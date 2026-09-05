@@ -413,3 +413,117 @@ def test_composed_schema_converts_object_and_array_params():
         "wait": {"type": "for", "minutes": 2880},
         "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
     }
+
+
+def _stream_chunks(parser, chunks):
+    """Feed pre-split chunks and collect non-None deltas + a final flush."""
+    deltas = []
+    previous_text = ""
+    for chunk in chunks:
+        current_text = previous_text + chunk
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[1],
+            request=make_request(),
+        )
+        previous_text = current_text
+        if delta is not None:
+            deltas.append(delta)
+    finish = parser.finish_streaming()
+    if finish is not None:
+        deltas.append(finish)
+    return deltas
+
+
+def _leaked_ws_content(deltas):
+    """Return delta.content values that are whitespace-only (should never leak
+    in a stream that also emits tool_calls)."""
+    return [
+        d.content
+        for d in deltas
+        if getattr(d, "content", None) is not None
+        and d.content != ""
+        and d.content.strip() == ""
+    ]
+
+
+def test_streaming_no_whitespace_content_around_tool_call():
+    """No whitespace-only delta.content should be emitted before/after
+    tool_calls, even when a preceding non-whitespace content delta has
+    already flipped the parser's `content-seen` flag on."""
+    parser = make_parser()
+    body = build_tool_call("get_weather", {"location": "Beijing"})
+    chunks = [
+        "Sure, let me check.",  # legitimate content sets _content_has_nonws=True
+        "\n\n",                # trailing whitespace right before tool_calls
+        body,
+        "\n",                  # trailing whitespace right after tool_calls
+    ]
+
+    deltas = _stream_chunks(parser, chunks)
+    assert _leaked_ws_content(deltas) == []
+    # Legitimate content preserved
+    content_parts = [d.content for d in deltas if d.content]
+    assert "".join(content_parts) == "Sure, let me check."
+    # Tool call intact
+    tc_deltas = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    names = [tc.function.name for tc in tc_deltas if tc.function and tc.function.name]
+    assert names == ["get_weather"]
+    args = "".join(
+        tc.function.arguments
+        for tc in tc_deltas
+        if tc.function and tc.function.arguments
+    )
+    assert json.loads(args) == {"location": "Beijing"}
+
+
+def test_streaming_no_ws_content_when_tool_starts_no_prior_content():
+    """No whitespace-only delta.content when the model emits leading and
+    trailing whitespace around the tool block without any preceding chat
+    text."""
+    parser = make_parser()
+    body = build_tool_call("get_weather", {"location": "Beijing"})
+    chunks = ["\n\n", body, "\n"]
+
+    deltas = _stream_chunks(parser, chunks)
+    assert _leaked_ws_content(deltas) == []
+
+
+def test_streaming_ws_content_dropped_when_all_in_one_chunk():
+    """Chunk that contains leading whitespace, the full tool block, and
+    trailing whitespace must not emit any whitespace content — the tool_calls
+    chunk must have `content=None`."""
+    parser = make_parser()
+    body = build_tool_call("get_weather", {"location": "Beijing"})
+
+    deltas = _stream_chunks(parser, ["\n\n" + body + "\n"])
+    assert _leaked_ws_content(deltas) == []
+    # And the delta with tool_calls has content=None
+    for d in deltas:
+        if d.tool_calls:
+            assert d.content is None
+
+
+def test_streaming_real_text_around_tool_call_preserved():
+    """Non-whitespace content around a tool call is still preserved."""
+    parser = make_parser()
+    body = build_tool_call("search", {"query": "x"})
+    chunks = ["Result: ", body, " Great!"]
+
+    deltas = _stream_chunks(parser, chunks)
+    content = "".join(d.content for d in deltas if d.content)
+    assert content == "Result:  Great!"
+
+
+def test_streaming_trailing_whitespace_preserved_in_plain_chat():
+    """When no tool call is emitted, trailing whitespace at the end of a
+    plain chat response is still preserved (flushed on finish)."""
+    parser = make_parser()
+    deltas = _stream_chunks(parser, ["Hello", "\n"])
+    content = "".join(d.content for d in deltas if d.content)
+    assert content == "Hello\n"
+
