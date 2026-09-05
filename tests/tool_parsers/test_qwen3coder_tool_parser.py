@@ -1537,3 +1537,142 @@ class TestParameterWhitespace:
                     streamed += tool_call.function.arguments
 
         assert json.loads(streamed)["content"] == EXPECTED_CONTENT
+
+
+REF_MODEL_OUTPUT = """<tool_call>
+<function=get_weather>
+<parameter=city>
+Berlin
+</parameter>
+<parameter=options>
+{"unit": "celsius", "include_forecast": true}
+</parameter>
+</function>
+</tool_call>"""
+
+# Pydantic v2 emits `$defs`; JSON Schema draft-07 tooling emits `definitions`.
+DEFS_NAMESPACES = [
+    pytest.param("$defs", "#/$defs/", id="defs"),
+    pytest.param("definitions", "#/definitions/", id="definitions"),
+]
+
+
+def _ref_tools(defs_key: str, ref_prefix: str) -> list[ChatCompletionToolsParam]:
+    """A tool whose nested object argument sits behind a ``$ref``."""
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function=FunctionDefinition(
+                name="get_weather",
+                description="Get the weather for a city",
+                parameters={
+                    "type": "object",
+                    defs_key: {
+                        "WeatherOptions": {
+                            "type": "object",
+                            "properties": {
+                                "unit": {"type": "string"},
+                                "include_forecast": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "properties": {
+                        "city": {"type": "string"},
+                        "options": {"$ref": f"{ref_prefix}WeatherOptions"},
+                    },
+                    "required": ["city", "options"],
+                },
+            ),
+        )
+    ]
+
+
+class TestRefResolutionOnRequestPath:
+    """Regression tests for https://github.com/vllm-project/vllm/issues/46924.
+
+    These run the same sequence the OpenAI server does: ``adjust_request()``
+    (which derives the structured output schema from the tools) followed by
+    tool call extraction. Order matters — ``adjust_request()`` used to strip
+    the definitions off the request's tools, leaving the parser unable to
+    resolve ``$ref`` argument types, so nested objects came back to the caller
+    double-encoded as JSON strings.
+    """
+
+    @pytest.mark.parametrize("defs_key, ref_prefix", DEFS_NAMESPACES)
+    @pytest.mark.parametrize("tool_choice", ["auto", "required"])
+    def test_nested_object_argument_decodes_as_object(
+        self, qwen3_tokenizer, defs_key, ref_prefix, tool_choice
+    ):
+        tools = _ref_tools(defs_key, ref_prefix)
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+        request = ChatCompletionRequest(
+            model=MODEL,
+            messages=[{"role": "user", "content": "weather in Berlin?"}],
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+        request = parser.adjust_request(request)
+        extracted = parser.extract_tool_calls(REF_MODEL_OUTPUT, request=request)
+
+        assert extracted.tools_called
+        args = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args["city"] == "Berlin"
+        assert args["options"] == {"unit": "celsius", "include_forecast": True}
+
+    def test_pointer_into_definition_coerces(self, qwen3_tokenizer):
+        """A ``$ref`` pointing into a definition must still yield concrete types.
+
+        Caller-supplied schemas (zod-to-json-schema and friends) use this form
+        for a re-used sub-schema. Left unresolved it falls back to ``string``
+        and the argument comes back quoted.
+        """
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="get_weather",
+                    parameters={
+                        "type": "object",
+                        "$defs": {
+                            "WeatherOptions": {
+                                "type": "object",
+                                "properties": {"days": {"type": "integer"}},
+                            },
+                        },
+                        "properties": {
+                            "days": {"$ref": "#/$defs/WeatherOptions/properties/days"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+        request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+        model_output = (
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter=days>\n7\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        extracted = parser.extract_tool_calls(model_output, request=request)
+
+        args = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args["days"] == 7
+
+    @pytest.mark.parametrize("defs_key, ref_prefix", DEFS_NAMESPACES)
+    def test_adjust_request_preserves_definitions(
+        self, qwen3_tokenizer, defs_key, ref_prefix
+    ):
+        tools = _ref_tools(defs_key, ref_prefix)
+        parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+        request = ChatCompletionRequest(
+            model=MODEL,
+            messages=[{"role": "user", "content": "weather in Berlin?"}],
+            tools=tools,
+            tool_choice="required",
+        )
+
+        parser.adjust_request(request)
+
+        assert defs_key in request.tools[0].function.parameters
