@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, cast
+import dataclasses
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 from torch import nn
@@ -55,6 +56,9 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+
+if TYPE_CHECKING:
+    from .ops.qsa_tile_union import QSATileUnionInputs
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -126,6 +130,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         use_prefill_config: bool,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        tile_union: QSATileUnionInputs | None = None,
     ) -> torch.Tensor:
         del key, value
         if output_scale is not None or output_block_scale is not None:
@@ -136,7 +141,9 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError("QSA does not support sliding-window attention")
 
         num_tokens = attn_metadata.num_actual_tokens
-        output.zero_()
+        # Both kernels write every row in [0, num_tokens) (masked rows as
+        # zeros); only the padded tail needs clearing.
+        output[num_tokens:].zero_()
         if num_tokens == 0:
             return output
 
@@ -160,6 +167,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             token_to_req,
             use_prefill_config,
             output[:num_tokens],
+            tile_union=tile_union,
         )
         return output
 
@@ -328,6 +336,17 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             ),
             persistent=False,
         )
+        # The selection BEFORE expansion (compressed block ids per row) for
+        # the tile-union prefill kernel: one workspace per device shared by
+        # all QSA layers (see qsa_tile_union_workspace), taken at forward time
+        # and only where the path is enabled.
+        from .ops.qsa_tile_union import qsa_tile_union_config
+
+        self._tile_union_workspace_shape = (
+            (max_tokens, self.indexer.token_topk // self.indexer.compress_ratio)
+            if qsa_tile_union_config() is not None
+            else None
+        )
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -373,10 +392,68 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
+        use_prefill_config = main_metadata.max_query_len > self._max_decode_query_len
+        # Tile-union eligibility is decided from host metadata BEFORE the
+        # indexer runs, so an eligible batch can skip the expansion; a layer
+        # whose rows are reused on later MTP steps keeps it.
+        tile_union = None
+        block_indices = None
+        if (
+            use_prefill_config
+            and self._tile_union_workspace_shape is not None
+            and not self.indexer.skip_topk
+        ):
+            from .ops.qsa_tile_union import (
+                QSATileUnionInputs,
+                qsa_tile_union_config,
+                qsa_tile_union_eligible,
+                qsa_tile_union_layout,
+                qsa_tile_union_workspace,
+            )
+
+            config = qsa_tile_union_config()
+            block_indices = qsa_tile_union_workspace(
+                *self._tile_union_workspace_shape, hidden_states.device
+            )[:num_tokens]
+            compressed_metadata = cast(
+                QSAForwardMetadata,
+                metadata[self.indexer.compressed_key_cache.prefix],
+            )
+            candidate = QSATileUnionInputs(
+                block_indices=block_indices,
+                logical_positions=compressed_metadata.logical_positions[:num_tokens],
+                query_start_loc=compressed_metadata.query_start_loc,
+                num_decode_tokens=compressed_metadata.num_decode_tokens,
+                num_prefills=compressed_metadata.num_prefills,
+                compress_ratio=self.indexer.compress_ratio,
+                token_topk=self.indexer.token_topk,
+            )
+            # Eligibility reads only the cache's block count, page size and
+            # device: the [blocks, page, kv, 2 * head] view suffices.
+            cache_view = self.kv_cache.transpose(1, 2)
+            if config is not None and qsa_tile_union_eligible(
+                candidate, num_tokens, cache_view, main_metadata.block_table, config
+            ):
+                # One row -> tile layout per forward, shared by all QSA layers.
+                layout = compressed_metadata.tile_union_layout
+                if layout is None or layout[0] != (num_tokens, config.rows_per_tile):
+                    layout = (
+                        (num_tokens, config.rows_per_tile),
+                        qsa_tile_union_layout(
+                            compressed_metadata.query_start_loc,
+                            num_tokens,
+                            main_metadata.block_table.shape[0],
+                            config.rows_per_tile,
+                        ),
+                    )
+                    compressed_metadata.tile_union_layout = layout
+                tile_union = dataclasses.replace(candidate, layout=layout[1])
         selected = self.indexer(
             hidden_states,
             positions,
             self.topk_indices_buffer[:num_tokens],
+            block_indices_out=None if tile_union is None else block_indices,
+            expand=tile_union is None or self.indexer.reuses_selection,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
@@ -397,7 +474,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
-            use_prefill_config=main_metadata.max_query_len > self._max_decode_query_len,
+            use_prefill_config=use_prefill_config,
+            tile_union=tile_union,
         )
 
     def forward(

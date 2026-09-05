@@ -128,6 +128,9 @@ class QSAIndexer(nn.Module):
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
         self.skip_topk = False
+        # Set by the MTP proposer: this layer's expanded rows are reused on
+        # later steps, so the expansion can never be skipped for it.
+        self.reuses_selection = False
 
         self.index_qk_proj = ReplicatedLinear(
             int(config.hidden_size),
@@ -221,6 +224,8 @@ class QSAIndexer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
+        block_indices_out: torch.Tensor | None = None,
+        expand: bool = True,
     ) -> torch.Tensor:
         """Select each query row's token indices.
 
@@ -229,10 +234,29 @@ class QSAIndexer(nn.Module):
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
+
+        block_indices_out, if given, receives the selection before expansion
+        ([num_tokens, block_topk] compressed block ids, ``-1``-padded; only
+        ranks below the row's visible-block count are meaningful) for the
+        tile-union attention kernel. It is filled with ``-1`` whenever no
+        selection is computed.
+
+        expand=False skips the expansion into ``out`` (its rows are left
+        undefined); only a caller that consumes ``block_indices_out`` through
+        the tile-union path and never reads ``out`` may pass it, and never
+        for a layer whose rows are reused on later MTP steps.
         """
 
+        block_topk = self.token_topk // self.compress_ratio
+        if block_indices_out is not None and block_indices_out.shape != (
+            hidden_states.shape[0],
+            block_topk,
+        ):
+            raise ValueError("QSA block-index output has an invalid shape")
         metadata = self._metadata()
         if metadata is None:
+            if block_indices_out is not None:
+                block_indices_out.fill_(-1)
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
                 return out
@@ -387,12 +411,15 @@ class QSAIndexer(nn.Module):
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
         visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
-        block_indices = torch.empty(
-            num_tokens,
-            self.token_topk // self.compress_ratio,
-            dtype=torch.int32,
-            device=q.device,
-        )
+        if block_indices_out is not None:
+            block_indices = block_indices_out
+        else:
+            block_indices = torch.empty(
+                num_tokens,
+                block_topk,
+                dtype=torch.int32,
+                device=q.device,
+            )
 
         # Decode requests occupy the leading rows and share one query length.
         if num_decode_tokens:
@@ -427,14 +454,15 @@ class QSAIndexer(nn.Module):
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
             )
-        expand_qsa_block_indices(
-            block_indices,
-            compressed_metadata.logical_positions[:num_tokens],
-            visible_blocks,
-            self.compress_ratio,
-            self.token_topk,
-            out,
-        )
+        if expand:
+            expand_qsa_block_indices(
+                block_indices,
+                compressed_metadata.logical_positions[:num_tokens],
+                visible_blocks,
+                self.compress_ratio,
+                self.token_topk,
+                out,
+            )
         return out
 
 
