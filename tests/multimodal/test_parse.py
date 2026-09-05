@@ -55,6 +55,28 @@ def test_frame_size_hwc_chw(frame):
     assert items.get_frame_size(0) == (W, H)
 
 
+def test_video_with_metadata_tensor_passthrough():
+    """Tensor frames pass through unchanged regardless of device: HF video
+    processors accept tensors, and device-resident frames (e.g. NVDEC-decoded)
+    must not be copied back to host."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8)
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert video is frames
+    assert metadata is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_video_with_metadata_keeps_device_tensor():
+    """Device-resident frames (e.g. NVDEC-decoded) pass through as tensors,
+    so a device-side HF processor can consume them without a D2H copy."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8, device="cuda")
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert video is frames
+    assert metadata is None
+
+
 @pytest.mark.parametrize(
     "modality,processor_cls",
     [

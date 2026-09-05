@@ -19,17 +19,22 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..video import VIDEO_LOADER_REGISTRY
+from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
 from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
 
 
-class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
+class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
+
+    Use --media-io-kwargs '{"video": {"backend": "torchcodec",
+    "device": "cuda"}}' to decode with NVDEC and keep frames on the GPU,
+    which pairs with a device-side multi-modal processor
+    (--mm-processor-device, EPD encode-only instances).
     """
 
     @classmethod
@@ -43,6 +48,9 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
             runtime_kwargs = dict(runtime_kwargs)
             runtime_kwargs.pop("hw_decoders", None)
             runtime_kwargs.pop("pool_size", None)
+            # The decode device determines which device the decoded frames
+            # (and thus the processor pipeline) live on; startup-only.
+            runtime_kwargs.pop("device", None)
 
             # Block request-level selection of GPU video backends that
             # were not configured (and VRAM-reserved) at startup.
@@ -101,7 +109,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
 
     def load_bytes(
         self, data: bytes
-    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
         video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
@@ -109,7 +117,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -177,7 +185,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
 
     def load_file(
         self, filepath: Path
-    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
         with filepath.open("rb") as f:
             data = f.read()
 
