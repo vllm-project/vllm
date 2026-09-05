@@ -1210,15 +1210,23 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
-            # if the above fails, install from source
-            apt-get update -y && \
-            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
-            apt-get purge -y ${BUILD_PKGS} && \
-            # clean up -dev packages, keep runtime libraries
-            rm -rf /var/lib/apt/lists/* \
-        ); \
+        # lmcache ships wheels compiled against a single pinned torch ABI
+        # (torch==2.11 at time of writing). Installing that wheel into an image
+        # built with a different torch (e.g. 2.13) succeeds but its compiled
+        # lmcache.c_ops extension then fails to load at runtime due to the C++
+        # ABI mismatch, silently falling back to slow torch baseline ops. The
+        # wheel install succeeding also means the source-build fallback below
+        # never runs. So lmcache must ALWAYS be built from source against the
+        # torch version this image actually ships (--no-build-isolation makes
+        # the build reuse the installed torch instead of pulling a fresh one).
+        apt-get update -y && \
+        apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
+        grep -v '^lmcache' /tmp/kv_connectors.txt > /tmp/kv_connectors_rest.txt; \
+        uv pip install --system -r /tmp/kv_connectors_rest.txt --no-build && \
+        uv pip install --system 'lmcache >= 0.3.9' --no-binary lmcache --no-build-isolation-package lmcache && \
+        apt-get purge -y ${BUILD_PKGS} && \
+        # clean up -dev packages, keep runtime libraries
+        rm -rf /var/lib/apt/lists/* && \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # Mirrors .buildkite/scripts/install-kv-connectors.sh.
