@@ -20,13 +20,22 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import CUDAGraphMode, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.forward_context import create_forward_context
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
-from vllm.v1.worker.gpu import dp_utils
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
@@ -272,6 +281,7 @@ def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
+    cudagraph_manager: Any = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -295,7 +305,7 @@ def _sync_dp(
         patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
     ):
         return dp_utils.sync_cudagraph_and_dp_padding(
-            cudagraph_manager=None,
+            cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens_per_rank[0],
@@ -718,3 +728,170 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
     ]
 
     assert all(ubatch.dcp_local_seq_lens is None for ubatch in ubatches)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_capturable_run_replays_as_a_cudagraph():
+    """The split forward survives `torch.cuda.graph`, and a replay recomputes.
+
+    This is the half of the DBO capture path that end-to-end runs cannot reach
+    without a DeepEP-capable box: threads start (and reach their contexts)
+    outside the graph, only the handoff-and-join is captured, and the replay
+    has to pick up whatever the persistent input buffers hold.
+    """
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="deepep_low_latency"
+        ),
+    )
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(vllm_config)
+
+    num_tokens = 16
+    input_ids = torch.arange(num_tokens, device=device)
+    positions = torch.arange(num_tokens, device=device)
+    model_inputs = {
+        "input_ids": input_ids,
+        "positions": positions,
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+    }
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 4), slice(0, 8)),
+            UBatchSlice(slice(4, 8), slice(8, 16)),
+        ],
+    )
+
+    model = _YieldingModel([])
+    graph = torch.cuda.CUDAGraph()
+    finish = runner.begin_capturable_run(
+        model, model_inputs, ubatch_state, for_capture=True
+    )
+    with torch.cuda.graph(graph, stream=runner.capture_stream):
+        captured = finish()
+
+    input_ids.fill_(3)
+    positions.fill_(5)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    expected = torch.full(
+        (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
+    )
+    torch.testing.assert_close(captured, expected)
+
+
+def _request_slices(input_batch: InputBatch) -> list[slice]:
+    return [s.request_slice for s in create_ubatch_slices(input_batch, 2)]
+
+
+def test_captured_split_survives_a_replay_with_enough_requests():
+    """A microbatched FULL graph bakes in where the request split falls.
+
+    Capture takes the split from `make_dummy`'s evenly filled batch, so a replay
+    only lines up while the real batch still reaches the split point. That is
+    the condition `sync_cudagraph_and_dp_padding` checks before it hands back a
+    microbatched FULL descriptor; below it, the split slides onto the last real
+    request and the graph would read the wrong rows.
+    """
+    buffers = _make_buffers()
+    captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
+
+    def replay(num_reqs: int) -> list[slice]:
+        return _request_slices(
+            _make_input_batch(
+                [1] * num_reqs,
+                [128] * num_reqs,
+                buffers,
+                num_reqs_padded=16,
+                num_tokens_padded=16,
+            )
+        )
+
+    assert replay(16) == captured
+    assert replay(9) == captured
+    assert replay(4) != captured
+
+
+def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True,
+            all2all_backend="deepep_low_latency",
+            dbo_decode_token_threshold=DECODE_THRESHOLD,
+            dbo_prefill_token_threshold=PREFILL_THRESHOLD,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            cudagraph_capture_sizes=capture_sizes,
+        ),
+    )
+    with patch.object(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    ):
+        manager = CudaGraphManager(
+            vllm_config,
+            torch.device("cuda:0"),
+            CUDAGraphMode.FULL,
+            decode_query_len=1,
+            ubatch_runner=cast(UBatchRunner, object()),
+        )
+    manager._graphs_captured = True
+    return manager
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
+def test_microbatched_graphs_are_only_offered_to_uniform_batches():
+    """The captured split only reproduces for a batch shaped like the dummy one.
+
+    So a microbatched graph is pinned to the query length its own shape implies,
+    and a mixed batch of the same size finds nothing and stays eager.
+    """
+    manager = _make_cudagraph_manager([64, 128])
+
+    desc = manager.dispatch(
+        num_reqs=64,
+        num_tokens=64,
+        uniform_token_count=1,
+        num_active_loras=0,
+        num_ubatches=2,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+
+    desc = manager.dispatch(
+        num_reqs=8,
+        num_tokens=64,
+        uniform_token_count=None,
+        num_active_loras=0,
+        num_ubatches=2,
+    )
+    assert desc.cg_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
+def test_microbatched_graph_needs_every_rank_to_reach_the_split():
+    """The split is taken at the midpoint of the padded batch.
+
+    A rank holding under half the captured tokens splits at a different request
+    than the capture did, so the group falls back to eager together rather than
+    replaying against the wrong metadata.
+    """
+    manager = _make_cudagraph_manager([64, 128])
+    uniform = [1, 1]
+
+    desc, _ = _sync_dp([64, 64], uniform, cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+
+    # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
+    desc, dp_sync = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.NONE
+    assert desc.num_ubatches == 2
+    assert dp_sync is not None and dp_sync.eager

@@ -111,20 +111,52 @@ def sync_cudagraph_and_dp_padding(
             # Microbatching is all-or-nothing: the expert all-to-all is
             # collective, so every rank splits and pads to the same token count.
             # A rank too small to fill a microbatch does no work in it, like a
-            # dummy run. Microbatched steps run eager; nothing is captured yet.
+            # dummy run.
             ubatch_num_tokens = int(num_tokens_across_dp.max())
-            return BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
-                num_tokens=ubatch_num_tokens,
-                num_reqs=num_reqs,
-                num_ubatches=get_num_ubatches(parallel_config),
-            ), DPSyncState(
+            num_ubatches = get_num_ubatches(parallel_config)
+            ubatch_desc = None
+            if cudagraph_manager is not None:
+                # Ask for a captured FULL graph the same way the non-ubatched
+                # path below does, with the synced uniform token count -- the
+                # microbatched graphs are uniform-decode ones. `dispatch` falls
+                # back to a NONE descriptor when nothing matches.
+                ubatch_desc = cudagraph_manager.dispatch(
+                    num_reqs,
+                    ubatch_num_tokens,
+                    synced_uniform_token_count,
+                    num_active_loras=num_active_loras,
+                    num_ubatches=num_ubatches,
+                )
+                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
+                    # The graph baked in a request split taken at the midpoint
+                    # of a full batch. A rank holding under half the captured
+                    # tokens splits at a different request and would replay
+                    # against the wrong metadata, so every rank -- they all see
+                    # these counts -- drops back to eager together.
+                    ubatch_desc = None
+            if ubatch_desc is None:
+                ubatch_desc = BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=ubatch_num_tokens,
+                    num_reqs=num_reqs,
+                    num_ubatches=num_ubatches,
+                )
+            else:
+                # Dispatch rounds the token count up to the captured size, and
+                # every rank has to run what the graph expects.
+                ubatch_num_tokens = ubatch_desc.num_tokens
+            return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
                 ),
                 uniform_token_count=synced_uniform_token_count,
-                eager=True,
-                num_reqs=int(num_reqs_across_dp.max()),
+                eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
+                num_reqs=(
+                    ubatch_desc.num_reqs
+                    if ubatch_desc.cg_mode == CUDAGraphMode.FULL
+                    and ubatch_desc.num_reqs is not None
+                    else int(num_reqs_across_dp.max())
+                ),
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
