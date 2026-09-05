@@ -640,3 +640,59 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     assert layer.hc_attn_fn_broadcast is buffer
     expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_mhc_pre_broadcast_tilelang_without_deep_gemm(monkeypatch):
+    """Verify mhc_pre_broadcast_tilelang fallback when DeepGEMM is unavailable."""
+    import torch
+
+    import vllm.utils.deep_gemm
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_pre_broadcast_tilelang,
+        
+    )
+
+    monkeypatch.setattr(vllm.utils.deep_gemm, "is_deep_gemm_supported", lambda: False)
+
+    num_tokens = 2
+    hidden_size = 512
+    hc_mult = 4
+    hc_mult3 = 2 * hc_mult + hc_mult**2
+
+    residual = torch.randn(num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+    fn = torch.randn(hc_mult3, hc_mult, hidden_size, device="cuda", dtype=torch.float32)
+    fn_broadcast = fn.sum(1)
+    fn_flat = fn.view(hc_mult3, hc_mult * hidden_size)
+
+    hc_scale = torch.ones(3, device="cuda", dtype=torch.float32)
+    hc_base = torch.zeros(hc_mult3, device="cuda", dtype=torch.float32)
+    norm_weight = torch.ones(hidden_size, device="cuda", dtype=torch.bfloat16)
+
+    residual_expanded = residual.unsqueeze(1).expand(num_tokens, hc_mult, hidden_size)
+    res_ref = mhc_pre_ref(
+        residual_expanded,
+        fn_flat,
+        hc_scale,
+        hc_base,
+        1e-5,
+        1e-5,
+        1e-5,
+        1.0,
+        1,
+    )
+    res_test = mhc_pre_broadcast_tilelang(
+        residual,
+        fn_flat,
+        hc_scale,
+        hc_base,
+        1e-5,
+        1e-5,
+        1e-5,
+        1.0,
+        1,
+        norm_weight=norm_weight,
+        fn_broadcast=fn_broadcast,
+    )
+
+    torch.testing.assert_close(res_ref[0], res_test[1], atol=1e-2, rtol=1e-2)
