@@ -18,6 +18,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -42,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -2075,3 +2077,146 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+def _make_hybrid_attention_mamba_scheduler(
+    *,
+    num_cpu_blocks: int = 8,
+    num_gpu_blocks: int = 16,
+    attention_block_size: int = BLOCK_SIZE,
+    block_size: int = 4 * BLOCK_SIZE,
+    scheduler_block_size: int | None = None,
+    hash_block_size: int | None = None,
+    dcp_world_size: int = 4,
+    lazy: bool = False,
+    mamba_cache_mode: str = "align",
+    enable_kv_cache_events: bool = False,
+) -> SchedulerFixture:
+    """Build a scheduler for one attention group plus one Mamba group."""
+    scheduler_block_size = scheduler_block_size or block_size
+    hash_block_size = hash_block_size or block_size
+    attention_spec = FullAttentionSpec(
+        block_size=attention_block_size,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    groups = [
+        KVCacheGroupSpec(["attention"], attention_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * num_gpu_blocks,
+            layers=group.layer_names,
+            layer_stride=spec.page_size_bytes * num_gpu_blocks,
+            block_stride=spec.page_size_bytes,
+        )
+        for group, spec in zip(groups, (attention_spec, mamba_spec))
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
+    vllm_config.cache_config.prefix_cache_retention_interval = 0
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    if enable_kv_cache_events:
+        vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
+    # _derive_cpu_config() scales the requested capacity against
+    # kv_cache_tensors[0].size, so express it as a multiple of that tensor's
+    # per-block size to get exactly num_cpu_blocks.
+    cpu_capacity_bytes = tensors[0].size // num_gpu_blocks * num_cpu_blocks
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=cpu_capacity_bytes,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        lazy_offload=lazy,
+    )
+    gpu_block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    sched.bind_gpu_block_pool(gpu_block_pool)
+    return SchedulerFixture(
+        scheduler=sched,
+        gpu_block_pool=gpu_block_pool,
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+    )
+
+
+def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
+    """Replicated groups must not be scaled by the DCP world size.
+
+    ``dcp_world_size_for_kv_cache_spec`` gives full attention the process DCP
+    size and every other spec 1. Reconstructing a group's geometry as
+    ``spec.block_size * cp_world_size`` over-scales the replicated groups, so
+    the eager store scan believes far fewer of their blocks are ready and
+    silently offloads only a fraction of them.
+    """
+    attention_block_size = BLOCK_SIZE
+    mamba_block_size = 4 * BLOCK_SIZE
+    dcp_world_size = 2
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        attention_block_size=attention_block_size,
+        block_size=mamba_block_size,
+        # Every prefix-cacheable group's resolved block size must be a multiple
+        # of the hash block, so it cannot exceed the smallest of them.
+        hash_block_size=BLOCK_SIZE,
+        dcp_world_size=dcp_world_size,
+        mamba_cache_mode="all",
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    attention_size, mamba_size = sched.group_block_sizes
+    assert attention_size == attention_block_size * dcp_world_size
+    assert mamba_size == mamba_block_size
+
+    confirmed = 2 * sched.block_size
+    req = _make_cp_request(num_blocks=8, virtual_block_size=BLOCK_SIZE)
+    attention_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, confirmed // attention_size, attention_size, group_id=0
+    )
+    mamba_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, confirmed // mamba_size, mamba_size, group_id=1
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: confirmed},
+            new_reqs={req.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    req.num_computed_tokens = confirmed
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 1},
+            cached_req_new_blocks={req.request_id: None},
+        )
+    )
+
+    # Both groups are positionally stable here, so every confirmed block of
+    # both must be offloaded. Over-scaling the replicated group halves its
+    # count.
+    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [
+        confirmed // attention_size,
+        confirmed // mamba_size,
+    ]
+    assert set(meta.store_gpu_blocks) == {
+        *(b.block_id for b in attention_blocks),
+        *(b.block_id for b in mamba_blocks),
+    }
