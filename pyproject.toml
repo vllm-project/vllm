@@ -77,6 +77,8 @@ select = [
     "I",
     # flake8-logging-format
     "G",
+    # pylint: logging args do not match the format string placeholders
+    "PLE1205", "PLE1206",
 ]
 ignore = [
     # star imports
