@@ -78,10 +78,12 @@ def _is_fa4_supported() -> tuple[bool, str | None]:
         current_platform.is_device_capability_family(90)
         or current_platform.is_device_capability_family(100)
         or current_platform.is_device_capability_family(110)
+        or current_platform.is_device_capability_family(120)
     ):
         return (
             False,
-            "FA4 is only supported on devices with compute capability 9.x, 10.x, or 11.x",
+            "FA4 is only supported on devices with compute capability "
+            "9.x, 10.x, 11.x, or 12.x",
         )
     return True, None
 
