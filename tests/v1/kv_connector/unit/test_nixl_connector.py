@@ -6,6 +6,7 @@ import inspect
 import os
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -1904,6 +1905,67 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
         stager_factory.assert_not_called()
         assert worker._maybe_init_host_stager("local-host") is stager
         stager_factory.assert_called_once()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("staging_finishes_first", [False, True])
+def test_mixed_host_staging_waits_for_both_receive_parts(staging_finishes_first):
+    """A mixed host/device receive completes only after both paths finish."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._recving_metadata = {"request": MagicMock()}
+    worker._recving_transfers = {"request": [7]}
+    worker._failed_recv_lock = threading.Lock()
+    worker._failed_recv_pending = set()
+    worker._failed_recv_reported = set()
+    worker._pending_recv_notifs = {"request": [("agent", b"notification")]}
+    worker._send_pending_recv_notifs = MagicMock()
+    worker._report_failed_recv = MagicMock()
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    stager = MagicMock()
+    stager.active_req_ids = {"request"}
+
+    def finish_staging():
+        stager.active_req_ids = set()
+        return {"request"}, set()
+
+    stager.get_finished.side_effect = finish_staging
+    worker._host_stager = stager
+
+    if staging_finishes_first:
+        assert worker._get_finished_host_staging() == set()
+        assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
+            "request"
+        }
+    else:
+        assert (
+            worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == set()
+        )
+        assert worker._get_finished_host_staging() == {"request"}
+
+    worker._send_pending_recv_notifs.assert_called_once_with("request")
+
+
+@pytest.mark.cpu_test
+def test_mixed_host_staging_reports_failure_after_aborted_sibling_drains():
+    worker = object.__new__(NixlConnectorWorker)
+    worker._recving_metadata = {"request": MagicMock()}
+    worker._recving_transfers = {}
+    worker._failed_recv_lock = threading.Lock()
+    worker._failed_recv_pending = {"request"}
+    worker._pending_recv_notifs = {}
+    worker._report_failed_recv = MagicMock()
+
+    stager = MagicMock()
+    stager.active_req_ids = set()
+    stager.get_finished.return_value = set(), set()
+    worker._host_stager = stager
+
+    assert worker._get_finished_host_staging() == set()
+    assert worker._failed_recv_pending == set()
+    worker._report_failed_recv.assert_called_once_with("request")
 
 
 def _run_abort_timeout_test(llm: LLM, timeout: int):
