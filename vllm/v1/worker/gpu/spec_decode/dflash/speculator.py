@@ -50,6 +50,19 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Each request emits exactly (bonus + N mask) query tokens per step.
         self.num_query_per_req = 1 + self.num_speculative_steps
 
+        # The drafter forward carries only the (bonus + mask) query tokens; the
+        # context is handled via KV precomputation. At large L the per-step query
+        # budget max_num_reqs * (1 + L) can exceed the scheduler's
+        # max_num_batched_tokens, so the input buffers must be sized to the
+        # larger of the two or the query index arithmetic overflows.
+        self.max_query_tokens = self.max_num_reqs * self.num_query_per_req
+        if self.max_query_tokens > self.max_num_tokens:
+            self.input_buffers = InputBuffers(
+                max_num_reqs=self.max_num_reqs,
+                max_num_tokens=self.max_query_tokens,
+                device=device,
+            )
+
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
         )
@@ -419,7 +432,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.num_query_per_req,
                 self.num_speculative_steps,
                 self.max_num_reqs,
-                self.max_num_tokens,
+                self.input_buffers.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
             )

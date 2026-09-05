@@ -924,3 +924,21 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+def test_parallel_drafting_batched_tokens_floor():
+    from types import SimpleNamespace
+
+    from vllm.engine.arg_utils import _parallel_drafting_batched_tokens_floor as floor
+
+    dflash = SimpleNamespace(parallel_drafting=True, num_speculative_tokens=12)
+    sequential = SimpleNamespace(parallel_drafting=False, num_speculative_tokens=5)
+    # The default 2048 cannot cover 256 seqs x 13 tokens/request -> raised to 3328.
+    assert floor(2048, 256, dflash) == 3328
+    # An explicit larger value is preserved.
+    assert floor(4096, 256, dflash) == 4096
+    # Small batches stay within the default.
+    assert floor(2048, 128, dflash) == 2048
+    # No speculative config or sequential drafting: unchanged.
+    assert floor(2048, 256, None) == 2048
+    assert floor(2048, 256, sequential) == 2048
