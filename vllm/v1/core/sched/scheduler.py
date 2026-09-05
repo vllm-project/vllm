@@ -1535,7 +1535,13 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
-        # Update block hashes for the new tokens.
+        # update_block_hashes only appends, so drop hashes covering discarded
+        # tokens. Multimodal sessions recompute from token 0 because the
+        # incremental hasher resumes the MM scan from the last feature.
+        if session.mm_features:
+            session.block_hashes.clear()
+        else:
+            del session.block_hashes[num_computed_tokens // self.hash_block_size :]
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
