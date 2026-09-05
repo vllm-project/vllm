@@ -568,6 +568,10 @@ class VllmConfig:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
+        # For TPU V1 runner with PP, execute synchronously (1 batch in flight)
+        # so that each decode step receives the previous step's sampled token.
+        if pp_size > 1 and not self.use_v2_model_runner:
+            return 1
         if self.scheduler_config.async_scheduling:
             if self.use_v2_model_runner:
                 return pp_size + 1
@@ -1314,6 +1318,10 @@ class VllmConfig:
                     "high-throughput DBO because that combination can corrupt "
                     "DP+EP generation accuracy."
                 )
+                self.scheduler_config.async_scheduling = False
+            elif self.parallel_config.pipeline_parallel_size > 1 and not getattr(
+                self, "use_v2_model_runner", False
+            ):
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
