@@ -87,7 +87,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        return capability.major in [8, 9, 10]
 
 
 @dataclass
@@ -388,6 +388,7 @@ def _build_c128a_topk_metadata_kernel(
     if is_decode:
         # --- Decode: block-table lookup → global slot ids + count ---
         is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
+        num_compressed = tl.where(is_valid_token, num_compressed, 0)
         req_idx = tl.load(token_to_req_indices_ptr + token_idx)
         count = tl.zeros((), dtype=tl.int32)
         for i in range(0, max_compressed_tokens, BLOCK_SIZE):
