@@ -2271,3 +2271,91 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
         blk, intra = divmod(slot, BLOCK_SIZE)
         torch.testing.assert_close(kv_cache[blk, :, intra, :HEAD_DIM], key[t])
         torch.testing.assert_close(kv_cache[blk, :, intra, HEAD_DIM:], value[t])
+
+
+# ---------------------------------------------------------------------------
+# Query-tiled verify-decode (vllm-project/vllm#47763)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seq_lens_list", [(130, 257), (129, 200, 384)])
+@pytest.mark.parametrize("decode_query_len", [1, 2, 4])
+@pytest.mark.parametrize("num_padded_reqs", [0, 2])
+@pytest.mark.parametrize("num_chunks", [1, 4])
+def test_verify_decode_matches_per_token_decode(
+    seq_lens_list: tuple[int, ...],
+    decode_query_len: int,
+    num_padded_reqs: int,
+    num_chunks: int,
+):
+    """The q-tiled verify kernel must reproduce the per-token decode kernel.
+
+    Both attend to exactly the blocks each query row selected, with the same
+    causal bound, so this is an equivalence -- not a tolerance -- check up to
+    fp accumulation order. `_build_decode_inputs` randomises each row's top-k
+    independently, which is the adversarial case for the union path: rows share
+    almost nothing, so the union is near dnum*topk.
+    """
+    from vllm.models.minimax_m3.common.ops.sparse_attn_verify import (
+        minimax_m3_sparse_attn_verify_decode,
+    )
+
+    torch.manual_seed(0)
+    q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
+        seq_lens_list, decode_query_len, num_padded_reqs
+    )
+    kv_cache = _allocate_main_kv_via_contract(num_pages, "NHD")
+
+    expected = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q, kv_cache, topk_idx, block_table, seq_lens,
+        NUM_KV_HEADS, SM_SCALE, expected, decode_query_len,
+    )
+
+    prefix_lens = (seq_lens - decode_query_len).clamp_min(0).to(torch.int32)
+    actual = torch.empty_like(q)
+    minimax_m3_sparse_attn_verify_decode(
+        q, kv_cache, topk_idx, block_table, prefix_lens,
+        NUM_KV_HEADS, SM_SCALE, actual, decode_query_len,
+        num_chunks=num_chunks,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("decode_query_len", [2, 4])
+def test_verify_block_lists_union_and_mask(decode_query_len: int):
+    """The union must be exactly the distinct ids, and bit r set iff row r
+    selected that block. A wrong mask makes rows attend to blocks they never
+    chose, which shows up as a silently wrong -- not crashing -- kernel."""
+    from vllm.models.minimax_m3.common.ops.sparse_attn_verify import (
+        build_verify_block_lists,
+    )
+
+    torch.manual_seed(0)
+    num_reqs, topk = 3, 4
+    topk_idx = torch.randint(
+        0, 6, (NUM_KV_HEADS, num_reqs * decode_query_len, topk),
+        device="cuda", dtype=torch.int32,
+    )
+    topk_idx[0, 0, -1] = -1  # a padded slot must be dropped, not indexed
+    blocks, row_mask, union_size = build_verify_block_lists(
+        topk_idx, num_reqs, decode_query_len
+    )
+
+    flat = topk_idx.view(NUM_KV_HEADS, num_reqs, decode_query_len, topk)
+    for h in range(NUM_KV_HEADS):
+        for b in range(num_reqs):
+            rows = [set(x.item() for x in flat[h, b, r] if x >= 0)
+                    for r in range(decode_query_len)]
+            want = sorted(set().union(*rows))
+            n = int(union_size[h, b])
+            assert n == len(want), f"union size {n} != {len(want)}"
+            got = [int(x) for x in blocks[h, b, :n]]
+            assert got == want, f"union {got} != {want}"
+            for i, blk in enumerate(got):
+                for r in range(decode_query_len):
+                    bit = (int(row_mask[h, b, i]) >> r) & 1
+                    assert bit == (blk in rows[r]), (
+                        f"block {blk} row {r}: mask bit {bit}"
+                    )
