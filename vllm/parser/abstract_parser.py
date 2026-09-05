@@ -716,6 +716,7 @@ class DelegatingParser(Parser):
                 tool_call_idx=tool_call_idx,
                 tool_call_id_type=tool_call_id_type,
                 tokenizer=self.model_tokenizer,
+                tool_parser_cls = self.tool_parser_cls
             )
             return delta_message, function_name_returned
 
@@ -728,6 +729,8 @@ class DelegatingParser(Parser):
                     function_name_returned=function_name_returned,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
+                    tokenizer=self.model_tokenizer,
+                    tool_parser_cls = self.tool_parser_cls
                 )
             )
             return delta_message, function_name_returned
