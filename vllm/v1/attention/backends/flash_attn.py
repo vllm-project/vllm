@@ -89,9 +89,34 @@ class FlashAttentionBackend(AttentionBackend):
     ]
     head_size_v: int | None = None
 
+    @staticmethod
+    def _get_sm90_fa4_fp8_kv_block_size(
+        vllm_config: VllmConfig | None = None,
+    ) -> int | None:
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config_or_none()
+
+        if vllm_config is None or vllm_config.model_config is None:
+            return None
+
+        head_size = vllm_config.model_config.get_head_size()
+        if (
+            current_platform.is_device_capability_family(90)
+            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+            and head_size == 512
+            and get_flash_attn_version(head_size=head_size, vllm_config=vllm_config)
+            == 4
+        ):
+            # The SM90 FP8-KV-dequant kernel uses a 64-token TMA tile/page.
+            return 64
+        return None
+
     @classmethod
-    def _get_fa4_hd256_block_size(cls) -> int | None:
-        vllm_config = get_current_vllm_config_or_none()
+    def _get_fa4_hd256_block_size(
+        cls, vllm_config: VllmConfig | None = None
+    ) -> int | None:
+        if vllm_config is None:
+            vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None or vllm_config.model_config is None:
             return None
 
@@ -102,6 +127,7 @@ class FlashAttentionBackend(AttentionBackend):
                 head_size=head_size,
                 head_size_v=cls.head_size_v,
                 supports_fa4_hd256=True,
+                vllm_config=vllm_config,
             )
             == 4
         ):
@@ -110,8 +136,20 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
+            return [block_size]
         if block_size := cls._get_fa4_hd256_block_size():
             # Sliding-window specs select the smallest advertised size.
+            return [block_size]
+        return [MultipleOf(16)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_config(
+        cls, vllm_config: VllmConfig
+    ) -> list[int | MultipleOf]:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
+            return [block_size]
+        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
             return [block_size]
         return [MultipleOf(16)]
 
@@ -119,7 +157,21 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
+            return max(default_block_size, block_size)
         if block_size := cls._get_fa4_hd256_block_size():
+            return max(default_block_size, block_size)
+        if current_platform.is_xpu():
+            return max(default_block_size, 64)
+        return super().get_preferred_block_size(default_block_size)
+
+    @classmethod
+    def get_preferred_block_size_for_config(
+        cls, default_block_size: int, vllm_config: VllmConfig
+    ) -> int:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
+            return max(default_block_size, block_size)
+        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
             return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
@@ -214,6 +266,13 @@ class FlashAttentionBackend(AttentionBackend):
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
+            use_mm_prefix
+            and kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and device_capability == DeviceCapability(9, 0)
+        ):
+            return "SM90 FP8 KV with mm_prefix requires Triton"
+        if (
             kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
             and not flash_attn_supports_kv_cache_dtype(
@@ -225,7 +284,10 @@ class FlashAttentionBackend(AttentionBackend):
                 supports_fa4_hd256=True,
             )
         ):
-            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
+            return (
+                "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
+                "on SM90, or FA4 on SM100"
+            )
         if (
             use_mm_prefix
             and get_flash_attn_version(
@@ -927,7 +989,17 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
+        # FA4's SM90 FP8-KV path consumes native FP16/BF16 Q and dequantizes
+        # FP8 K/V in-kernel. Other FA4 paths (notably SM100) still require Q,
+        # K, and V to have the same FP8 dtype.
+        uses_sm90_fa4_fp8_kv_dequant = (
+            self.vllm_flash_attn_version == 4
+            and current_platform.is_device_capability_family(90)
+            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+        )
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
+            not uses_sm90_fa4_fp8_kv_dequant
+        )
 
         dcp_a2a = (
             vllm_config is not None
