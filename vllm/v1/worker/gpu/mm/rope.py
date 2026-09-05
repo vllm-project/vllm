@@ -79,7 +79,7 @@ class RopeState:
             )
 
         for i in range(self.num_dims):
-            pos = prefill_positions[i].tolist()
+            pos = prefill_positions[i].numpy()
             self.prefill_positions.stage_write(self.num_dims * req_idx + i, 0, pos)
 
     def apply_staged_writes(self) -> None:
