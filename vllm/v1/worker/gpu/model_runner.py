@@ -899,7 +899,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
+            self.get_pcp_local_token_upper_bound(self.max_num_tokens),
+            skip_attn=True,
+            is_profile=True,
         )
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
@@ -914,6 +916,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
+
+    def get_pcp_local_token_upper_bound(self, num_tokens: int) -> int:
+        """Bound tokens seen by one worker after PCP batch partitioning.
+
+        Scheduler and compilation sizes are global, while DualChunkSwap sends
+        only a PCP shard of prefill tokens to each worker. Decode tokens are
+        replicated, so reserve their worst-case budget and shard the rest.
+        Two tokens per request cover the rounding of the two prefill segments
+        assigned to a rank. This intentionally overestimates the runtime local
+        batch without profiling the full global chunk on every PCP rank.
+        """
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return num_tokens
+        max_decode_tokens = min(
+            num_tokens,
+            self.max_num_reqs * max(1, self.decode_query_len),
+        )
+        remaining_prefill_tokens = num_tokens - max_decode_tokens
+        local_prefill_tokens = (
+            remaining_prefill_tokens + pcp_size - 1
+        ) // pcp_size + 2 * self.max_num_reqs
+        return min(num_tokens, max_decode_tokens + local_prefill_tokens)
+
+    def post_kv_cache_wake_up(self) -> None:
+        self.block_tables.init_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:

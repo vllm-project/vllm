@@ -584,6 +584,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
             query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             uncompressed_seq_lens=seq_lens,
+            uncompressed_seq_lens_cpu=seq_lens_cpu,
             compressed_seq_lens=seq_lens,
             compressed_seq_lens_cpu=seq_lens_cpu,
             block_table=block_table,

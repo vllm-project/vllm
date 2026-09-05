@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
+    VLLM_LITETOPK: bool = False
+    VLLM_LITETOPK_TP_QUERY_SHARD: bool = False
+    VLLM_LITETOPK_PCP_FRONTIER_CARRY: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -572,6 +575,19 @@ def get_env_or_set_default(
 # --8<-- [start:env-vars-definition]
 
 logger = logging.getLogger(__name__)
+
+
+def _deprecated_triton_attn_use_td() -> None:
+    """Warn that VLLM_TRITON_ATTN_USE_TD was renamed to VLLM_TRITON_USE_TD.
+
+    The old name is ignored; VLLM_TRITON_USE_TD is the supported variable.
+    """
+    if "VLLM_TRITON_ATTN_USE_TD" in os.environ:
+        logger.warning(
+            "VLLM_TRITON_ATTN_USE_TD is deprecated and will be removed in "
+            "v0.25. Use VLLM_TRITON_USE_TD instead."
+        )
+    return None
 
 
 def _resolve_rust_cli_path() -> str | None:
@@ -1105,6 +1121,38 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Clamped to max_model_len - query_len. Default: 8192 tokens
     "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN": lambda: int(
         os.getenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "8192")
+    ),
+    # Enable the vendored SM100 LiteTopK sparse-prefill indexer.
+    "VLLM_LITETOPK": lambda: bool(int(os.getenv("VLLM_LITETOPK", "0"))),
+    "VLLM_LITETOPK_TP_QUERY_SHARD": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_TP_QUERY_SHARD", "0"))
+    ),
+    # LiteTopK integration controls. Register every supported VLLM_* knob so
+    # strict environment validation and compile provenance do not reject or
+    # omit an explicitly qualified run.
+    "VLLM_LITETOPK_BUILD": lambda: os.getenv("VLLM_LITETOPK_BUILD", ""),
+    "VLLM_LITETOPK_SO": lambda: os.getenv("VLLM_LITETOPK_SO", ""),
+    "VLLM_LITETOPK_SO_SHA256": lambda: os.getenv("VLLM_LITETOPK_SO_SHA256", ""),
+    "VLLM_LITETOPK_PRODUCTION_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_PRODUCTION_MIN_S", "196608")
+    ),
+    "VLLM_LITETOPK_FP4_PRODUCTION_MIN_S": lambda: int(
+        os.getenv("VLLM_LITETOPK_FP4_PRODUCTION_MIN_S", "65536")
+    ),
+    "VLLM_LITETOPK_MERGE_CAP": lambda: int(
+        os.getenv("VLLM_LITETOPK_MERGE_CAP", "49152")
+    ),
+    "VLLM_LITETOPK_NB": lambda: int(os.getenv("VLLM_LITETOPK_NB", "256")),
+    "VLLM_LITETOPK_HEADROOM": lambda: float(os.getenv("VLLM_LITETOPK_HEADROOM", "0")),
+    "VLLM_LITETOPK_PROBE_EVERY": lambda: int(
+        os.getenv("VLLM_LITETOPK_PROBE_EVERY", "8")
+    ),
+    "VLLM_LITETOPK_OVF_WATERMARK": lambda: int(
+        os.getenv("VLLM_LITETOPK_OVF_WATERMARK", "40960")
+    ),
+    "VLLM_LITETOPK_OVF_LOG": lambda: bool(int(os.getenv("VLLM_LITETOPK_OVF_LOG", "0"))),
+    "VLLM_LITETOPK_PCP_FRONTIER_CARRY": lambda: bool(
+        int(os.getenv("VLLM_LITETOPK_PCP_FRONTIER_CARRY", "0"))
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
