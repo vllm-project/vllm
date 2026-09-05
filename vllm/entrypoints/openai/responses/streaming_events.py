@@ -248,6 +248,7 @@ def emit_function_call_delta_events(
     delta: str,
     function_name: str,
     state: StreamingState,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for function call argument deltas."""
     events: list[StreamingResponsesResponse] = []
@@ -257,6 +258,7 @@ def emit_function_call_delta_events(
         state.current_call_id = f"call_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
             name=function_name,
+            namespace=namespace,
             type="function_call",
             id=state.current_item_id,
             call_id=state.current_call_id,
@@ -480,6 +482,7 @@ def emit_function_call_done_events(
     function_name: str,
     arguments: str,
     state: StreamingState,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
     events: list[StreamingResponsesResponse] = []
@@ -497,6 +500,7 @@ def emit_function_call_done_events(
         type="function_call",
         arguments=arguments,
         name=function_name,
+        namespace=namespace,
         id=state.current_item_id,
         output_index=state.current_output_index,
         sequence_number=-1,
@@ -567,6 +571,7 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    tool_call_name_map: dict[str, Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -590,7 +595,12 @@ def emit_content_delta_events(
         fn_names = function_tool_names
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
-            return emit_function_call_delta_events(delta, function_name, state)
+            call_name = resolve_responses_tool_call_name(
+                function_name, tool_call_name_map=tool_call_name_map
+            )
+            return emit_function_call_delta_events(
+                delta, call_name.name, state, namespace=call_name.namespace
+            )
         elif recipient == "python":
             return emit_code_interpreter_delta_events(delta, state)
         elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
@@ -605,6 +615,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    tool_call_name_map: dict[str, Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -622,7 +633,12 @@ def emit_previous_item_done_events(
         # Deal with tool call
         if is_function_recipient(previous_item.recipient, function_tool_names):
             function_name = extract_function_from_recipient(previous_item.recipient)
-            return emit_function_call_done_events(function_name, text, state)
+            call_name = resolve_responses_tool_call_name(
+                function_name, tool_call_name_map=tool_call_name_map
+            )
+            return emit_function_call_done_events(
+                call_name.name, text, state, namespace=call_name.namespace
+            )
         elif previous_item.recipient == "python":
             return emit_code_interpreter_completion_events(previous_item, state)
         elif (
