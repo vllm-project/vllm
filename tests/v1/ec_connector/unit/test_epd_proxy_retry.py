@@ -120,7 +120,34 @@ def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch
     assert "ec_transfer_params" not in second
 
 
-@pytest.mark.parametrize("server_keep_alive", ["5", "2", "30"])
+def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
+    handle = {"metadata": {"image_grid_thw": [1, 2, 2]}}
+    monkeypatch.setattr(proxy, "NO_REWRITE", True)
+    monkeypatch.setattr(
+        proxy, "encode_session", _EncoderSession([{"encoded-hash": handle}])
+    )
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "image"}}],
+            }
+        ]
+    }
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(
+            body, "request", ["http://encoder"], "", "tcp://consumer:1"
+        )
+    )
+    assert prepared["messages"] == body["messages"]
+    assert "ec_transfer_params" not in body
+    params = prepared["ec_transfer_params"]
+    assert params["encoded-hash"] == handle
+    assert params["ec_items"][0]["mm_hash"] == "encoded-hash"
+    assert params["ec_items"][0]["transfer_id"]
+
+
+@pytest.mark.parametrize("server_keep_alive", ["0.1", "1", "5", "2", "30"])
 def test_pooled_connections_are_retired_before_the_server_closes_them(
     proxy, monkeypatch, server_keep_alive
 ):

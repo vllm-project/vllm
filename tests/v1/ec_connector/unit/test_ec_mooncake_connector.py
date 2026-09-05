@@ -78,7 +78,10 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import ECMooncakeWorker
+from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
+    ECMooncakeWorker,
+    _FanoutError,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
     ECMooncakeConnector,
 )
@@ -202,6 +205,16 @@ def _bind_extra_config(config: VllmConfig) -> None:
 class TestECMooncakeControlPlane:
     """Validate ZMQ client reuse, shard discovery, events, and server RPCs."""
 
+    def test_event_transport_failure_stops_draining(self):
+        inbox = EventInbox(Mock())
+        socket = Mock()
+        socket.recv_json.side_effect = zmq.ZMQError(zmq.ENOTSOCK)
+        inbox._socket = socket
+        assert inbox.drain("unused") == []
+        socket.recv_json.assert_called_once()
+        inbox.close()
+        assert inbox._socket is None
+
     def test_worker_get_ip_failure_does_not_construct_client(
         self, mock_vllm_config_producer
     ):
@@ -249,6 +262,7 @@ class TestECMooncakeControlPlane:
 
         context.socket.assert_called_once_with(zmq.REQ)
         assert socket.setsockopt.call_args_list == [
+            call(zmq.IPV6, 1),
             call(zmq.RCVTIMEO, 17),
             call(zmq.SNDTIMEO, 17),
             call(zmq.LINGER, 0),
@@ -493,14 +507,8 @@ class TestECMooncakeControlPlane:
             client.close()
             server.close()
 
-    def test_a_dead_writer_gives_its_destination_back(self):
-        """Reserve, then vanish: the receive pool has to recover on its own.
-
-        Driven over the wire the way a Producer and the Scheduler drive it --
-        `reserve`, then the Scheduler's own cancel, which does not abandon the
-        writer. That cancel used to leave the destination pinned with no path
-        back, so a Producer crash permanently cost the Consumer a buffer.
-        """
+    def test_an_unconfirmed_writer_keeps_its_destination_reserved(self):
+        """Only writer confirmation makes a timed-out destination reusable."""
         engine = MagicMock(spec=MooncakeTransfer)
         engine.register_memory.return_value = 0
         engine.unregister_memory.return_value = True
@@ -567,11 +575,15 @@ class TestECMooncakeControlPlane:
                 abandoned += 1
             assert abandoned, "the pool should accept a writer before filling up"
 
-            # No in-flight write can still land, so the buffers come back and
-            # an unrelated request gets a destination again.
             for record in manager._records.values():
                 record.expires_at = 0
-            request_destination("after-the-grace")
+            with pytest.raises(RuntimeError, match="pool is full"):
+                request_destination("after-the-grace")
+            for transfer_id in list(manager._records):
+                client.request(
+                    addr, control.make_cancel_request(transfer_id, abandon=True)
+                )
+            request_destination("after-writer-confirmation")
         finally:
             client.close()
             server.close()
@@ -968,13 +980,52 @@ class TestMooncakeMemoryPools:
         assert second is not None
         assert second.regions == first.regions
         pool.release(second)
-        parent = pool._pool
+        parent = pool.tensor
 
         pool.close()
         pool.close()
 
-        assert pool._pool is None
+        assert pool.tensor is None
         mooncake_transfer.unregister_memory.assert_called_once_with(parent)
+
+    @pytest.mark.parametrize("pool_type", [ProducerMemoryPool, ConsumerMemoryPool])
+    def test_failed_unregister_keeps_the_registered_buffer_until_retry(self, pool_type):
+        mooncake_transfer = MagicMock(spec=MooncakeTransfer)
+        mooncake_transfer.register_memory.return_value = 0
+        mooncake_transfer.unregister_memory.side_effect = [False, True]
+        pool = pool_type(256, mooncake_transfer)
+        if isinstance(pool, ProducerMemoryPool):
+            staged = pool.stage([torch.ones(16)])
+            assert staged is not None
+            pool.release(staged)
+        else:
+            pool.prepare(torch.device("cpu"))
+        parent = pool.tensor
+        assert parent is not None
+
+        pool.close()
+        assert pool.tensor is parent
+        pool.close()
+        assert pool.tensor is None
+        pool.close()
+        assert mooncake_transfer.unregister_memory.call_args_list == [
+            call(parent),
+            call(parent),
+        ]
+
+    def test_producer_failed_batch_returns_reserved_regions(self):
+        mooncake_transfer = MagicMock(spec=MooncakeTransfer)
+        mooncake_transfer.register_memory.return_value = 0
+        pool = ProducerMemoryPool(256, mooncake_transfer)
+        source = torch.arange(16, dtype=torch.float32)
+
+        assert pool.stage([source, source]) is None
+        staged = pool.stage([source])
+        assert staged is not None
+        assert torch.equal(staged.tensors[0], source)
+        mooncake_transfer.register_memory.assert_called_once()
+        pool.release(staged)
+        pool.close()
 
     def test_producer_falls_back_when_staging_pool_allocation_fails(self):
         mooncake_transfer = MagicMock(spec=MooncakeTransfer)
@@ -1322,10 +1373,25 @@ class TestSchedulerTransferTable:
         assert table.take_unavailable_requests() == {"req-b"}
         assert first.mm_hash == "hash"
         assert first.request_id == "req-a"
+        assert not table.cancel("shared", 2, "other-hash", "req-b")
+        assert first.state is SchedulerTransferState.WAITING_EVENT
 
 
 class TestECMooncakeSchedulerMetadata:
     """Validate Scheduler decisions and per-step Worker metadata."""
+
+    @pytest.mark.parametrize("payload", [[], "ready", 1, None])
+    def test_non_object_events_are_discarded(self, payload):
+        scheduler = object.__new__(ECMooncakeScheduler)
+        scheduler._drain_pending = True
+        scheduler._control_addr = "unused"
+        scheduler._poll_pending_cancels = Mock()
+        scheduler._expire_transfers = Mock()
+        scheduler._event_inbox = Mock()
+        scheduler._event_inbox.drain.return_value = [payload]
+        scheduler._accept_ready_event = Mock()
+        scheduler._drain_push_notifications()
+        scheduler._accept_ready_event.assert_not_called()
 
     def test_an_unreachable_consumer_does_not_block_the_scheduler(
         self, mock_vllm_config_consumer
@@ -1970,6 +2036,50 @@ class TestECMooncakeSchedulerMetadata:
 
 
 class TestConsumerReservationManager:
+    @pytest.mark.parametrize("cancelled", [None, "writer", "follower"])
+    def test_inflight_duplicates_share_memory_and_cancel_independently(self, cancelled):
+        engine = Mock()
+        engine.register_memory.return_value = 0
+        pool = ConsumerMemoryPool(256, engine)
+        pool.prepare(torch.device("cpu"))
+        manager = ConsumerReservationManager(pool, 300, 16)
+        writer, write = manager.reserve(
+            "writer", "hash", 64, (16,), "float32", torch.float32
+        )
+        follower, write_again = manager.reserve(
+            "follower", "hash", 64, (16,), "float32", torch.float32
+        )
+        assert write and not write_again
+        assert writer.allocation is follower.allocation
+        tensor = writer.allocation.tensor
+        tensor.fill_(7)
+        if cancelled is not None:
+            manager.cancel(cancelled, "")
+        assert manager.complete("writer", writer.reservation_id)[0]
+        for name in ("writer", "follower"):
+            if name != cancelled:
+                loaded = manager.take(name, "hash")
+                assert loaded.tensor.data_ptr() == tensor.data_ptr()
+                assert torch.all(loaded.tensor == 7)
+        assert pool.try_allocate(64, (16,), torch.float32) is None
+
+    def test_follower_refresh_does_not_abandon_the_shared_writer(self):
+        manager, pool, _ = self.manager()
+        writer, _ = self.reserve(manager)
+        follower, _ = manager.reserve(
+            "follower", "hash", 64, (16,), "float32", torch.float32
+        )
+        assert manager.cancel(
+            "follower", follower.reservation_id, abandon=True, refresh=True
+        )
+        renewed, write = manager.reserve(
+            "follower", "hash", 64, (16,), "float32", torch.float32
+        )
+        assert not write and renewed.writer_id == writer.transfer_id
+        assert renewed.reservation_id != follower.reservation_id
+        assert writer.state is ConsumerReservationState.WRITING
+        pool.free.assert_not_called()
+
     @staticmethod
     def manager():
         pool = Mock()
@@ -2084,15 +2194,8 @@ class TestConsumerReservationManager:
             ),
         ],
     )
-    def test_a_deferred_release_is_reclaimed_when_no_writer_reports(
-        self, deferred, terminal
-    ):
-        """A writer that never reports must not pin its destination for good.
-
-        Cancellation and expiry defer to the remote writer, so a Producer that
-        died between reserve and complete used to hold the buffer for the life
-        of the process and every later reserve saw a full pool.
-        """
+    def test_a_deferred_release_requires_writer_completion(self, deferred, terminal):
+        """A timeout cannot prove that a remote writer stopped using its address."""
         manager, pool, allocation = self.manager()
         record, _ = self.reserve(manager)
 
@@ -2106,13 +2209,103 @@ class TestConsumerReservationManager:
         pool.free.assert_not_called()
 
         record.expires_at = 0
-        assert manager.expire() == 1
+        assert manager.expire() == 0
+        pool.free.assert_not_called()
+        assert manager.complete("transfer", record.reservation_id) == (True, False)
         assert record.state is terminal
         pool.free.assert_called_once_with(allocation)
 
 
 class TestECMooncakeWorkerTransfer:
     """Validate end-to-end Worker reservation, push, load, and cleanup flows."""
+
+    def test_partial_batch_reservation_cleans_only_the_failed_item(self):
+        """An item rejected on one shard must not cancel its successful sibling."""
+        worker = object.__new__(ECMooncakeWorker)
+        worker._control_client = Mock()
+        shards = ["tcp://consumer:0", "tcp://consumer:1"]
+        worker._control_client.discover_shards.return_value = shards
+        specs = [
+            ECMooncakePushSpec(name, 64, (16,), "float32", shards[0], name)
+            for name in ("good", "bad")
+        ]
+
+        def request(addr, payload):
+            assert payload["op"] == "reserve_batch"
+            return {
+                "items": [
+                    {"ok": True, "result": {"reservation_id": "good-" + addr}},
+                    {"ok": False, "error": "full"}
+                    if addr == shards[1]
+                    else {"ok": True, "result": {"reservation_id": "partial"}},
+                ]
+            }
+
+        worker._control_client.request.side_effect = request
+        worker._run_fanout = lambda tasks: [task() for task in tasks]
+        worker._retry_cancel_reservations = Mock()
+        good, bad = worker._reserve_remote_many(specs)
+        assert [item["addr"] for item in good] == shards
+        assert isinstance(bad, _FanoutError) and str(bad) == "full"
+        worker._retry_cancel_reservations.assert_called_once_with(specs[1], bad.results)
+        assert [item["reservation_id"] for item in bad.results] == ["partial", ""]
+
+    def test_reservation_completion_dispatches_without_another_model_step(
+        self, mock_vllm_config_producer
+    ):
+        allow_reservation = threading.Event()
+        transferred = threading.Event()
+        source = torch.ones(16)
+        spec = ECMooncakePushSpec("hash", 64, (16,), "float32", "unused", "transfer")
+        with patch_ec_mooncake_deps():
+            worker = ECMooncakeWorker(mock_vllm_config_producer)
+
+            def reserve(_):
+                assert allow_reservation.wait(5)
+                return []
+
+            def write(records):
+                for record in records:
+                    worker._producer_pushes.begin_writing(record)
+                worker._producer_pushes.begin_notifying(records)
+                worker._producer_pushes.complete(records)
+                transferred.set()
+
+            worker._reserve_remote = reserve
+            worker._push_batch = write
+            try:
+                worker.start_save_caches(
+                    ECMooncakeConnectorMetadata(pushes=[spec]), {"hash": source}
+                )
+                worker.build_connector_worker_meta()
+                assert not transferred.is_set()
+                allow_reservation.set()
+                assert transferred.wait(5)
+            finally:
+                allow_reservation.set()
+                worker.close()
+
+    @pytest.mark.parametrize("waiting_for", ["reservation", "encoder"])
+    def test_a_ready_push_does_not_wait_for_another_item(self, waiting_for):
+        manager = ProducerPushManager()
+        records = []
+        for name in ("slow", "fast"):
+            future: Future[list[dict[str, Any]]] = Future()
+            spec = ECMooncakePushSpec(
+                name, 64, (16,), "float32", "tcp://consumer:1", name
+            )
+            record, _ = manager.reserve(spec, lambda future=future: future)
+            event = Mock()
+            event.query.return_value = name == "fast" or waiting_for == "reservation"
+            manager.bind_source(name, torch.empty(16), event)
+            if name == "fast" or waiting_for == "encoder":
+                future.set_result([])
+            records.append(record)
+        executor = Mock()
+        executor.submit.return_value = Future()
+        run = Mock()
+        manager.submit_batches(executor, run)
+        executor.submit.assert_called_once_with(run, [records[1]])
 
     def test_reservation_requires_confirmed_topology_before_any_rpc(self):
         worker = object.__new__(ECMooncakeWorker)
@@ -2204,7 +2397,8 @@ class TestECMooncakeWorkerTransfer:
         # failing the engine; the push in flight keeps the id.
         changed = copy.copy(spec)
         changed.mm_hash = "other"
-        assert manager.reserve(changed, lambda: Future()) == (record, False)
+        with pytest.raises(ValueError, match="Conflicting EC destination"):
+            manager.reserve(changed, lambda: Future())
         assert record.spec.mm_hash == "hash"
 
         source = torch.empty(16)
@@ -2321,8 +2515,8 @@ class TestECMooncakeWorkerTransfer:
             "flush",
             "io.submit",
             "cancel:orphan",
-            ("io.shutdown", True, {}),
             ("control.shutdown", True, {}),
+            ("io.shutdown", True, {}),
             ("shard.shutdown", True, {}),
         ]
         worker._control_client.close.assert_called_once_with()
@@ -3396,11 +3590,11 @@ class TestECMooncakeWorkerTransfer:
                 assert isinstance(engine, CopyingFakeTransferEngine)
                 # The staging pool is registered once; a transfer registers
                 # nothing of its own.
-                pool = producer._worker._producer_memory._pool
+                pool = producer._worker._producer_memory.tensor
                 assert pool is not None
                 assert engine.register_calls == [[pool.data_ptr()]]
                 assert engine.batch_unregister_calls == []
-                assert engine.transfer_calls == [[source.nbytes, source.nbytes]]
+                assert engine.transfer_calls == [[source.nbytes]]
                 assert all(
                     reservation.state is ConsumerReservationState.READY
                     for reservation in consumer._worker._reservations._records.values()
@@ -3442,7 +3636,7 @@ class TestECMooncakeWorkerTransfer:
                     _wait_for_worker_io(producer)
                 engine = producer._worker._transfer._engine
                 assert isinstance(engine, CopyingFakeTransferEngine)
-                assert producer._worker._producer_memory._pool is None
+                assert producer._worker._producer_memory.tensor is None
                 assert engine.register_calls == [[source.data_ptr()]]
                 assert engine.batch_unregister_calls == [[source.data_ptr()]]
                 assert engine.transfer_calls == [[source.nbytes]]

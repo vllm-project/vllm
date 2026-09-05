@@ -20,6 +20,7 @@ import torch
 import zmq
 
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_path
 
 logger = init_logger(__name__)
 
@@ -58,6 +59,7 @@ class ControlClient:
         socket = sockets.get(addr)
         if socket is None:
             socket = self._context.socket(zmq.REQ)
+            socket.setsockopt(zmq.IPV6, 1)
             socket.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
             socket.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
             socket.setsockopt(zmq.LINGER, 0)
@@ -194,6 +196,7 @@ class EventInbox:
             return
         context = zmq.Context()
         socket = context.socket(zmq.PULL)
+        socket.setsockopt(zmq.IPV6, 1)
         for endpoint in endpoints:
             socket.connect(endpoint)
         self._context = context
@@ -210,7 +213,10 @@ class EventInbox:
                 events.append(self._socket.recv_json(flags=zmq.DONTWAIT))
             except zmq.Again:
                 return events
-            except Exception:
+            except zmq.ZMQError:
+                logger.warning("EC Mooncake event channel failed", exc_info=True)
+                return events
+            except (ValueError, UnicodeError):
                 # The event channel is a plain PULL socket: an undecodable
                 # frame must cost one frame, not the engine.
                 logger.warning(
@@ -226,6 +232,7 @@ class EventInbox:
             self._discovery = None
         if self._socket is not None:
             self._socket.close(linger=0)
+            self._socket = None
         if self._context is not None:
             self._context.term()
 
@@ -249,6 +256,7 @@ class ConsumerControlServer:
         reap: Callable[[], int],
         peer_ports: list[int] | None = None,
         device: torch.device | None = None,
+        drain_ready: Callable[[], list[str]] = lambda: [],
     ) -> None:
         self.host = host
         self.port = port
@@ -260,6 +268,7 @@ class ConsumerControlServer:
         self._complete = complete
         self._cancel = cancel
         self._reap = reap
+        self._drain_ready = drain_ready
         self._stop = threading.Event()
         self._started = threading.Event()
         self._thread: threading.Thread | None = None
@@ -272,6 +281,8 @@ class ConsumerControlServer:
             context = zmq.Context()
             socket = context.socket(zmq.REP)
             event_socket = context.socket(zmq.PUSH)
+            socket.setsockopt(zmq.IPV6, 1)
+            event_socket.setsockopt(zmq.IPV6, 1)
             pending_events: deque[dict[str, Any]] = deque()
 
             def queue_event(event: dict[str, Any]) -> None:
@@ -294,8 +305,13 @@ class ConsumerControlServer:
             last_reap_at = time.monotonic()
             socket.setsockopt(zmq.RCVTIMEO, 100)
             try:
-                socket.bind(f"tcp://{self.host}:{self.port}")
-                self.event_port = event_socket.bind_to_random_port(f"tcp://{self.host}")
+                socket.bind(make_zmq_path("tcp", self.host, self.port))
+                event_socket.bind(make_zmq_path("tcp", self.host, 0))
+                self.event_port = int(
+                    event_socket.getsockopt(zmq.LAST_ENDPOINT)
+                    .decode()
+                    .rsplit(":", 1)[1]
+                )
             except Exception as e:
                 self._startup_error = e
                 self._started.set()
@@ -337,10 +353,25 @@ class ConsumerControlServer:
                     try:
                         op = request.get("op")
                         result: Any = None
-                        if op == "reserve":
-                            result = self._reserve(request)
-                            if result.get("ready"):
-                                queue_ready(str(request["transfer_id"]))
+                        if op in ("reserve", "reserve_batch"):
+                            items = (
+                                request["items"] if op == "reserve_batch" else [request]
+                            )
+                            results = []
+                            for item in items:
+                                try:
+                                    reserved = self._reserve(item)
+                                    results.append({"ok": True, "result": reserved})
+                                    if reserved.get("ready"):
+                                        queue_ready(str(item["transfer_id"]))
+                                except Exception as exc:
+                                    results.append({"ok": False, "error": str(exc)})
+                            if op == "reserve_batch":
+                                result = {"items": results}
+                            elif not results[0]["ok"]:
+                                raise RuntimeError(results[0]["error"])
+                            else:
+                                result = results[0]["result"]
                         elif op == "status":
                             result = self._status(str(request["transfer_id"]))
                         elif op == "event_port":
@@ -359,6 +390,8 @@ class ConsumerControlServer:
                                 accepted, became_ready = self._complete(
                                     transfer_id, str(item["reservation_id"])
                                 )
+                                for ready_id in self._drain_ready():
+                                    queue_ready(ready_id)
                                 completions.append(
                                     {
                                         "completed": accepted,

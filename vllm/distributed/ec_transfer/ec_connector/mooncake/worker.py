@@ -124,10 +124,34 @@ class ECMooncakeWorker:
         )
         self._shard_pool: ThreadPoolExecutor | None = None
         self._shard_pool_lock = threading.Lock()
-        self._producer_pushes = ProducerPushManager()
+        self._push_ready = threading.Event()
+        self._producer_pushes = ProducerPushManager(self._push_ready.set)
+        self._dispatch_stop = threading.Event()
+        self._dispatcher: threading.Thread | None = None
+        self._failed_saves: set[str] = set()
+        self._collecting_sources = False
         self._completed_loads: set[str] = set()
         self._failed_loads: set[str] = set()
         self._shutdown = False
+        if self.is_producer:
+            self._dispatcher = threading.Thread(
+                target=self._dispatch_pushes, name="ec-mooncake-ready", daemon=True
+            )
+            self._dispatcher.start()
+
+    def _dispatch_pushes(self) -> None:
+        pending_event = False
+        while not self._dispatch_stop.is_set():
+            self._push_ready.wait(timeout=0.001 if pending_event else None)
+            self._push_ready.clear()
+            if self._dispatch_stop.is_set():
+                break
+            if self._collecting_sources:
+                pending_event = False
+                continue
+            pending_event = self._producer_pushes.submit_batches(
+                self._io_executor, self._push_batch
+            )
 
     def _resolve_consumer_rank(self) -> None:
         """Place this worker in the consumer receive topology."""
@@ -176,6 +200,7 @@ class ECMooncakeWorker:
             self._reservations.expire,
             peer_ports=[base_port + rank for rank in range(self._tp_size)],
             device=consumer_pool.device,
+            drain_ready=self._reservations.drain_ready,
         )
         try:
             self._control_server.start()
@@ -375,38 +400,10 @@ class ECMooncakeWorker:
 
     def _reserve_remote(self, spec: ECMooncakePushSpec) -> list[dict[str, Any]]:
         """Reserve a destination on every shard of the consumer."""
-        shards = None
-        for _ in range(_CANCEL_ATTEMPTS):
-            shards = self._control_client.discover_shards(spec.consumer_zmq)
-            if shards is not None:
-                break
-        if shards is None:
-            raise RuntimeError(
-                f"Could not discover every EC consumer shard at {spec.consumer_zmq}"
-            )
-        tasks: list[Callable[[], dict[str, Any]]] = [
-            partial(self._reserve_one, addr, spec) for addr in shards
-        ]
-        try:
-            return self._run_fanout(tasks)
-        except _FanoutError as exc:
-            # Keep one cleanup entry per confirmed shard.  A missing result
-            # means the reservation outcome is unknown, so transfer-level
-            # cancellation with an empty reservation ID is the only safe
-            # idempotent action for that exact address.
-            reservations = []
-            for addr, result in zip(shards, exc.results):
-                if isinstance(result, dict):
-                    result["addr"] = addr
-                    reservations.append(result)
-                else:
-                    reservations.append({"addr": addr, "reservation_id": ""})
-            exc.results[:] = reservations
-            try:
-                self._retry_cancel_reservations(spec, reservations)
-            except _FanoutError as cleanup_error:
-                raise exc from cleanup_error
-            raise
+        result = self._reserve_remote_many([spec])[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def _refresh_remote_reservations(
         self,
@@ -454,11 +451,19 @@ class ECMooncakeWorker:
         encoder_cache: dict[str, torch.Tensor] | None = None,
         **kwargs: Any,
     ) -> None:
+        self._collecting_sources = True
+        new: dict[str, list[ProducerPushRecord]] = {}
         for spec in metadata.pushes:
-            self._producer_pushes.reserve(
-                spec,
-                partial(self._submit_reservation, spec),
-            )
+            try:
+                record, created = self._producer_pushes.reserve(spec, Future)
+                if created:
+                    new.setdefault(spec.consumer_zmq, []).append(record)
+            except ValueError:
+                logger.warning("Rejected conflicting EC push", exc_info=True)
+                self._failed_saves.add(spec.request_id)
+        for records in new.values():
+            future = self._control_executor.submit(self._reserve_batch, records)
+            future.add_done_callback(partial(self._reservation_batch_done, records))
         if not isinstance(encoder_cache, dict):
             return
         for mm_hash in dict.fromkeys(spec.mm_hash for spec in metadata.pushes):
@@ -466,10 +471,97 @@ class ECMooncakeWorker:
             if tensor is not None:
                 self._bind_push_source(tensor, mm_hash)
 
-    def _submit_reservation(
-        self, spec: ECMooncakePushSpec
-    ) -> Future[list[dict[str, Any]]]:
-        return self._control_executor.submit(self._reserve_remote, spec)
+    def _reserve_batch(self, records: list[ProducerPushRecord]) -> None:
+        """Resolve independent item futures with one reserve RPC per shard."""
+        if len(records) == 1:
+            record = records[0]
+            try:
+                record.reservation_future.set_result(self._reserve_remote(record.spec))
+            except Exception as exc:
+                record.reservation_future.set_exception(exc)
+            return
+        outcomes = self._reserve_remote_many([record.spec for record in records])
+        self._producer_pushes.finish_reservations(list(zip(records, outcomes)))
+
+    def _reserve_remote_many(
+        self, specs: list[ECMooncakePushSpec]
+    ) -> list[list[dict[str, Any]] | Exception]:
+        shards = None
+        for _ in range(_CANCEL_ATTEMPTS):
+            shards = self._control_client.discover_shards(specs[0].consumer_zmq)
+            if shards is not None:
+                break
+        if shards is None:
+            raise RuntimeError(
+                f"Could not discover every EC consumer shard at {specs[0].consumer_zmq}"
+            )
+
+        def reserve(addr: str) -> list[dict[str, Any]]:
+            if len(specs) == 1:
+                return [{"ok": True, "result": self._reserve_one(addr, specs[0])}]
+            response = self._control_client.request(
+                addr,
+                {
+                    "op": "reserve_batch",
+                    "items": [
+                        {
+                            "transfer_id": spec.transfer_id,
+                            "mm_hash": spec.mm_hash,
+                            "nbytes": spec.nbytes,
+                            "shape": list(spec.shape),
+                            "dtype": spec.dtype,
+                        }
+                        for spec in specs
+                    ],
+                },
+            )
+            items = response["items"]
+            if len(items) != len(specs):
+                raise RuntimeError("Malformed EC reservation batch response")
+            for item in items:
+                if item.get("ok"):
+                    item["result"]["_received_at"] = time.monotonic()
+            return items
+
+        fanout_error = None
+        results: list[Any]
+        try:
+            results = self._run_fanout([partial(reserve, addr) for addr in shards])
+        except _FanoutError as exc:
+            results = exc.results
+            fanout_error = exc
+        outcomes: list[list[dict[str, Any]] | Exception] = []
+        for index, spec in enumerate(specs):
+            reservations: list[dict[str, Any]] = []
+            error = None
+            for addr, items in zip(shards, results):
+                item = items[index] if items is not None else {}
+                if item.get("ok"):
+                    reservations.append({**item["result"], "addr": addr})
+                else:
+                    error = fanout_error or RuntimeError(item["error"])
+                    reservations.append({"addr": addr, "reservation_id": ""})
+            if error is None:
+                outcomes.append(reservations)
+            else:
+                failure = _FanoutError(error, list(reservations))
+                try:
+                    self._retry_cancel_reservations(spec, reservations)
+                except Exception as cleanup_error:
+                    failure.__cause__ = cleanup_error
+                    logger.exception("Failed to release partial EC reservation batch")
+                outcomes.append(failure)
+        return outcomes
+
+    @staticmethod
+    def _reservation_batch_done(
+        records: list[ProducerPushRecord], future: Future[None]
+    ) -> None:
+        error = future.exception()
+        if error is not None:
+            for record in records:
+                if not record.reservation_future.done():
+                    record.reservation_future.set_exception(error)
 
     def start_load_caches(
         self,
@@ -486,7 +578,7 @@ class ECMooncakeWorker:
             raise RuntimeError(
                 "ECMooncakeConnector requires CUDA for ec_buffer_device=cuda"
             )
-        self._reservations.retire_stale(encoder_cache)
+        self._reservations.retire_stale(encoder_cache, metadata.freed)
 
         for spec in metadata.loads:
             if spec.mm_hash in encoder_cache:
@@ -544,8 +636,6 @@ class ECMooncakeWorker:
                 ]
                 source = push.source_tensor
                 assert source is not None
-                if writable and push.source_event is not None:
-                    push.source_event.synchronize()
                 for shard in writable:
                     if int(shard["nbytes"]) != source.nbytes:
                         raise RuntimeError(
@@ -570,11 +660,6 @@ class ECMooncakeWorker:
                 registered_sources: list[int] = []
                 if staged is not None:
                     sources = staged.tensors
-                    # The NIC reads outside the CUDA stream.
-                    if sources and sources[0].device.type == "cuda":
-                        torch.accelerator.current_stream(
-                            sources[0].device
-                        ).synchronize()
                 else:
                     sources = tensors
                     registered_sources = self._transfer.acquire_sources(tensors)
@@ -788,6 +873,8 @@ class ECMooncakeWorker:
             # never loads must not report at all rather than report nothing.
             return None
 
+        self._collecting_sources = False
+        self._push_ready.set()
         self._flush_pending_pushes()
         failures = self._producer_pushes.poll()
         for mm_hash, error in failures:
@@ -802,7 +889,9 @@ class ECMooncakeWorker:
             failed_loads=self._failed_loads,
             reclaimed=reclaimed,
             pending_saves=self._producer_pushes.pending,
+            failed_saves=self._failed_saves,
         )
+        self._failed_saves = set()
         self._completed_loads = set()
         self._failed_loads = set()
         return meta
@@ -811,6 +900,11 @@ class ECMooncakeWorker:
         if self._shutdown:
             return
         self._shutdown = True
+        dispatcher = getattr(self, "_dispatcher", None)
+        if dispatcher is not None:
+            self._dispatch_stop.set()
+            self._push_ready.set()
+            dispatcher.join()
         if self._control_server is not None:
             self._reservations.begin_shutdown()
         self._flush_pending_pushes()
@@ -820,8 +914,11 @@ class ECMooncakeWorker:
                 self._io_executor,
                 self._cancel_orphaned_reservation,
             )
-        self._io_executor.shutdown(wait=True)
         self._control_executor.shutdown(wait=True)
+        self._producer_pushes.submit_batches(
+            self._io_executor, self._push_batch, wait=True
+        )
+        self._io_executor.shutdown(wait=True)
         if self._shard_pool is not None:
             self._shard_pool.shutdown(wait=True)
         # Every producer-side thread that could hold a control socket is stopped.

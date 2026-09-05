@@ -45,6 +45,7 @@ class ECMooncakeConnectorMetadata(ECConnectorMetadata):
 
     loads: list[ECMooncakeLoadSpec] = field(default_factory=list)
     pushes: list[ECMooncakePushSpec] = field(default_factory=list)
+    freed: list[str] | None = None
 
 
 @dataclass
@@ -57,6 +58,7 @@ class ECMooncakeWorkerMetadata(ECConnectorWorkerMetadata):
     # evicted item stays resident until told otherwise.
     reclaimed: set[str] = field(default_factory=set)
     pending_saves: bool = False
+    failed_saves: set[str] = field(default_factory=set)
 
     def aggregate(self, other: ECConnectorWorkerMetadata) -> ECMooncakeWorkerMetadata:
         assert isinstance(other, ECMooncakeWorkerMetadata)
@@ -69,4 +71,5 @@ class ECMooncakeWorkerMetadata(ECConnectorWorkerMetadata):
             failed_loads=self.failed_loads | other.failed_loads,
             reclaimed=self.reclaimed | other.reclaimed,
             pending_saves=self.pending_saves or other.pending_saves,
+            failed_saves=self.failed_saves | other.failed_saves,
         )

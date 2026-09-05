@@ -60,11 +60,43 @@ class ResidentLease(Generic[_T]):
 
 
 class ContiguousAllocator:
-    """Allocate aligned regions from one contiguous byte range."""
+    """Own a registered slab and its aligned regions; callers serialize access."""
 
     def __init__(self, capacity: int, alignment: int = 256):
         self.alignment = alignment
+        self._capacity = capacity
         self._free = [(0, capacity)]
+        self.tensor: torch.Tensor | None = None
+        self._disabled = False
+
+    def prepare(self, device: torch.device, transfer: MooncakeTransfer) -> None:
+        if self.tensor is not None or self._disabled:
+            return
+        try:
+            tensor = torch.empty(self._capacity, dtype=torch.uint8, device=device)
+            ret = transfer.register_memory(tensor)
+            if ret != 0:
+                raise RuntimeError(f"Mooncake returned {ret}")
+        except (RuntimeError, torch.OutOfMemoryError) as error:
+            self._disabled = True
+            logger.warning("Could not initialize the EC registered buffer: %s", error)
+            return
+        self.tensor = tensor
+        self._free = [(0, tensor.nbytes)]
+        logger.info("Registered %d-byte buffer for Mooncake EC", tensor.nbytes)
+
+    def view(
+        self, offset: int, nbytes: int, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        assert self.tensor is not None
+        return self.tensor.narrow(0, offset, nbytes).view(dtype).view(shape)
+
+    def close(self, transfer: MooncakeTransfer) -> bool:
+        if self.tensor is not None and not transfer.unregister_memory(self.tensor):
+            return False
+        self.tensor = None
+        self._free.clear()
+        return True
 
     def allocate(self, nbytes: int) -> tuple[int, int] | None:
         size = (nbytes + self.alignment - 1) // self.alignment * self.alignment
@@ -198,41 +230,16 @@ class ProducerMemoryPool:
     """Own the Producer staging slab and regions carved from it."""
 
     def __init__(self, capacity: int, transfer: MooncakeTransfer) -> None:
-        self._capacity = capacity
         self._transfer = transfer
-        self._pool: torch.Tensor | None = None
-        self._allocator: ContiguousAllocator | None = None
-        self._disabled = False
+        self._allocator = ContiguousAllocator(capacity)
         self._lock = threading.Lock()
+        self._local = threading.local()
 
-    def _ensure_pool(self, device: torch.device) -> None:
-        if self._pool is not None or self._disabled:
-            return
-        with self._lock:
-            if self._pool is not None or self._disabled:
-                return
-            try:
-                pool = torch.empty(self._capacity, dtype=torch.uint8, device=device)
-                ret = self._transfer.register_memory(pool)
-                if ret != 0:
-                    raise RuntimeError(f"Mooncake returned {ret}")
-            except (RuntimeError, torch.OutOfMemoryError) as error:
-                self._disabled = True
-                logger.warning(
-                    "Could not initialize the EC producer staging pool; falling "
-                    "back to per-transfer registration: %s",
-                    error,
-                )
-                return
-            self._pool = pool
-            self._allocator = ContiguousAllocator(pool.nbytes)
-            logger.info(
-                "Registered %d-byte staging pool for Mooncake EC pushes",
-                pool.nbytes,
-            )
+    @property
+    def tensor(self) -> torch.Tensor | None:
+        return self._allocator.tensor
 
     def _free_regions(self, regions: list[tuple[int, int]]) -> None:
-        assert self._allocator is not None
         for offset, size in regions:
             self._allocator.free(offset, size)
 
@@ -240,14 +247,14 @@ class ProducerMemoryPool:
         """Copy tensors into one registered slab, or return None for fallback."""
         if not tensors:
             return StagedSources([], [])
-        self._ensure_pool(tensors[0].device)
-        pool = self._pool
         allocator = self._allocator
-        if pool is None or allocator is None:
-            return None
         staged: list[torch.Tensor] = []
         regions: list[tuple[int, int]] = []
         with self._lock:
+            allocator.prepare(tensors[0].device, self._transfer)
+            pool = allocator.tensor
+            if pool is None:
+                return None
             for tensor in tensors:
                 region = allocator.allocate(tensor.nbytes)
                 if region is None:
@@ -255,12 +262,22 @@ class ProducerMemoryPool:
                     return None
                 regions.append(region)
                 staged.append(
-                    pool.narrow(0, region[0], tensor.nbytes)
-                    .view(tensor.dtype)
-                    .view(tensor.shape)
+                    allocator.view(
+                        region[0], tensor.nbytes, tuple(tensor.shape), tensor.dtype
+                    )
                 )
-        for destination, source in zip(staged, tensors):
-            destination.copy_(source, non_blocking=True)
+        if pool.device.type == "cuda":
+            stream = getattr(self._local, "stream", None)
+            if stream is None:
+                stream = torch.cuda.Stream(device=pool.device)
+                self._local.stream = stream
+            with torch.cuda.stream(stream):
+                for destination, source in zip(staged, tensors):
+                    destination.copy_(source, non_blocking=True)
+            stream.synchronize()
+        else:
+            for destination, source in zip(staged, tensors):
+                destination.copy_(source)
         return StagedSources(staged, regions)
 
     def release(self, staged: StagedSources) -> None:
@@ -271,11 +288,7 @@ class ProducerMemoryPool:
 
     def close(self) -> None:
         with self._lock:
-            pool = self._pool
-            if pool is None or not self._transfer.unregister_memory(pool):
-                return
-            self._pool = None
-            self._allocator = None
+            self._allocator.close(self._transfer)
 
 
 class ConsumerMemoryPool:
@@ -286,48 +299,26 @@ class ConsumerMemoryPool:
         capacity: int,
         transfer: MooncakeTransfer,
     ) -> None:
-        self._capacity = capacity
         self._transfer = transfer
-        self._pool: torch.Tensor | None = None
-        self._allocator: ContiguousAllocator | None = None
+        self._allocator = ContiguousAllocator(capacity)
         self._residents: ResidentPool[MemoryAllocation] = ResidentPool()
         self._retire_events: dict[str, torch.Event] = {}
         self._pending_frees: list[tuple[torch.Event, MemoryAllocation]] = []
         self._reclaimed: set[str] = set()
-        self._disabled = False
         self.lock = threading.RLock()
 
     @property
     def tensor(self) -> torch.Tensor | None:
-        return self._pool
+        return self._allocator.tensor
 
     def prepare(
         self,
         device: torch.device,
     ) -> None:
-        if self._pool is not None or self._disabled:
-            return
-        try:
-            pool = torch.empty(self._capacity, dtype=torch.uint8, device=device)
-            ret = self._transfer.register_memory(pool)
-            if ret != 0:
-                raise RuntimeError(f"Mooncake returned {ret}")
-        except (RuntimeError, torch.OutOfMemoryError) as error:
-            self._disabled = True
-            logger.warning(
-                "Could not initialize the EC consumer buffer pool: %s",
-                error,
-            )
-            return
-        self._pool = pool
-        self._allocator = ContiguousAllocator(pool.nbytes)
-        logger.info(
-            "Prepared %d-byte receive pool for Mooncake EC",
-            pool.nbytes,
-        )
+        with self.lock:
+            self._allocator.prepare(device, self._transfer)
 
     def _free(self, allocation: MemoryAllocation) -> None:
-        assert self._allocator is not None
         self._allocator.free(allocation.offset, allocation.size)
 
     def free(self, allocation: MemoryAllocation) -> None:
@@ -352,8 +343,6 @@ class ConsumerMemoryPool:
         self._pending_frees = pending
 
     def _reclaim_locked(self, nbytes: int) -> tuple[int, int] | None:
-        assert self._allocator is not None
-
         def evict(mm_hash: str, allocation: MemoryAllocation) -> bool:
             event = self._retire_events.pop(mm_hash, None)
             self._defer_or_free(allocation, event)
@@ -377,9 +366,8 @@ class ConsumerMemoryPool:
         shape: tuple[int, ...],
         dtype: torch.dtype,
     ) -> MemoryAllocation:
-        assert self._pool is not None
         offset, size = region
-        tensor = self._pool.narrow(0, offset, nbytes).view(dtype).view(shape)
+        tensor = self._allocator.view(offset, nbytes, shape, dtype)
         return MemoryAllocation(offset, size, tensor)
 
     def try_allocate(
@@ -387,7 +375,7 @@ class ConsumerMemoryPool:
     ) -> MemoryAllocation | None:
         with self.lock:
             allocator = self._allocator
-            assert self._pool is not None and allocator is not None
+            assert allocator.tensor is not None
             self._poll_frees_locked()
             region = allocator.allocate(nbytes)
             if region is None:
@@ -435,10 +423,11 @@ class ConsumerMemoryPool:
             return tensor
 
     def _record_release_event(self) -> torch.Event | None:
-        if self._pool is None or self._pool.device.type != "cuda":
+        pool = self.tensor
+        if pool is None or pool.device.type != "cuda":
             return None
         event = torch.Event()
-        event.record(torch.accelerator.current_stream(self._pool.device))
+        event.record(torch.accelerator.current_stream(pool.device))
         return event
 
     def release_cached(self, lease: ResidentLease[MemoryAllocation]) -> None:
@@ -452,6 +441,8 @@ class ConsumerMemoryPool:
         mm_hash: str,
         allocation: MemoryAllocation,
         lease: ResidentLease[MemoryAllocation] | None = None,
+        *,
+        pin: bool = True,
     ) -> MemoryAllocation:
         with self.lock:
             if lease is not None:
@@ -462,6 +453,8 @@ class ConsumerMemoryPool:
                 return canonical
             previous = self._residents.get(mm_hash)
             displaced = self._residents.insert(mm_hash, allocation)
+            if not pin:
+                self._residents.retire(mm_hash)
             event = None
             if previous is not None and previous is not allocation:
                 event = self._retire_events.pop(mm_hash, None)
@@ -475,18 +468,20 @@ class ConsumerMemoryPool:
     def retire_stale(
         self,
         encoder_cache: dict[str, torch.Tensor],
-        reserved_hashes: set[str],
+        reserved_hashes: set[str] | None = None,
+        *,
+        freed: list[str] | None = None,
     ) -> None:
-        if self._pool is None:
+        if self.tensor is None:
             return
         with self.lock:
-            for mm_hash in self._residents.referenced():
+            for mm_hash in self._residents.referenced() if freed is None else freed:
                 allocation = self._residents.get(mm_hash)
                 if allocation is None:
                     continue
                 if encoder_cache.get(mm_hash) is allocation.tensor:
                     continue
-                if mm_hash in reserved_hashes:
+                if reserved_hashes and mm_hash in reserved_hashes:
                     continue
                 event = self._record_release_event()
                 if event is not None:
@@ -502,11 +497,8 @@ class ConsumerMemoryPool:
 
     def close(self) -> None:
         with self.lock:
-            pool = self._pool
-            if pool is None or not self._transfer.unregister_memory(pool):
+            if not self._allocator.close(self._transfer):
                 return
-            self._pool = None
-            self._allocator = None
             self._residents.clear()
             self._retire_events.clear()
             self._pending_frees.clear()

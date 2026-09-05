@@ -68,6 +68,10 @@ class SchedulerTransferTable:
         self._resident_capacity = resident_capacity
         self._tombstone_ttl = tombstone_ttl
         self._records: OrderedDict[str, SchedulerTransfer] = OrderedDict()
+        self._active_ids: dict[str, None] = {}
+        self._terminal_ids: OrderedDict[str, None] = OrderedDict()
+        self._resident_ids: OrderedDict[str, None] = OrderedDict()
+        self._resident_bytes = 0
         self._hash_index: dict[str, deque[str]] = {}
         self._loads_to_dispatch: OrderedDict[str, None] = OrderedDict()
         self._unavailable_requests: set[str] = set()
@@ -287,6 +291,12 @@ class SchedulerTransferTable:
         request_id: str = "",
     ) -> bool:
         record = self._records.get(transfer_id)
+        if (
+            record is not None
+            and mm_hash
+            and not self._identity_matches(record, mm_hash)
+        ):
+            return False
         if record is None:
             record = SchedulerTransfer(
                 transfer_id=transfer_id,
@@ -312,7 +322,8 @@ class SchedulerTransferTable:
         if terminal_limit < 0:
             raise ValueError("terminal_limit must be non-negative")
         expired = []
-        for record in list(self._records.values()):
+        for transfer_id in list(self._active_ids):
+            record = self._records[transfer_id]
             if record.deadline is None or record.deadline > now:
                 continue
             if record.state is SchedulerTransferState.AVAILABLE:
@@ -331,15 +342,15 @@ class SchedulerTransferTable:
                 if record.request_id:
                     self._notify_unavailable(record, record.request_id)
                 expired.append(record)
-            elif record.state in _TERMINAL_STATES:
-                self._remove(record.transfer_id)
-        terminal_ids = [
-            record.transfer_id
-            for record in self._records.values()
-            if record.state in _TERMINAL_STATES
-        ]
-        excess = max(0, len(terminal_ids) - terminal_limit)
-        for transfer_id in terminal_ids[:excess]:
+        while self._terminal_ids:
+            transfer_id = next(iter(self._terminal_ids))
+            record = self._records[transfer_id]
+            if (
+                record.deadline is not None
+                and record.deadline > now
+                and len(self._terminal_ids) <= terminal_limit
+            ):
+                break
             self._remove(transfer_id)
         return expired
 
@@ -355,6 +366,7 @@ class SchedulerTransferTable:
 
     def _insert(self, record: SchedulerTransfer) -> None:
         self._records[record.transfer_id] = record
+        self._active_ids[record.transfer_id] = None
         if record.mm_hash:
             self._hash_index.setdefault(record.mm_hash, deque()).append(
                 record.transfer_id
@@ -389,12 +401,23 @@ class SchedulerTransferTable:
         state: SchedulerTransferState,
         now: float | None = None,
     ) -> None:
+        if record.state is SchedulerTransferState.RESIDENT:
+            self._resident_ids.pop(record.transfer_id, None)
+            if record.spec is not None:
+                self._resident_bytes -= record.spec.nbytes
+        if state is SchedulerTransferState.RESIDENT:
+            self._resident_ids[record.transfer_id] = None
+            if record.spec is not None:
+                self._resident_bytes += record.spec.nbytes
         if state in _TERMINAL_STATES:
             if now is None:
                 raise ValueError("Terminal transition requires a timestamp")
             # Keep a bounded tombstone so late events and repeat request IDs
             # remain idempotent instead of reviving a finished transfer.
             record.deadline = now + self._tombstone_ttl
+            self._active_ids.pop(record.transfer_id, None)
+            self._terminal_ids[record.transfer_id] = None
+            self._terminal_ids.move_to_end(record.transfer_id)
         if state is SchedulerTransferState.EXPIRED and record.state in (
             SchedulerTransferState.READY,
             SchedulerTransferState.RESIDENT,
@@ -404,23 +427,18 @@ class SchedulerTransferTable:
         self._records.move_to_end(record.transfer_id)
 
     def _evict_residents(self, now: float) -> None:
-        residents: list[SchedulerTransfer] = []
-        resident_bytes = 0
-        for record in self._records.values():
-            if record.state is not SchedulerTransferState.RESIDENT:
-                continue
-            residents.append(record)
-            if record.spec is not None:
-                resident_bytes += record.spec.nbytes
-        for record in residents:
-            if resident_bytes <= self._resident_capacity:
-                break
+        while self._resident_bytes > self._resident_capacity and self._resident_ids:
+            record = self._records[next(iter(self._resident_ids))]
             self._transition(record, SchedulerTransferState.EXPIRED, now=now)
-            if record.spec is not None:
-                resident_bytes -= record.spec.nbytes
 
     def _remove(self, transfer_id: str) -> None:
         record = self._records.pop(transfer_id, None)
+        self._active_ids.pop(transfer_id, None)
+        self._terminal_ids.pop(transfer_id, None)
+        if transfer_id in self._resident_ids:
+            self._resident_ids.pop(transfer_id)
+            if record is not None and record.spec is not None:
+                self._resident_bytes -= record.spec.nbytes
         self._loads_to_dispatch.pop(transfer_id, None)
         if record is None or not record.mm_hash:
             return

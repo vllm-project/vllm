@@ -22,9 +22,6 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     MemoryAllocation,
     ResidentLease,
 )
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class ConsumerReservationState(Enum):
@@ -88,6 +85,7 @@ class ConsumerReservation:
     allocation: MemoryAllocation | None = None
     lease: ResidentLease[MemoryAllocation] | None = None
     expires_at: float = 0
+    writer_id: str = ""
 
 
 class ConsumerReservationManager:
@@ -106,13 +104,13 @@ class ConsumerReservationManager:
     ) -> None:
         self._memory = memory
         self._lease_ttl = lease_ttl
-        # A writer that has not reported for a full extra lease is gone; no
-        # RDMA write outlives that, so reclaiming its destination is safe.
-        self._writer_grace = lease_ttl
         self._tombstone_limit = tombstone_limit
         self._records: dict[str, ConsumerReservation] = {}
         self._active_ids: dict[str, None] = {}
         self._tombstones: OrderedDict[str, None] = OrderedDict()
+        self._writers: dict[str, ConsumerReservation] = {}
+        self._followers: dict[str, dict[str, None]] = {}
+        self._ready: list[str] = []
         self._condition = threading.Condition(memory.lock)
         self._shutting_down = False
 
@@ -179,6 +177,24 @@ class ConsumerReservationManager:
                 )
                 self._insert(record)
                 return record, False
+            writer = self._writers.get(mm_hash)
+            if writer is not None and writer.state is ConsumerReservationState.WRITING:
+                if writer.shape != shape or writer.dtype != dtype_name:
+                    raise ValueError("conflicting in-flight tensor for mm_hash")
+                record = ConsumerReservation(
+                    transfer_id,
+                    mm_hash,
+                    uuid.uuid4().hex,
+                    ConsumerReservationState.WRITING,
+                    shape,
+                    dtype_name,
+                    writer.allocation,
+                    expires_at=now + self._lease_ttl,
+                    writer_id=writer.transfer_id,
+                )
+                self._insert(record)
+                self._followers.setdefault(writer.transfer_id, {})[transfer_id] = None
+                return record, False
             allocation = self._memory.try_allocate(nbytes, shape, dtype)
             if allocation is None:
                 self._expire_locked(time.monotonic())
@@ -199,6 +215,7 @@ class ConsumerReservationManager:
                 now + self._lease_ttl,
             )
             self._insert(record)
+            self._writers[mm_hash] = record
             return record, True
 
     def status(self, transfer_id: str) -> ConsumerReservation | None:
@@ -216,6 +233,10 @@ class ConsumerReservationManager:
                     return False, False
                 if record.state is ConsumerReservationState.READY:
                     return True, False
+                if record.writer_id:
+                    return False, False
+                if record.state in _WRITER_OWNED_STATES:
+                    self._publish_followers(record)
                 if record.state in _DEFERRED_STATES:
                     terminal = (
                         ConsumerReservationState.CANCELLED
@@ -232,6 +253,31 @@ class ConsumerReservationManager:
             finally:
                 self._condition.notify_all()
 
+    def _publish_followers(self, writer: ConsumerReservation) -> None:
+        if self._writers.get(writer.mm_hash) is writer:
+            self._writers.pop(writer.mm_hash)
+        followers = self._followers.pop(writer.transfer_id, {})
+        if not followers:
+            return
+        assert writer.allocation is not None
+        allocation = self._memory.publish(writer.mm_hash, writer.allocation, pin=False)
+        for record in [writer, *(self._records[key] for key in followers)]:
+            record.allocation = allocation
+            record.lease = self._memory.acquire_cached(
+                record.mm_hash, record.shape, allocation.tensor.dtype
+            )
+            assert record.lease is not None
+            if record is not writer:
+                record.writer_id = ""
+                self._transition(record, ConsumerReservationState.READY)
+                record.expires_at = time.monotonic() + self._lease_ttl
+                self._ready.append(record.transfer_id)
+
+    def drain_ready(self) -> list[str]:
+        with self._memory.lock:
+            ready, self._ready = self._ready, []
+            return ready
+
     def begin_shutdown(self) -> None:
         """Stop new reservations and cancel everything without a remote writer."""
         with self._condition:
@@ -240,7 +286,7 @@ class ConsumerReservationManager:
             self._shutting_down = True
             for transfer_id in list(self._active_ids):
                 record = self._records[transfer_id]
-                if record.state is ConsumerReservationState.READY:
+                if record.writer_id or record.state is ConsumerReservationState.READY:
                     self._terminate(record, ConsumerReservationState.CANCELLED)
                 elif record.state is ConsumerReservationState.WRITING:
                     self._defer(record, ConsumerReservationState.CANCEL_PENDING)
@@ -300,6 +346,9 @@ class ConsumerReservationManager:
                 self._condition.notify_all()
                 self._reap_tombstones(time.monotonic())
                 return True
+            if record.writer_id:
+                self._terminate(record, ConsumerReservationState.CANCELLED)
+                return True
             if record.state in _DEFERRED_STATES and not abandon:
                 return True
             if record.state is ConsumerReservationState.WRITING and not abandon:
@@ -335,12 +384,11 @@ class ConsumerReservationManager:
         with self._memory.lock:
             return self._expire_locked(time.monotonic())
 
-    def retire_stale(self, encoder_cache: dict[str, torch.Tensor]) -> None:
+    def retire_stale(
+        self, encoder_cache: dict[str, torch.Tensor], freed: list[str] | None = None
+    ) -> None:
         with self._memory.lock:
-            reserved_hashes = {
-                self._records[transfer_id].mm_hash for transfer_id in self._active_ids
-            }
-            self._memory.retire_stale(encoder_cache, reserved_hashes)
+            self._memory.retire_stale(encoder_cache, freed=freed)
 
     def _expire_locked(self, now: float) -> int:
         expired = 0
@@ -352,40 +400,19 @@ class ConsumerReservationManager:
                 self._terminate(record, ConsumerReservationState.EXPIRED)
                 expired += 1
             elif record.state is ConsumerReservationState.WRITING:
-                self._defer(record, ConsumerReservationState.EXPIRE_PENDING)
-            elif record.state in _DEFERRED_STATES:
-                # The writer that this release deferred to never reported
-                # back: it crashed, or its host is gone. Waiting forever
-                # pins the destination for the life of the process, so take
-                # the buffer back once no in-flight write could still land.
-                logger.warning(
-                    "Reclaiming EC destination for transfer_id=%s after %.0fs "
-                    "in %s: its writer never reported back",
-                    record.transfer_id,
-                    self._writer_grace,
-                    record.state.name,
-                )
-                self._terminate(
-                    record,
-                    ConsumerReservationState.CANCELLED
-                    if record.state is ConsumerReservationState.CANCEL_PENDING
-                    else ConsumerReservationState.EXPIRED,
-                )
-                expired += 1
+                if record.writer_id:
+                    self._terminate(record, ConsumerReservationState.CANCELLED)
+                else:
+                    self._defer(record, ConsumerReservationState.EXPIRE_PENDING)
         self._reap_tombstones(now)
         return expired
 
     def _defer(
         self, record: ConsumerReservation, state: ConsumerReservationState
     ) -> None:
-        """Hand a release to the remote writer, but not indefinitely.
-
-        Mooncake may still be writing into the destination, so the release
-        waits for the writer to report. `_expire_locked` reclaims the buffer
-        once the grace has passed without a report.
-        """
+        """Keep the destination until the writer completes or abandons it."""
         self._transition(record, state)
-        record.expires_at = time.monotonic() + self._writer_grace
+        record.expires_at = float("inf")
 
     def _terminate(
         self, record: ConsumerReservation, state: ConsumerReservationState
@@ -395,6 +422,17 @@ class ConsumerReservationManager:
         self._set_tombstone_deadline(record)
 
     def _release(self, record: ConsumerReservation) -> None:
+        if record.writer_id:
+            followers = self._followers.get(record.writer_id, {})
+            followers.pop(record.transfer_id, None)
+            record.allocation = None
+            return
+        if self._writers.get(record.mm_hash) is record:
+            self._writers.pop(record.mm_hash)
+        for transfer_id in list(self._followers.pop(record.transfer_id, {})):
+            self._terminate(
+                self._records[transfer_id], ConsumerReservationState.CANCELLED
+            )
         allocation = record.allocation
         if allocation is None:
             return

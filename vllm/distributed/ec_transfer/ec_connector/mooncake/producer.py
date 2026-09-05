@@ -22,9 +22,6 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakePushSpec,
 )
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 def _same_destination(
@@ -110,7 +107,7 @@ class ProducerPushManager:
     ordered indexes keep hot polling paths from scanning those tombstones.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, wake: Callable[[], None] = lambda: None) -> None:
         self._records: OrderedDict[str, ProducerPushRecord] = OrderedDict()
         self._active_ids: OrderedDict[str, None] = OrderedDict()
         self._reapable_terminal_ids: OrderedDict[str, None] = OrderedDict()
@@ -118,6 +115,7 @@ class ProducerPushManager:
         self._batch_ids: OrderedDict[str, None] = OrderedDict()
         self._source_waiters: dict[str, OrderedDict[str, None]] = {}
         self._lock = threading.RLock()
+        self._wake = wake
 
     def reserve(
         self,
@@ -128,18 +126,8 @@ class ProducerPushManager:
             existing = self._records.get(spec.transfer_id)
             if existing is not None:
                 if not _same_destination(existing.spec, spec):
-                    # Transfer ids come in on the request, so two requests can
-                    # name one id. Keep the push already in flight and drop
-                    # the newcomer: the consumer times its own wait out and
-                    # fails that request, which an engine-level raise would
-                    # not.
-                    logger.warning(
-                        "EC Mooncake producer transfer_id=%s already pushes "
-                        "mm_hash=%s to %s; dropping mm_hash=%s",
-                        spec.transfer_id,
-                        existing.spec.mm_hash[:16],
-                        existing.spec.consumer_zmq,
-                        spec.mm_hash[:16],
+                    raise ValueError(
+                        f"Conflicting EC destination for transfer_id={spec.transfer_id}"
                     )
                 return existing, False
             record = ProducerPushRecord(
@@ -174,12 +162,16 @@ class ProducerPushManager:
                     continue
                 record.source_tensor = tensor
                 record.source_event = ready_event
+        self._wake()
 
     def submit_batches(
         self,
         executor: ThreadPoolExecutor,
         run_batch: Callable[[list[ProducerPushRecord]], None],
-    ) -> None:
+        *,
+        wait: bool = False,
+    ) -> bool:
+        pending_event = False
         with self._lock:
             grouped: dict[str, list[ProducerPushRecord]] = {}
             for transfer_id in list(self._active_ids):
@@ -189,6 +181,14 @@ class ProducerPushManager:
                     and record.batch_future is None
                     and record.state is ProducerPushState.WAITING_INPUTS
                 ):
+                    if not record.reservation_future.done():
+                        continue
+                    if record.source_event is not None:
+                        if wait:
+                            record.source_event.synchronize()
+                        elif not record.source_event.query():
+                            pending_event = True
+                            continue
                     grouped.setdefault(record.spec.consumer_zmq, []).append(record)
             batches = list(grouped.values())
             for records in batches:
@@ -196,12 +196,24 @@ class ProducerPushManager:
                 for record in records:
                     record.batch_future = future
                     self._batch_ids[record.spec.transfer_id] = None
+        return pending_event
 
     def resolve_reservations(self, record: ProducerPushRecord) -> list[dict[str, Any]]:
         results = record.reservation_future.result()
         with self._lock:
             record.reservations = results
             return list(results)
+
+    def finish_reservations(
+        self,
+        outcomes: list[tuple[ProducerPushRecord, list[dict[str, Any]] | Exception]],
+    ) -> None:
+        with self._lock:
+            for record, result in outcomes:
+                if isinstance(result, Exception):
+                    record.reservation_future.set_exception(result)
+                else:
+                    record.reservation_future.set_result(result)
 
     def _reservation_done(
         self,
@@ -218,6 +230,8 @@ class ProducerPushManager:
                     and record.source_tensor is None
                 ):
                     self._transition(record, ProducerPushState.FAILED)
+        finally:
+            self._wake()
 
     def settle_all(self, records: list[ProducerPushRecord]) -> None:
         for record in records:

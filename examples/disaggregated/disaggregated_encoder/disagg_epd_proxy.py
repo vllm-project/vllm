@@ -31,6 +31,7 @@ import random
 import time
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import aiohttp
 import pybase64 as base64
@@ -228,7 +229,7 @@ async def fanout_encoder_primer(
     e_urls: list[str],
     req_id: str,
     consumer_zmq: str | None = None,
-) -> tuple[dict[int, dict], dict[str, dict]]:
+) -> tuple[dict[int, dict], dict[str, Any]]:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
@@ -256,7 +257,7 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
-    ec_params: dict[str, dict] = {}
+    ec_params: dict[str, Any] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
     # persists across requests so fan-out doesn't restart at e_urls[0] every
@@ -357,7 +358,7 @@ async def fanout_encoder_primer(
         except Exception:
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
             params = {}
-        if idx in item_uuids:
+        if params:
             # One encoder request carries exactly one item, so there is a
             # single reported entry. Do not key it by this proxy's uuid: when
             # media_io_kwargs or mm_processor_kwargs are set the engine
@@ -365,7 +366,7 @@ async def fanout_encoder_primer(
             # `mm_features[i].identifier` is a derived value this proxy cannot
             # predict. Fall back to the sole entry, and carry the key the
             # encoder actually used through as `ec_mm_hash`.
-            ec_mm_hash = item_uuids[idx]
+            ec_mm_hash = item_uuids.get(idx)
             reported = params.get(ec_mm_hash)
             if reported is None and len(params) == 1:
                 ((ec_mm_hash, reported),) = params.items()
@@ -374,7 +375,7 @@ async def fanout_encoder_primer(
                 if metadata:
                     item_meta[idx] = {
                         **metadata,
-                        "mm_hash": item_uuids[idx],
+                        "mm_hash": item_uuids.get(idx, ec_mm_hash),
                         "ec_mm_hash": ec_mm_hash,
                     }
                     if idx in item_transfer_ids:
@@ -383,7 +384,11 @@ async def fanout_encoder_primer(
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
                 # looks it up by mm_hash on the request, so carry it through.
-                ec_params[item_uuids[idx]] = reported
+                ec_params[item_uuids.get(idx, ec_mm_hash)] = reported
+                if NO_REWRITE and consumer_zmq is not None:
+                    ec_params.setdefault("ec_items", []).append(
+                        {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
+                    )
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
@@ -533,8 +538,11 @@ async def on_startup() -> None:
     server_keep_alive = float(os.getenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5"))
     connector = aiohttp.TCPConnector(
         limit=0,
-        force_close=False,
-        keepalive_timeout=max(1.0, server_keep_alive - 1.0),
+        **(
+            {"keepalive_timeout": server_keep_alive / 2}
+            if server_keep_alive > 0
+            else {"force_close": True}
+        ),
     )
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:

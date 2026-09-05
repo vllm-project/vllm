@@ -107,6 +107,7 @@ class ECMooncakeScheduler:
         # free notifications the Scheduler already sends. Tracking it here
         # keeps `ensure_cache_available` on the upstream two-argument shape.
         self._local_cache: set[str] = set()
+        self._failed_saves: set[str] = set()
 
     def _cancel_remote(self, consumer_zmq: str, transfer_id: str) -> bool:
         pending = None
@@ -175,7 +176,8 @@ class ECMooncakeScheduler:
         )
 
     def take_unavailable_requests(self) -> set[str]:
-        return self._transfers.take_unavailable_requests()
+        failed, self._failed_saves = self._failed_saves, set()
+        return failed | self._transfers.take_unavailable_requests()
 
     def _poll_pending_cancels(self) -> None:
         pending = {}
@@ -267,9 +269,11 @@ class ECMooncakeScheduler:
         self._expire_transfers()
         events = self._event_inbox.drain(self._control_addr)
         for data in events:
-            if not data.get("ready"):
-                continue
             try:
+                if not isinstance(data, dict):
+                    raise TypeError("EC readiness event must be an object")
+                if not data.get("ready"):
+                    continue
                 self._accept_ready_event(data)
             except (KeyError, TypeError, ValueError):
                 # Readiness events cross a plain PULL socket, so a malformed
@@ -467,7 +471,9 @@ class ECMooncakeScheduler:
             self._transfers.release_ready(mm_hash, time.monotonic())
         for transfer_id in self._transfers.drain_orphaned():
             self._queue_cancel(transfer_id)
-        meta = ECMooncakeConnectorMetadata()
+        meta = ECMooncakeConnectorMetadata(
+            freed=scheduler_output.free_encoder_mm_hashes
+        )
         for push_spec in self._pushes_to_prepare.values():
             meta.pushes.append(push_spec)
         self._pushes_to_prepare.clear()
@@ -489,6 +495,7 @@ class ECMooncakeScheduler:
         for mm_hash in meta.reclaimed:
             self._transfers.reclaim(mm_hash, time.monotonic())
         self._scheduler_pending_work = meta.pending_saves
+        self._failed_saves.update(meta.failed_saves)
 
     def has_pending_push_work(self) -> bool:
         return self._scheduler_pending_work
