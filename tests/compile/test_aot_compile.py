@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
+import json
 import os
 import pickle
+import subprocess
+import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
+import vllm.compilation.decorators as compilation_decorators
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
@@ -75,6 +80,637 @@ class CompiledModTuple(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return reference_fn_tuple(x)
+
+
+def _capture_forward_state(enabled: bool):
+    def decorate(forward):
+        @functools.wraps(forward)
+        def wrapped(*args, **kwargs):
+            # Make the captured flag affect both the fingerprint and behavior.
+            output = forward(*args, **kwargs)
+            return output + 1 if enabled else output
+
+        return wrapped
+
+    return decorate
+
+
+def _capture_unsupported_forward_state():
+    # Capture a mutable value that the fingerprint protocol deliberately rejects.
+    mutable_state: list[object] = []
+
+    def decorate(forward):
+        @functools.wraps(forward)
+        def wrapped(*args, **kwargs):
+            if mutable_state:
+                return forward(*args, **kwargs)
+            return forward(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+class ExternalDataDecoratedMod(torch.nn.Module):
+    @_capture_forward_state(True)
+    @_capture_forward_state(False)
+    def forward(self, x: torch.Tensor):
+        return x + 1
+
+
+_EXTERNAL_DATA_AOT_FORWARD_FLAG = (
+    os.environ.get("VLLM_TEST_AOT_FORWARD_FLAG", "0") == "1"
+)
+
+
+@support_torch_compile
+class ExternalDataAOTMod(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @_capture_forward_state(True)
+    @_capture_forward_state(_EXTERNAL_DATA_AOT_FORWARD_FLAG)
+    def forward(self, x: torch.Tensor):
+        return x + 1
+
+
+@support_torch_compile
+class UnsupportedExternalDataAOTMod(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @_capture_unsupported_forward_state()
+    def forward(self, x: torch.Tensor):
+        return x + 1
+
+
+def _install_canonical_forward_model(
+    monkeypatch: pytest.MonkeyPatch, model_name: str, forward
+) -> torch.nn.Module:
+    """Install a dynamic model so module/qualname lookup resolves its forward."""
+    forward.__module__ = __name__
+    forward.__qualname__ = f"{model_name}.forward"
+    model_type = type(
+        model_name,
+        (torch.nn.Module,),
+        {"__module__": __name__, "forward": forward},
+    )
+    monkeypatch.setattr(sys.modules[__name__], model_name, model_type, raising=False)
+    return model_type()
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_forward_external_data_describes_direct_and_inherited_forward(inherited: bool):
+    if inherited:
+
+        class Model(ExternalDataDecoratedMod):
+            pass
+
+        model = Model()
+    else:
+        model = ExternalDataDecoratedMod()
+
+    outer = model.forward.__func__
+    inner = outer.__wrapped__
+    original = inner.__wrapped__
+
+    external_data = compilation_decorators._get_forward_external_data(model)
+
+    assert external_data is not None
+    assert set(external_data.values()) == {inner, original}
+    expected_prefix = (
+        f"aot:model-forward:{outer.__module__}:{outer.__qualname__}:wrapped:"
+    )
+    assert all(key.startswith(expected_prefix) for key in external_data)
+
+
+@pytest.mark.parametrize("case", ["instance_override", "noncanonical_outer"])
+def test_forward_external_data_rejects_unstable_outer_function(case: str):
+    if case == "instance_override":
+        model = ExternalDataDecoratedMod()
+        object.__setattr__(model, "forward", lambda x: x)
+    else:
+
+        class NonCanonicalOuterMod(torch.nn.Module):
+            @_capture_forward_state(False)
+            def forward(self, x):
+                return x
+
+        model = NonCanonicalOuterMod()
+
+    assert compilation_decorators._get_forward_external_data(model) is None
+
+
+@pytest.mark.parametrize("case", ["non_function", "cycle", "excessive_chain"])
+def test_forward_external_data_rejects_malformed_wrapped_chain(
+    case: str, monkeypatch: pytest.MonkeyPatch
+):
+    def original(self, x):
+        return x
+
+    if case == "excessive_chain":
+        outer = original
+        for _ in range(33):
+            outer = _capture_forward_state(False)(outer)
+    else:
+        outer = _capture_forward_state(False)(original)
+        monkeypatch.setattr(
+            outer,
+            "__wrapped__",
+            object() if case == "non_function" else outer,
+        )
+
+    model = _install_canonical_forward_model(
+        monkeypatch, "_MalformedWrappedChainMod", outer
+    )
+
+    assert compilation_decorators._get_forward_external_data(model) is None
+
+
+@pytest.mark.parametrize("case", ["empty_closure_cell", "missing_inner_metadata"])
+def test_forward_external_data_rejects_invalid_inner_state(
+    case: str, monkeypatch: pytest.MonkeyPatch
+):
+    def original(self, x):
+        return x
+
+    if case == "empty_closure_cell":
+        flag = True
+
+        @functools.wraps(original)
+        def outer(*args, **kwargs):
+            if flag:
+                return original(*args, **kwargs)
+            return original(*args, **kwargs)
+
+        del flag
+    else:
+        outer = _capture_forward_state(False)(original)
+        outer.__wrapped__.__module__ = None
+
+    model = _install_canonical_forward_model(
+        monkeypatch, "_InvalidInnerStateMod", outer
+    )
+
+    assert compilation_decorators._get_forward_external_data(model) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, ("none",)),
+        (False, ("bool", "0")),
+        (True, ("bool", "1")),
+        (10**100, ("int", str(10**100))),
+        (-12345678901234567890, ("int", "-12345678901234567890")),
+        (0.0, ("float", "0x0.0p+0")),
+        (-0.0, ("float", "-0x0.0p+0")),
+        ("forward-state", ("str", "forward-state")),
+        (b"\x00\xff", ("bytes", "00ff")),
+        (
+            (None, True, 7, "nested"),
+            (
+                "tuple",
+                (
+                    ("none",),
+                    ("bool", "1"),
+                    ("int", "7"),
+                    ("str", "nested"),
+                ),
+            ),
+        ),
+    ],
+)
+def test_normalize_aot_external_state_uses_tagged_values(value, expected):
+    assert compilation_decorators._normalize_aot_external_state(value) == expected
+
+
+def test_normalize_aot_external_state_only_accepts_next_wrapped_function():
+    def next_wrapped():
+        pass
+
+    assert compilation_decorators._normalize_aot_external_state(
+        next_wrapped,
+        next_wrapped=next_wrapped,
+        next_depth=2,
+    ) == ("wrapped", "2")
+
+    with pytest.raises(compilation_decorators._UnsupportedAOTExternalState):
+        compilation_decorators._normalize_aot_external_state(lambda: None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        {},
+        set(),
+        frozenset(),
+        object(),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_normalize_aot_external_state_rejects_unsupported_values(value):
+    with pytest.raises(compilation_decorators._UnsupportedAOTExternalState):
+        compilation_decorators._normalize_aot_external_state(value)
+
+
+def test_normalize_aot_external_state_rejects_excessive_depth():
+    value: object = None
+    for _ in range(33):
+        value = (value,)
+
+    with pytest.raises(compilation_decorators._UnsupportedAOTExternalState):
+        compilation_decorators._normalize_aot_external_state(value)
+
+
+@pytest.mark.parametrize("flag_depth", [0, 1])
+def test_forward_external_data_key_covers_complete_decorator_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    flag_depth: int,
+):
+    def build_model(flag: bool):
+        flags = [False, False]
+        flags[flag_depth] = flag
+
+        @_capture_forward_state(flags[0])
+        @_capture_forward_state(flags[1])
+        @_capture_forward_state(False)
+        def forward(self, x):
+            return x
+
+        return _install_canonical_forward_model(
+            monkeypatch, "_CanonicalChainHolder", forward
+        )
+
+    false_model = build_model(False)
+    false_keys = compilation_decorators._get_forward_external_data(false_model)
+
+    true_model = build_model(True)
+    true_keys = compilation_decorators._get_forward_external_data(true_model)
+
+    assert false_keys is not None
+    assert true_keys is not None
+    assert false_keys.keys().isdisjoint(true_keys.keys())
+
+
+@_capture_forward_state(False)
+def _canonical_middle_forward(self, x):
+    return x
+
+
+def test_forward_external_data_skips_canonical_inner_function(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    next_forward = _canonical_middle_forward
+
+    def outer(self, x):
+        return next_forward(self, x)
+
+    outer.__wrapped__ = next_forward
+    model = _install_canonical_forward_model(
+        monkeypatch, "_CanonicalInnerHolder", outer
+    )
+
+    external_data = compilation_decorators._get_forward_external_data(model)
+
+    assert external_data is not None
+    assert next_forward not in external_data.values()
+    assert next_forward.__wrapped__ in external_data.values()
+
+
+def test_forward_external_data_does_not_hide_internal_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        compilation_decorators,
+        "_normalize_aot_external_state",
+        Mock(side_effect=RuntimeError("fingerprint bug")),
+    )
+
+    with pytest.raises(RuntimeError, match="fingerprint bug"):
+        compilation_decorators._get_forward_external_data(ExternalDataDecoratedMod())
+
+
+def test_forward_external_data_rejects_unsupported_closure_state():
+    # This helper inspects class metadata only; avoid the compile-aware __init__.
+    model = UnsupportedExternalDataAOTMod.__new__(UnsupportedExternalDataAOTMod)
+
+    assert compilation_decorators._get_forward_external_data(model) is None
+
+
+@pytest.mark.parametrize(
+    ("supports_external_data", "external_data"),
+    [(False, None), (True, None), (True, {})],
+)
+def test_save_aot_compiled_function_uses_compatible_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supports_external_data: bool,
+    external_data: dict | None,
+):
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "0")
+    monkeypatch.setattr(
+        compilation_decorators,
+        "_SUPPORTS_AOT_EXTERNAL_DATA",
+        supports_external_data,
+    )
+    disable_envs_cache()
+    model = ExternalDataDecoratedMod()
+    model.was_aot_compile_fn_loaded_from_disk = False
+    model._aot_cache_dir = str(tmp_path)
+    model._aot_compilation_path = str(tmp_path / "model")
+    saved_paths = []
+
+    class StandardCompiledFunction:
+        def save_compiled_function(self, path):
+            saved_paths.append(path)
+            Path(path).touch()
+
+    model.aot_compiled_fn = StandardCompiledFunction()
+    helper = Mock(return_value=external_data)
+    if not supports_external_data:
+        helper.side_effect = AssertionError("helper requires torch 2.11+")
+
+    with patch.object(
+        compilation_decorators,
+        "_get_forward_external_data",
+        helper,
+    ):
+        CompiledMod.save_aot_compiled_function(model)
+
+    assert helper.call_count == int(supports_external_data)
+    assert saved_paths == [f"{model._aot_compilation_path}.{os.getpid()}.tmp"]
+    assert Path(model._aot_compilation_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("supports_external_data", "external_data"),
+    [(False, None), (True, None), (True, {})],
+)
+def test_load_aot_compiled_function_uses_compatible_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supports_external_data: bool,
+    external_data: dict | None,
+):
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "0")
+    monkeypatch.setattr(
+        compilation_decorators,
+        "_SUPPORTS_AOT_EXTERNAL_DATA",
+        supports_external_data,
+    )
+    disable_envs_cache()
+    artifact = tmp_path / "model"
+    artifact.write_bytes(b"invalid")
+    model = ExternalDataDecoratedMod()
+    model.vllm_config = Mock()
+    model._is_encoder = False
+    calls = []
+
+    def standard_load(file, *, f_globals=None):
+        calls.append((file, f_globals))
+        raise RuntimeError("stop after argument capture")
+
+    helper = Mock(return_value=external_data)
+    if not supports_external_data:
+        helper.side_effect = AssertionError("helper requires torch 2.11+")
+
+    with (
+        patch.object(
+            compilation_decorators,
+            "monitor_torch_compile",
+            return_value=nullcontext(),
+        ),
+        patch.object(
+            compilation_decorators,
+            "_get_forward_external_data",
+            helper,
+        ),
+        patch.object(torch.compiler, "load_compiled_function", standard_load),
+    ):
+        loaded = compilation_decorators._try_load_aot_compiled_fn(model, str(artifact))
+
+    assert helper.call_count == int(supports_external_data)
+    assert loaded is None
+    assert len(calls) == 1
+    assert calls[0][1] is model.forward.__globals__
+
+
+@pytest.mark.parametrize("force_load", [False, True])
+def test_forward_external_data_failure_obeys_load_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_load: bool
+):
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "1" if force_load else "0")
+    disable_envs_cache()
+    artifact = tmp_path / "model"
+    artifact.write_bytes(b"unused")
+    model = ExternalDataDecoratedMod()
+    model.vllm_config = Mock()
+    model._is_encoder = False
+
+    with (
+        patch.object(
+            compilation_decorators,
+            "monitor_torch_compile",
+            return_value=nullcontext(),
+        ),
+        patch.object(
+            compilation_decorators,
+            "_get_forward_external_data",
+            side_effect=RuntimeError("unsafe decorator state"),
+        ),
+        patch.object(torch.compiler, "load_compiled_function") as load_mock,
+    ):
+        if force_load:
+            with pytest.raises(RuntimeError, match="unsafe decorator state"):
+                compilation_decorators._try_load_aot_compiled_fn(model, str(artifact))
+        else:
+            assert (
+                compilation_decorators._try_load_aot_compiled_fn(model, str(artifact))
+                is None
+            )
+
+    load_mock.assert_not_called()
+
+
+def _run_external_data_aot_process(result_path: str) -> None:
+    """Run one AOT phase in a fresh interpreter and persist its outcome."""
+    disable_envs_cache()
+    torch.manual_seed(0)
+    args = (torch.arange(100, device="cuda", dtype=torch.float32).reshape(10, 10),)
+    vllm_config = make_vllm_config()
+    model = None
+    try:
+        with use_vllm_config(vllm_config):
+            model_type = (
+                UnsupportedExternalDataAOTMod
+                if os.environ.get("VLLM_TEST_AOT_UNSUPPORTED_STATE") == "1"
+                else ExternalDataAOTMod
+            )
+            model = model_type(vllm_config=vllm_config)
+            output = model(*args)
+        result = {
+            "output": output.cpu().tolist(),
+            "loaded_from_disk": model.was_aot_compile_fn_loaded_from_disk,
+        }
+    except Exception as exc:
+        result = {
+            "error": f"{type(exc).__name__}: {exc}",
+            "loaded_from_disk": False,
+        }
+        raise
+    finally:
+        result.update(
+            {
+                "num_aot_compiles": compilation_counter.num_aot_compiles,
+                "num_aot_artifacts_saved": (
+                    compilation_counter.num_aot_artifacts_saved
+                ),
+                "num_aot_artifacts_loaded": (
+                    compilation_counter.num_aot_artifacts_loaded
+                ),
+                "artifact_exists": bool(
+                    model is not None
+                    and (artifact_path := getattr(model, "_aot_compilation_path", None))
+                    and Path(artifact_path).exists()
+                ),
+            }
+        )
+        Path(result_path).write_text(json.dumps(result))
+
+
+def _launch_external_data_aot_process(
+    cache_root: Path,
+    result_path: Path,
+    *,
+    force_load: bool,
+    forward_flag: bool = False,
+    unsupported_state: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    """Launch an isolated process so no in-memory compile state is reused."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "VLLM_CACHE_ROOT": str(cache_root),
+            "VLLM_USE_AOT_COMPILE": "1",
+            "VLLM_USE_MEGA_AOT_ARTIFACT": "1",
+            "VLLM_USE_STANDALONE_COMPILE": "1",
+            "VLLM_TEST_AOT_FORWARD_FLAG": "1" if forward_flag else "0",
+            "VLLM_TEST_AOT_UNSUPPORTED_STATE": ("1" if unsupported_state else "0"),
+        }
+    )
+    if force_load:
+        env["VLLM_FORCE_AOT_LOAD"] = "1"
+    else:
+        env.pop("VLLM_FORCE_AOT_LOAD", None)
+    code = (
+        "import sys; "
+        "from tests.compile.test_aot_compile import "
+        "_run_external_data_aot_process; "
+        "_run_external_data_aot_process(sys.argv[1])"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code, str(result_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=600,
+    )
+    result = json.loads(result_path.read_text()) if result_path.exists() else {}
+    return completed, result
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_unsupported_closure_state_is_nonfatal_during_real_save(tmp_path: Path):
+    process, result = _launch_external_data_aot_process(
+        tmp_path / "cache",
+        tmp_path / "unsupported.json",
+        force_load=False,
+        unsupported_state=True,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert result["output"] == torch.arange(100).reshape(10, 10).add(1).tolist()
+    assert result["num_aot_artifacts_saved"] == 0
+    assert result["artifact_exists"] is False
+    logs = f"{process.stdout}\n{process.stderr}".lower()
+    assert "unable to save aot compiled function" in logs
+
+
+@pytest.mark.skipif(
+    not is_torch_equal_or_newer("2.11.0"),
+    reason="requires AOT external_data support in torch 2.11+",
+)
+def test_external_data_aot_cache_loads_across_fresh_processes(tmp_path: Path):
+    cache_root = tmp_path / "cache"
+    cold_process, cold = _launch_external_data_aot_process(
+        cache_root, tmp_path / "cold.json", force_load=False
+    )
+    assert cold_process.returncode == 0, cold_process.stderr
+    assert cold["num_aot_compiles"] == 1
+    assert cold["num_aot_artifacts_saved"] == 1
+    assert cold["num_aot_artifacts_loaded"] == 0
+    assert cold["loaded_from_disk"] is False
+
+    warm_process, warm = _launch_external_data_aot_process(
+        cache_root, tmp_path / "warm.json", force_load=True
+    )
+    assert warm_process.returncode == 0, warm_process.stderr
+    assert warm["num_aot_compiles"] == 0
+    assert warm["num_aot_artifacts_saved"] == 0
+    assert warm["num_aot_artifacts_loaded"] == 1
+    assert warm["loaded_from_disk"] is True
+    assert warm["output"] == cold["output"]
+
+
+@pytest.mark.skipif(
+    not is_torch_equal_or_newer("2.11.0"),
+    reason="requires AOT external_data support in torch 2.11+",
+)
+def test_external_data_fingerprint_mismatch_obeys_load_mode(tmp_path: Path):
+    cache_root = tmp_path / "cache"
+
+    # Save an artifact whose wrapper flag uses the old behavior.
+    cold_process, cold = _launch_external_data_aot_process(
+        cache_root,
+        tmp_path / "cold.json",
+        force_load=False,
+        forward_flag=False,
+    )
+    assert cold_process.returncode == 0, cold_process.stderr
+    assert cold["num_aot_artifacts_saved"] == 1
+
+    # Forced loading must reject the old fingerprint before compiling.
+    forced_process, forced = _launch_external_data_aot_process(
+        cache_root,
+        tmp_path / "forced.json",
+        force_load=True,
+        forward_flag=True,
+    )
+    assert forced_process.returncode != 0
+    assert "external reference" in forced["error"].lower()
+    assert forced["num_aot_compiles"] == 0
+    assert forced["num_aot_artifacts_loaded"] == 0
+
+    # Normal mode falls back to compilation and must run the new behavior.
+    warm_process, warm = _launch_external_data_aot_process(
+        cache_root,
+        tmp_path / "warm.json",
+        force_load=False,
+        forward_flag=True,
+    )
+    assert warm_process.returncode == 0, warm_process.stderr
+    assert warm["num_aot_compiles"] == 1
+    assert warm["num_aot_artifacts_loaded"] == 0
+    assert warm["loaded_from_disk"] is False
+    assert warm["output"] != cold["output"]
+    assert torch.equal(torch.tensor(warm["output"]), torch.tensor(cold["output"]) + 1)
+    logs = f"{warm_process.stdout}\n{warm_process.stderr}".lower()
+    assert "compiling model again due to a load failure" in logs
 
 
 def make_vllm_config() -> VllmConfig:
