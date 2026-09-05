@@ -500,6 +500,7 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
+        request.weight_version = self._weight_version
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
