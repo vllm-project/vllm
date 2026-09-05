@@ -2050,6 +2050,16 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # so, for messages that have tool_calls, parse the string (which we get
     # from openAI format) to dict
     for message in messages:
+        if (
+            message.get("role") == "assistant"
+            and message.get("content") is None
+            and "tool_calls" in message
+        ):
+            # Agent clients send assistant messages with content=null and
+            # tool_calls. Templates that render {{ content }} emit a literal
+            # "None" into the context, which degrades multi-turn generation.
+            message["content"] = ""
+
         if message["role"] == "assistant" and "tool_calls" in message:
             tool_calls = message.get("tool_calls")
             if not isinstance(tool_calls, list):
