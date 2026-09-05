@@ -574,6 +574,56 @@ def test_explicit_b12x_nvfp4_selection(
 
 
 @pytest.mark.parametrize(
+    "b12x_supported,expected_backend",
+    [
+        (True, NvFp4MoeBackend.B12X),
+        (False, NvFp4MoeBackend.MARLIN),
+    ],
+)
+def test_auto_b12x_nvfp4_selection_precedes_marlin(
+    monkeypatch: pytest.MonkeyPatch,
+    b12x_supported: bool,
+    expected_backend: NvFp4MoeBackend,
+) -> None:
+    selected_backends: list[NvFp4MoeBackend] = []
+
+    class CandidateExperts:
+        @staticmethod
+        def is_supported_config(
+            cls, config, weight_key, activation_key, activation_format
+        ):
+            backend = selected_backends[-1]
+            if backend == NvFp4MoeBackend.B12X:
+                return b12x_supported, None if b12x_supported else "unavailable"
+            if backend == NvFp4MoeBackend.MARLIN:
+                return True, None
+            return False, "unsupported in selector-order test"
+
+    def backend_to_kernel_cls(backend: NvFp4MoeBackend):
+        selected_backends.append(backend)
+        return [CandidateExperts]
+
+    monkeypatch.setattr(nvfp4_oracle, "backend_to_kernel_cls", backend_to_kernel_cls)
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+
+    backend, experts_cls = select_nvfp4_moe_backend(
+        config,
+        weight_key=kNvfp4Static,
+        activation_key=None,
+    )
+
+    assert backend == expected_backend
+    assert experts_cls is CandidateExperts
+    assert NvFp4MoeBackend.B12X in selected_backends
+    if b12x_supported:
+        assert NvFp4MoeBackend.MARLIN not in selected_backends
+    else:
+        assert selected_backends.index(NvFp4MoeBackend.B12X) < selected_backends.index(
+            NvFp4MoeBackend.MARLIN
+        )
+
+
+@pytest.mark.parametrize(
     "force_a16,expected_quant_dtype", [(False, "nvfp4"), (True, None)]
 )
 def test_b12x_nvfp4_force_a16_updates_quant_config(

@@ -199,6 +199,11 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
+        # B12X is optional. Its support predicate checks that the package,
+        # device, quantization scheme, shape, and parallel configuration are
+        # all compatible, so an unavailable installation falls through
+        # without changing the existing Marlin fallback.
+        NvFp4MoeBackend.B12X,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
