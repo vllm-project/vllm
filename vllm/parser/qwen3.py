@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -257,6 +258,34 @@ class Qwen3Parser(ParserEngine):
         if not self.thinking_enabled:
             return None, model_output
         return super().extract_reasoning(model_output, request)
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Start in ``CONTENT`` when the chat template already closed the think block.
+
+        ``__init__`` reads only ``chat_template_kwargs["enable_thinking"]``, so a
+        template that renders ``<think>\\n\\n</think>\\n\\n`` for any other reason
+        leaves the engine in ``REASONING`` while the model, having nothing left to
+        close, emits its answer as plain text. Every token then becomes a reasoning
+        chunk and the caller gets ``reasoning=<the answer>``, ``content=None``
+        (issue #53284). Community Qwen3.x templates reach this state through
+        ``reasoning_effort: "none"``, an inline ``<|think_off|>`` tag and
+        ``auto_disable_thinking_with_tools``.
+
+        ``is_reasoning_end`` already encodes the test: it scans back to the last
+        think marker, so a thinking-on prompt, whose tail is an open ``<think>``,
+        stays ``False`` even when earlier turns are preserved in the history.
+
+        This is the mirror of :meth:`Gemma4Parser.adjust_initial_state_from_prompt`,
+        which pre-initialises to ``REASONING`` for a prompt ending *inside* an open
+        block (issue #45834).
+        """
+        if not self.is_reasoning_end(list(prompt_token_ids)):
+            return
+        self._engine.reset(initial_state=ParserState.CONTENT)
+        self._reasoning_ended = True
+        # Prevent a later default ``initialize_streaming()`` from clobbering this
+        # with the configured initial state.
+        self._streaming_initialized = True
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         if super().is_reasoning_end(input_ids):

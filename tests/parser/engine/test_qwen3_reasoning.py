@@ -701,3 +701,83 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+
+class TestPromptClosedThinkBlock:
+    """The chat template can close the think block without enable_thinking=false.
+
+    Community Qwen3.x templates do it for ``reasoning_effort: "none"``, an inline
+    ``<|think_off|>`` tag and ``auto_disable_thinking_with_tools``. The parser only
+    ever saw ``enable_thinking``, so it stayed in REASONING and returned the whole
+    answer as reasoning (issue #53284).
+    """
+
+    def test_closed_think_block_in_prompt_streams_as_content(
+        self, parser, mock_request
+    ):
+        delta = parser.parse_delta(
+            "The answer is 4.",
+            [_TEXT_ID],
+            mock_request,
+            prompt_token_ids=[_TEXT_ID, _THINK_START_ID, _THINK_END_ID],
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.content == "The answer is 4."
+        assert delta.reasoning is None
+
+    def test_open_think_block_in_prompt_still_streams_as_reasoning(
+        self, parser, mock_request
+    ):
+        """Control: the ordinary thinking-on prompt tail is an open <think>."""
+        delta = parser.parse_delta(
+            "Let me work it out.",
+            [_TEXT_ID],
+            mock_request,
+            prompt_token_ids=[_TEXT_ID, _THINK_START_ID],
+            finished=False,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "Let me work it out."
+        assert delta.content is None
+
+    def test_closed_block_in_history_does_not_end_the_new_turn(
+        self, parser, mock_request
+    ):
+        """Control: a previous turn's </think> must not disable the current one.
+
+        is_reasoning_end scans back only to the last think marker, so the new
+        turn's open <think> still wins.
+        """
+        delta = parser.parse_delta(
+            "Thinking again.",
+            [_TEXT_ID],
+            mock_request,
+            prompt_token_ids=[
+                _THINK_START_ID,
+                _TEXT_ID,
+                _THINK_END_ID,
+                _TEXT_ID,
+                _THINK_START_ID,
+            ],
+            finished=False,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "Thinking again."
+        assert delta.content is None
+
+    def test_no_prompt_keeps_the_configured_initial_state(self, parser, mock_request):
+        """Control: with no prompt token ids the hook never runs."""
+        delta = parser.parse_delta(
+            "Let me work it out.",
+            [_TEXT_ID],
+            mock_request,
+            finished=False,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "Let me work it out."
+        assert delta.content is None
