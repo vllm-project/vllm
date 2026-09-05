@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4_a16_dispatch import (
+    can_dispatch_a16_per_forward,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
@@ -335,6 +338,13 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
 ]:
     use_a16 = _use_a16(nvfp4_backend, use_a16)
+
+    if envs.VLLM_NVFP4_MOE_A16_MAX_M > 0:
+        # Fail at load naming the preparation step responsible, rather than
+        # ignoring the flag or serving one scheme for both.
+        ok, reason = can_dispatch_a16_per_forward(nvfp4_backend.name)
+        if not ok:
+            raise NotImplementedError(f"VLLM_NVFP4_MOE_A16_MAX_M is set but {reason}")
     if nvfp4_backend == NvFp4MoeBackend.B12X:
         if a13_scale is None or a2_scale is None:
             if not use_a16:

@@ -190,6 +190,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_NVFP4_MOE_A16_MAX_M: int = 0
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1637,6 +1638,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
     ),
+    # Token-count threshold below which NVFP4 MoE would run the weight-only
+    # (W4A16) expert path and above which it would run W4A4. 0 disables it.
+    # No backend can honour this yet: see
+    # fused_moe/oracle/nvfp4_a16_dispatch.py for why.
+    "VLLM_NVFP4_MOE_A16_MAX_M": lambda: int(os.getenv("VLLM_NVFP4_MOE_A16_MAX_M", "0")),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
