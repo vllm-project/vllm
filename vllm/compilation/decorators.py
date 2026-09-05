@@ -536,11 +536,12 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            from .caching import aot_compile_hash_factors
+            from .caching import aot_compile_hash_factors, lora_wrap_hash_factor
 
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
             factors.append(_model_hash_key(self.forward))
+            factors.append(lora_wrap_hash_factor(self))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
