@@ -308,6 +308,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
 
+    def on_load_failure(self, request_ids: set[str]) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.on_load_failure(request_ids)
+
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self._kv_cache_events is not None:
             events = self._kv_cache_events.pop_common_events()
