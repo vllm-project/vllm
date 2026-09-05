@@ -271,6 +271,30 @@ def qwen3_woofing_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen3_guard_star_trek_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-StarTrek-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def qwen3_guard_new_zealand_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="geoffmunn/Qwen3Guard-NewZealand-Classification-0.6B",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
+def skywork_qwen3_reward_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="AmirMohseni/skywork-qwen3-0.6b-reward-lora",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return hf_api().snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 

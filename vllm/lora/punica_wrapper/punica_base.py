@@ -120,6 +120,18 @@ class PunicaWrapperABC(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Apply request-routed full linear weights to selected rows."""
+        raise NotImplementedError
+
 
 class PunicaWrapperBase(PunicaWrapperABC):
     """
@@ -216,6 +228,19 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.max_length = max_length
         self.token_nums = token_nums
         self.no_lora = no_lora
+
+    def _select_full_linear_output(
+        self,
+        y: torch.Tensor,
+        adapter_y: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        indices = self.sampler_indices
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & module_enabled[safe_indices]
+        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
+        return torch.where(use_full.unsqueeze(-1), adapter_y, y)
 
     @property
     def prefill_metadata(

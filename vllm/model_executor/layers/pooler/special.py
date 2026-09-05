@@ -75,6 +75,20 @@ class DispatchPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.poolers_by_task[task].get_pooling_updates(task)
 
+    def replace_classifier(
+        self,
+        new_classifier: ClassifierFn,
+    ) -> None:
+        """Replaces the classifier to the LoRA-wrapped version."""
+        for task, pooler in self.poolers_by_task.items():
+            if task not in {"classify"}:
+                # Now LoRA only supports classification tasks,
+                # so we only replace the classifier for "classify" task.
+                continue
+            head = getattr(pooler, "head", None)
+            if head is not None and hasattr(head, "classifier"):
+                head.classifier = new_classifier
+
     def forward(
         self,
         hidden_states: torch.Tensor,

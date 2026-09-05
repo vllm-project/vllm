@@ -349,3 +349,23 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
         bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
         y = y.view_as(y_org)
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        indices = self.sampler_indices
+        adapter_y = torch.zeros(
+            (x.size(0), weight_stacked.size(-2)),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        bgmv_shrink(x, weight_stacked, adapter_y, indices, 1.0)
+        result = self._select_full_linear_output(
+            y, adapter_y, bias_stacked, module_enabled
+        )
+        y.copy_(result)

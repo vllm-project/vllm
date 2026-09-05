@@ -13,16 +13,22 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
-from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import (
+    LoRAFullModuleWeights,
+    LoRALayerWeights,
+    PackedLoRALayerWeights,
+)
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (
     from_layer,
+    from_layer_classification,
     from_layer_logits_processor,
     get_supported_lora_modules,
     is_in_target_modules,
@@ -121,6 +127,13 @@ class LoRAModelManager:
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
+        self.supported_modules_to_save = (
+            {"score", "classifier"}
+            if self.is_pooling_model
+            and vllm_config.model_config.score_type == "cross-encoder"
+            else set()
+        )
+
         # When the engine is started with enable_mixed_moe_lora_format=True
         # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
         # the model's 3D flag, so 2D and 3D adapters can coexist.
@@ -146,6 +159,20 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
+
+        self._classification_head: tuple[str, ClassificationHeadWithLoRA] | None = None
+        if self.is_pooling_model:
+            classification_heads = [
+                (module_name, module)
+                for module_name, module in self.modules.items()
+                if isinstance(module, ClassificationHeadWithLoRA)
+            ]
+            if classification_heads:
+                assert len(classification_heads) == 1, (
+                    "Expected 1 classification head, but found "
+                    f"{len(classification_heads)}."
+                )
+                self._classification_head = classification_heads[0]
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
@@ -337,6 +364,15 @@ class LoRAModelManager:
         )
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+            if isinstance(module, ClassificationHeadWithLoRA):
+                full_module = self._get_module_to_save_weights(lora_model, module_name)
+                if full_module is None:
+                    module.reset_module_to_save(index)
+                else:
+                    module.set_module_to_save(
+                        index, full_module.weight, full_module.bias
+                    )
+
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
@@ -418,15 +454,26 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
+            is_classifier_head = module_name in self.supported_modules_to_save
+
+            # Full classification heads come from PEFT modules_to_save and must be
+            # wrapped independently of target_modules, which only filters A/B LoRA.
             target_modules = self.lora_config.target_modules
-            is_configured_target = target_modules is not None and is_in_target_modules(
-                module_name,
-                target_modules,
-                self.packed_modules_mapping,
-            )
             if (
-                not self._match_target_modules(module_name, module)
-                and not is_configured_target
+                not is_in_target_modules(
+                    module_name,
+                    target_modules,
+                    self.packed_modules_mapping,
+                )
+                and not is_classifier_head
+            ):
+                continue
+
+            # Let explicit targets reach wrapping so unsupported modules fail closed.
+            if target_modules is None and not is_supported_lora_module(
+                module_name,
+                module,
+                self.supported_lora_modules,
             ):
                 continue
 
@@ -479,17 +526,25 @@ class LoRAModelManager:
                 # LoRA weights of w1 and w3 have already been fused on disk.
 
                 packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
-            new_module = replace_submodule(
-                self.model,
-                module_name,
-                from_layer(
+            if is_classifier_head:
+                new_module = from_layer_classification(
+                    module,
+                    self.lora_slots,
+                    self.lora_config,
+                    self.model.config,
+                )
+            else:
+                new_module = from_layer(
                     module,
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
                     self.model.config,
-                ),
-            )
+                )
+            new_module = replace_submodule(self.model, module_name, new_module)
+
+            if is_classifier_head:
+                self.model.pooler.replace_classifier(new_module)
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
                 wrapped_by_id[id(new_module)] = new_module
@@ -745,6 +800,12 @@ class LoRAModelManager:
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
+        if module_name in self.supported_modules_to_save:
+            lm_wrapper = self.punica_wrapper_mapping.get(
+                self.mm_mapping.language_model[0]
+            )
+            return lm_wrapper
+
         # For multimodal model
         # NOTE Sort by prefix length (descending) to match the longest prefix first
         # e.g., 'visual.merger' should match 'visual.merger' instead of 'visual.'
@@ -869,6 +930,10 @@ class LoRAModelManager:
                 else:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
+
+            if lora_model.modules_to_save:
+                for full_module in lora_model.modules_to_save.values():
+                    full_module.pin_memory()
 
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
@@ -1162,6 +1227,60 @@ class LoRAModelManager:
                     "after removing the prefix 'model.'."
                 )
         return lora_model.get_lora(org_module_name)
+
+    def _get_module_to_save_weights(
+        self, lora_model: LoRAModel, module_name: str
+    ) -> LoRAFullModuleWeights | None:
+        weights = lora_model.get_module_to_save(module_name)
+        if weights is not None:
+            return weights
+
+        unprefixed_module_name = module_name.removeprefix("model.")
+        weights = lora_model.get_module_to_save(unprefixed_module_name)
+        if weights is not None and unprefixed_module_name != module_name:
+            logger.info_once(
+                "For the pool model, successfully loaded the full module weights "
+                "after removing the prefix 'model.'."
+            )
+        return weights
+
+    def _validate_modules_to_save(self, lora_model: LoRAModel) -> None:
+        if not lora_model.modules_to_save:
+            return
+        saved_module_name = next(iter(lora_model.modules_to_save))
+        if self._classification_head is None:
+            raise ValueError(
+                f"Cannot load full module {saved_module_name!r}: the model does "
+                "not expose a unique ClassificationHeadWithLoRA."
+            )
+
+        module_name, wrapper = self._classification_head
+        full_module = self._get_module_to_save_weights(lora_model, module_name)
+        if full_module is None:
+            raise ValueError(
+                f"Full module {saved_module_name!r} does not match the model's "
+                f"classification head {module_name!r}."
+            )
+
+        expected_weight_shape = (wrapper.output_size, wrapper.input_size)
+        received_weight_shape = tuple(full_module.weight.shape)
+        if received_weight_shape != expected_weight_shape:
+            raise ValueError(
+                f"Full module {saved_module_name!r} for {module_name!r} has "
+                "an incompatible weight shape: expected "
+                f"{expected_weight_shape}, received {received_weight_shape}."
+            )
+
+        if full_module.bias is None:
+            return
+        expected_bias_shape = (wrapper.output_size,)
+        received_bias_shape = tuple(full_module.bias.shape)
+        if received_bias_shape != expected_bias_shape:
+            raise ValueError(
+                f"Full module {saved_module_name!r} for {module_name!r} has "
+                "an incompatible bias shape: expected "
+                f"{expected_bias_shape}, received {received_bias_shape}."
+            )
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:

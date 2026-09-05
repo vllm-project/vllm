@@ -26,7 +26,7 @@ BADREQUEST_CASES = [
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
-        "only supports modules_to_save being None",
+        "Unsupported modules_to_save",
     ),
 ]
 

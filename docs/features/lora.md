@@ -422,6 +422,52 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
 
+## Sequence-Classification LoRA Adapters
+
+vLLM supports PEFT sequence-classification adapters that save a complete, single-layer linear classification head through `modules_to_save`. The saved module must be named `score` or `classifier`.
+
+For a causal language model converted to sequence classification, configure the number of labels when the engine starts. Every adapter loaded into that engine must use the same head shape and therefore the same `num_labels`:
+
+```python
+from huggingface_hub import snapshot_download
+
+from vllm import LLM
+from vllm.lora.request import LoRARequest
+
+star_trek_path = snapshot_download(
+    repo_id="geoffmunn/Qwen3Guard-StarTrek-Classification-0.6B"
+)
+new_zealand_path = snapshot_download(
+    repo_id="geoffmunn/Qwen3Guard-NewZealand-Classification-0.6B"
+)
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    runner="pooling",
+    convert="classify",
+    hf_overrides={"num_labels": 2},
+    enable_lora=True,
+    max_loras=2,
+    max_lora_rank=16,
+)
+
+star_trek_request = LoRARequest("star-trek", 1, star_trek_path)
+new_zealand_request = LoRARequest("new-zealand", 2, new_zealand_path)
+outputs = llm.classify(
+    [
+        "Does warp drive appear in Star Trek?",
+        "Wellington is the capital of New Zealand.",
+    ],
+    lora_request=[star_trek_request, new_zealand_request],
+)
+```
+
+This support has the following limitations:
+
+- All adapters in one engine must have the same `num_labels` and hidden size as the base classification head. An incompatible adapter is rejected when it is loaded.
+- A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
+- Token-classification adapters are not supported by this feature.
+
 ## Using Tips
 
 ### Configuring `max_lora_rank`
