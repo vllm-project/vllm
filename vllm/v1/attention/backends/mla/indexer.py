@@ -256,6 +256,16 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def get_builder_cls() -> type["DeepseekV32IndexerMetadataBuilder"]:
         return DeepseekV32IndexerMetadataBuilder
 
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The sparse top-k walk reads per-layer [B, N, C] rows, which
+        # block-outermost layouts do not provide.
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.LHBNC,
+        )
+
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):
     """Storage-only backend for the GLM-5.3-Flash kpool tail cache."""
