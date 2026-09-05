@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
+    VLLM_ENABLE_QWEN_GDN_FUSED_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1233,6 +1234,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "cuda",
         ["cuda", "triton"],
         case_sensitive=False,
+    ),
+    # Fallback control for the Qwen GDN fused decode step: set to 0 to keep
+    # the GDN decode chain vLLM would otherwise run, even where FlashInfer
+    # reports the shape supported. This is NOT a backend choice (there is no
+    # new backend -- the fused step activates inside vLLM's own fused-norm
+    # packed GDN decode route when the support probe says yes); it exists so
+    # a bad fusion can be turned off in the field, and so both arms of an A/B
+    # can run one build. VLLM_GDN_DECODE_KERNEL=triton also holds it off: the
+    # fused step is a CUDA decode kernel.
+    "VLLM_ENABLE_QWEN_GDN_FUSED_DECODE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_QWEN_GDN_FUSED_DECODE", "1"))
     ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (

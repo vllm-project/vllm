@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import inspect
 import os
 from typing import Literal
 
@@ -175,6 +176,93 @@ def _log_gdn_backend_decision(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
         )
+
+
+def _resolve_gdn_fused_decode_step(vllm_config: VllmConfig):
+    """Resolve FlashInfer's fused GDN decode step for the non-spec decode path.
+
+    This is not a new backend and adds no backend name: on CUDA, the GDN
+    decode path already runs FlashInfer kernels, and this resolves the fused
+    single-step op that replaces several of them. Support is the only gate --
+    ``flashinfer.gdn_fused_decode_step_supported(...)`` answers it per step,
+    and a shape FlashInfer does not support keeps the existing decode chain
+    at full speed.
+
+    The step is homed inside vLLM's own fused-norm packed GDN decode route
+    (``qwen_gdn_attention_core_fused_norm_packed``): it replaces the conv1d
+    + gated delta-rule chain that route runs for plain decode, which is the
+    regime vLLM's own fused GDN decode kernel does not serve (that one needs
+    speculative tokens). Everything else -- prefill, spec/MTP decode, the
+    gated RMSNorm, the output projection -- stays with vLLM.
+
+    Resolves when the platform is CUDA and the installed FlashInfer exposes
+    both ``gdn_fused_decode_step`` and a routing probe accepting
+    ``conv_state_layout``. An older FlashInfer -- one without the op at all,
+    or with a probe revision predating conv-state-layout awareness -- keeps
+    the stock path bit-for-bit unchanged.
+
+    FlashInfer exports the op at the top level, so the capability check is a
+    ``getattr`` on the package rather than an import of a submodule. That is
+    still fail-closed, but for a different reason and it is worth stating:
+    ``import flashinfer`` succeeds on every FlashInfer, new or old, so the
+    absence of the op shows up as a **missing attribute**, and
+    ``getattr(..., None)`` plus the ``step is None or supported is None``
+    check below is what turns that into "keep the stock chain". Read the
+    attributes inside the ``try`` as well: a FlashInfer whose package init
+    raises on an incomplete install must land in the same branch, not
+    propagate out of layer construction.
+
+    ``VLLM_ENABLE_QWEN_GDN_FUSED_DECODE=0`` keeps the stock chain even where
+    FlashInfer reports the shape supported. It is a fallback control, not a
+    backend choice: it exists so a bad fusion can be turned off in the field
+    without redeploying a different build, and so both arms of an A/B can
+    run one build and differ only in this routing decision. With it unset
+    (the default) the route is on wherever it is supported.
+
+    Args:
+        vllm_config: The engine configuration (unused beyond keeping the
+            resolver's signature stable for callers and tests).
+
+    Returns:
+        ``(step, supported)`` callables, or ``None`` when the route is
+        unavailable -- in which case the layer wires vLLM's own core ops and
+        is byte-for-byte the unpatched path.
+    """
+    del vllm_config  # capability + fallback control only; no config surface
+    if not envs.VLLM_ENABLE_QWEN_GDN_FUSED_DECODE:
+        # Distinct from the "unavailable" message below: this one proves the
+        # integration IS present and was deliberately held off, which is what
+        # makes a stock-arm measurement attributable.
+        logger.info_once(
+            "FlashInfer fused GDN decode step held off by "
+            "VLLM_ENABLE_QWEN_GDN_FUSED_DECODE=0; using the stock GDN decode "
+            "chain."
+        )
+        return None
+    if not current_platform.is_cuda():
+        return None
+    try:
+        import flashinfer
+
+        step = getattr(flashinfer, "gdn_fused_decode_step", None)
+        supported = getattr(flashinfer, "gdn_fused_decode_step_supported", None)
+    except ImportError:
+        return None
+    if step is None or supported is None:
+        return None
+    # Probe revisions that predate conv-state-layout awareness assume a
+    # dim-first conv pool and would never dispatch (or worse, mis-gate)
+    # against vLLM's default state-first allocation: require the parameter.
+    try:
+        probe_params = inspect.signature(supported).parameters
+    except (TypeError, ValueError):
+        return None
+    if "conv_state_layout" not in probe_params and not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in probe_params.values()
+    ):
+        return None
+    logger.info_once("Using FlashInfer fused GDN decode step when supported.")
+    return step, supported
 
 
 def fi_chunk_gated_delta_rule(
@@ -517,6 +605,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
+
+        # FlashInfer fused decode step (b/a projection + conv1d update + head
+        # split + gated delta rule in one op) for the packed non-spec decode
+        # path. Requires the non-interleaved (Qwen3.5-style) b/a layout.
+        self._fi_fused_decode_step = None
+        self._fi_fused_decode_supported = None
+        self._fi_w_ba: torch.Tensor | None = None
+        self._fi_conv_weight: torch.Tensor | None = None
+        self._fi_conv_bias: torch.Tensor | None = None
+        self._fi_setup_failed = False
+        if not self.gqa_interleaved_layout:
+            fused = _resolve_gdn_fused_decode_step(vllm_config)
+            if fused is not None:
+                self._fi_fused_decode_step, self._fi_fused_decode_supported = fused
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -901,25 +1003,46 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 1: Input Projection
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
+        # The FlashInfer fused decode step replaces the conv1d + gated
+        # delta-rule chain that the fused-norm packed core op runs for
+        # non-spec decode, and it folds the b/a projection GEMV in, so `ba`
+        # is projected inside the core op only on the steps that do not
+        # fuse. It is wired only where the packed core op is wired: the
+        # fused step is a CUDA decode kernel, so VLLM_GDN_DECODE_KERNEL
+        # ("triton") governs it too, and the legacy route below is
+        # untouched.
+        use_fi_fused_decode = (
+            use_fused_gdn_decode and self._fi_fused_decode_step is not None
+        )
+        if not use_fi_fused_decode:
+            ba, _ = self.in_proj_ba(hidden_states)
+
         if use_fused_gdn_decode:
             core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-            torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
-                mixed_qkvz,
-                ba,
-                core_attn_out,
-                layer_name=_encode_layer_name(self.prefix),
-            )
+            if use_fi_fused_decode:
+                torch.ops.vllm.qwen_gdn_attention_core_fi(
+                    mixed_qkvz,
+                    hidden_states,
+                    core_attn_out,
+                    layer_name=_encode_layer_name(self.prefix),
+                )
+            else:
+                torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+                    mixed_qkvz,
+                    ba,
+                    core_attn_out,
+                    layer_name=_encode_layer_name(self.prefix),
+                )
             output, _ = self.out_proj(core_attn_out.flatten(-2))
             return output
 
@@ -1908,6 +2031,187 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens],
         )
 
+    def _fi_fused_decode_setup(self) -> bool:
+        """One-time parameter staging for the FlashInfer fused decode route.
+
+        Validates the static parameter dtypes and stages the transposed b/a
+        projection weight (and a zero conv bias when the layer has none) in
+        the layout the fused op consumes. Never runs under CUDA graph
+        capture (the caller guarantees that).
+
+        Returns:
+            Whether the route is usable for this layer.
+        """
+        if self._fi_setup_failed:
+            return False
+        if self._fi_w_ba is not None:
+            return True
+        w_ba = getattr(self.in_proj_ba, "weight", None)
+        conv_w = self.conv1d.weight
+        conv_bias = self.conv1d.bias
+        supported = (
+            isinstance(w_ba, torch.Tensor)
+            and w_ba.dim() == 2
+            and w_ba.dtype == torch.bfloat16
+            and w_ba.shape[1] == self.hidden_size
+            and self.A_log.dtype == torch.float32
+            and self.dt_bias.dtype == torch.bfloat16
+            and conv_w.dtype == torch.bfloat16
+            and (conv_bias is None or conv_bias.dtype == torch.bfloat16)
+        )
+        if not supported:
+            self._fi_setup_failed = True
+            logger.info_once(
+                "FlashInfer fused GDN decode step disabled: unsupported "
+                "parameter dtypes/layout for this checkpoint."
+            )
+            return False
+        self._fi_conv_weight = conv_w.view(conv_w.size(0), conv_w.size(2)).contiguous()
+        self._fi_conv_bias = (
+            conv_bias
+            if conv_bias is not None
+            else torch.zeros(
+                self._fi_conv_weight.size(0),
+                dtype=torch.bfloat16,
+                device=self._fi_conv_weight.device,
+            )
+        )
+        self._fi_w_ba = w_ba.data.t().contiguous()
+        return True
+
+    def _forward_core_fi(
+        self,
+        mixed_qkvz: torch.Tensor,
+        hidden_states: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        """Fused-norm packed core attention with the FlashInfer decode step.
+
+        Same contract as :meth:`_forward_core_fused_norm_packed`, which it
+        stands in for, except that it receives ``hidden_states`` instead of a
+        pre-projected ``ba``: the FlashInfer step folds the b/a projection
+        GEMV in, so the projection happens here only on the steps that do not
+        fuse.
+
+        Non-spec decode steps whose geometry FlashInfer supports go through
+        ``flashinfer.gdn_fused_decode_step``, which folds the b/a
+        projection GEMV, the causal conv1d update, the q/k/v head split and
+        the gated delta-rule state update into one op writing directly into
+        ``core_attn_out``; the gated RMSNorm that the packed route owns is
+        then applied exactly as upstream applies it. That is the one regime
+        this route serves, and it is the regime upstream's own fused decode
+        kernel does not: ``_can_use_fused_gdn_mtp_decode`` requires
+        speculative tokens, so plain decode reaches the Triton conv +
+        recurrent chain this step replaces.
+
+        Every other step -- prefill-containing, spec/MTP decode, unsupported
+        geometries or dtypes, and cudagraph capture before the one-time
+        staging has run -- projects b/a here (the identical GEMV
+        ``forward_cuda`` skipped) and is handed straight back to
+        :meth:`_forward_core_fused_norm`, so upstream keeps everything it
+        owns, including its own fused MTP decode kernel and the norm.
+
+        The support probe is the only per-step gate; FlashInfer has no
+        on/off variable for this op. A deployment that wants vLLM's own
+        chain regardless sets ``VLLM_ENABLE_QWEN_GDN_FUSED_DECODE=0`` (which
+        stops the route from resolving at all, so this method is never
+        reached) or ``VLLM_GDN_DECODE_KERNEL=triton`` (which turns off the
+        packed route this one is homed under).
+        """
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        if attn_metadata_raw is None:
+            self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
+            return
+
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        mixed_qkv, output_gate_flat = mixed_qkvz.split(
+            [qkv_size, self.value_dim // self.tp_size], dim=-1
+        )
+        output_gate = output_gate_flat.reshape(
+            output_gate_flat.size(0), -1, self.head_v_dim
+        )
+
+        conv_dim_first = is_conv_state_dim_first()
+        if (
+            attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+            and hidden_states.dtype == torch.bfloat16
+            and self.kv_cache[0].dtype == torch.bfloat16
+            and self.kv_cache[1].dtype == torch.float32
+            and self._fi_fused_decode_supported(
+                attn_metadata.num_actual_tokens,
+                hidden_size=self.hidden_size,
+                n_ba=self.in_proj_ba.output_size_per_partition,
+                qkv_dim=self.conv_dim // self.tp_size,
+                num_qk_heads=self.num_k_heads // self.tp_size,
+                num_v_heads=divide(self.num_v_heads, self.tp_size),
+                head_dim=self.head_k_dim,
+                conv_width=self.conv_kernel_size,
+                conv_state_len=self.conv_kernel_size - 1,
+                device=hidden_states.device,
+                conv_state_layout="DS" if conv_dim_first else "SD",
+            )
+            and (
+                self._fi_w_ba is not None
+                or (
+                    not torch.cuda.is_current_stream_capturing()
+                    and self._fi_fused_decode_setup()
+                )
+            )
+        ):
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            state_indices = attn_metadata.non_spec_state_indices_tensor
+            out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+            # The fused op consumes the conv pool as a (..., dim, state_len)
+            # logical view, like the stock conv kernels: the DS layout stores
+            # it that way directly, the (default) SD layout needs a transpose.
+            conv_state = (
+                self.kv_cache[0]
+                if conv_dim_first
+                else self.kv_cache[0].transpose(-1, -2)
+            )
+            self._fi_fused_decode_step(
+                hidden_states=hidden_states[:num_actual_tokens],
+                w_ba=self._fi_w_ba,
+                mixed_qkv=mixed_qkv[:num_actual_tokens],
+                conv_weight=self._fi_conv_weight,
+                conv_bias=self._fi_conv_bias,
+                conv_state=conv_state,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim**-0.5,
+                ssm_state=self.kv_cache[1],
+                state_indices=state_indices[:num_actual_tokens],  # type: ignore[index]
+                use_qk_l2norm=True,
+                out=out_buf,
+            )
+            # The fused step computes the core only. The packed route owns
+            # the gated RMSNorm for every step it serves, so apply the same
+            # in-place norm the non-fused branch of _forward_core_fused_norm
+            # applies -- this route changes which kernels compute the core,
+            # not what the layer returns.
+            self._rms_norm_gated_cuda(
+                core_attn_out[:num_actual_tokens],
+                output_gate[:num_actual_tokens],
+                core_attn_out[:num_actual_tokens],
+            )
+            return
+
+        ba, _ = self.in_proj_ba(hidden_states)
+        b, a = self.split_ba(ba)
+        self._forward_core_fused_norm(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            output_gate=output_gate,
+            core_attn_out=core_attn_out,
+        )
+
 
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
@@ -1985,6 +2289,31 @@ def qwen_gdn_attention_core_fused_norm_packed(
     )
 
 
+def qwen_gdn_attention_core_fi(
+    mixed_qkvz: torch.Tensor,
+    hidden_states: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Fused-norm packed core op with the FlashInfer fused decode step.
+
+    Same role as :func:`qwen_gdn_attention_core_fused_norm_packed`, which it
+    stands in for, but it receives ``hidden_states`` instead of pre-projected
+    ``ba``: supported non-spec decode steps run FlashInfer's fused decode op
+    (which folds the b/a projection GEMV), and every other step projects the
+    identical b/a inside the op and is handed back to
+    ``_forward_core_fused_norm``. ``core_attn_out`` is mutated in-place.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_core_fi(
+        mixed_qkvz=mixed_qkvz,
+        hidden_states=hidden_states,
+        core_attn_out=core_attn_out,
+    )
+
+
 def gdn_attention_core_fused_norm_packed_fake(
     mixed_qkvz: torch.Tensor,
     ba: torch.Tensor,
@@ -1994,11 +2323,29 @@ def gdn_attention_core_fused_norm_packed_fake(
     return
 
 
+def gdn_attention_core_fi_fake(
+    mixed_qkvz: torch.Tensor,
+    hidden_states: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Fake implementation for torch.compile."""
+    return
+
+
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fused_norm_packed_fake,
+)
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_fi",
+    op_func=qwen_gdn_attention_core_fi,
+    mutates_args=["core_attn_out"],
+    fake_impl=gdn_attention_core_fi_fake,
 )
 
 

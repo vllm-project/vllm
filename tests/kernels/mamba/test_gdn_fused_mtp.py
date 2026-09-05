@@ -195,6 +195,10 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
     layer = types.SimpleNamespace(
         prefix=PREFIX,
         enable_fused_gdn_decode=True,
+        # The FlashInfer fused decode step is homed inside this same packed
+        # route; unresolved (None) is what a build whose FlashInfer does not
+        # export gdn_fused_decode_step has, and it must leave this path alone.
+        _fi_fused_decode_step=None,
         norm=types.SimpleNamespace(
             weight=torch.empty(V, dtype=torch.bfloat16, device=device)
         ),
