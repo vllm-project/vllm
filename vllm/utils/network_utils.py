@@ -261,7 +261,7 @@ def find_process_using_port(port: int) -> psutil.Process | None:
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
-                return None
+                continue
     return None
 
 
