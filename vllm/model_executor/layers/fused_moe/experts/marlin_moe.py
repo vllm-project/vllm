@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
+    should_use_atomic_add_reduce,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -133,6 +134,13 @@ def _fused_marlin_moe(
     elif input_dtype == torch.float8_e4m3fn:
         gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
 
+    use_atomic_add1 = should_use_atomic_add_reduce(
+        m=M * num_topk,
+        n=w13_num_shards * N,
+        k=K,
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
         intermediate_cache1,
@@ -157,7 +165,7 @@ def _fused_marlin_moe(
         size_n=w13_num_shards * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=use_atomic_add1,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
@@ -200,6 +208,13 @@ def _fused_marlin_moe(
             intermediate_cache2, input_dtype
         )
 
+    use_atomic_add2 = should_use_atomic_add_reduce(
+        m=M * num_topk,
+        n=K,
+        k=N,
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
         output,
@@ -224,7 +239,7 @@ def _fused_marlin_moe(
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=use_atomic_add2,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
