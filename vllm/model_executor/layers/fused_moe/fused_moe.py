@@ -782,6 +782,24 @@ def invoke_fused_moe_triton_kernel(
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
 ):
+    if (
+        use_fp8_w8a8
+        and (A.dtype == torch.float8_e4m3fn or B.dtype == torch.float8_e4m3fn)
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
+    ):
+        cap = current_platform.get_device_capability()
+        cap_str = cap.as_version_str() if cap is not None else "unknown"
+        dev = current_platform.get_device_name()
+        raise ValueError(
+            f"FP8 Triton MoE is not supported on {dev} (compute capability "
+            f"{cap_str}); native FP8 (fp8e4nv) requires SM89+. Triton cannot "
+            "JIT-compile this kernel on older architectures and would "
+            "otherwise fail with an opaque CompilationError deep inside a "
+            "worker process. Use a quantization method with a kernel that "
+            "supports this GPU, or run on SM89+ hardware."
+        )
+
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1

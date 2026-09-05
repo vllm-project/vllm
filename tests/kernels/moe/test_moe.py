@@ -109,6 +109,53 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or current_platform.has_device_capability(89),
+    reason="Only applies on CUDA below SM89, where Triton lacks fp8e4nv support",
+)
+def test_triton_moe_launcher_rejects_fp8_below_sm89(monkeypatch) -> None:
+    """Regression test for #54219: Triton cannot JIT-compile fused_moe_kernel
+    with float8_e4m3fn (fp8e4nv) operands below SM89 -- it fails with an
+    opaque CompilationError deep inside a worker process. The launcher must
+    reject this combination itself, before ever reaching the kernel, with a
+    clear error naming the actual hardware requirement."""
+    launched = False
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                nonlocal launched
+                launched = True
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    with pytest.raises(ValueError, match="SM89"):
+        fused_moe_module.invoke_fused_moe_triton_kernel(
+            A=torch.ones((1, 1), dtype=torch.float8_e4m3fn, device=DEVICE_TYPE),
+            B=torch.ones((1, 1, 1), dtype=torch.float8_e4m3fn, device=DEVICE_TYPE),
+            C=torch.empty((1, 1, 1), device=DEVICE_TYPE),
+            A_scale=torch.ones(1, device=DEVICE_TYPE),
+            B_scale=torch.ones(1, device=DEVICE_TYPE),
+            topk_weights=torch.ones((1, 1), device=DEVICE_TYPE),
+            sorted_token_ids=None,
+            expert_ids=torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE),
+            num_tokens_post_padded=torch.ones(1, dtype=torch.int32, device=DEVICE_TYPE),
+            mul_routed_weight=True,
+            top_k=1,
+            config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+            compute_type=tl.float32,
+            use_fp8_w8a8=True,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            per_channel_quant=False,
+        )
+
+    assert not launched, "kernel must not be launched once the check rejects it"
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
