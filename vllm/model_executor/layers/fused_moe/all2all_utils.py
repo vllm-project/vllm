@@ -63,6 +63,13 @@ def flashinfer_one_sided_dispatch_layout(
         return FlashInferOneSidedDispatchLayout(hidden_dim, scale_elems)
     if (
         quant_config.use_fp8_w8a8
+        and not quant_config.is_per_act_token
+        and not quant_config.is_block_quantized
+        and quant_config.a1_scale is not None
+    ):
+        return FlashInferOneSidedDispatchLayout(hidden_dim, 0)
+    if (
+        quant_config.use_fp8_w8a8
         and quant_config.quant_dtype == current_platform.fp8_dtype()
         and quant_config.block_shape == [128, 128]
     ):
@@ -76,11 +83,13 @@ def flashinfer_one_sided_dispatch_layout(
         return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
     raise NotImplementedError(
         "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
-        "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
-        "(quant_dtype=None) today; got "
+        "static per-tensor FP8, DeepSeek Blockwise FP8 (E4M3 with FP32 "
+        "1x128 scales), and bf16 (quant_dtype=None) today; got "
         f"quant_dtype={quant_config.quant_dtype!r}, "
         f"use_fp8_w8a8={quant_config.use_fp8_w8a8!r}, "
-        f"block_shape={quant_config.block_shape!r}"
+        f"per_act_token={quant_config.is_per_act_token!r}, "
+        f"block_shape={quant_config.block_shape!r}, "
+        f"static={quant_config.a1_scale is not None}"
     )
 
 
