@@ -2610,6 +2610,19 @@ class Scheduler(SchedulerInterface):
             )
         )
 
+    def has_structured_output_in_flight(
+        self, scheduler_output: SchedulerOutput
+    ) -> bool:
+        for req_id in scheduler_output.num_scheduled_tokens:
+            req = self.requests.get(req_id)
+            if (
+                req is not None
+                and req.use_structured_output
+                and req.num_output_placeholders > 1
+            ):
+                return True
+        return False
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
