@@ -355,29 +355,66 @@ class NixlBaseConnectorScheduler:
             sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
             while True:
+                if stop_event.is_set():
+                    break
                 try:
-                    identity, _, msg = sock.recv_multipart()
+                    # Left unpacked here: a peer that isn't a well-behaved
+                    # REQ socket (e.g. a bare DEALER) can send a different
+                    # number of frames, and unpacking that must not be
+                    # allowed to kill this thread either.
+                    frames = sock.recv_multipart()
                 except zmq.Again:
-                    if stop_event.is_set():
-                        break
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
-                    "Received message for pp rank %s, tp rank %s",
-                    target_pp_rank,
-                    target_tp_rank,
-                )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                # Echo our perf_counter so P can estimate the clock offset.
-                # perf_counter is only comparable within a process, so this
-                # listener must run in the same process that stamps the block
-                # expiry deadline (`_reqs_need_send`).
-                ts = msgspec.msgpack.encode(time.perf_counter())
-                sock.send_multipart(
-                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
-                )
+                try:
+                    identity, _, msg = frames
+                    # Decode (GET_META_MSG, pp_rank, tp_rank).
+                    decoded_msg, target_pp_rank, target_tp_rank = (
+                        msgspec.msgpack.decode(msg)
+                    )
+                    logger.debug(
+                        "Received message for pp rank %s, tp rank %s",
+                        target_pp_rank,
+                        target_tp_rank,
+                    )
+                    if decoded_msg != GET_META_MSG:
+                        logger.warning(
+                            "Connection listener got unexpected message %s",
+                            decoded_msg,
+                        )
+                    # Echo our perf_counter so P can estimate the clock offset.
+                    # perf_counter is only comparable within a process, so this
+                    # listener must run in the same process that stamps the
+                    # block expiry deadline (`_reqs_need_send`).
+                    ts = msgspec.msgpack.encode(time.perf_counter())
+                    sock.send_multipart(
+                        (
+                            identity,
+                            b"",
+                            encoded_data[(target_pp_rank, target_tp_rank)],
+                            ts,
+                        )
+                    )
+                except (
+                    msgspec.DecodeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    zmq.ZMQError,
+                ):
+                    # A single malformed or unexpected request (e.g. a stray
+                    # non-NIXL client, one that doesn't speak the REQ/ROUTER
+                    # envelope, or a request for a pp/tp rank this engine
+                    # doesn't serve) must not take down the listener: every
+                    # remote's handshake depends on this thread staying alive
+                    # for the lifetime of the process. Anything outside this
+                    # list is a genuine bug and should still crash the thread
+                    # loudly rather than be swallowed here.
+                    logger.exception(
+                        "Error handling NIXL handshake request "
+                        "(raw=%.200r); ignoring it and continuing to listen on %s",
+                        frames[-1],
+                        path,
+                    )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder

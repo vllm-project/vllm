@@ -6,6 +6,7 @@ import inspect
 import os
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -18,6 +19,7 @@ import numpy as np
 import pytest
 import ray
 import torch
+import zmq
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import LLM
@@ -44,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -3462,6 +3465,128 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+def _start_handshake_listener(port: int) -> tuple[threading.Thread, threading.Event]:
+    encoded_data = {(0, 0): b"fake-metadata-blob"}
+    ready_event = threading.Event()
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=NixlConnectorScheduler._nixl_handshake_listener,
+        args=(encoded_data, ready_event, stop_event, "127.0.0.1", port),
+        daemon=True,
+    )
+    thread.start()
+    assert ready_event.wait(timeout=5), "listener did not start"
+    return thread, stop_event
+
+
+def _ask_handshake_listener(port: int, timeout_ms: int = 2000):
+    """Send a real GET_META_MSG request, like a decode worker would."""
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.REQ)
+    sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(f"tcp://127.0.0.1:{port}")
+    sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0)))
+    try:
+        reply = sock.recv_multipart()
+    except zmq.Again:
+        reply = None
+    sock.close()
+    ctx.term()
+    return reply
+
+
+def test_handshake_listener_survives_bad_envelope():
+    """A peer that doesn't speak the REQ/ROUTER envelope (e.g. a bare
+    DEALER socket, which doesn't auto-add the empty delimiter frame the
+    way REQ does) must not kill the listener thread. Reproduces the
+    production crash: ValueError: not enough values to unpack."""
+    port = 15700
+    thread, stop_event = _start_handshake_listener(port)
+    try:
+        # Sanity check: the listener is healthy before the bad message.
+        reply = _ask_handshake_listener(port)
+        assert reply is not None and reply[0] == b"fake-metadata-blob"
+
+        ctx = zmq.Context()
+        stray = ctx.socket(zmq.DEALER)
+        stray.connect(f"tcp://127.0.0.1:{port}")
+        stray.send(b"whatever")
+        time.sleep(0.3)
+        stray.setsockopt(zmq.LINGER, 0)
+        stray.close()
+        ctx.term()
+        time.sleep(0.3)
+
+        assert thread.is_alive(), "listener died on a bad envelope"
+
+        reply = _ask_handshake_listener(port)
+        assert reply is not None and reply[0] == b"fake-metadata-blob"
+    finally:
+        stop_event.set()
+        thread.join(timeout=3)
+
+
+def test_handshake_listener_survives_malformed_content():
+    """A well-formed REQ envelope carrying malformed msgpack content must
+    also not kill the listener thread."""
+    port = 15701
+    thread, stop_event = _start_handshake_listener(port)
+    try:
+        ctx = zmq.Context()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.RCVTIMEO, 1000)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://127.0.0.1:{port}")
+        sock.send(b"not valid msgpack")
+        with contextlib.suppress(zmq.Again):
+            sock.recv_multipart()
+        sock.close()
+        ctx.term()
+        time.sleep(0.3)
+
+        assert thread.is_alive(), "listener died on malformed content"
+
+        reply = _ask_handshake_listener(port)
+        assert reply is not None and reply[0] == b"fake-metadata-blob"
+    finally:
+        stop_event.set()
+        thread.join(timeout=3)
+
+
+def test_handshake_listener_shutdown_with_continuous_bad_requests():
+    """stop_event must be observed even while bad requests keep arriving
+    back-to-back with no receive timeout in between, or shutdown() blocks
+    on thread.join() forever. Reproduces a review finding: a DEALER client
+    that never stops sending bad frames means recv_multipart() never
+    raises zmq.Again, so a stop check gated behind that exception never
+    runs."""
+    port = 15702
+    thread, stop_event = _start_handshake_listener(port)
+    spam_stop = threading.Event()
+
+    def spam():
+        ctx = zmq.Context()
+        sock = ctx.socket(zmq.DEALER)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(f"tcp://127.0.0.1:{port}")
+        while not spam_stop.is_set():
+            sock.send(b"bad frame")
+        sock.close()
+        ctx.term()
+
+    spammer = threading.Thread(target=spam, daemon=True)
+    spammer.start()
+    try:
+        time.sleep(0.3)
+        stop_event.set()
+        thread.join(timeout=3)
+        assert not thread.is_alive(), "shutdown blocked on continuous bad requests"
+    finally:
+        spam_stop.set()
+        spammer.join(timeout=3)
 
 
 @patch(

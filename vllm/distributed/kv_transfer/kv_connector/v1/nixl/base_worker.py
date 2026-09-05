@@ -807,10 +807,24 @@ class NixlBaseConnectorWorker:
                     (GET_META_MSG, remote_pp_rank, remote_rank)
                 )
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
-                sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+                handshake_timeout_ms = 5000
+                sock.setsockopt(zmq.RCVTIMEO, handshake_timeout_ms)
                 start_time = time.perf_counter()
                 sock.send(msg)
-                reply_parts = sock.recv_multipart()
+                try:
+                    reply_parts = sock.recv_multipart()
+                except zmq.error.Again as e:
+                    # ZMQ hides the underlying connection state, so this
+                    # timeout is all we get; point at the probe script
+                    # instead of a bare "Resource temporarily unavailable".
+                    raise RuntimeError(
+                        f"No reply from NIXL handshake listener at {path} "
+                        f"(pp_rank={remote_pp_rank}, tp_rank={remote_rank}) "
+                        f"after {handshake_timeout_ms}ms. Probe it with "
+                        "tests/v1/kv_connector/nixl_integration/"
+                        f"nixl_side_channel_probe.py --host {host} --port {port} "
+                        f"--pp-rank {remote_pp_rank} --rank {remote_rank}."
+                    ) from e
                 recv_time = time.perf_counter()
                 assert len(reply_parts) == 2
                 handshake_bytes = reply_parts[0]
