@@ -6,10 +6,13 @@ from typing import Any
 
 from transformers import PretrainedConfig
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.configs.speculators.algos import (
     SUPPORTED_SPECULATORS_TYPES,
 )
 from vllm.transformers_utils.utils import without_trust_remote_code
+
+logger = init_logger(__name__)
 
 
 class SpeculatorsConfig(PretrainedConfig):
@@ -77,14 +80,27 @@ class SpeculatorsConfig(PretrainedConfig):
 
     @classmethod
     def validate_speculators_config(cls, config_dict: dict[str, Any]) -> None:
+        spec_config = config_dict.get("speculators_config")
+        if not isinstance(spec_config, dict):
+            raise ValueError("Invalid speculators config structure")
+        methods = spec_config.get("proposal_methods")
+        if not isinstance(methods, list) or not methods:
+            raise ValueError(
+                "speculators_config.proposal_methods must be a non-empty list"
+            )
+        # The schema is plural: every entry must at least be a mapping that
+        # names its proposal_type. Fields specific to concrete method types
+        # (e.g. speculative_tokens) are checked only on the selected method.
+        for method in methods:
+            if not isinstance(method, dict) or "proposal_type" not in method:
+                raise ValueError(
+                    "Each entry in proposal_methods must be a mapping with a "
+                    f"'proposal_type'. Got: {method}"
+                )
         try:
-            spec_config = config_dict["speculators_config"]
-            methods = spec_config["proposal_methods"]
-            first_method = methods[0]
-            _ = first_method["speculative_tokens"]
             _ = spec_config["verifier"]["name_or_path"]
             _ = config_dict["speculators_model_type"]
-        except (KeyError, IndexError, TypeError) as e:
+        except (KeyError, TypeError) as e:
             raise ValueError("Invalid speculators config structure") from e
 
         if "transformer_layer_config" not in config_dict:
@@ -114,17 +130,51 @@ class SpeculatorsConfig(PretrainedConfig):
         # Extract speculators configuration
         spec_config = config_dict["speculators_config"]
 
-        # Currently we only support one proposal method
         proposal_methods = spec_config.get("proposal_methods")
         if not proposal_methods:
             raise ValueError("No proposal methods found in speculators config")
 
-        first_method = proposal_methods[0]
-        num_speculative_tokens = first_method.get("speculative_tokens")
+        # The schema names the active method via default_proposal_method;
+        # select it, falling back to the first entry for configs that
+        # predate the field. vLLM drafts with a single method.
+        default_method = spec_config.get("default_proposal_method")
+        selected = next(
+            (
+                method
+                for method in proposal_methods
+                if method.get("proposal_type") == default_method
+            ),
+            proposal_methods[0],
+        )
+        if default_method is not None and selected.get("proposal_type") != (
+            default_method
+        ):
+            logger.warning_once(
+                "default_proposal_method '%s' matches no entry in "
+                "proposal_methods; falling back to the first entry '%s'.",
+                default_method,
+                str(selected.get("proposal_type", "<unnamed>")),
+            )
+        if len(proposal_methods) > 1:
+            ignored = ", ".join(
+                str(method.get("proposal_type", "<unnamed>"))
+                for method in proposal_methods
+                if method is not selected
+            )
+            logger.warning_once(
+                "Speculators config declares %d proposal methods; vLLM "
+                "drafts with one. Selected '%s'; ignoring: %s.",
+                len(proposal_methods),
+                str(selected.get("proposal_type", "<unnamed>")),
+                ignored,
+            )
+
+        num_speculative_tokens = selected.get("speculative_tokens")
 
         if num_speculative_tokens is None:
             raise ValueError(
-                f"Missing 'speculative_tokens' in proposal method. Got: {first_method}"
+                "Missing 'speculative_tokens' in the selected proposal "
+                f"method. Got: {selected}"
             )
 
         # Build base vLLM speculative configuration
