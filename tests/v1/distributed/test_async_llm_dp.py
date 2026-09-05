@@ -325,6 +325,9 @@ async def test_dp_pause_late_request_does_not_block_drain():
 
     MoE only: wave coordination is enabled iff the model is MoE, so a dense
     model never reaches the coordinator state this exercises.
+
+    Uses `keep`: the only mode that still admits a late request now that
+    boundary modes reject it at the client.
     """
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel=True)
@@ -357,7 +360,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
         await long_request
         assert await _poll_flag(engine, False, timeout=30)
 
-        await engine.pause_generation(mode="abort")
+        await engine.pause_generation(mode="keep")
         await engine.wait_for_requests_to_drain(drain_timeout=30)
 
         # Awaiting add_request guarantees the new-request notification has been
@@ -397,6 +400,8 @@ async def test_dp_sleep_late_request_does_not_block_drain():
     the pause case because it is the shape that reaches
     `_drain_requests_for_elastic_ep`, which decides from the same signal
     whether it is safe to scale.
+
+    Uses `keep` for the same reason as the pause variant above.
     """
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel=True)
@@ -411,7 +416,7 @@ async def test_dp_sleep_late_request_does_not_block_drain():
             pass
         assert await _poll_flag(engine, False, timeout=30)
 
-        await engine.sleep(level=1)
+        await engine.sleep(level=1, mode="keep")
         assert await engine.is_sleeping()
 
         collector = await engine.add_request(
