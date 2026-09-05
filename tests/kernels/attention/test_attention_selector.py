@@ -545,6 +545,40 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_flashinfer_rejects_fp8_when_jit_unavailable(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+):
+    """FlashInferBackend must not accept the fp8 and fp8_e4m3 dtypes
+    when it cannot JIT-compile for the current GPU and toolkit."""
+    import flashinfer.jit.core as fi_jit_core
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    monkeypatch.setattr(
+        fi_jit_core,
+        "check_cuda_arch",
+        MagicMock(side_effect=RuntimeError("arch check failed")),
+    )
+
+    assert not FlashInferBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_flashinfer_accepts_fp8_when_jit_available(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+):
+    """FlashInferBackend must accept the fp8 and fp8_e4m3 dtypes
+    when it can JIT-compile for the current GPU and toolkit."""
+    import flashinfer.jit.core as fi_jit_core
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    monkeypatch.setattr(fi_jit_core, "check_cuda_arch", MagicMock())
+
+    assert FlashInferBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
     kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
 ):
