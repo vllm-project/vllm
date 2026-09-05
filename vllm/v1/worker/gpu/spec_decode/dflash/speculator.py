@@ -388,6 +388,14 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
             return self.draft_tokens[:num_reqs]
 
+        # Under PCP the runner gathered block tables for the rank-local
+        # sharded batch; the replicated drafter needs them gathered for the
+        # global batch (its context-KV slot mappings are derived from them).
+        if self.replicated_pcp:
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping, num_reqs_padded=num_reqs
+            )
+
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
         assert self.draft_kv_cache_group_id >= 0

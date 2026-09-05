@@ -16,8 +16,6 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    prepare_pos_seq_lens,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -76,11 +74,6 @@ class PCPManager:
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
-            else None
-        )
-        self._local_req_idx = (
-            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
-            if max_num_local_reqs is not None
             else None
         )
         self._local_block_tables: tuple[torch.Tensor, ...] | None
@@ -145,11 +138,28 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "MRV2 PCP does not support speculative decoding yet."
-            )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.method not in ("mtp", "dspark"):
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding currently supports MTP "
+                    "and DSpark only."
+                )
+            if is_sparse_mla and speculative_config.method == "mtp":
+                raise NotImplementedError(
+                    "MRV2 PCP MTP speculative decoding currently supports "
+                    "dense MLA only."
+                )
+            if parallel_config.decode_context_parallel_size != 1:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding does not support DCP yet."
+                )
+            if speculative_config.enable_adaptive_verification:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding does not support adaptive "
+                    "verification yet."
+                )
         if (
             is_sparse_mla
             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -361,11 +371,7 @@ class PCPManager:
     ) -> InputBatch:
         assert self._req_states is not None
         assert self._input_buffers is not None
-        req_states = self._req_states
         input_buffers = self._input_buffers
-        if input_batch.num_draft_tokens > 0:
-            raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
-
         global_batch = input_batch
         self._global_batch = global_batch
 
@@ -465,6 +471,17 @@ class PCPManager:
             local_gather_idx,
             out=input_buffers.input_ids[:num_local_tokens_padded],
         )
+        # Positions are derived from the GPU request-state cursor in
+        # prepare_inputs(). Reuse them verbatim so RoPE positions, attention
+        # sequence lengths, and slot mappings all observe the same cursor after
+        # speculative rejection. The CPU num_computed_tokens value below is
+        # only an asynchronous upper bound for metadata construction.
+        torch.index_select(
+            global_batch.positions,
+            0,
+            local_gather_idx,
+            out=input_buffers.positions[:num_local_tokens_padded],
+        )
 
         local_query_start_loc_np = np.empty(
             input_buffers.max_num_reqs + 1, dtype=np.int32
@@ -479,17 +496,16 @@ class PCPManager:
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
         )
-        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
-
-        assert self._local_req_idx is not None
-        prepare_pos_seq_lens(
-            self._local_req_idx[:num_local_reqs],
-            local_query_start_loc,
-            local_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
-        )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
+        if num_local_tokens > 0:
+            local_end_positions = torch.index_select(
+                input_buffers.positions,
+                0,
+                local_query_start_loc[1:] - 1,
+            )
+            seq_lens.copy_(local_end_positions + 1)
+        else:
+            seq_lens.zero_()
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -512,18 +528,11 @@ class PCPManager:
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
-        logits_indices = combine_sampled_and_draft_tokens(
-            input_buffers.input_ids,
-            local_to_global_req_idx,
-            req_states.last_sampled_tokens,
-            local_query_start_loc,
-            seq_lens,
-            req_states.prefill_len.gpu,
-            req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            1,
-        )
+        # The global batch has already materialized sampled and draft tokens.
+        # Recombining the rank-local view as a one-logit batch would overwrite
+        # the final draft token with the last sampled token. Local logits are
+        # never sampled directly; they are restored to the global layout first.
+        logits_indices = local_query_start_loc[1:] - 1
 
         local_prefill_len_np = global_batch.prefill_len_np[
             local_to_global_batch_req_idx_np
@@ -648,10 +657,35 @@ class PCPManager:
         return gathered_kv_slot_mappings
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self._global_batch is not None
         if self._hidden_restore_idx is None:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
-        return gathered[self._hidden_restore_idx]
+        restored = gathered[self._hidden_restore_idx]
+        num_tokens = self._global_batch.num_tokens
+        num_tokens_padded = self._global_batch.num_tokens_after_padding
+        assert restored.shape[0] == num_tokens
+        if num_tokens == num_tokens_padded:
+            return restored
+
+        # PCP restore reconstructs only active global tokens, whereas
+        # PIECEWISE graphs keep the target batch padded to a capture size. The
+        # drafter follows that padded shape contract, so append explicit zero
+        # rows rather than aliasing a real token through an arbitrary index.
+        padded_shape = (num_tokens_padded, *restored.shape[1:])
+        padded = restored.new_zeros(padded_shape)
+        padded[:num_tokens].copy_(restored)
+        return padded
+
+    def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Restore a persistent max-token-sized buffer (e.g. the target's
+        pre-hc_head residual) by slicing it to the rank-local padded token
+        count before the all-gather."""
+        assert self._padded_gather_idx is not None
+        local_num_tokens_padded = (
+            self._padded_gather_idx.shape[0] // self.pcp_world_size
+        )
+        return self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
 
     def restore_for_sampling(
         self,
