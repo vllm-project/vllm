@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
+from vllm.v1.kv_offload.cpu.common import CPUCacheTierInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 
@@ -36,6 +37,7 @@ STORE_SIZE = _TransferMetricName.STORE_SIZE
 STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 PENDING_STORES = "vllm:kv_offload_pending_stores"
 LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"
+CPU_CONFIG_INFO = CPUOffloadingMetrics.CPU_CONFIG_INFO
 MY_COUNTER = "my_counter"
 MY_LABEL = "my_label"
 
@@ -636,6 +638,112 @@ def test_prom_metrics_lazily_observes_labeled_metric():
     assert counter.labelvalues == ("model", "0", "a")
     counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
     assert counter_def.kwargs["labelnames"] == ["model_name", "engine", MY_LABEL]
+
+
+def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
+    """Each CPU tier fact must land under its own label name.
+
+    Label values are bound positionally against the metric's declared
+    labelnames, and CPU_TIER_INFO_LABELS is a separate declaration from the
+    values as_labelvalues() renders, so nothing but the exported pairing
+    catches the two drifting apart. Uses the real CPU spec definitions, which
+    OffloadingSpecFactory resolves by default.
+    """
+    tier_info = CPUCacheTierInfo(
+        num_blocks=4096,
+        blocks_per_chunk=2,
+        kv_bytes_per_chunk=262144,
+        capacity_tokens=None,
+    )
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    labelvalues = tier_info.as_labelvalues()
+    prom_metrics.observe(
+        {
+            _StatsKey.TYPES: {CPU_CONFIG_INFO: _MetricType.GAUGE},
+            _StatsKey.DATA: {CPU_CONFIG_INFO: {labelvalues: 1}},
+        }
+    )
+
+    gauge = prom_metrics.offloading_metrics[(0, CPU_CONFIG_INFO, labelvalues)]
+    assert gauge.set_values == [1]
+    gauge_def = prom_metrics._offloading_metric_defs[CPU_CONFIG_INFO]
+    assert dict(zip(gauge_def.kwargs["labelnames"], gauge.labelvalues)) == {
+        "model_name": "model",
+        "engine": "0",
+        "num_blocks": "4096",
+        "blocks_per_chunk": "2",
+        "kv_bytes_per_chunk": "262144",
+        "capacity_tokens": "None",
+    }
+
+
+def test_prom_metrics_declares_cpu_tier_info_gauge_as_most_recent():
+    """The CPU info gauge must merge across frontends by freshest write.
+
+    Offloading stats reach one frontend per step as complete per-engine
+    snapshots, so summing would report the number of participating API-server
+    processes instead of the 1 an info gauge is pinned to -- wrong only under
+    multiprocess deployment, and silently, since the facts ride the labels.
+    """
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    gauge_def = prom_metrics._offloading_metric_defs[CPU_CONFIG_INFO]
+    assert gauge_def.kwargs["multiprocess_mode"] == "mostrecent"
+
+
+def test_prom_metrics_routes_multiprocess_mode_to_gauges_only():
+    """multiprocess_mode is gauge-only: declared value honored, absent elsewhere.
+
+    Hardcoding the default would pass the test above while ignoring the field,
+    and hoisting the kwarg out of the gauge branch would break construction of
+    a real prometheus_client Counter, which does not accept it.
+    """
+    metric_definitions = {
+        PENDING_STORES: OffloadingGaugeMetadata(
+            documentation="gauge declaring a non-default multiprocess mode.",
+            multiprocess_mode="sum",
+        ),
+        MY_COUNTER: OffloadingCounterMetadata(documentation="a counter."),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    gauge_def = prom_metrics._offloading_metric_defs[PENDING_STORES]
+    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    assert gauge_def.kwargs["multiprocess_mode"] == "sum"
+    assert "multiprocess_mode" not in counter_def.kwargs
 
 
 def test_prom_metrics_rejects_wrong_label_count():

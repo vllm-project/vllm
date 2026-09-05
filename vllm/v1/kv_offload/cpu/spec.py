@@ -18,7 +18,11 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import (
+    CPU_TIER_INFO_LABELS,
+    CPUCacheTierInfo,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -49,6 +53,17 @@ class CPUOffloadingSpec(OffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.CPU_CONFIG_INFO: OffloadingGaugeMetadata(
+                documentation=(
+                    "Static configuration of this engine's CPU KV offload tier: "
+                    "its size in slots and in bytes, and the KV tokens it holds "
+                    "when full, or 'None' when a slot count does not convert to "
+                    "a token count. Emitted from the first scheduler step, so "
+                    "absent on an idle engine. Sum across engines for the "
+                    "whole instance."
+                ),
+                labelnames=CPU_TIER_INFO_LABELS,
+            ),
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
                     "Fraction of CPU KV-cache space currently pinned by active "
@@ -126,6 +141,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- B0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.tier_info = self._build_tier_info(config)
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -135,6 +152,27 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
+        )
+
+    def _build_tier_info(self, config: OffloadingConfig) -> CPUCacheTierInfo:
+        """Resolve the tier's static facts, including token capacity.
+
+        capacity_tokens holds a value only when a slot count converts exactly
+        to a token count: exactly one group, whose blocks hold tokens (a tier
+        sized to zero chunks is then an exact zero, not None). It is None for
+        multiple groups, whose share of the slots is workload- rather than
+        configuration-determined, and when blocks span no tokens (Mamba).
+        """
+        capacity_tokens: int | None = None
+        if len(config.groups) == 1 and config.groups[0].blocks_hold_tokens:
+            tokens_per_chunk = self.blocks_per_chunk * config.groups[0].tokens_per_block
+            capacity_tokens = self.num_blocks * tokens_per_chunk
+
+        return CPUCacheTierInfo(
+            num_blocks=self.num_blocks,
+            blocks_per_chunk=self.blocks_per_chunk,
+            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+            capacity_tokens=capacity_tokens,
         )
 
     @override
@@ -151,6 +189,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
+                tier_info=self.tier_info,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,

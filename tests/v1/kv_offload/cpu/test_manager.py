@@ -7,6 +7,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _StatsKey,
+)
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -18,6 +22,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.common import (
+    CPUCacheTierInfo,
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
@@ -42,9 +47,11 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    tier_info: CPUCacheTierInfo | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_blocks=num_blocks,
+        tier_info=tier_info,
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
@@ -236,6 +243,56 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def _config_info(stats: OffloadingConnectorStats) -> dict[tuple[str, ...], int]:
+    """The CPU_CONFIG_INFO label-tuple -> value map from a stats payload."""
+    return stats.data[_StatsKey.DATA].get(CPUOffloadingMetrics.CPU_CONFIG_INFO, {})
+
+
+def test_cpu_manager_reports_tier_info_as_info_gauge():
+    """The tier's static facts ride every stats payload as an info gauge.
+
+    Label values are bound positionally downstream, so they must come out in
+    CPU_TIER_INFO_LABELS order with the value pinned to 1.
+    """
+    tier_info = CPUCacheTierInfo(
+        num_blocks=4,
+        blocks_per_chunk=2,
+        kv_bytes_per_chunk=16384,
+        capacity_tokens=128,
+    )
+    manager = make_cpu_manager(num_blocks=4, tier_info=tier_info)
+
+    stats = manager.get_stats()
+    assert stats is not None
+    assert _config_info(stats) == {("4", "2", "16384", "128"): 1}
+
+
+def test_cpu_manager_renders_unknown_token_capacity_as_none():
+    """capacity_tokens=None must survive as a label, not crash or vanish."""
+    manager = make_cpu_manager(
+        num_blocks=4,
+        tier_info=CPUCacheTierInfo(
+            num_blocks=4,
+            blocks_per_chunk=1,
+            kv_bytes_per_chunk=16384,
+            capacity_tokens=None,
+        ),
+    )
+
+    stats = manager.get_stats()
+    assert stats is not None
+    assert _config_info(stats) == {("4", "1", "16384", "None"): 1}
+
+
+def test_cpu_manager_omits_tier_info_when_not_supplied():
+    """Callers that pass no tier info keep their previous metric surface."""
+    manager = make_cpu_manager(num_blocks=4)
+
+    stats = manager.get_stats()
+    assert stats is not None
+    assert _config_info(stats) == {}
 
 
 def test_cpu_manager_reports_cache_usage_gauge():

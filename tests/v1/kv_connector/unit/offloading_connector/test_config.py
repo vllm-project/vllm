@@ -165,6 +165,12 @@ def _mla_spec(
     )
 
 
+_HIDDEN_STATE_KWARGS: dict[str, Any] = {
+    "block_size": 16,
+    "num_kv_heads": 1,
+    "head_size": 512,
+    "dtype": torch.float32,
+}
 _MAMBA_SPEC = MambaSpec(
     block_size=16,
     shapes=((16, 1),),
@@ -443,6 +449,50 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
         expected,
         16,
     )
+
+
+@pytest.mark.parametrize(
+    "kv_cache_spec,holds_tokens",
+    [
+        (_full_attention_spec(), True),
+        (_mla_spec(), True),
+        (_MAMBA_SPEC, False),
+        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), False),
+        (
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"mla": _mla_spec()}),
+            True,
+        ),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={
+                    "mla": _mla_spec(),
+                    "hidden": HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS),
+                },
+            ),
+            False,
+        ),
+    ],
+)
+def test_blocks_hold_tokens_only_when_every_layer_holds_tokens(
+    kv_cache_spec: KVCacheSpec, holds_tokens: bool
+):
+    """A block count converts to a token count only for token-holding blocks.
+
+    A Mamba block holds one recurrent state and a hidden-state block holds
+    activations, so multiplying either by tokens_per_block would report a
+    capacity the tier cannot hold. UniformTypeKVCacheSpecs wraps one spec per
+    layer, so a single non-token layer disqualifies the whole group.
+    """
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+    assert offloading_config.groups[0].blocks_hold_tokens is holds_tokens
 
 
 def test_preserves_data_parallel_config():
