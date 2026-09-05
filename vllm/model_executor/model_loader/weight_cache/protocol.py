@@ -90,6 +90,7 @@ def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
 IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
     None: lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,
+    "modelopt_fp4": lambda _quant_config: True,
 }
 
 

@@ -30,6 +30,11 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
+    # Verified to reconstruct its post-load state from already-processed
+    # (weight cache IPC) tensors. Subclasses whose process_weights_after_loading
+    # is re-entrant under is_weights_pre_processed() set this True.
+    ipc_pre_processed_safe: bool = False
+
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
