@@ -1670,6 +1670,18 @@ class VllmConfig:
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
 
+        if (
+            self.parallel_config.all2all_backend == "moonep"
+            and self.model_config is not None
+            and self.model_config.quantization is not None
+        ):
+            raise ValueError(
+                "The moonep all2all backend currently supports unquantized "
+                "BF16 models only; got "
+                f"quantization={self.model_config.quantization!r}. Use a "
+                "different --all2all-backend for quantized models."
+            )
+
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size

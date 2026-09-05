@@ -1254,6 +1254,19 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
+        # Disable CUDA graphs for MoonEP: the integration is eager-only for
+        # now and its dispatch/combine must not be captured.
+        if (
+            all2all_backend == "moonep"
+            and data_parallel_size > 1
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.info(
+                "MoonEP: Disabling CUDA Graphs since the MoonEP integration "
+                "is currently eager-only."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:

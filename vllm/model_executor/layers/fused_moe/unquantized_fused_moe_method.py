@@ -141,6 +141,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
+            layer=layer,
         )
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
@@ -161,14 +162,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # does not need to be re-built.
             self._init_moe_kernel(layer)
 
-            if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-                # The CPU experts need the layer itself for the setup that
-                # convert_to_unquantized_kernel_format cannot express, since
-                # it only sees the two weight tensors: padding and prepacking
-                # into the grouped-gemm layout (bias included), and capturing
-                # the router config that monolithic apply() cannot carry.
-                assert self.moe_kernel is not None
-                self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+            # No-op by default. Experts that need the layer itself for setup
+            # convert_to_unquantized_kernel_format cannot express override
+            # it: CPU prepacks into its grouped-gemm layout and captures the
+            # router config; MoonEP picks up the [E+B] weight layout for
+            # prefetch and the up projection.
+            assert self.moe_kernel is not None
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
         """Build the MoE kernel from the layer's current (shuffled) weights."""
