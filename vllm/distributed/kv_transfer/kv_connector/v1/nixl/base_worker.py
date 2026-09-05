@@ -431,7 +431,9 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        self._hisparse_destination = make_hisparse_nixl_destination(kv_cache_config)
+        self._hisparse_destination = make_hisparse_nixl_destination(
+            kv_cache_config, vllm_config
+        )
         attention_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -1623,14 +1625,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
         if self._hisparse_destination is not None:
-            registered_host_ranges = [
-                (start, end)
-                for (_, mem_type), (start, end, _) in registration_ranges.items()
-                if mem_type == "DRAM"
-            ]
-            self._hisparse_destination.prepare_host_descriptors(
-                self, registered_host_ranges
-            )
+            self._hisparse_destination.prepare_host_descriptors(self)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks

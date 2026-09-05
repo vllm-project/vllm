@@ -13,27 +13,32 @@ from vllm.v1.core.kv_cache_utils import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.kv_cache_interface import HiSparseResidentSpec
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+    from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 class HiSparseNixlDestination:
     """Provide a host destination list parallel to HiSparse GPU regions."""
 
-    def __init__(self, kv_cache_config: KVCacheConfig) -> None:
+    def __init__(self, kv_cache_config: KVCacheConfig, vllm_config: VllmConfig) -> None:
         host_num_blocks = kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
         self.host_num_blocks = host_num_blocks
+        self._forward_context = vllm_config.compilation_config.static_forward_context
         self.host_regions: list[tuple[int, int] | None] = []
+        self._host_pools: dict[int, tuple[torch.Tensor, list[HiSparseRuntime]]] = {}
         self._descriptor_offsets: list[int | None] = []
         self._xfer_handle: int | None = None
 
     def reset_regions(self) -> None:
         self.host_regions.clear()
+        self._host_pools.clear()
         self._descriptor_offsets.clear()
         self._xfer_handle = None
 
@@ -72,13 +77,57 @@ class HiSparseNixlDestination:
                 f"HiSparse host and GPU pages differ for {source_name}: "
                 f"host={stride}, gpu={region_block_len}"
             )
+        attention_layer = self._forward_context[source_name]
+        cache_handle = attention_layer.hisparse_cache
+        assert cache_handle is not None
+        runtime = cache_handle.runtime
+        registered_pool = runtime.registered_host_pool
+        pool_start = registered_pool.data_ptr()
+        pool_end = pool_start + registered_pool.nbytes
+        host_end = host_cache.data_ptr() + host_cache.nbytes
+        if not pool_start <= host_cache.data_ptr() < host_end <= pool_end:
+            raise ValueError(
+                f"HiSparse host cache {source_name} is outside its registered pool"
+            )
+        pool, runtimes = self._host_pools.setdefault(pool_start, (registered_pool, []))
+        if pool.nbytes != registered_pool.nbytes:
+            raise ValueError("HiSparse host pool aliases have inconsistent sizes")
+        if runtime not in runtimes:
+            runtimes.append(runtime)
         self.host_regions.append((host_cache.data_ptr(), stride))
 
     def prepare_host_descriptors(
         self,
         worker: NixlBaseConnectorWorker,
-        registered_ranges: list[tuple[int, int]],
     ) -> None:
+        torch.accelerator.synchronize()
+        cudart = torch.cuda.cudart()
+        for pool, runtimes in self._host_pools.values():
+            if not all(
+                runtime.host_pool_registration_owned_by_hisparse for runtime in runtimes
+            ):
+                raise RuntimeError("HiSparse host pool registration has no owner")
+            error = cudart.cudaHostUnregister(pool.data_ptr())
+            if error.value != 0:
+                raise RuntimeError(
+                    "HiSparse cudaHostUnregister failed before NIXL registration: "
+                    f"{error}"
+                )
+            for runtime in runtimes:
+                runtime.host_pool_registration_owned_by_hisparse = False
+
+        registration_descs = worker.nixl_wrapper.get_reg_descs(
+            [
+                (pool.data_ptr(), pool.nbytes, 0, "")
+                for pool, _ in self._host_pools.values()
+            ],
+            "DRAM",
+        )
+        worker.nixl_wrapper.register_memory(
+            registration_descs, backends=worker.nixl_backends
+        )
+        worker._registered_descs.append(registration_descs)
+
         blocks: list[tuple[int, int, int]] = []
         for region in self.host_regions:
             if region is None:
@@ -86,14 +135,6 @@ class HiSparseNixlDestination:
                 continue
             base, stride = region
             self._descriptor_offsets.append(len(blocks))
-            end = base + self.host_num_blocks * stride
-            if not any(
-                start <= base and end <= stop for start, stop in registered_ranges
-            ):
-                raise RuntimeError(
-                    "HiSparse host destination is outside NIXL-registered DRAM: "
-                    f"destination=({base}, {end}), ranges={registered_ranges}"
-                )
             blocks.extend(
                 (base + block_id * stride, stride, 0)
                 for block_id in range(self.host_num_blocks)
@@ -259,10 +300,11 @@ class HiSparseNixlDestination:
 
 def make_hisparse_nixl_destination(
     kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
 ) -> HiSparseNixlDestination | None:
     if kv_cache_config.hisparse_host_num_blocks is None or not any(
         isinstance(group.kv_cache_spec, HiSparseResidentSpec)
         for group in kv_cache_config.transfer_groups
     ):
         return None
-    return HiSparseNixlDestination(kv_cache_config)
+    return HiSparseNixlDestination(kv_cache_config, vllm_config)
