@@ -183,14 +183,23 @@ def _make_input(api_url: str, n_tokens: int, endpoint_id: str) -> RequestFuncInp
     )
 
 
-def _run(request_func, api_url: str, endpoint_id: str, chunks, n_tokens: int):
+def _run(
+    request_func,
+    api_url: str,
+    endpoint_id: str,
+    chunks,
+    n_tokens: int,
+    *,
+    expect_success: bool = True,
+):
     output = asyncio.run(
         request_func(
             _make_input(api_url, n_tokens, endpoint_id),
             _FakeSession(chunks),
         )
     )
-    assert output.success, output.error
+    if expect_success:
+        assert output.success, output.error
     return output
 
 
@@ -295,3 +304,29 @@ def test_decode_span_identity_holds_with_real_clock(
     assert abs(residual) < 1e-6, (
         f"{endpoint_id}: (latency - ttft) - sum(itl) drifted by {residual:.9f}s"
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+def test_usage_only_stream_is_not_reported_as_success(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """A stream with no token chunk must fail rather than report 0 ms.
+
+    Only token chunks move the end of the request, so a degenerate stream
+    carrying nothing but a usage trailer leaves latency at zero. Reporting that
+    as a success would feed a zero-duration request into the benchmark
+    aggregates.
+    """
+    chunks = [(0.0, _usage_chunk(0)), (0.0, b"data: [DONE]\n\n")]
+    output = _run(request_func, api_url, endpoint_id, chunks, 0, expect_success=False)
+
+    assert not output.success
+    assert output.itl == []
+    assert "TTFT" in output.error

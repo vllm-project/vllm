@@ -458,7 +458,16 @@ async def async_request_openai_chat_completions(
                                 output.output_tokens = usage.get("completion_tokens")
 
                     output.generated_text = generated_text
-                    output.success = True
+                    # ttft is only set by a token chunk, so a stream carrying
+                    # nothing but a usage trailer has produced no tokens.
+                    if ttft != 0.0:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!"
+                        )
                     output.latency = most_recent_timestamp - st
                 else:
                     output.error = response.reason or ""
@@ -572,7 +581,15 @@ async def async_request_openai_audio(
                                     )
 
                         output.generated_text = generated_text
-                        output.success = True
+                        # See the note in async_request_openai_chat_completions.
+                        if ttft != 0.0:
+                            output.success = True
+                        else:
+                            output.success = False
+                            output.error = (
+                                "Never received a valid chunk to calculate TTFT."
+                                "This response will be marked as failed!"
+                            )
                         output.latency = most_recent_timestamp - st
                     else:
                         output.error = response.reason or ""
