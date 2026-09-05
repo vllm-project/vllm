@@ -284,18 +284,16 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
 
-        log_parts.extend(
-            [
-                "GPU KV cache usage: %.1f%%",
-                "Prefix cache hit rate: %.1f%%",
-            ]
-        )
-        log_args.extend(
-            [
-                self.last_scheduler_stats.kv_cache_usage * 100,
-                self.prefix_caching_metrics.hit_rate * 100,
-            ]
-        )
+        log_parts.append("GPU KV cache usage: %.1f%%")
+        log_args.append(self.last_scheduler_stats.kv_cache_usage * 100)
+        # hit_rate returns 0.0 when nothing has been observed, which reads as
+        # "the cache is missing everything" rather than "no queries yet". The
+        # two cache metrics below already guard on `empty` for this reason;
+        # this one did not, so a fresh server logged a 0.0% hit rate before it
+        # had served a single prefix-cacheable request.
+        if not self.prefix_caching_metrics.empty:
+            log_parts.append("Prefix cache hit rate: %.1f%%")
+            log_args.append(self.prefix_caching_metrics.hit_rate * 100)
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
