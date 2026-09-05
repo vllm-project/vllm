@@ -36,6 +36,13 @@ ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
 
 
+@VIDEO_LOADER_REGISTRY.register("assert_never_reached")
+class AssertNeverReachedVideoLoader(VideoLoader):
+    @classmethod
+    def load_bytes(cls, data: bytes, **kwargs) -> npt.NDArray:
+        raise AssertionError("video decoder reached with undecodable base64")
+
+
 @VIDEO_LOADER_REGISTRY.register("assert_10_frames_1_fps")
 class Assert10Frames1FPSVideoLoader(VideoLoader):
     @classmethod
@@ -367,6 +374,23 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
 
     with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
         videoio.load_base64("video/jpeg", data)
+
+
+def test_load_base64_rejects_malformed():
+    """Malformed base64 must be rejected before the video decoder sees it.
+
+    Lenient decoding silently drops the invalid characters, shifting every
+    following byte, so the decoder receives a corrupted stream and the client
+    gets a 500 instead of a 400. ImageMediaIO and AudioMediaIO already decode
+    strictly; VideoMediaIO was the last loader that did not.
+    """
+    encoded = pybase64.b64encode(bytes(range(64)) * 2).decode("ascii")
+    malformed = encoded[:8] + "!!!@@@" + encoded[8:]
+
+    videoio = VideoMediaIO(ImageMediaIO(), video_backend="assert_never_reached")
+
+    with pytest.raises(ValueError):
+        videoio.load_base64("video/mp4", malformed)
 
 
 def test_pynvvideocodec_unrelated_error_propagates(
