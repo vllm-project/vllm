@@ -701,6 +701,74 @@ class TestFixArgTypes:
         parsed = json.loads(result)
         assert parsed["inner"]["count"] == 42
 
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    def test_root_alternative_branch_properties(self, combinator):
+        """A property declared by one branch is coerced, one the branches type
+        differently is left alone since no branch is selected, and one all
+        branches agree on refines the direct schema."""
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function=FunctionDefinition(
+                name="f",
+                parameters={
+                    "type": "object",
+                    "properties": {"count": {"type": ["string", "integer"]}},
+                    combinator: [
+                        {
+                            "properties": {
+                                "kind": {"const": "a"},
+                                "payload": {"type": "object"},
+                                "value": {"type": "integer"},
+                                "count": {"type": "string"},
+                            },
+                        },
+                        {
+                            "properties": {
+                                "kind": {"const": "b"},
+                                "value": {"type": "string"},
+                                "count": {"type": "string"},
+                            },
+                        },
+                    ],
+                },
+            ),
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(
+            '{"kind": "a", "payload": "{\\"n\\": 1}", "value": "123", "count": "7"}',
+            "f",
+        )
+        assert json.loads(result) == {
+            "kind": "a",
+            "payload": {"n": 1},
+            "value": "123",
+            "count": "7",
+        }
+
+    def test_root_allof_refines_direct_property(self):
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function=FunctionDefinition(
+                name="f",
+                parameters={
+                    "type": "object",
+                    "properties": {"payload": {"type": "object"}},
+                    "allOf": [
+                        {
+                            "properties": {
+                                "payload": {
+                                    "properties": {"count": {"type": "integer"}}
+                                }
+                            }
+                        }
+                    ],
+                },
+            ),
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"payload": {"count": "42"}}', "f")
+        assert json.loads(result) == {"payload": {"count": 42}}
+
     def test_array_item_coercion(self):
         tool = _make_tool(
             "f",
