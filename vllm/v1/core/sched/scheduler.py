@@ -2410,6 +2410,16 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.resumable and not request.first_chunk:
+                # A non-first chunk for an unknown id: its session is gone.
+                # Admitting it would resurrect the session as an unabortable
+                # request that pins its KV blocks until restart.
+                logger.warning(
+                    "Dropping streaming request %s: its session already "
+                    "finished (stale post-abort chunk).",
+                    request.request_id,
+                )
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
