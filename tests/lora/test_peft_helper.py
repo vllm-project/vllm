@@ -101,6 +101,33 @@ def test_peft_helper_error(
         ).validate_legal(lora_config)
 
 
+def test_peft_helper_target_parameters_direct():
+    """PEFT 0.18+ records ``target_parameters`` when LoRA is trained against a
+    fused nn.Parameter (e.g. a 3D MoE expert weight) instead of an nn.Module.
+    PEFTHelper must round-trip it so 3D MoE LoRA loading can detect the layout.
+
+    Network-free: constructs PEFTHelper.from_dict() rather than reading an
+    on-disk adapter_config.json.
+    """
+    config = {
+        "r": 8,
+        "lora_alpha": 16,
+        "target_modules": ["q_proj"],
+        "target_parameters": ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"],
+    }
+    peft_helper = PEFTHelper.from_dict(config)
+    assert peft_helper.target_parameters == [
+        "mlp.experts.gate_up_proj",
+        "mlp.experts.down_proj",
+    ]
+
+    # Absent in older adapters -> defaults to None, not a crash.
+    legacy = PEFTHelper.from_dict(
+        {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]}
+    )
+    assert legacy.target_parameters is None
+
+
 @pytest.mark.parametrize("bad_rank", [0, -1, -8])
 def test_peft_helper_invalid_rank_direct(bad_rank: int):
     """Regression test: constructing a PEFTHelper with a non-positive rank
