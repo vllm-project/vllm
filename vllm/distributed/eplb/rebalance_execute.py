@@ -15,6 +15,10 @@ from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.migration_scheduler import (
+    MigrationFlow,
+    schedule_migration_batches,
+)
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -170,6 +174,103 @@ def get_ep_ranks_with_experts_batch(
     return ranks_to_send_map, ranks_to_recv_map
 
 
+def _execute_migration_batch(
+    batch: list[MigrationFlow],
+    old_indices: np.ndarray,
+    old_rows: dict[int, int],
+    new_rows: dict[int, int],
+    ep_rank: int,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
+    communicator: EplbCommunicator,
+    layer_idx: int,
+) -> None:
+    """Execute one batch of rank-pair-disjoint expert transfers."""
+    communicator.set_transfer_context(old_indices, layer_idx)
+    for flow in batch:
+        if flow.src_rank == ep_rank:
+            for expert_id in flow.expert_ids:
+                src_row = _get_migration_row(
+                    old_rows, expert_id, flow, ep_rank, mapping_name="old"
+                )
+                communicator.add_send(
+                    [weight[src_row] for weight in expert_weights],
+                    flow.dst_rank,
+                    expert_id=expert_id,
+                )
+        elif flow.dst_rank == ep_rank:
+            for expert_id in flow.expert_ids:
+                dst_row = _get_migration_row(
+                    new_rows, expert_id, flow, ep_rank, mapping_name="new"
+                )
+                communicator.add_recv(
+                    [buffer[dst_row] for buffer in expert_weights_buffers],
+                    flow.src_rank,
+                    expert_id=expert_id,
+                )
+    communicator.execute()
+
+
+def _execute_migration_batches(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_rank: int,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
+    communicator: EplbCommunicator,
+    layer_idx: int,
+) -> None:
+    """Execute all contention-aware migration batches for one layer."""
+    with torch.profiler.record_function("eplb: schedule migration batches"):
+        batches = schedule_migration_batches(
+            num_local_experts, old_indices, new_indices
+        )
+    base = ep_rank * num_local_experts
+    old_local = old_indices[base : base + num_local_experts]
+    new_local = new_indices[base : base + num_local_experts]
+    old_rows: dict[int, int] = {}
+    new_rows: dict[int, int] = {}
+    for row, expert_id in enumerate(old_local):
+        if expert_id != -1:
+            old_rows.setdefault(int(expert_id), row)
+    for row, expert_id in enumerate(new_local):
+        if expert_id != -1:
+            new_rows.setdefault(int(expert_id), row)
+    for batch in batches:
+        _execute_migration_batch(
+            batch=batch,
+            old_indices=old_indices,
+            old_rows=old_rows,
+            new_rows=new_rows,
+            ep_rank=ep_rank,
+            expert_weights=expert_weights,
+            expert_weights_buffers=expert_weights_buffers,
+            communicator=communicator,
+            layer_idx=layer_idx,
+        )
+
+
+def _get_migration_row(
+    rows: dict[int, int],
+    expert_id: int,
+    flow: MigrationFlow,
+    ep_rank: int,
+    mapping_name: str,
+) -> int:
+    row = rows.get(expert_id)
+    if row is not None:
+        return row
+
+    message = (
+        f"Expert {expert_id} is missing from the {mapping_name} "
+        f"mapping on rank {ep_rank} for migration "
+        f"{flow.src_rank} -> {flow.dst_rank}"
+    )
+    logger.error(message)
+    raise RuntimeError(message)
+
+
 def move_to_buffer(
     num_local_experts: int,
     old_indices: np.ndarray,
@@ -180,6 +281,7 @@ def move_to_buffer(
     ep_rank: int,
     communicator: EplbCommunicator,
     layer_idx: int = 0,
+    enable_migration_batching: bool = False,
 ) -> TransferMetadata:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -196,6 +298,8 @@ def move_to_buffer(
         ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers.
@@ -268,6 +372,28 @@ def move_to_buffer(
                     for w, b in zip(expert_weights, expert_weights_buffers):
                         b[dst].copy_(w[src_local], non_blocking=True)
 
+    transfer_metadata = TransferMetadata(
+        is_unchanged=is_unchanged,
+        is_received_locally=is_received_locally,
+        recv_primary_mask=recv_primary_mask,
+        recv_count=recv_count,
+        recv_expert_ids=recv_expert_ids,
+        recv_dst_rows=recv_dst_rows,
+    )
+
+    if enable_migration_batching:
+        _execute_migration_batches(
+            num_local_experts=num_local_experts,
+            old_indices=old_indices,
+            new_indices=new_indices,
+            ep_rank=ep_rank,
+            expert_weights=expert_weights,
+            expert_weights_buffers=expert_weights_buffers,
+            communicator=communicator,
+            layer_idx=layer_idx,
+        )
+        return transfer_metadata
+
     communicator.set_transfer_context(old_indices, layer_idx)
 
     # 2. Post sends
@@ -338,14 +464,7 @@ def move_to_buffer(
 
     # 4. Execute transfers and wait for completion.
     communicator.execute()
-    return TransferMetadata(
-        is_unchanged=is_unchanged,
-        is_received_locally=is_received_locally,
-        recv_primary_mask=recv_primary_mask,
-        recv_count=recv_count,
-        recv_expert_ids=recv_expert_ids,
-        recv_dst_rows=recv_dst_rows,
-    )
+    return transfer_metadata
 
 
 def move_from_buffer(
@@ -436,6 +555,7 @@ def transfer_layer(
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
+    enable_migration_batching: bool = False,
 ) -> TransferMetadata:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -458,6 +578,8 @@ def transfer_layer(
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers,
@@ -506,6 +628,7 @@ def transfer_layer(
         ep_rank=ep_group.rank(),
         communicator=communicator,
         layer_idx=layer_idx,
+        enable_migration_batching=enable_migration_batching,
     )
 
 
@@ -518,6 +641,7 @@ def rearrange_expert_weights_inplace(
     communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
+    enable_migration_batching: bool = False,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -540,6 +664,8 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -608,6 +734,7 @@ def rearrange_expert_weights_inplace(
             ep_rank=ep_rank,
             communicator=communicator,
             layer_idx=layer_idx,
+            enable_migration_batching=enable_migration_batching,
         )
 
         move_from_buffer(
