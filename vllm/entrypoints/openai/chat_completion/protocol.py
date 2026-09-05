@@ -708,7 +708,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
 
         prompt_logprobs = self.prompt_logprobs
-        if prompt_logprobs is None and self.echo:
+        if prompt_logprobs is None and self.echo and self.logprobs:
             prompt_logprobs = self.top_logprobs
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -833,19 +833,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter=field_name,
                     value=field_value,
                 )
-        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
-                raise VLLMValidationError(
-                    "`prompt_logprobs` are not available when `stream=True`.",
-                    parameter="prompt_logprobs",
-                )
-
-            if prompt_logprobs < 0 and prompt_logprobs != -1:
-                raise VLLMValidationError(
-                    "`prompt_logprobs` must be a positive value or -1.",
-                    parameter="prompt_logprobs",
-                    value=prompt_logprobs,
-                )
+        if (
+            (prompt_logprobs := data.get("prompt_logprobs")) is not None
+            and prompt_logprobs < 0
+            and prompt_logprobs != -1
+        ):
+            raise VLLMValidationError(
+                "`prompt_logprobs` must be a positive value or -1.",
+                parameter="prompt_logprobs",
+                value=prompt_logprobs,
+            )
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
                 raise VLLMValidationError(
@@ -861,6 +858,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
 
         return data
+
+    @model_validator(mode="after")
+    def _check_prompt_logprobs_stream(self) -> "ChatCompletionRequest":
+        """Reject `prompt_logprobs` under `stream=True`.
+
+        Runs "after" typed validation (not alongside the raw-dict checks in
+        check_logprobs) so `self.stream` is a real coerced bool. A raw,
+        not-yet-coerced value like `stream="false"` is truthy in a "before"
+        validator even though it resolves to False, which would wrongly
+        reject a valid `prompt_logprobs=0` request.
+        """
+        if self.prompt_logprobs is not None and self.stream:
+            raise VLLMValidationError(
+                "`prompt_logprobs` are not available when `stream=True`.",
+                parameter="prompt_logprobs",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod

@@ -522,19 +522,16 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter=field_name,
                     value=field_value,
                 )
-        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
-                raise VLLMValidationError(
-                    "`prompt_logprobs` are not available when `stream=True`.",
-                    parameter="prompt_logprobs",
-                )
-
-            if prompt_logprobs < 0 and prompt_logprobs != -1:
-                raise VLLMValidationError(
-                    "`prompt_logprobs` must be a positive value or -1.",
-                    parameter="prompt_logprobs",
-                    value=prompt_logprobs,
-                )
+        if (
+            (prompt_logprobs := data.get("prompt_logprobs")) is not None
+            and prompt_logprobs < 0
+            and prompt_logprobs != -1
+        ):
+            raise VLLMValidationError(
+                "`prompt_logprobs` must be a positive value or -1.",
+                parameter="prompt_logprobs",
+                value=prompt_logprobs,
+            )
         if (
             (logprobs := data.get("logprobs")) is not None
             and logprobs < 0
@@ -547,6 +544,23 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         return data
+
+    @model_validator(mode="after")
+    def _check_prompt_logprobs_stream(self) -> "CompletionRequest":
+        """Reject `prompt_logprobs` under `stream=True`.
+
+        Runs "after" typed validation (not alongside the raw-dict checks in
+        check_logprobs) so `self.stream` is a real coerced bool. A raw,
+        not-yet-coerced value like `stream="false"` is truthy in a "before"
+        validator even though it resolves to False, which would wrongly
+        reject a valid `prompt_logprobs=0` request.
+        """
+        if self.prompt_logprobs is not None and self.stream:
+            raise VLLMValidationError(
+                "`prompt_logprobs` are not available when `stream=True`.",
+                parameter="prompt_logprobs",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod

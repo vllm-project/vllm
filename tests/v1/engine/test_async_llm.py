@@ -497,6 +497,34 @@ async def test_dp_rank_argument():
 
 
 @pytest.mark.asyncio(scope="module")
+async def test_kv_sharing_fast_prefill_rejects_prompt_logprobs_zero():
+    """prompt_logprobs=0 is a meaningful, explicit request ("return the
+    prompt token's own logprob"), not "unset" -- it must be rejected by the
+    kv_sharing_fast_prefill admission-time guard just like any other
+    prompt_logprobs value, before any GPU work begins.
+    """
+    engine_args = AsyncEngineArgs(
+        model=TEXT_ENGINE_ARGS.model,
+        enforce_eager=True,
+        kv_sharing_fast_prefill=True,
+    )
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(prompt_logprobs=0, max_tokens=5)
+
+        with pytest.raises(VLLMValidationError, match="kv-sharing-fast-prefill"):
+            async for _ in engine.generate(
+                request_id="request-kv-sharing-prompt-logprobs-zero",
+                prompt=TEXT_PROMPT,
+                sampling_params=sampling_params,
+            ):
+                pass
+
+
+@pytest.mark.asyncio(scope="module")
 async def test_header_dp_rank_argument():
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
