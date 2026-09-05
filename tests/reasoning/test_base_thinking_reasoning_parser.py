@@ -415,6 +415,23 @@ class TestBaseThinkingReasoningParserEdgeCases:
         assert reasoning == "First"
         assert content == "Middle</test:think>Last"
 
+    def test_multiple_end_tokens_streaming(self, test_tokenizer):
+        """A think token after the block closed is content, not a delimiter."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+
+        deltas = [
+            "<test:think>",
+            "First",
+            "</test:think>",
+            "Middle",
+            "</test:think>",
+            "Last",
+        ]
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
+
+        assert reasoning == "First"
+        assert content == "Middle</test:think>Last"
+
     def test_nested_tokens(self, test_tokenizer):
         """Test behavior with nested-like token patterns."""
         parser = TestThinkingReasoningParser(test_tokenizer)

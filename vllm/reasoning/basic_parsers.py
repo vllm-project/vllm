@@ -109,10 +109,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         """
-        # Skip single special tokens
+        # Skip single special tokens, but only while they still delimit
+        # reasoning; afterwards they are content.
         if len(delta_token_ids) == 1 and (
             delta_token_ids[0] in [self.start_token_id, self.end_token_id]
         ):
+            if self.end_token_id in previous_token_ids:
+                return DeltaMessage(content=delta_text)
             return None
 
         # Check if start token is present in previous or delta.
