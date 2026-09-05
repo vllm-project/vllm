@@ -227,7 +227,193 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
+class TestXPUFp8GEMMRSModel(_BaseScaledMMModel):
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the scaled_mm + reduce scatter in the FX graph
+
+        """
+        fp8_input = input.to(FP8_DTYPE)
+        scale_a = torch.ones(input.shape[0], 1, dtype=torch.float32)
+        scaled_mm = torch.ops._xpu_C.fp8_gemm(
+            fp8_input, self.weight, self.dtype, scale_a, self.scale_b, None
+        )
+        reduce_scatter = tensor_model_parallel_reduce_scatter(scaled_mm, dim=0)
+        return reduce_scatter
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.reduce_scatter.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.fused_xpu_fp8_matmul_reduce_scatter.default]
+
+
+class TestAGXPUFp8GEMMModel(_BaseScaledMMModel):
+    """XPU scaled_mm/xpu.py W8A8 all_gather(fp8, scale) + fp8_gemm."""
+
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the all gather + scaled_mm in the FX graph
+        """
+        # Reshape input
+        fp8_input = input.to(FP8_DTYPE)
+        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+
+        scale_a = torch.ones(all_gather.shape[0], 1, dtype=torch.float32)
+        fp8_gemm = torch.ops._xpu_C.fp8_gemm(
+            all_gather, self.weight, self.dtype, scale_a, self.scale_b, None
+        )
+        return fp8_gemm
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.fused_all_gather_xpu_fp8_matmul.default]
+
+
+class TestAGXPUBlockFp8GEMMModel(torch.nn.Module):
+    """XPU BlockScaledMMLinearKernel.xpu.py all_gather(quant, scale) + fp8_gemm.
+
+    Block FP8 activation quant is always dynamic per-token-group (group
+    size 128), so both the fp8 activation and its block-scale are produced
+    locally per TP shard and must be all-gathered together before the GEMM.
+    """
+
+    GROUP_SIZE = 128
+
+    def __init__(self, hidden_size=128, dtype=torch.bfloat16):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.dtype = dtype
+        n_blocks = -(-hidden_size // self.GROUP_SIZE)
+        k_blocks = -(-hidden_size // self.GROUP_SIZE)
+        # weight is kept as [N, K] (not pre-transposed), unlike the static
+        # per-tensor XPU kernel.
+        self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        # weight's block-scale, stored as [n_blocks, k_blocks] view.
+        self.weight_scale = torch.ones(n_blocks, k_blocks, dtype=torch.float32)
+
+    def forward(self, input: torch.Tensor):
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            per_token_group_quant_fp8,
+        )
+
+        q_input, input_scale = per_token_group_quant_fp8(
+            input, group_size=self.GROUP_SIZE, dtype=FP8_DTYPE
+        )
+        all_gather_q = tensor_model_parallel_all_gather(q_input, dim=0)
+        all_gather_scale = tensor_model_parallel_all_gather(input_scale, dim=0)
+
+        fp8_gemm = torch.ops._xpu_C.fp8_gemm(
+            all_gather_q,
+            self.weight.t(),
+            self.dtype,
+            all_gather_scale,
+            self.weight_scale.t(),
+            torch.Tensor(),
+        )
+        return fp8_gemm
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.fused_all_gather_xpu_dynamic_scaled_fp8_matmul.default]
+
+
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model",
+    [
+        TestXPUFp8GEMMRSModel,
+        TestAGXPUFp8GEMMModel,
+    ],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dynamic", [True, False])
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["xpu"],
+    reason="XPU FP8 AsyncTP patterns only run on XPU",
+)
+def test_async_tp_pass_replace_xpu_fp8(
+    test_model,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    dynamic: bool,
+):
+    """Test XPU static/dynamic FP8 GEMM + collective fusion patterns."""
+    num_processes = 2
+    distributed_init_method = get_file_store_init_method()
+    torch.multiprocessing.spawn(
+        async_tp_pass_on_test_model,
+        args=(
+            num_processes,
+            test_model,
+            batch_size,
+            seq_len,
+            hidden_size,
+            dtype,
+            dynamic,
+            distributed_init_method,
+        ),
+        nprocs=num_processes,
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model",
+    [
+        TestAGXPUBlockFp8GEMMModel,
+    ],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+# block quant requires hidden_size to be a multiple of the 128 group size
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dynamic", [True, False])
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["xpu"],
+    reason="XPU block FP8 AsyncTP patterns only run on XPU",
+)
+@pytest.mark.skipif(
+    not hasattr(torch.ops._C, "per_token_group_fp8_quant"),
+    reason="Requires per_token_group_fp8_quant",
+)
+def test_async_tp_pass_replace_xpu_block_fp8(
+    test_model,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    dynamic: bool,
+):
+    """Test XPU block FP8 GEMM + all_gather collective fusion pattern."""
+    num_processes = 2
+    distributed_init_method = get_file_store_init_method()
+    torch.multiprocessing.spawn(
+        async_tp_pass_on_test_model,
+        args=(
+            num_processes,
+            test_model,
+            batch_size,
+            seq_len,
+            hidden_size,
+            dtype,
+            dynamic,
+            distributed_init_method,
+        ),
+        nprocs=num_processes,
+    )
+
+
 @pytest.mark.parametrize(
     "test_model",
     [
@@ -333,6 +519,7 @@ def async_tp_pass_on_test_model(
 
     # initialize distributed
     init_distributed_environment(
+        backend=current_platform.dist_backend,
         world_size=world_size,
         rank=local_rank,
         distributed_init_method=distributed_init_method,
