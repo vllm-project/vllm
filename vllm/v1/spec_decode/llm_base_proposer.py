@@ -106,6 +106,13 @@ class SpecDecodeBaseProposer:
         ):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
 
+        # Gemma4 MTP drafters have a decoder hidden_size smaller than the
+        # target model's backbone hidden_size (e.g. 1024 vs 5376) and consume
+        # the target's backbone-dim hidden states, so size the hidden-state
+        # buffer by the backbone hidden size.
+        if hasattr(draft_hf_config, "backbone_hidden_size"):
+            self.hidden_size = draft_hf_config.backbone_hidden_size
+
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),
         # but has an additional slot for the next_token_id (does not shift like EAGLE)
