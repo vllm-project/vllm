@@ -44,11 +44,12 @@ impl ToolParser for Glm47MoeToolParser {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{Value, json};
 
     use super::Glm47MoeToolParser;
-    use crate::tool::ToolParserTestExt as _;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::{ToolParser as _, ToolParserOutput, ToolParserTestExt as _};
 
     fn glm47_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -101,6 +102,64 @@ mod tests {
             serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({"x": 1, "y": 2})
         );
+    }
+
+    #[test]
+    fn glm47_preserves_text_between_tool_calls_across_chunk_boundaries() {
+        let input = format!(
+            "{}\nsome text\n{}\ndone",
+            glm47_tool_call("get_weather", &[("city", "Paris")]),
+            glm47_tool_call("add", &[("x", "1")]),
+        );
+        let parse = |chunks: &[&str]| -> ToolParserOutput {
+            let mut parser = Glm47MoeToolParser::new(&test_tools());
+            let mut output = ToolParserOutput::default();
+            for chunk in chunks {
+                parser.parse_into(chunk, &mut output).unwrap();
+            }
+            output.append(parser.finish().unwrap());
+            output
+        };
+
+        let expected = parse(&[&input]);
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"city\":\"Paris\"}",
+                        },
+                    ),
+                    Text(
+                        "\nsome text\n",
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1}",
+                        },
+                    ),
+                    Text(
+                        "\ndone",
+                    ),
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&expected);
+
+        for (split, _) in input.char_indices().skip(1) {
+            assert_eq!(parse(&[&input[..split], &input[split..]]), expected);
+        }
+        for chunk_chars in [1, 2, 3, 5, 7, 11] {
+            assert_eq!(parse(&split_by_chars(&input, chunk_chars)), expected);
+        }
     }
 
     #[test]
