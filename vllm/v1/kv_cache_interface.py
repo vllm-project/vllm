@@ -1323,9 +1323,14 @@ class KVCacheConfig:
     def needs_kv_cache_zeroing(self) -> bool:
         """Whether newly allocated KV cache blocks must be zeroed before use.
 
-        Required for Mamba layers, whose state is read before it is fully written
-        (#35219), and for mixed-precision caches, where a block reused across
-        groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
+        Required when Mamba layers are present. In a hybrid model they share a
+        block pool with attention, so a block holding fp32 Mamba state can be
+        reallocated to an attention layer with a smaller dtype, where the
+        leftover bytes decode as NaN/Inf (#35219). Only attention blocks are
+        zeroed; #35219 excludes Mamba blocks on the grounds that they overwrite
+        their state each step. Also required for mixed-precision
+        caches, where a block reused across groups can be reinterpreted under a
+        different precision and decode stale bytes to NaN/Inf. Uniform-precision
+        caches skip zeroing.
         """
         return self.has_mamba_layers or self.has_mixed_precision_kv_cache
