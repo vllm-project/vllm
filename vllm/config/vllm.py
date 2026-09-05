@@ -2150,6 +2150,8 @@ class VllmConfig:
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
                 ]
+                if max_cudagraph_capture_size not in cudagraph_capture_sizes:
+                    cudagraph_capture_sizes.append(max_cudagraph_capture_size)
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
