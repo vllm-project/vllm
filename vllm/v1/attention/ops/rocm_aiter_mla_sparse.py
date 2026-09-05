@@ -165,6 +165,22 @@ def _indexer_cache_layout(block_size: int, head_dim: int = 128) -> str:
     return "NORMAL" if block_size <= 1 else "SHUFFLE"
 
 
+def _indexer_read_layout(cache: torch.Tensor, block_size: int, head_dim: int) -> str:
+    """Layout to READ an indexer cache, distinguishing two writers.
+
+    DeepSeek-V4's indexer cache is a *strided slice* of a combined per-block
+    record (indexer + main-MLA share blocks), written PLAIN (un-shuffled) with
+    per-token ``[head_dim fp8 | 4-byte f32 scale]`` separated as
+    ``[bs*head_dim fp8 | bs*4 scale]`` per block. It is detected by a
+    non-contiguous block stride (``stride(0) != block_size*(head_dim+4)``) and
+    must be read with the NORMAL (pos-major) offset. The V3.2/GLM cache is
+    contiguous and written by the in-tree SHUFFLE writer.
+    """
+    if cache.stride(0) != block_size * (head_dim + 4):
+        return "NORMAL"
+    return _indexer_cache_layout(block_size, head_dim)
+
+
 @functools.lru_cache(maxsize=1)
 def _use_aiter_native_paged_mqa() -> bool:
     """Whether to use aiter's native (fast) paged-MQA-logits decode instead of
@@ -463,19 +479,37 @@ def cp_gather_indexer_k_quant_cache_triton(
     block_tile_size: int = 16,
     head_tile_size: int = 16,
 ):
+    """Gather the indexer's quantized K cache into contiguous fp8 + scale.
+
+    Reads the paged fp8_ds_mla indexer cache in place (auto-detecting its
+    layout), gathering per-token K values and scales for the prefill indexer.
+
+    Args:
+        k_cache: Paged indexer cache ``[num_blocks, block_size, head_dim + 4]``.
+        k_fp8: Output fp8 K buffer ``[num_tokens, head_dim]``.
+        k_fp8_scale: Output per-token scale buffer.
+        block_table: Per-request block table.
+        cu_seqlen: Cumulative sequence lengths.
+        token_to_seq: Token-to-sequence mapping.
+        block_tile_size: KV block tiling for the gather kernel.
+        head_tile_size: Head-dim tiling for the gather kernel.
+    """
     num_tokens = k_fp8.size(0)
     block_size = k_cache.size(1)
     block_table_stride = block_table.stride(0)
     head_dim = k_fp8.shape[-1]
     num_blocks = k_cache.shape[0]
-    # we assume the kv cache already been split to 2 portion
-    k_cache = k_cache.view(num_blocks, -1)
+    # Detect the read layout from the ORIGINAL cache stride (before reshape).
+    layout = _indexer_read_layout(k_cache, block_size, head_dim)
+    # reshape (not view) so V4's strided combined-cache slice yields a strided
+    # view rather than erroring; the gather kernel indexes block_id in int64 and
+    # honours kv_cache_stride, so the slice is read in place — no copy.
+    k_cache = k_cache.reshape(num_blocks, -1)
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     kernel_args = (
         k_cache_value,
         k_cache_scale,
@@ -715,6 +749,10 @@ def _fp8_paged_mqa_logits_kernel(
         mask=blk_mask,
         other=0,
     )  # [BLOCK_N] physical block indices
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record, so the per-block row stride is large enough that phys_blk * stride
+    # overflows int32; index in int64 to keep the strided read in bounds.
+    phys_blk = phys_blk.to(tl.int64)
 
     kv_mask = logi_offs < context_len
     # Within-block byte offset of (position within_blk, dim d). The persistent
@@ -727,9 +765,9 @@ def _fp8_paged_mqa_logits_kernel(
         pos_part = (within_blk // BLOCK_TILE_SIZE) * (BLOCK_TILE_SIZE * D_actual) + (
             within_blk % BLOCK_TILE_SIZE
         ) * HEAD_TILE_SIZE
-        dim_part = (d_offs // HEAD_TILE_SIZE) * (
-            BLOCK_TILE_SIZE * HEAD_TILE_SIZE
-        ) + (d_offs % HEAD_TILE_SIZE)
+        dim_part = (d_offs // HEAD_TILE_SIZE) * (BLOCK_TILE_SIZE * HEAD_TILE_SIZE) + (
+            d_offs % HEAD_TILE_SIZE
+        )
         data_off = pos_part[:, None] + dim_part[None, :]
     else:
         data_off = within_blk[:, None] * D_actual + d_offs[None, :]
@@ -790,15 +828,20 @@ def fp8_paged_mqa_logits_triton(
     batch_size, next_n, H, D = q.shape
     N = kv_cache.shape[0]
     block_size = kv_cache.shape[1]
+    # Read layout from the stride: V4's indexer cache is a strided slice of a
+    # combined per-block record (read NORMAL/plain); the V3.2/GLM cache is
+    # contiguous SHUFFLE. The kernel indexes by phys_blk in int64 and honours the
+    # row strides below, so the strided V4 slice is read in place — no copy.
+    layout = _indexer_read_layout(kv_cache, block_size, D)
 
     # Unpack kv_cache [N, block_size, 1, D+4] uint8 without copying. Within each
     # physical block the D*block_size fp8 bytes come first, followed by
     # 4*block_size bytes of per-position float32 scales. The fp8 region is either
     # plain pos-major (NORMAL) or 16x16 tiled (SHUFFLE) depending on the aiter
     # version that wrote it — see _indexer_cache_layout / _indexer_cache_uses_shuffle.
-    kv_2d = kv_cache.reshape(
-        N, (D + 4) * block_size
-    )  # contiguous; reshape never copies here
+    # reshape merges the per-block dims (internally contiguous even for V4's
+    # strided slice) into a view; the per-block row stride is preserved.
+    kv_2d = kv_cache.reshape(N, (D + 4) * block_size)
 
     kv_fp8 = kv_2d.view(fp8_dtype)  # [N, (D+4)*block_size] fp8, same storage
 
@@ -815,7 +858,6 @@ def fp8_paged_mqa_logits_triton(
     BLOCK_D = triton.next_power_of_2(D)
     BLOCK_N = max(128, triton.next_power_of_2(block_size))
     grid = (triton.cdiv(max_model_len, BLOCK_N), batch_size, next_n)
-    layout = _indexer_cache_layout(block_size, D)
     # HEAD_TILE_SIZE is in fp8 elements (writer uses 16 bytes // element_size).
     head_tile_size = 16 // kv_fp8.element_size()
 
@@ -881,12 +923,20 @@ def rocm_fp8_paged_mqa_logits(
     """
 
     block_size = kv_cache_fp8.shape[1]
-    # Prefer aiter's native deepgemm decode (gfx942/gfx950, API present); the
-    # in-tree Triton kernel is correct at all block sizes but slower. Both
-    # consume the SHUFFLE cache produced by the Triton writer.
-    if not _use_aiter_native_paged_mqa():
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record written in a plain (non-SHUFFLE) layout; aiter's native deepgemm
+    # decode misreads it, so always take the in-tree Triton kernel (which detects
+    # and reads that layout) for a non-contiguous cache. V3.2/GLM caches are
+    # contiguous and keep the native fast path.
+    force_triton_v4 = not kv_cache_fp8.is_contiguous()
+    # Otherwise prefer aiter's native deepgemm decode (gfx942/gfx950, API
+    # present); the in-tree Triton kernel is correct at all block sizes but
+    # slower. Both consume the SHUFFLE cache produced by the Triton writer.
+    if force_triton_v4 or not _use_aiter_native_paged_mqa():
         logger.info_once(
-            f"rocm_fp8_paged_mqa_logits: Triton fallback, block size {block_size}"
+            f"rocm_fp8_paged_mqa_logits: Triton fallback "
+            f"(non-contiguous V4 cache={force_triton_v4}), "
+            f"block size {block_size}"
         )
         return fp8_paged_mqa_logits_triton(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
