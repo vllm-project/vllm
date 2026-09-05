@@ -244,6 +244,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
         num_actual_tokens=16,
         num_reqs=4,
         max_query_len=4,
+        max_seq_len=68,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=torch.tensor([68, 68, 68, 0], dtype=torch.int32, device=device),
@@ -297,6 +298,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
         num_actual_tokens=16,
         num_reqs=3,
         max_query_len=7,
+        max_seq_len=11,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=torch.tensor([9, 11, 0], dtype=torch.int32, device=device),
@@ -428,6 +430,7 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
         num_actual_tokens=8,
         num_reqs=3,
         max_query_len=5,
+        max_seq_len=12,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=torch.tensor([7, 0, 12], dtype=torch.int32, device=device),
@@ -673,13 +676,24 @@ def test_qsa_decode_selection_correctness(
 
 
 @requires_qsa_kernels
-def test_qsa_prefill_selection_correctness() -> None:
+@pytest.mark.parametrize("seq_len_slack", [0, 1792])
+@pytest.mark.parametrize("force_chunk", [False, True])
+def test_qsa_prefill_selection_correctness(
+    monkeypatch: pytest.MonkeyPatch, seq_len_slack: int, force_chunk: bool
+) -> None:
+    # page_size=24 (does not divide the 64-aligned clipped width) and an
+    # oversized page table, so the clipped logits width comes from
+    # max_seq_len, not page geometry. seq_len_slack > 0 simulates the
+    # spec-decode case where the bound is an over-estimate. force_chunk
+    # drives the logits budget to one row per chunk.
+    if force_chunk:
+        monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "0")
     torch.manual_seed(2)
     query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    cache = torch.randn(160, 16, 1, head_dim, device="cuda", dtype=torch.bfloat16)
-    page_table = torch.randperm(160, device="cuda", dtype=torch.int32).reshape(2, 80)
+    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16)
+    page_table = torch.randperm(128, device="cuda", dtype=torch.int32).reshape(2, 64)
     token_to_req = torch.repeat_interleave(
         torch.arange(2, device="cuda", dtype=torch.int32),
         torch.tensor(query_lens, device="cuda"),
@@ -713,6 +727,7 @@ def test_qsa_prefill_selection_correctness() -> None:
         compress_ratio,
         max(query_lens),
         actual,
+        max_seq_len=sequence_lengths.max().item() + seq_len_slack,
     )
     expected = _qsa_select_paged_reference(
         q,
@@ -739,7 +754,10 @@ def test_qsa_block_expansion_correctness() -> None:
         sequence_lengths.index_select(0, token_to_req.long()) // 4,
     ).to(torch.int32)
 
-    actual = torch.empty((2, 11), device="cuda", dtype=torch.int32)
+    # Packed layout: one trailing column per row holds the valid-entry count
+    # (never a token index). Row 0: 1 visible block + 2 tail; row 1: 2 blocks
+    # + 3 tail.
+    actual = torch.empty((2, 12), device="cuda", dtype=torch.int32)
     qsa_indexer_ops.expand_qsa_block_indices(
         blocks,
         query_positions,
@@ -756,19 +774,35 @@ def test_qsa_block_expansion_correctness() -> None:
         token_topk=8,
     )
 
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual[:, :11], expected)
+    assert actual[:, 11].tolist() == [6, 11]
 
 
 @requires_qsa_kernels
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
+    (
+        "num_rows",
+        "num_query_heads",
+        "num_kv_heads",
+        "page_size",
+        "use_prefill_config",
+        "num_requests",
+    ),
     [
-        # Kernel-visible pages with --block-size 256 and hybrid-cache alignment.
-        pytest.param(1, 24, 2, 1792, id="tp1_split64"),
-        pytest.param(16, 12, 1, 1792, id="tp2_split32"),
-        pytest.param(32, 6, 1, 1024, id="tp4_split8"),
-        pytest.param(257, 6, 1, 1024, id="tp4_split4"),
-        pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        # Production page sizes from hybrid-cache block alignment: 784/800
+        # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
+        # splits are per-rank TP1/TP2/TP4; the largest batch runs both
+        # use_prefill_config variants.
+        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -776,10 +810,11 @@ def test_qsa_sparse_paged_attention_correctness(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    use_prefill_config: bool,
+    num_requests: int,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
-    num_requests = 2
     num_selected_pages = 64
     # Keep the newest page outside the synthetic top-k as causal headroom.
     num_pages_per_request = num_selected_pages + 1
@@ -807,13 +842,22 @@ def test_qsa_sparse_paged_attention_correctness(
     rows_per_request = math.ceil(num_rows / num_requests)
     row_indices = torch.arange(num_rows, device="cuda", dtype=torch.int32)
     token_to_req = row_indices // rows_per_request
-    request_row_counts = torch.tensor(
-        [rows_per_request, num_rows - rows_per_request],
+    # Uniform row split; the last request takes the remainder (possibly 0).
+    request_row_counts = torch.full(
+        (num_requests,), rows_per_request, device="cuda", dtype=torch.int32
+    )
+    request_row_counts[-1] = num_rows - rows_per_request * (num_requests - 1)
+
+    # Mix context lengths: every third request is short-context, attending
+    # to only its first few pages; the rest fill their cache.
+    context_lengths = torch.full(
+        (num_requests,),
+        num_pages_per_request * page_size - 1,
         device="cuda",
         dtype=torch.int32,
     )
-
-    context_length = num_pages_per_request * page_size - 1
+    short_requests = torch.arange(num_requests, device="cuda") % 3 == 1
+    context_lengths[short_requests] = request_row_counts[short_requests] + 8
     block_topk = indexer_budget // indexer_compress_ratio
     compressed_blocks_per_page = page_size // indexer_compress_ratio
     selection = torch.arange(block_topk, device="cuda")
@@ -827,17 +871,19 @@ def test_qsa_sparse_paged_attention_correctness(
     )
     rows_within_request = row_indices % rows_per_request
     query_positions = (
-        context_length - request_row_counts[token_to_req.long()] + rows_within_request
+        context_lengths[token_to_req.long()]
+        - request_row_counts[token_to_req.long()]
+        + rows_within_request
     ).to(torch.int64)
-    sequence_lengths = torch.full(
-        (num_requests,), context_length, device="cuda", dtype=torch.int32
-    )
+    sequence_lengths = context_lengths
     visible_blocks = torch.minimum(
         (query_positions + 1) // indexer_compress_ratio,
         sequence_lengths.index_select(0, token_to_req.long()) // indexer_compress_ratio,
     ).to(torch.int32)
+    # +1: the packed trailing column holds each row's valid-entry count
+    # (never a token index); the reference reads only the selection region.
     logical_indices = torch.empty(
-        (num_rows, selection_width), device="cuda", dtype=torch.int32
+        (num_rows, selection_width + 1), device="cuda", dtype=torch.int32
     )
     qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
@@ -847,7 +893,7 @@ def test_qsa_sparse_paged_attention_correctness(
         indexer_budget,
         logical_indices,
     )
-    assert logical_indices.shape == (num_rows, selection_width)
+    assert logical_indices.shape == (num_rows, selection_width + 1)
     scale = q.shape[-1] ** -0.5
 
     actual = qsa_ops.qsa_sparse_paged_attention(
@@ -857,12 +903,13 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_indices,
         block_table,
         token_to_req,
+        use_prefill_config=use_prefill_config,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
         k_cache,
         v_cache,
-        logical_indices,
+        logical_indices[:, :selection_width],
         block_table,
         token_to_req,
         scale,
@@ -931,9 +978,12 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         compress_ratio,
         query_lens[-1],
         block_indices[prefill_slice],
+        max_seq_len=sequence_lengths.max().item(),
     )
+    # +1: the packed trailing count column (never a token index; excluded
+    # from the comparison).
     actual = torch.empty(
-        (rows, token_topk + compress_ratio - 1), device="cuda", dtype=torch.int32
+        (rows, token_topk + compress_ratio), device="cuda", dtype=torch.int32
     )
     qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
@@ -961,7 +1011,10 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         token_topk,
     )
 
-    torch.testing.assert_close(actual.sort().values, expected.sort().values)
+    torch.testing.assert_close(
+        actual[:, : token_topk + compress_ratio - 1].sort().values,
+        expected.sort().values,
+    )
 
 
 @requires_qsa_kernels
@@ -983,8 +1036,9 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
         compress_ratio=4,
         max_query_len=2,
         block_indices=block_indices,
+        max_seq_len=64,  # clamps to the page-table capacity
     )
-    selected = torch.empty((2, 2051), device="cuda", dtype=torch.int32)
+    selected = torch.empty((2, 2052), device="cuda", dtype=torch.int32)
     qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
         query_positions,
@@ -996,8 +1050,10 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
 
     assert selected[0, :2].tolist() == [0, 1]
     assert selected[1, :3].tolist() == [0, 1, 2]
-    assert torch.all(selected[0, 2:] == -1)
-    assert torch.all(selected[1, 3:] == -1)
+    assert torch.all(selected[0, 2:2051] == -1)
+    assert torch.all(selected[1, 3:2051] == -1)
+    # The packed trailing column holds each row's valid-entry count.
+    assert selected[:, 2051].tolist() == [2, 3]
 
 
 @requires_qsa_kernels
