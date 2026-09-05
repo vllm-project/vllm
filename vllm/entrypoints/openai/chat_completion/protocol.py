@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
@@ -671,6 +672,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         self,
         max_tokens: int,
         default_sampling_params: dict,
+        reasoning_effort_budgets: Mapping[str, int] | None = None,
     ) -> SamplingParams:
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -718,6 +720,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.ec_transfer_params:
             # Pass in ec_transfer_params via extra_args
             extra_args["ec_transfer_params"] = self.ec_transfer_params
+        thinking_token_budget = self.thinking_token_budget
+        if thinking_token_budget is None and self.reasoning_effort is not None:
+            thinking_token_budget = (reasoning_effort_budgets or {}).get(
+                self.reasoning_effort
+            )
+
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -750,7 +758,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
-            thinking_token_budget=self.thinking_token_budget,
+            thinking_token_budget=thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
