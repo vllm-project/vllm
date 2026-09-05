@@ -9,6 +9,7 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    build_harmony_preamble,
     create_tool_definition,
     extract_function_from_recipient,
     get_system_message,
@@ -27,6 +28,21 @@ _TOOL_PARAMETERS = {
     "required": ["status"],
     "additionalProperties": False,
 }
+
+
+def test_build_harmony_preamble_can_force_developer_instructions(monkeypatch):
+    monkeypatch.setenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "1")
+    instructions = "ZXQ_7429_OK"
+
+    messages = build_harmony_preamble(
+        instructions=instructions,
+        force_developer_instructions=True,
+    )
+
+    assert messages[0].author.role == Role.SYSTEM
+    assert instructions not in (messages[0].content[0].model_identity or "")
+    assert messages[1].author.role == Role.DEVELOPER
+    assert messages[1].content[0].instructions == instructions
 
 
 class TestCreateToolDefinition:
