@@ -350,6 +350,7 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params.validate().map_err(|e| Status::invalid_argument(e.to_string()))?;
     Ok(Some(params))
 }
 
@@ -635,6 +636,22 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        // Empty grammar via gRPC must be rejected at request conversion, not
+        // forwarded to EngineCore where an empty constraint aborts the engine.
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
