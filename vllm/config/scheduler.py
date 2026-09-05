@@ -20,6 +20,7 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+PreemptionVictimPolicy = Literal["fcfs", "lcf"]
 
 
 @config
@@ -134,6 +135,18 @@ class SchedulerConfig:
       of arrival.
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties)."""
+
+    preemption_victim: PreemptionVictimPolicy = "fcfs"
+    """The preemption-victim selection policy to use when a running request
+    must be evicted to free KV cache. This is independent of `policy`, which
+    controls admission order.
+
+    - "fcfs" (default) preserves today's behavior: with `policy="priority"`
+      the highest-priority-value (lowest-priority) request is evicted, and
+      otherwise the last-admitted running request is popped.
+    - "lcf" (least-computed-first) evicts the running request with the
+      smallest `num_computed_tokens`, minimizing wasted recompute since
+      recompute-preemption discards a preempted request's computed tokens."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
