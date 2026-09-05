@@ -46,6 +46,60 @@ _T = TypeVar("_T")
 CACHE = None
 
 
+def compile_with_timeout(
+    fn: Callable[..., _T],
+    *args,
+    spec: str = "",
+    spec_type: str = "Grammar",
+    timeout: int = 0,
+    **kwargs,
+) -> _T:
+    """Run a grammar/regex compilation callable with a timeout.
+
+    Prevents worker stalls where complex grammars, nested schemas, or
+    adversarial patterns cause exponential DFA state-space explosion,
+    hanging the inference worker indefinitely.
+
+    Args:
+        fn: Callable that performs the compilation.
+        *args: Positional arguments to pass to *fn*.
+        spec: The specification string (regex, schema, or grammar), included
+            in timeout error messages.
+        spec_type: Human-readable type of grammar being compiled (e.g. 'Regex',
+            'JSON schema', 'Grammar', 'Structural tag').
+        timeout: Timeout in seconds. If <= 0, timeout is disabled.
+        **kwargs: Keyword arguments to pass to *fn*.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    if timeout <= 0:
+        return fn(*args, **kwargs)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, *args, **kwargs)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        if spec_type == "Regex":
+            cause = "nested quantifiers"
+            preview = f" Pattern: {spec[:200]}" if spec else ""
+        else:
+            cause = "nested oneOf/anyOf"
+            preview = f" Spec: {spec[:200]}" if spec else ""
+        raise ValueError(
+            f"{spec_type} compilation timed out after {timeout}s. "
+            f"The pattern or schema may be too complex or contain constructs "
+            f"that cause exponential state-space explosion (e.g. "
+            f"{cause}).{preview}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
+
+
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
@@ -62,26 +116,50 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     Raises:
         ValueError: If compilation exceeds the configured timeout.
     """
-    timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
-    if timeout <= 0:
-        return fn(pattern)
+    return compile_with_timeout(
+        fn,
+        pattern,
+        spec=pattern,
+        spec_type="Regex",
+        timeout=envs.VLLM_REGEX_COMPILATION_TIMEOUT_S,
+    )
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn, pattern)
-    try:
-        result = future.result(timeout=timeout)
-    except TimeoutError:
-        future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise ValueError(
-            f"Regex compilation timed out after {timeout}s. "
-            "The pattern may be too complex or contain constructs that "
-            "cause exponential state-space explosion (e.g. nested "
-            f"quantifiers). Pattern: {pattern[:200]}"
-        ) from None
-    else:
-        executor.shutdown(wait=False)
-        return result
+
+def compile_grammar_with_timeout(
+    fn: Callable[..., _T],
+    *args,
+    grammar_spec: str = "",
+    grammar_type: str = "Grammar",
+    timeout: int | None = None,
+    **kwargs,
+) -> _T:
+    """Run a grammar/schema compilation callable with a timeout.
+
+    Prevents worker stalls on deeply nested or pathological schemas (e.g.
+    exponential oneOf branching).
+
+    Args:
+        fn: Callable performing the compilation.
+        *args: Positional arguments to pass to *fn*.
+        grammar_spec: The raw spec string for preview in error messages.
+        grammar_type: Human-readable type (e.g. 'JSON schema', 'Grammar').
+        timeout: Timeout in seconds (defaults to
+            VLLM_GRAMMAR_COMPILATION_TIMEOUT_S).
+        **kwargs: Keyword arguments to pass to *fn*.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    if timeout is None:
+        timeout = envs.VLLM_GRAMMAR_COMPILATION_TIMEOUT_S
+    return compile_with_timeout(
+        fn,
+        *args,
+        spec=grammar_spec,
+        spec_type=grammar_type,
+        timeout=timeout,
+        **kwargs,
+    )
 
 
 def apply_grammar_bitmask(
