@@ -748,6 +748,7 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+    blocked_waiting_timeout_s: float = SchedulerConfig.blocked_waiting_timeout_s
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1540,6 +1541,10 @@ class EngineArgs:
         scheduler_group = parser.add_argument_group(
             title="SchedulerConfig",
             description=SchedulerConfig.__doc__,
+        )
+        scheduler_group.add_argument(
+            "--blocked-waiting-timeout-s",
+            **scheduler_kwargs["blocked_waiting_timeout_s"],
         )
         scheduler_group.add_argument(
             "--max-num-batched-tokens",
@@ -2378,6 +2383,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            blocked_waiting_timeout_s=self.blocked_waiting_timeout_s,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

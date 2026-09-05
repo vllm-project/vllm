@@ -187,6 +187,12 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    blocked_waiting_timeout_s: float = Field(default=60.0, ge=0.0)
+    """Timeout in seconds for requests stuck in blocked-waiting statuses (e.g.,
+    WAITING_FOR_REMOTE_KVS). If the condition isn't met within this time,
+    the request is aborted. 0.0 means 0s timeout. This operates as a safety
+    net to prevent scheduler deadlocks. Excludes WAITING_FOR_STREAMING_REQ."""
+
     @staticmethod
     def default_factory(**kwargs):
         """
