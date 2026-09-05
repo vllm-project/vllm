@@ -74,7 +74,64 @@ def ernie45_vl_chat_template(content: str) -> str:
     )
 
 
+def cosmos3_edge_chat_template(content: str) -> str:
+    return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+
+def cosmos3_edge_dummy_hf_overrides(hf_config):
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Cosmos3EdgeForConditionalGeneration",
+    )
+    if text_config := getattr(hf_config, "text_config", None):
+        text_config.update(
+            {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "*-",
+            }
+        )
+    return hf_config
+
+
+def _get_encoder_cudagraph_hit_miss_counts(worker):
+    model_runner = worker.model_runner
+    if hasattr(model_runner, "model_state"):
+        manager = model_runner.model_state.encoder_runner.cudagraph_manager
+    else:
+        manager = model_runner.encoder_cudagraph_manager
+    assert manager is not None
+    return manager.graph_hits, manager.graph_misses
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "cosmos3_edge": VitCudagraphTestConfig(
+        model="nvidia/Cosmos3-Edge",
+        image_prompt=cosmos3_edge_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>\nWhat is in this image?"
+        ),
+        video_prompt=cosmos3_edge_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>\n"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        compilation_config_overrides={
+            # The two fixtures produce 1,107 and 2,035 merged output tokens.
+            # Cosmos requires exact graph-budget matches and one item/replay.
+            "encoder_cudagraph_token_budgets": [1107, 2035],
+            "encoder_cudagraph_max_vision_items_per_batch": 1,
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": cosmos3_edge_dummy_hf_overrides,
+        },
+        marks=[
+            pytest.mark.core_model,
+            pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Cosmos3-Edge encoder CUDA graphs are only validated on CUDA",
+            ),
+        ],
+    ),
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
         modalities=["image"],
@@ -337,7 +394,7 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
 )
-def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
+def test_vit_cudagraph_image(model_id, vllm_runner, image_assets, monkeypatch):
     config = MODEL_CONFIGS[model_id]
 
     if config.skip:
@@ -353,6 +410,11 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         }
     )
     images = [[asset.pil_image] for asset in image_assets]
+
+    if model_id == "cosmos3_edge":
+        # The callable used to read worker-local graph counters below must cross
+        # the EngineCore process boundary under default V1 multiprocessing.
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     with vllm_runner(
         config.model,
@@ -377,6 +439,12 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
         # Ensure the output is a string
         assert isinstance(output_text, str)
+
+        if model_id == "cosmos3_edge":
+            hit_miss_counts = vllm_model.collective_rpc(
+                _get_encoder_cudagraph_hit_miss_counts
+            )
+            assert hit_miss_counts == [(2, 0)]
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
