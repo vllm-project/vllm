@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
+from unittest.mock import patch
 
 import pytest
 from pydantic import Field
@@ -924,3 +925,229 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+def _warning_text(mock_warning) -> str:
+    parts: list[str] = []
+    for args, _kwargs in mock_warning.call_args_list:
+        if not args:
+            continue
+        try:
+            parts.append(args[0] % args[1:])
+        except TypeError:
+            parts.append(" ".join(str(arg) for arg in args))
+    return "\n".join(parts)
+
+
+class TestGetBatchDefaults:
+    """EngineArgs.get_batch_defaults() memory-probe fallbacks."""
+
+    def _force_gpu_ladder(self, monkeypatch):
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+        monkeypatch.setattr(current_platform, "is_tpu", lambda: False)
+
+    def _raise_platform_query(self, monkeypatch):
+        from vllm.platforms import current_platform
+
+        def _raise(*_args, **_kwargs):
+            raise RuntimeError("Insufficient Permissions")
+
+        monkeypatch.setattr(current_platform, "get_device_total_memory", _raise)
+        monkeypatch.setattr(current_platform, "get_device_name", _raise)
+
+    def test_platform_query_failure_uses_torch_memory(self, monkeypatch):
+        """NVML/platform failure should use torch visible memory."""
+        import torch
+
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        self._raise_platform_query(monkeypatch)
+
+        class _FakeProps:
+            total_memory = 80 * GiB_bytes
+            name = "NVIDIA H200"
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_properties", lambda device=0: _FakeProps()
+        )
+
+        with patch("vllm.engine.arg_utils.logger.warning") as mock_warning:
+            batched, seqs = EngineArgs.get_batch_defaults(1)
+
+        text = _warning_text(mock_warning)
+        assert "Failed to query device memory/name" in text
+        assert "Insufficient Permissions" in text
+        assert "conservative" in text
+        assert batched[UsageContext.OPENAI_API_SERVER] == 8192
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 1024
+        assert batched[UsageContext.LLM_CLASS] == 16384
+        assert seqs[UsageContext.LLM_CLASS] == 1024
+
+    def test_h200_mig_35gb_uses_high_bw_defaults(self, monkeypatch):
+        """H200 2g.35gb is below 70 GiB but still a Hopper slice."""
+        import torch
+
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        self._raise_platform_query(monkeypatch)
+
+        class _FakeProps:
+            total_memory = 35 * GiB_bytes
+            name = "NVIDIA H200 MIG 2g.35gb"
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_properties", lambda device=0: _FakeProps()
+        )
+
+        with patch("vllm.engine.arg_utils.logger.warning") as mock_warning:
+            batched, seqs = EngineArgs.get_batch_defaults(1)
+
+        text = _warning_text(mock_warning)
+        assert "Failed to query device memory/name" in text
+        assert batched[UsageContext.OPENAI_API_SERVER] == 8192
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 1024
+        assert batched[UsageContext.LLM_CLASS] == 16384
+        assert seqs[UsageContext.LLM_CLASS] == 1024
+
+    def test_h200_mig_35gb_high_bw_when_nvml_reports_slice(self, monkeypatch):
+        """Correct 35 GiB NVML reading must not keep the small-GPU ladder."""
+        from vllm.platforms import current_platform
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_total_memory",
+            lambda *_args, **_kwargs: 35 * GiB_bytes,
+        )
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_name",
+            lambda *_args, **_kwargs: "NVIDIA H200 MIG 2g.35gb",
+        )
+
+        with patch("vllm.engine.arg_utils.logger.warning") as mock_warning:
+            batched, seqs = EngineArgs.get_batch_defaults(1)
+
+        mock_warning.assert_not_called()
+        assert batched[UsageContext.OPENAI_API_SERVER] == 8192
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 1024
+
+    def test_small_mig_profile_stays_on_small_ladder(self, monkeypatch):
+        """1g.18gb is too small for the Hopper/Blackwell token budget."""
+        from vllm.platforms import current_platform
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_total_memory",
+            lambda *_args, **_kwargs: 18 * GiB_bytes,
+        )
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_name",
+            lambda *_args, **_kwargs: "NVIDIA H200 MIG 1g.18gb",
+        )
+
+        batched, seqs = EngineArgs.get_batch_defaults(1)
+        assert batched[UsageContext.OPENAI_API_SERVER] == 2048
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 256
+
+    def test_a100_mig_stays_on_small_ladder(self, monkeypatch):
+        """A100 large-batch regression (#17885) still applies to MIG slices."""
+        from vllm.platforms import current_platform
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_total_memory",
+            lambda *_args, **_kwargs: 40 * GiB_bytes,
+        )
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_name",
+            lambda *_args, **_kwargs: "NVIDIA A100-SXM4-80GB MIG 3g.40gb",
+        )
+
+        batched, seqs = EngineArgs.get_batch_defaults(1)
+        assert batched[UsageContext.OPENAI_API_SERVER] == 2048
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 256
+
+    def test_non_mig_35gb_stays_on_small_ladder(self, monkeypatch):
+        """A 35 GiB consumer GPU is not a Hopper/Blackwell MIG slice."""
+        from vllm.platforms import current_platform
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.utils.mem_constants import GiB_bytes
+
+        self._force_gpu_ladder(monkeypatch)
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_total_memory",
+            lambda *_args, **_kwargs: 35 * GiB_bytes,
+        )
+        monkeypatch.setattr(
+            current_platform,
+            "get_device_name",
+            lambda *_args, **_kwargs: "NVIDIA GeForce RTX 5090",
+        )
+
+        batched, seqs = EngineArgs.get_batch_defaults(1)
+        assert batched[UsageContext.OPENAI_API_SERVER] == 2048
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 256
+
+    def test_platform_and_torch_query_failure_uses_small_defaults(self, monkeypatch):
+        """Both probes failing must keep the smallest-GPU defaults."""
+        import torch
+
+        from vllm.usage.usage_lib import UsageContext
+
+        self._force_gpu_ladder(monkeypatch)
+        self._raise_platform_query(monkeypatch)
+
+        def _raise_torch(*_args, **_kwargs):
+            raise RuntimeError("CUDA is not available")
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_properties", _raise_torch)
+
+        with patch("vllm.engine.arg_utils.logger.warning") as mock_warning:
+            batched, seqs = EngineArgs.get_batch_defaults(1)
+
+        text = _warning_text(mock_warning)
+        assert "Failed to query device memory/name" in text
+        assert "Failed to fall back to torch.cuda" in text
+        assert batched[UsageContext.OPENAI_API_SERVER] == 2048
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 256
+        assert batched[UsageContext.LLM_CLASS] == 8192
+        assert seqs[UsageContext.LLM_CLASS] == 256
+
+    def test_platform_failure_without_cuda_uses_small_defaults(self, monkeypatch):
+        """Ray import-without-GPU must still resolve small-GPU defaults."""
+        import torch
+
+        from vllm.usage.usage_lib import UsageContext
+
+        self._force_gpu_ladder(monkeypatch)
+        self._raise_platform_query(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        with patch("vllm.engine.arg_utils.logger.warning") as mock_warning:
+            batched, seqs = EngineArgs.get_batch_defaults(1)
+
+        text = _warning_text(mock_warning)
+        assert "Failed to query device memory/name" in text
+        assert batched[UsageContext.OPENAI_API_SERVER] == 2048
+        assert seqs[UsageContext.OPENAI_API_SERVER] == 256
