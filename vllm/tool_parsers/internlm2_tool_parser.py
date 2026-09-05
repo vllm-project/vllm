@@ -213,7 +213,12 @@ class Internlm2ToolParser(ToolParser):
             text, action = text.split("<|action_start|><|plugin|>")
             action = action.split("<|action_end|>".strip())[0]
             action = action[action.find("{") :]
-            action_dict = json.loads(action)
+            try:
+                action_dict = json.loads(action)
+            except json.JSONDecodeError:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
             name, parameters = (
                 action_dict["name"],
                 json.dumps(
