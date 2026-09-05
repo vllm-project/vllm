@@ -140,7 +140,17 @@ def _get_backend_priorities(
             ]
             flashinfer_sparse = AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
             if head_size == 512:
-                sparse_tail.insert(0, flashinfer_sparse)
+                if kv_cache_dtype == "fp8_ds_mla":
+                    # NoPE-512 on the packed fp8_ds_mla format rides the
+                    # FlashMLA zero-padded 576/656B envelope (decode LSE for
+                    # DCP/MTP); order it ahead of the FlashInfer SM90
+                    # stopgap. Plain fp8 keeps FlashInfer -- no silent dtype
+                    # reinterpretation (see _canonicalize_sparse_mla_
+                    # kv_cache_dtype in mla_attention.py, which only promotes
+                    # fp8 -> fp8_ds_mla for FLASHMLA_SPARSE).
+                    sparse_tail.insert(2, flashinfer_sparse)
+                else:
+                    sparse_tail.insert(0, flashinfer_sparse)
             else:
                 sparse_tail.append(flashinfer_sparse)
             return [
