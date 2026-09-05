@@ -161,15 +161,17 @@ def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
 
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
-    """Chunk ends with partial hits on: block-aligned chunks, one extra stop
-    at the prompt's last hash boundary (registering the partial tail), then
-    the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
-    0 -> 8192 -> 9728 -> 9984 -> 10000."""
+    """Chunk ends with partial hits on: a stop at every crossed block
+    boundary (each materializes a mamba state slot; no spanning chunks), one
+    extra stop at the prompt's last hash boundary (registering the partial
+    tail), then the remaining tokens. block=512, hash=32, prompt=10000,
+    budget=8192: 0 -> 512 -> ... -> 9728 -> 9984 -> 10000."""
     block_size = 512
     scheduler_block_size = block_size * dcp_world_size
     hash_block_size = 32
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        mamba_state_block_size=block_size,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
@@ -183,10 +185,12 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
 
     req = make_request("0", [0] * 10000, hash_block_size, sha256)
     req.num_computed_tokens = 0
-    assert split(self=mock, request=req, num_new_tokens=8192) == 8192
-    req.num_computed_tokens = 8192
-    # Stop at the last block boundary (9728).
-    assert split(self=mock, request=req, num_new_tokens=1808) == 1536
+    # Stop at the next block boundary even from an aligned start (no
+    # spanning chunks: interior state slots must materialize).
+    assert split(self=mock, request=req, num_new_tokens=8192) == 512
+    req.num_computed_tokens = 9728 - 512
+    # Full-budget requests still advance exactly one block per step.
+    assert split(self=mock, request=req, num_new_tokens=10000) == 512
     req.num_computed_tokens = 9728
     # Extra stop at the prompt's last hash boundary (9984).
     assert split(self=mock, request=req, num_new_tokens=272) == 256
@@ -218,6 +222,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
     prompt_length = 30000
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        mamba_state_block_size=block_size,
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
@@ -255,6 +260,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
     prompt_length = 1300
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        mamba_state_block_size=block_size,
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(
             long_prefill_token_threshold=long_prefill_threshold

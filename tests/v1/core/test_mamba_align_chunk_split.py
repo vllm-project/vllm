@@ -89,6 +89,10 @@ def _split(
         use_eagle_block_drop = use_eagle
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
+        # Set by `Scheduler.__init__` from the mamba group's spec; the equal
+        # geometry of these tests keeps it identical to `cache_config`.
+        mamba_state_block_size=MAMBA_BLOCK_SIZE,
+        use_eagle=use_eagle,
         use_eagle_block_drop=use_eagle_block_drop,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -307,3 +311,215 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail boundary"
         )
+
+
+# Heterogeneous layouts: `cache_config.block_size` is the minimum over all
+# groups and can be finer than the mamba state grid (page-size matching, a
+# drafter/attention group with a smaller block, or an explicit --block-size;
+# see also #53142 for the worker-side sibling). Production geometry that
+# exposed this: draft attention block 816, mamba block 1648 — 816k equals
+# 1648m only at the LCM (84048), so chunk stops on the generic grid never
+# materialize a state and the mamba group publishes no prefix hashes.
+HETERO_ATTN_BLOCK_SIZE = 816
+HETERO_MAMBA_BLOCK_SIZE = 1648
+HETERO_SCHEDULER_BLOCK_SIZE = 84048  # lcm(816, 1648)
+HETERO_MAMBA_GROUP_ID = 1
+
+
+def _make_heterogeneous_kv_cache_manager() -> KVCacheManager:
+    config = KVCacheConfig(
+        num_blocks=10000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention_layer"],
+                FullAttentionSpec(
+                    block_size=HETERO_ATTN_BLOCK_SIZE,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=HETERO_MAMBA_BLOCK_SIZE,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=NUM_SPEC,
+                ),
+            ),
+        ],
+    )
+    return KVCacheManager(
+        config,
+        max_model_len=262144,
+        scheduler_block_size=HETERO_SCHEDULER_BLOCK_SIZE,
+        hash_block_size=ATTN_BLOCK_SIZE,
+        enable_caching=True,
+        use_eagle=True,
+    )
+
+
+def _hetero_split(request: Request, num_new_tokens: int) -> int:
+    """Real split on a heterogeneous-layout stub `self`.
+
+    `cache_config.block_size` is the group minimum (816); the mamba state
+    grid is 1648. `mamba_state_block_size` mirrors the attribute
+    `Scheduler.__init__` derives from the mamba group's spec.
+    """
+    stub = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=HETERO_ATTN_BLOCK_SIZE),
+        mamba_state_block_size=HETERO_MAMBA_BLOCK_SIZE,
+        use_eagle=True,
+        max_num_scheduled_tokens=16384,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        mamba_partial_cache_hit=False,
+        hash_block_size=ATTN_BLOCK_SIZE,
+        mamba_has_prefill_checkpoint_blocks=False,
+    )
+    return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+
+
+def test_heterogeneous_block_sizes_stop_chunks_on_the_mamba_grid() -> None:
+    """Chunk ends must follow MambaSpec.block_size, not cache_config.block_size."""
+    prompt_len = 4 * HETERO_MAMBA_BLOCK_SIZE + 70
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    pos, ends = 0, []
+    while pos < prompt_len:
+        request.num_computed_tokens = pos
+        num_new = _hetero_split(request, prompt_len - pos)
+        assert num_new > 0, f"no progress at {pos}"
+        pos += num_new
+        ends.append(pos)
+    for end in ends[:-1]:
+        assert end % HETERO_MAMBA_BLOCK_SIZE == 0, (
+            f"intermediate chunk end {end} is off the mamba state grid; the "
+            f"worker never commits a state there (816-grid stop)"
+        )
+    assert ends[0] % HETERO_MAMBA_BLOCK_SIZE == 0, (
+        f"first chunk ended at {ends[0]}, off the mamba state grid "
+        f"(816-grid stop); ends={ends}"
+    )
+
+
+def test_aligned_start_does_not_span_multiple_state_blocks() -> None:
+    """A full token budget must not skip interior state boundaries.
+
+    With the stop conditional on a mid-block start, a chunk beginning exactly
+    on a boundary could run to the budget-clamped end whenever the budget
+    exceeds one block, crossing k boundaries and leaving the k-1 interior
+    state slots permanently null (one state column is materialized per step).
+    """
+    prompt_len = 5 * HETERO_MAMBA_BLOCK_SIZE + 30
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    # Request the FULL remaining prompt every step, as a solo prefill with a
+    # budget larger than 2 blocks would (no per-block rationing).
+    pos, ends = 0, []
+    while pos < prompt_len:
+        request.num_computed_tokens = pos
+        num_new = _hetero_split(request, prompt_len - pos)
+        assert num_new > 0, f"no progress at {pos}"
+        pos += num_new
+        ends.append(pos)
+    expected_grid_ends = [
+        (i + 1) * HETERO_MAMBA_BLOCK_SIZE
+        for i in range(prompt_len // HETERO_MAMBA_BLOCK_SIZE)
+    ]
+    materialized = [e for e in ends if e % HETERO_MAMBA_BLOCK_SIZE == 0]
+    assert materialized == expected_grid_ends, (
+        f"state-grid chunk ends {materialized} != consecutive boundaries "
+        f"{expected_grid_ends}; interior slots stayed null (spanning chunk)"
+    )
+
+
+def _hetero_prefill(prompt_len: int) -> tuple[KVCacheManager, Request, dict[int, int]]:
+    """Prefill one request through the real manager under the hetero layout.
+
+    Budgets one mamba block per step, the shape the fixed split produces for
+    a request sharing the token budget (and the equal-geometry tests above).
+    """
+    manager = _make_heterogeneous_kv_cache_manager()
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    mamba_manager = manager.coordinator.single_type_managers[HETERO_MAMBA_GROUP_ID]
+    state_at: dict[int, int] = {}
+    while request.num_computed_tokens < request.num_tokens:
+        computed = request.num_computed_tokens
+        budget = min(HETERO_MAMBA_BLOCK_SIZE, request.num_tokens - computed)
+        num_new = _hetero_split(request, budget)
+        assert num_new > 0, f"no progress at {computed}"
+        assert (
+            manager.allocate_slots(request, num_new, num_lookahead_tokens=NUM_SPEC)
+            is not None
+        )
+        request.num_computed_tokens = computed + num_new
+        blocks = mamba_manager.req_to_blocks[request.request_id]
+        running = cdiv(request.num_computed_tokens, HETERO_MAMBA_BLOCK_SIZE) - 1
+        state_at[blocks[running].block_id] = request.num_computed_tokens
+    return manager, request, state_at
+
+
+def test_heterogeneous_block_sizes_publish_mamba_states_for_immediate_reuse() -> None:
+    """Mamba states must be published where the worker materializes them.
+
+    On the generic 816 grid no chunk ever ends on the 1648 state grid, so the
+    mamba group publishes zero prefix hashes and a request repeating the same
+    prompt immediately reuses nothing.
+    """
+    prompt_len = 4 * HETERO_MAMBA_BLOCK_SIZE + 70
+    manager, first, state_at = _hetero_prefill(prompt_len)
+    mamba_manager = manager.coordinator.single_type_managers[HETERO_MAMBA_GROUP_ID]
+
+    published = [
+        block.block_hash_num_tokens
+        for block in mamba_manager.req_to_blocks[first.request_id]
+        if not block.is_null and block.block_hash is not None
+    ]
+    full_block_entries = [p for p in published if p % HETERO_MAMBA_BLOCK_SIZE == 0]
+    assert full_block_entries, (
+        f"no mamba full-block state published (entries={published}); "
+        f"immediate reuse on this layout is impossible"
+    )
+    # Safety: every hashed slot holds the state its hash claims.
+    for block in mamba_manager.req_to_blocks[first.request_id]:
+        if block.is_null or block.block_hash is None:
+            continue
+        assert state_at.get(block.block_id) == block.block_hash_num_tokens, (
+            f"mamba slot hashed as state@{block.block_hash_num_tokens} but "
+            f"holds state@{state_at.get(block.block_id)}"
+        )
+
+    (second,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    # The scheduler hashes prompt token ids deterministically, so mirror it:
+    second.all_token_ids = first.all_token_ids
+    second.block_hashes = first.block_hashes
+    _, num_computed, _ = manager.get_computed_blocks(second)
+    assert num_computed >= HETERO_MAMBA_BLOCK_SIZE, (
+        f"immediate repeat of the same prompt reused {num_computed} tokens "
+        f"(expected at least one legal mamba boundary)"
+    )
+    assert num_computed % HETERO_MAMBA_BLOCK_SIZE == 0
+
+
+def test_equal_block_sizes_control_still_reuses() -> None:
+    """Control: with cache_config.block_size == MambaSpec.block_size the
+    behavior is the same before and after a heterogeneous-layout fix."""
+    prompt_len = 2 * MAMBA_BLOCK_SIZE + 70
+    manager = _make_hybrid_kv_cache_manager()
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    while request.num_computed_tokens < request.num_tokens:
+        computed = request.num_computed_tokens
+        num_new = _split(request, request.num_tokens - computed)
+        assert num_new > 0
+        assert (
+            manager.allocate_slots(request, num_new, num_lookahead_tokens=NUM_SPEC)
+            is not None
+        )
+        request.num_computed_tokens = computed + num_new
+    (second,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    second.all_token_ids = request.all_token_ids
+    second.block_hashes = request.block_hashes
+    _, num_computed, _ = manager.get_computed_blocks(second)
+    assert num_computed >= MAMBA_BLOCK_SIZE
+    assert num_computed % MAMBA_BLOCK_SIZE == 0
