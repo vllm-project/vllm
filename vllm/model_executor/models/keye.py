@@ -964,6 +964,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
         image_processor: BaseImageProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -971,7 +972,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = 1
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -1016,6 +1017,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return num_image_tokens
 
@@ -1034,6 +1036,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             num_frames=num_frames,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="video",
         )
         return num_video_tokens
 
@@ -1045,6 +1048,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             image_height=self.get_max_image_size(),
             image_processor=image_processor,
             mm_kwargs={},
+            modality="image",
         )
         return max_image_size
 

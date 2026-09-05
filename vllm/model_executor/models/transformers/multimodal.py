@@ -17,7 +17,7 @@
 """Transformers modeling backend mixin for multi-modal models."""
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +59,7 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -415,6 +416,26 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         ]
 
 
+def _num_multimodal_tokens_kwargs(
+    count_tokens: Callable[..., object],
+    merged_mm_kwargs: Mapping[str, object],
+) -> dict[str, Any]:
+    """The subset of `merged_mm_kwargs` that `count_tokens` accepts.
+
+    `_get_num_multimodal_tokens` is a sizing helper rather than `__call__`, so it
+    does not take every processor override. Filtering mirrors what
+    `call_hf_processor` does before splatting the same kwargs into the processor,
+    and keeps an override meant for `__call__` from turning the count into a
+    `TypeError`.
+    """
+    return get_allowed_kwarg_only_overrides(
+        count_tokens,
+        merged_mm_kwargs,
+        requires_kw_only=False,
+        allow_var_kwargs=True,
+    )
+
+
 class LegacyMultiModalProcessor(_MultiModalProcessorBase):
     """Locates placeholders by searching the prompt the HF processor has already
     expanded for the tokens of each modality.
@@ -510,9 +531,15 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             (size.height, size.width)
             for size in map(images.get_image_size, range(len(images)))
         ]
-        return processor._get_num_multimodal_tokens(
+        count_tokens = processor._get_num_multimodal_tokens
+        return count_tokens(
             image_sizes=image_sizes,
-            **self.info.ctx.get_merged_mm_kwargs({}),
+            **_num_multimodal_tokens_kwargs(
+                count_tokens,
+                self.info.ctx.get_merged_mm_kwargs(
+                    hf_processor_mm_kwargs, modality="image"
+                ),
+            ),
         )
 
     def _apply_vision(
@@ -742,6 +769,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
         num_images: int,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
 
@@ -750,7 +778,9 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
-        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
+        elif (
+            counts := self._get_num_patches_per_image(mm_data, hf_processor_mm_kwargs)
+        ) is not None:
             num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
@@ -771,16 +801,26 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         return num_patches
 
     def _get_num_patches_per_image(
-        self, mm_data: Mapping[str, object]
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
         if not images:
             return None
         try:
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            count_tokens = processor._get_num_multimodal_tokens
             sizes = [(image.height, image.width) for image in images]
-            mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+            mm_tokens = count_tokens(
+                image_sizes=sizes,
+                **_num_multimodal_tokens_kwargs(
+                    count_tokens,
+                    self.info.ctx.get_merged_mm_kwargs(
+                        hf_processor_mm_kwargs, modality="image"
+                    ),
+                ),
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):
@@ -859,7 +899,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, mm_data, len(seqs)
+                    hf_inputs, mm_data, len(seqs), hf_processor_mm_kwargs
                 )
             elif modality == "audio":
                 counts = []
