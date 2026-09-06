@@ -48,6 +48,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
@@ -3389,6 +3390,220 @@ class TestEagle:
         assert offsets == list(range(len(offsets))), (
             f"interior hole in stored blocks: {offsets}"
         )
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.parametrize(
+        "abort_after_first_step,async_scheduling,store_horizon_tokens",
+        [
+            pytest.param(False, False, 1200, id="completed-prompt"),
+            pytest.param(True, False, 1000, id="aborted-sync"),
+            pytest.param(True, True, 1000, id="aborted-async"),
+        ],
+    )
+    def test_chunked_prefill_uses_final_swa_store_horizon(
+        self,
+        request_runner,
+        abort_after_first_step: bool,
+        async_scheduling: bool,
+        store_horizon_tokens: int,
+    ):
+        """SWA stores must use the completed or aborted request horizon."""
+        full_attn_block_size = 36
+        swa_block_size = 4
+        sliding_window = 16
+        num_tokens = 1200
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=full_attn_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                SlidingWindowSpec(
+                    block_size=swa_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ]
+        runner = request_runner(
+            block_size=swa_block_size,
+            num_gpu_blocks=1000,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        runner.new_request(token_ids=[0] * num_tokens)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+        def abort_after_prefill_step() -> None:
+            if runner.scheduler.running:
+                runner.scheduler.finish_requests(
+                    (str(runner.req_id),), RequestStatus.FINISHED_ABORTED
+                )
+
+        runner._run(
+            [1] if abort_after_first_step else [1, 1, EOS_TOKEN_ID],
+            complete_transfers=True,
+            post_step_fn=(abort_after_prefill_step if abort_after_first_step else None),
+        )
+
+        stored_swa_chunks = sorted(
+            block.request_block_offset
+            for transfer in runner.completed_stores
+            for block in transfer.gpu_blocks
+            if block.group_idx == 1
+        )
+        store_horizon_chunks = store_horizon_tokens // swa_block_size
+        alignment_chunks = full_attn_block_size // swa_block_size
+        sliding_window_chunks = sliding_window // swa_block_size
+        expected_swa_chunks = []
+        for chunk in range(store_horizon_chunks):
+            segment_start = chunk - chunk % alignment_chunks
+            segment_length = min(alignment_chunks, store_horizon_chunks - segment_start)
+            if chunk % alignment_chunks >= segment_length - sliding_window_chunks:
+                expected_swa_chunks.append(chunk)
+        assert stored_swa_chunks == expected_swa_chunks
+
+    @pytest.mark.skip_global_cleanup
+    def test_active_decode_does_not_advance_swa_final_horizon(self, request_runner):
+        """Active decode chunks are not final partial SWA segments."""
+        full_attn_block_size = 36
+        swa_block_size = 4
+        prompt_tokens = 1200
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=full_attn_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                SlidingWindowSpec(
+                    block_size=swa_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=16,
+                ),
+            ),
+        ]
+        runner = request_runner(
+            block_size=swa_block_size,
+            num_gpu_blocks=1000,
+            async_scheduling=False,
+            kv_cache_groups=kv_cache_groups,
+        )
+        runner.new_request(token_ids=[0] * prompt_tokens)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+        runner._run([1] * 12, complete_transfers=True)
+
+        assert runner.scheduler.running
+        stored_swa_chunks = {
+            block.request_block_offset
+            for transfer in runner.completed_stores
+            for block in transfer.gpu_blocks
+            if block.group_idx == 1
+        }
+        first_decode_chunk = prompt_tokens // swa_block_size
+        assert first_decode_chunk not in stored_swa_chunks
+
+    def test_dcp_abort_reconsiders_final_swa_tail(self):
+        """DCP-expanded SWA blocks are not scaled twice during abort."""
+        vllm_config = _make_vllm_config(
+            extra_config={"offload_prompt_only": False},
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+        )
+        vllm_config.speculative_config = None
+        vllm_config.kv_events_config = KVEventsConfig(
+            enable_kv_cache_events=True, publisher="null"
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=0,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full"],
+                    FullAttentionSpec(
+                        block_size=36,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["swa"],
+                    SlidingWindowSpec(
+                        block_size=4,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=16,
+                    ),
+                ),
+            ],
+        )
+        spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+        scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+        scheduler.manager.prepare_store.side_effect = (
+            lambda keys, req_context: generate_store_output(keys)
+        )
+
+        request = MagicMock()
+        request.request_id = "req"
+        request.kv_transfer_params = None
+        request.num_prompt_tokens = 1200
+        request.num_tokens = 1200
+        request.num_computed_tokens = 0
+        request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(150)]
+        request.all_token_ids = list(range(1200))
+        request.lora_request = None
+        request.shared_prefix_boundary = 0
+        request.status = RequestStatus.RUNNING
+        request.is_finished.return_value = False
+        scheduler.on_new_request(request)
+
+        full_block_ids = list(range(1, 15))
+        swa_block_ids = list(range(1001, 1126))
+        first_output = SchedulerOutput.make_empty()
+        first_output.scheduled_new_reqs = [
+            SimpleNamespace(req_id="req", block_ids=(full_block_ids, swa_block_ids))
+        ]
+        first_output.num_scheduled_tokens = {"req": 1000}
+        first_output.total_num_scheduled_tokens = 1000
+        scheduler.build_connector_meta(first_output)
+
+        request.num_computed_tokens = 1000
+        request.status = RequestStatus.FINISHED_ABORTED
+        request.is_finished.return_value = True
+        abort_output = SchedulerOutput.make_empty()
+        abort_output.finished_req_ids = {"req"}
+        abort_meta = scheduler.build_connector_meta(abort_output)
+
+        assert len(abort_meta.store_jobs) == 1
+        [store_job] = abort_meta.store_jobs.values()
+        assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+        assert store_job.src_spec.block_ids.tolist() == [swa_block_ids[123]]
+        assert store_job.src_spec.group_sizes == [0, 1]
+        assert store_job.src_spec.block_indices == [0, 123]
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
