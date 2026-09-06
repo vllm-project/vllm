@@ -238,22 +238,32 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
+    def _coerce_value(
+        value: object, schema: dict, *, coerce_native_scalars: bool = True
+    ) -> tuple[object, bool]:
         """Coerce a single value according to its schema.
 
         Returns ``(coerced_value, changed)``.
+        Newly decoded containers preserve native scalars while their
+        string values are recursively coerced.
         """
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
             coerced = coerce_to_schema_type(value, types)
             if coerced is not value:
+                if isinstance(coerced, (dict, list)):
+                    coerced, _ = ParserEngine._coerce_value(
+                        coerced, schema, coerce_native_scalars=False
+                    )
                 return coerced, True
             return value, False
 
         if isinstance(value, dict):
             nested_props = schema.get("properties")
             if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
+                _, changed = ParserEngine._coerce_dict(
+                    value, nested_props, coerce_native_scalars=coerce_native_scalars
+                )
                 return value, changed
             return value, False
 
@@ -263,12 +273,17 @@ class ParserEngine(Parser):
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema
+                        item,
+                        items_schema,
+                        coerce_native_scalars=coerce_native_scalars,
                     )
                     if item_changed:
                         value[i] = coerced
                         changed = True
                 return value, changed
+            return value, False
+
+        if not coerce_native_scalars:
             return value, False
 
         types = extract_types_from_schema(schema)
@@ -279,14 +294,18 @@ class ParserEngine(Parser):
         return value, False
 
     @staticmethod
-    def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
+    def _coerce_dict(
+        args: dict, properties: dict, *, coerce_native_scalars: bool = True
+    ) -> tuple[dict, bool]:
         """Coerce all values in *args* using *properties* schemas."""
         changed = False
         for key, value in args.items():
             prop = properties.get(key)
             if not isinstance(prop, dict):
                 continue
-            coerced, val_changed = ParserEngine._coerce_value(value, prop)
+            coerced, val_changed = ParserEngine._coerce_value(
+                value, prop, coerce_native_scalars=coerce_native_scalars
+            )
             if val_changed:
                 args[key] = coerced
                 changed = True
