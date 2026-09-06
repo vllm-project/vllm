@@ -227,6 +227,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
+        num_reclassified_rows: int | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -290,29 +291,65 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_decode_tokens = 0
 
             if num_prefills == 0 and num_decodes == 0:
-                spec_token_size = min(
-                    num_spec_decodes * (self.num_spec + 1),
-                    query_start_loc_cpu[-1].item(),
-                )
-                spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                non_spec_token_indx = torch.empty(
-                    0, dtype=torch.int32, device=query_start_loc.device
-                )
-                # Filter by spec_sequence_masks to exclude padded sequences
-                spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
-                ]
-                non_spec_state_indices_tensor = None
-                # Padded sequences are always at the back, so the first
-                # num_spec_decodes + 1 entries of query_start_loc already
-                # contain the correct cumulative token counts.
-                spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
-                non_spec_query_start_loc = None
-                non_spec_query_start_loc_cpu = None
+                expected_spec_token_size = num_spec_decodes * (self.num_spec + 1)
+                actual_spec_token_size = query_start_loc_cpu[-1].item()
+                if actual_spec_token_size < expected_spec_token_size:
+                    # The max-sequence boundary can truncate the final
+                    # speculative group. The fused GDN kernels require
+                    # complete groups, so process this final partial group
+                    # through the existing stateful non-spec prefill path.
+                    num_reclassified_rows = num_spec_decodes
+                    spec_sequence_masks = None
+                    spec_sequence_masks_cpu = None
+                    num_prefills = num_spec_decodes
+                    num_prefill_tokens = actual_spec_token_size
+                    num_spec_decodes = 0
+                    num_spec_decode_tokens = 0
+                    spec_token_indx = None
+                    non_spec_token_indx = None
+                    spec_state_indices_tensor = None
+                    # Sized by the reclassified rows only: the non-spec
+                    # kernels contract on non_spec_state_indices_tensor
+                    # .size(0) == num_prefills + num_decodes, so trailing
+                    # zero-length padded sequences must not leak in.
+                    non_spec_state_indices_tensor = block_table_tensor[
+                        :num_reclassified_rows, 0
+                    ]
+                    spec_query_start_loc = None
+                    # Padded sequences are always at the back, so the
+                    # first num_reclassified_rows + 1 entries of
+                    # query_start_loc carry the correct cumulative
+                    # token counts for the reclassified rows (same
+                    # convention as the complete-group path below), and
+                    # non_spec_query_start_loc.size(0) matches the
+                    # num_prefills + num_decodes + 1 kernel contract.
+                    non_spec_query_start_loc = query_start_loc[
+                        :num_reclassified_rows + 1
+                    ]
+                    non_spec_query_start_loc_cpu = query_start_loc_cpu[
+                        :num_reclassified_rows + 1
+                    ]
+                    num_accepted_tokens = None
+                else:
+                    spec_token_indx = torch.arange(
+                        expected_spec_token_size,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    non_spec_token_indx = torch.empty(
+                        0, dtype=torch.int32, device=query_start_loc.device
+                    )
+                    # Filter by spec_sequence_masks to exclude padded sequences
+                    spec_state_indices_tensor = block_table_tensor[
+                        spec_sequence_masks_cpu, : self.num_spec + 1
+                    ]
+                    non_spec_state_indices_tensor = None
+                    # Padded sequences are always at the back, so the first
+                    # num_spec_decodes + 1 entries of query_start_loc already
+                    # contain the correct cumulative token counts.
+                    spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
+                    non_spec_query_start_loc = None
+                    non_spec_query_start_loc_cpu = None
             else:
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
@@ -361,8 +398,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     out=non_spec_query_start_loc_cpu[1:],
                 )
 
-            assert num_accepted_tokens is not None
-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+            if spec_sequence_masks_cpu is not None:
+                assert num_accepted_tokens is not None
+                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
@@ -399,7 +437,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()
             has_initial_state = context_lens_tensor > 0
-            if spec_sequence_masks_cpu is not None:
+            if num_reclassified_rows is not None:
+                # Keep only the reclassified (formerly spec) rows so
+                # has_initial_state lines up with the row-sized
+                # non-spec tensors (num_prefills + num_decodes rows).
+                has_initial_state = has_initial_state[:num_reclassified_rows]
+                assert non_spec_query_start_loc_cpu is not None
+            elif spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
