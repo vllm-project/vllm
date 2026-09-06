@@ -98,6 +98,8 @@ def _is_masked_mha_available(
     if model_dims not in (
         (128, 512, 128, 64, 128),
         (64, 512, 192, 64, 256),
+        # GLM-5.3-Flash: NoPE, qk_head_dim 256 == the (192, 64, 256) kernel.
+        (64, 512, 256, 0, 256),
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
