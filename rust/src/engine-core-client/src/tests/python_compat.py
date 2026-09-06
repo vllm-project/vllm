@@ -421,6 +421,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    use_spec_decode: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -444,6 +445,7 @@ ready_response = EngineCoreReadyResponse(
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
+    use_spec_decode=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",

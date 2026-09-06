@@ -1700,6 +1700,7 @@ class EngineCoreProc(EngineCore):
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
             ),
+            use_spec_decode=self.use_spec_decode,
         )
 
     def process_input_sockets(
