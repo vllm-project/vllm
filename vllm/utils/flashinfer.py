@@ -156,6 +156,47 @@ def warn_if_flashinfer_kernels_missing() -> None:
 
 
 @functools.cache
+def flashinfer_jit_unsupported_reason() -> str | None:
+    """Return why FlashInfer JIT codegen cannot target the current GPU, or
+    None if it can.
+
+    FlashInfer swallows arch-detection errors when building its compilation
+    context (e.g. SM 12.x with a CUDA toolkit older than 12.9), leaving an
+    empty target-arch set that makes every JIT spec fail with a misleading
+    "requires sm75 or higher" error at first use: killing the engine during
+    startup profiling (https://github.com/vllm-project/vllm/issues/42393).
+    """
+    try:
+        from flashinfer.jit.core import check_cuda_arch
+    except ImportError:
+        return None
+    try:
+        check_cuda_arch()
+        return None
+    except RuntimeError as e:
+        reason = str(e)
+    capability = current_platform.get_device_capability()
+    assert capability is not None
+    try:
+        # Re-derive the real error that FlashInfer swallowed during arch
+        # detection, e.g. "SM 12.x requires CUDA >= 12.9".
+        from flashinfer.compilation_context import CompilationContext
+
+        CompilationContext._normalize_cuda_arch(capability.major, capability.minor)
+    except RuntimeError as e:
+        reason = str(e)
+    except Exception:
+        # FlashInfer internals changed; keep the original error message.
+        pass
+    logger.warning_once(
+        "FlashInfer cannot JIT-compile kernels for this GPU: %s. "
+        "FlashInfer-backed kernels will not be auto-selected.",
+        reason,
+    )
+    return reason
+
+
+@functools.cache
 def has_flashinfer_bf16_gemm() -> bool:
     """Return whether FlashInfer exposes the BF16 dense GEMM API."""
     if not has_flashinfer():
@@ -1309,6 +1350,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_jit_unsupported_reason",
     "flashinfer_bf16_mm",
     "has_flashinfer_bf16_gemm",
     "has_flashinfer_concat_mla_kv_quant_fp8",
