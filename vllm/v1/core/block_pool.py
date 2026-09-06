@@ -479,8 +479,8 @@ class BlockPool:
                 entry is partial within the owning cache block.
 
         Returns:
-            The hash key with group ID if a partial entry can be registered;
-            otherwise ``None`` for null blocks.
+            The hash key with group ID, or ``None`` for a null block or a
+            boundary superseded by the block's current hash.
         """
         if block.is_null:
             return None
@@ -493,23 +493,32 @@ class BlockPool:
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
         )
+        incoming_num_tokens = num_hash_blocks * self.hash_block_size
         already_cached = block.block_hash == block_hash_with_group_id or (
             self.cached_block_hash_to_block.contain(
                 block_hash_with_group_id, block.block_id
             )
         )
+        # Do not resurrect a shorter boundary removed during full-block
+        # promotion. Forward growth is handled by the removal branch below.
+        if (
+            not already_cached
+            and block.block_hash_num_tokens is not None
+            and block.block_hash_num_tokens >= incoming_num_tokens
+        ):
+            return None
         if (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
-            and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
+            and block.block_hash_num_tokens < incoming_num_tokens
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
-            num_tokens=num_hash_blocks * self.hash_block_size,
+            num_tokens=incoming_num_tokens,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
