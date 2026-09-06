@@ -42,13 +42,13 @@ Usage::
 
 import argparse
 import fnmatch
-import re
 import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import regex as re
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -333,7 +333,7 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
     pytest / runner lines inside it. ``visited`` stops a script that (directly or
     otherwise) refers back to itself; nesting is one level deep in practice.
     """
-    script_arg = next((t for t in tokens[1:] if t.endswith(".sh")), None)
+    script_arg = next((t for t in tokens if t.endswith(".sh")), None)
     if script_arg is None:
         return []
 
@@ -360,18 +360,62 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
             var_values[assignment.group(1)] = assignment.group(2).strip("'\"")
             continue
         if var_values:
-            line = re.sub(
-                r"\$\{(\w+)\}|\$(\w+)",
-                lambda m: var_values.get(m.group(1) or m.group(2), m.group(0)),
-                line,
-            )
+            line = _expand_vars(line, var_values)
         selections.extend(_parse_command(line, visited))
     return selections
+
+
+def _expand_vars(line: str, var_values: dict[str, str]) -> str:
+    """Substitute known ``$VAR`` / ``${VAR}`` in a script line - but not inside
+    single quotes, where the shell does not expand (``pytest '$X'`` passes a
+    literal ``$X``, collecting nothing)."""
+
+    def sub(segment: str) -> str:
+        return re.sub(
+            r"\$\{(\w+)\}|\$(\w+)",
+            lambda m: var_values.get(m.group(1) or m.group(2), m.group(0)),
+            segment,
+        )
+
+    # Splitting on `'`: even-indexed segments are outside single quotes, odd are
+    # inside. (A `'` inside double quotes is mis-split, but that only ever loses
+    # a substitution - the safe direction.)
+    parts = line.split("'")
+    return "'".join(sub(p) if i % 2 == 0 else p for i, p in enumerate(parts))
 
 
 # Shell tokens (or runs of them) that separate one sub-command from the next.
 _SHELL_SEP_CHARS = set("|&;()<>")
 _RUNNER_KEYWORDS = PYTEST_COMMANDS | FILE_RUNNER_COMMANDS
+
+# Tokens that can precede the real command word without being it.
+_COMMAND_WRAPPERS = {"if", "!", "then", "time", "exec", "nice", "command", "builtin"}
+
+
+def _effective_command_index(tokens: list[str]) -> int:
+    """Index of the token that names the command actually executed, past leading
+    ``FOO=bar`` assignments and simple wrappers - ``if ! env FOO=1 bash x.sh``
+    resolves to the ``bash``, so ``echo x.sh`` stays ``echo`` and is not
+    followed. Returns ``len(tokens)`` when nothing executable is left."""
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if _is_env_assignment(token) or token in _COMMAND_WRAPPERS:
+            i += 1
+        elif token == "env":
+            i += 1
+            while i < len(tokens) and (
+                _is_env_assignment(tokens[i]) or "$" in tokens[i] or tokens[i] == "-"
+            ):
+                i += 1
+        elif token == "timeout" and i + 1 < len(tokens):
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 1
+            i += 1  # the DURATION operand
+        else:
+            break
+    return i
 
 
 def _split_shell_stages(command: str) -> list[tuple[str, list[str]]]:
@@ -392,11 +436,18 @@ def _split_shell_stages(command: str) -> list[tuple[str, list[str]]]:
         return []
 
     stages: list[tuple[str, list[str]]] = [("", [])]
+    in_exec = False  # inside a `find -exec ... \;` action - its `;` terminates
     for token in tokens:
-        if token and set(token) <= _SHELL_SEP_CHARS:
+        if in_exec and token in (";", "+"):
+            stages[-1][1].append(token)
+            in_exec = False
+        elif token and set(token) <= _SHELL_SEP_CHARS:
             stages.append((token, []))
+            in_exec = False
         else:
             stages[-1][1].append(token)
+            if token in ("-exec", "-execdir"):
+                in_exec = True
     return [(sep, sub) for sep, sub in stages if sub]
 
 
@@ -423,39 +474,31 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
     if any(token in PYTEST_COMMANDS for token in tokens):
         return [_parse_pytest_command(tokens)]
 
-    # `bash <script>`, possibly behind a wrapper (`env FOO=1 bash x.sh`,
-    # `if ! bash x.sh; then`) - look for the interpreter or a `.sh` anywhere in
-    # the stage, not just at token 0. `_parse_shell_script` still needs a real
-    # `.sh` file to do anything.
-    if (
-        "bash" in tokens
-        or "sh" in tokens
-        or any(t.rsplit("/", 1)[-1].endswith(".sh") for t in tokens)
-    ):
-        selections = _parse_shell_script(tokens, visited)
+    # Resolve the real command word past `FOO=1` / `env` / `if ! ...` wrappers,
+    # so `env FOO=1 bash x.sh` is followed but `echo x.sh` (Buildkite just
+    # printing a filename) is not.
+    cmd_index = _effective_command_index(tokens)
+    command_name = (
+        tokens[cmd_index].rsplit("/", 1)[-1] if cmd_index < len(tokens) else ""
+    )
+
+    if command_name in ("bash", "sh") or command_name.endswith(".sh"):
+        run_tokens = tokens[cmd_index:]
+        selections = _parse_shell_script(run_tokens, visited)
         # Runner scripts (run-multi-node-test.sh, ...) take the real test
         # commands as quoted string arguments - parse those too.
-        for arg in tokens[1:]:
+        for arg in run_tokens[1:]:
             if _looks_like_command_string(arg):
                 selections.extend(_parse_command(arg, visited))
         return selections
 
-    # `python` / `torchrun` / `coverage <file>.py`, possibly after an env-var
-    # prefix - so search for the runner rather than assuming it is token 0.
-    runner_index = next(
-        (
-            i
-            for i, t in enumerate(tokens)
-            if t.rsplit("/", 1)[-1] in FILE_RUNNER_COMMANDS
-        ),
-        None,
-    )
-    if runner_index is not None:
+    # `python` / `torchrun` / `coverage <file>.py`.
+    if command_name in FILE_RUNNER_COMMANDS:
         # `python foo.py a b/c --suffix v1` executes only `foo.py`; the tokens
         # after it are that script's argv - treating them as test paths tethers
         # whatever directory an argument happens to name (`v1` -> `tests/v1`).
         script = next(
-            (t for t in tokens[runner_index + 1 :] if _token_is_test_path(t)), None
+            (t for t in tokens[cmd_index + 1 :] if _token_is_test_path(t)), None
         )
         if script is not None:
             return [PytestSelection(included_paths=[script])]
@@ -463,22 +506,53 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
     return []
 
 
+# `xargs` options that consume the following token as their value.
+_XARGS_VALUE_FLAGS = {
+    "-n", "-L", "-P", "-s", "-I", "-i", "-J", "-E", "-d",
+    "--max-args", "--max-lines", "--max-procs", "--replace", "--delimiter",
+}  # fmt: skip
+
+
+def _xargs_command(tokens: list[str]) -> str | None:
+    """The command ``xargs`` will exec, skipping its own options and their
+    values: ``xargs -0 -n1 -I{} pytest`` -> ``pytest``; ``xargs echo pytest``
+    -> ``echo``."""
+    it = iter(tokens)
+    for token in it:
+        if token in _XARGS_VALUE_FLAGS:
+            next(it, None)
+        elif token.startswith("-"):
+            continue
+        else:
+            return token
+    return None
+
+
 def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> bool:
-    """True if the ``find`` stage at ``find_index`` actually pipes its matches
-    into ``pytest``: an ``-exec pytest`` in the ``find`` itself, or an
-    ``xargs pytest`` reached through one or more consecutive ``|`` pipes. A
-    ``find`` piped to ``wc`` / ``grep``, or one merely sharing a line with a
-    ``pytest`` in a separate ``;`` / ``&&`` command, feeds it nothing."""
+    """True if the ``find`` stage at ``find_index`` actually runs its matches
+    through ``pytest``: a *terminated* ``-exec pytest ... \\;`` / ``... +`` in the
+    ``find`` itself, or an ``xargs`` whose command operand is ``pytest``, reached
+    through consecutive ``|`` pipes. A ``find`` piped to ``wc`` / an
+    ``xargs echo``, an unterminated ``-exec``, or a ``pytest`` in a separate
+    ``;`` / ``&&`` command, runs nothing."""
     find_tokens = stages[find_index][1]
-    for i, token in enumerate(find_tokens[:-1]):
-        if token in ("-exec", "-execdir") and find_tokens[i + 1] in PYTEST_COMMANDS:
-            return True
+    for i, token in enumerate(find_tokens):
+        if token in ("-exec", "-execdir"):
+            action = find_tokens[i + 1 :]
+            if action[:1] and action[0] in PYTEST_COMMANDS and _terminated(action):
+                return True
     for sep, tokens in stages[find_index + 1 :]:
         if sep != "|":
             break
-        if "xargs" in tokens and any(t in PYTEST_COMMANDS for t in tokens):
+        if tokens[:1] == ["xargs"] and _xargs_command(tokens[1:]) in PYTEST_COMMANDS:
             return True
     return False
+
+
+def _terminated(exec_action: list[str]) -> bool:
+    """A ``find -exec`` action only runs if it ends with a ``;`` or ``+`` token
+    (from ``\\;`` / ``+`` on the command line)."""
+    return ";" in exec_action or "+" in exec_action
 
 
 def _parse_command(command: str, visited: set[str] | None = None) -> list[Selection]:

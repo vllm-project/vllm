@@ -264,6 +264,26 @@ def test_option_and_token_handling(command, test_file, expected):
             "kernels/test_a.py",
             True,
         ),
+        # `xargs` runs `echo` here, not pytest - the trailing `pytest` is echo's
+        # argument.
+        (
+            "find kernels -name 'test_*.py' | xargs echo pytest",
+            "kernels/test_a.py",
+            False,
+        ),
+        # An `-exec` with no `\;` / `+` terminator is a `find` syntax error - it
+        # never runs pytest.
+        (
+            "find kernels -name 'test_*.py' -exec pytest {}",
+            "kernels/test_a.py",
+            False,
+        ),
+        # xargs value-flags with a space don't swallow the command.
+        (
+            "find kernels -name 'test_*.py' | xargs -0 -I {} pytest {}",
+            "kernels/test_a.py",
+            True,
+        ),
     ],
 )
 def test_find_pipelines(command, test_file, expected):
@@ -354,10 +374,16 @@ def test_direct_runners(command, test_file, expected):
         "bash tests/does_not_exist.sh",
         "echo 'pytest kernels/test_a.py'",
         'pytest -v -s "unbalanced',
+        # A `.sh` that is only an *argument* (Buildkite printing / copying a
+        # filename) is not a script invocation.
+        "echo tests/foo.sh",
+        "cp scripts/run_tests.sh /tmp/",
         # A `find` whose output never reaches pytest is not a test selection.
         "find kernels -name 'test_*.py'",
         "find kernels -name 'test_*.py' | wc -l",
         "find kernels -name 'test_*.py' -delete",
+        "find kernels -name 'test_*.py' | xargs echo pytest",
+        "find kernels -name 'test_*.py' -exec pytest {}",
     ],
 )
 def test_non_test_commands_contribute_nothing(command):
@@ -495,19 +521,27 @@ def test_shell_script_continuation_vars_and_nesting(tmp_path, monkeypatch):
     (scripts / "sweep.sh").write_text(
         'SCRIPT="v1/kv_connector/nixl_integration/inner.sh"\n'
         'IMPORT_CANARY="v1/kv_connector/nixl_integration/test_canary.py"\n'
+        'LITERAL="v1/kv_connector/nixl_integration/test_not_run.py"\n'
         'python3 -m pytest -s -x "${IMPORT_CANARY}"\n'
+        # single-quoted: the shell passes a literal $LITERAL, collecting nothing
+        "python3 -m pytest -s -x '${LITERAL}'\n"
         'if ! env FOO=1 bash "${SCRIPT}"; then exit 1; fi\n'
     )
     monkeypatch.setattr(checker, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(checker, "TESTS_DIR", tmp_path / "tests")
 
     selections = _parse_command("bash v1/kv_connector/nixl_integration/sweep.sh")
-    assert any(
-        s.runs("v1/kv_connector/nixl_integration/test_inner.py") for s in selections
-    )
-    assert any(
-        s.runs("v1/kv_connector/nixl_integration/test_canary.py") for s in selections
-    )
+
+    def tethered(path):
+        return any(s.runs(path) for s in selections)
+
+    # `\`-continuation + $VAR-prefixed absolute path, resolved through a nested
+    # `env FOO=1 bash "$SCRIPT"`:
+    assert tethered("v1/kv_connector/nixl_integration/test_inner.py")
+    # literal `VAR=path` + double-quoted `"$VAR"` (the import-canary pattern):
+    assert tethered("v1/kv_connector/nixl_integration/test_canary.py")
+    # single-quoted `'$VAR'` is NOT expanded by the shell, so not tethered:
+    assert not tethered("v1/kv_connector/nixl_integration/test_not_run.py")
 
 
 def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):

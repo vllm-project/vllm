@@ -182,7 +182,7 @@ repos:
     language: python
     entry: python tools/pre_commit/check_test_tethering.py
     files: ^(tests/.*\.py|\.buildkite/test_areas/.*\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
-    additional_dependencies: [PyYAML]
+    additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
