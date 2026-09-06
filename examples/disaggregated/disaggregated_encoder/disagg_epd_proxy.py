@@ -297,16 +297,26 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
-        # The encoder reports each item's cache key and grid here.
+        # The encoder reports each mm_hash's metadata (e.g. the grid) here,
+        # keyed by the same uuid this proxy assigned above.
         try:
             params = (await r.json()).get("ec_transfer_params") or {}
-            reported = params.get("ec_items") or []
         except Exception:
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
-            reported = []
-        if reported and idx in item_uuids:
-            # One item per encoder request, so the first entry is this item's.
-            item_meta[idx] = {**reported[0], "mm_hash": item_uuids[idx]}
+            params = {}
+        if idx in item_uuids:
+            reported = params.get(item_uuids[idx])
+            if reported:
+                metadata = reported.get("metadata") or {}
+                if metadata:
+                    item_meta[idx] = {**metadata, "mm_hash": item_uuids[idx]}
+                # Whatever the encoder reported alongside `metadata` is the
+                # connector's own handle on the published embedding (for NIXL,
+                # peer_host/peer_port/size_bytes). The decoder's connector
+                # looks it up by mm_hash on the request, so carry it through.
+                orig_request.setdefault("ec_transfer_params", {})[item_uuids[idx]] = (
+                    reported
+                )
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
