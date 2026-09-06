@@ -878,52 +878,57 @@ class TestFixArgTypes:
         original = json.dumps({"value": value})
         assert engine._fix_arg_types(original, "f") == original
 
-    def test_root_allof_refines_direct_property(self):
-        tool = ChatCompletionToolsParam(
-            type="function",
-            function=FunctionDefinition(
-                name="f",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"},
-                        "choice": {"type": ["string", "integer"]},
-                        "labels": {"type": "array", "items": {"type": "string"}},
-                        "payload": {
-                            "type": "object",
-                            "properties": {"kept": {"type": "integer"}},
-                        },
-                    },
-                    "allOf": [
-                        {
-                            "properties": {
-                                "value": {"type": "number"},
-                                "choice": {"enum": ["42", 7]},
-                                "labels": {"items": {"type": ["string", "integer"]}},
-                                "payload": {
-                                    "properties": {"count": {"type": "integer"}}
-                                },
-                            }
-                        }
-                    ],
-                },
+    @pytest.mark.parametrize(
+        "base, refinement, value, expected",
+        [
+            pytest.param(
+                {"type": "integer"},
+                {"type": "number"},
+                "1.5",
+                "1.5",
+                id="integer_intersection",
             ),
-        )
+            pytest.param(
+                {"type": ["string", "integer"]},
+                {"enum": ["42", 7]},
+                "42",
+                "42",
+                id="enum_preserves_string",
+            ),
+            pytest.param(
+                {"type": ["string", "integer"]},
+                {"enum": ["42", 7]},
+                "7",
+                7,
+                id="enum_coerces_allowed_integer",
+            ),
+            pytest.param(
+                {"type": "array", "items": {"type": "string"}},
+                {"items": {"type": ["string", "integer"]}},
+                ["42"],
+                ["42"],
+                id="array_item_intersection",
+            ),
+            pytest.param(
+                {
+                    "type": "object",
+                    "properties": {"kept": {"type": "integer"}},
+                },
+                {"properties": {"count": {"type": "integer"}}},
+                {"kept": "1", "count": "42"},
+                {"kept": 1, "count": 42},
+                id="nested_property_merge",
+            ),
+        ],
+    )
+    def test_root_allof_refines_direct_property(
+        self, base, refinement, value, expected
+    ):
+        tool = _make_tool("f", {"value": base})
+        tool.function.parameters["allOf"] = [{"properties": {"value": refinement}}]
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types(
-            '{"value": "1.5", "choice": "42", "labels": ["42"], '
-            '"payload": {"kept": "1", "count": "42"}}',
-            "f",
-        )
-        assert json.loads(result) == {
-            "value": "1.5",
-            "choice": "42",
-            "labels": ["42"],
-            "payload": {"kept": 1, "count": 42},
-        }
-        assert json.loads(engine._fix_arg_types('{"choice": "7"}', "f")) == {
-            "choice": 7
-        }
+        result = engine._fix_arg_types(json.dumps({"value": value}), "f")
+        assert json.loads(result) == {"value": expected}
 
     def test_malformed_combinators_preserve_other_properties(self):
         tool = _make_tool("f", {})
