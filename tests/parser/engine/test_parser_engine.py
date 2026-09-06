@@ -925,40 +925,50 @@ class TestFixArgTypes:
             "choice": 7
         }
 
-    def test_malformed_root_combinator_preserves_direct_coercion(self):
+    def test_malformed_combinators_preserve_other_properties(self):
         tool = _make_tool("f", {})
         tool.function.parameters = {
-            "properties": {"count": {"type": "integer"}},
+            "properties": {
+                "count": {"type": "integer"},
+                "value": {"type": "integer", "anyOf": 1},
+            },
             "anyOf": 1,
             "allOf": [{"properties": [1]}],
         }
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"count": "42"}', "f")
-        assert json.loads(result) == {"count": 42}
+        result = engine._fix_arg_types('{"count": "42", "value": "42"}', "f")
+        assert json.loads(result) == {"count": 42, "value": "42"}
 
     def test_array_item_coercion(self):
-        tool = _make_tool(
-            "f",
-            {
-                "nums": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "allOf": [{"allOf": [{"items": {"type": "integer"}}]}],
+        for combinator in ("allOf", "anyOf", "oneOf"):
+            tool = _make_tool(
+                "f",
+                {
+                    "nums": {
+                        combinator: [
+                            {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "allOf": [{"items": {"type": "integer"}}],
+                            }
+                        ],
+                    },
                 },
-            },
-        )
-        engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"nums": ["42", "5"]}', "f")
-        parsed = json.loads(result)
-        assert parsed["nums"] == [42, 5]
+            )
+            engine = _make_engine(tools=[tool])
+            result = engine._fix_arg_types(json.dumps({"nums": '["42", "5"]'}), "f")
+            parsed = json.loads(result)
+            assert parsed["nums"] == [42, 5]
 
     def test_array_mixed_item_types(self):
         tool = _make_tool(
             "f",
             {
                 "vals": {
-                    "type": "array",
-                    "items": {"type": "number"},
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "number"}},
+                        {"type": "null"},
+                    ],
                 },
             },
         )

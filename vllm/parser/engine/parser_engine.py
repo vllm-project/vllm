@@ -264,19 +264,30 @@ class ParserEngine(Parser):
             return ParserEngine._coerce_dict(value, get_schema_properties(schema))
 
         if isinstance(value, list):
-            item_schemas = []
-            pending = [schema]
+            # Preserve alternatives when projecting array schemas onto item hints.
+            items_schema: dict = {}
+            pending = [(schema, items_schema)]
             while pending:
-                member = pending.pop()
+                member, hints = pending.pop()
                 if not isinstance(member, dict):
                     continue
                 if isinstance(items := member.get("items"), dict):
-                    item_schemas.append(items)
-                if isinstance(all_of := member.get("allOf"), list):
-                    pending.extend(all_of)
-            if item_schemas:
+                    hints["allOf"] = [items]
+                for keyword in ("allOf", "anyOf", "oneOf"):
+                    if not isinstance(branches := member.get(keyword), list):
+                        continue
+                    branches = [
+                        branch
+                        for branch in branches
+                        if keyword == "allOf"
+                        or not (types := extract_types_from_schema(branch))
+                        or "array" in types
+                    ]
+                    branch_hints: list[dict] = [{} for _ in branches]
+                    hints.setdefault(keyword, []).extend(branch_hints)
+                    pending.extend(zip(branches, branch_hints))
+            if items_schema:
                 value = value.copy()
-                items_schema = {"allOf": item_schemas}
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
@@ -313,7 +324,8 @@ class ParserEngine(Parser):
                     valid = Draft202012Validator(prop, registry=Registry()).is_valid(
                         coerced
                     )
-                except (Unresolvable, UnknownType):
+                except (Unresolvable, UnknownType, TypeError):
+                    # Malformed schema keyword values can raise TypeError.
                     valid = False
                 if not valid:
                     continue
