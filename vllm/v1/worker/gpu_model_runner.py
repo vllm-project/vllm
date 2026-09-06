@@ -1975,6 +1975,12 @@ class GPUModelRunner(
     def _sync_num_accepted_tokens(
         self, num_reqs: int, prev_req_id_to_index: dict[str, int] | None
     ) -> None:
+        """Synchronize and remap accepted token counts into input_batch.
+
+        In async scheduling mode, remaps counts from runner.num_accepted_tokens.np
+        through prev_positions to account for row shifts from InputBatch.condense().
+        In sync mode, performs a direct write-back to input_batch.
+        """
         if self.use_async_scheduling:
             if prev_req_id_to_index:
                 # Remap the previous-iteration runner snapshot through prev_positions.
