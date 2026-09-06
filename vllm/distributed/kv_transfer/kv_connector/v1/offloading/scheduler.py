@@ -1384,7 +1384,10 @@ class OffloadingConnectorScheduler:
             if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens
             elif req.is_finished():
-                num_tokens_after_batch = req.num_tokens
+                # Clamp to the GPU prefix cache's commit point. The final sampled
+                # token's slot is never committed (under spec decode it holds a
+                # rejected draft's KV), so a block ending there must not be stored.
+                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
