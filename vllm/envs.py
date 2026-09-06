@@ -979,8 +979,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_CACHE_TTL_HOURS": lambda: float(
         os.getenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
     ),
-    # Whether to probe the multi-modal processor cache before resolving media
-    # sources with UUIDs. Cache hits skip source loading.
+    # Whether to probe the multi-modal processor cache before loading image or
+    # video URLs with UUIDs. Cache hits skip URL loading and decoding. Disabled
+    # by default.
     "VLLM_EARLY_UUID_LOOKUPS": lambda: bool(
         int(os.getenv("VLLM_EARLY_UUID_LOOKUPS", "0"))
     ),
