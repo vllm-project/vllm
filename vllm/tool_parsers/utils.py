@@ -270,10 +270,10 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _root_schema_properties(params: Any) -> dict[str, Any]:
-    """Property schemas declared directly or inside root combinators.
+def get_schema_properties(params: Any) -> dict[str, Any]:
+    """Property schemas declared directly or inside object combinators.
 
-    Root ``allOf`` members always apply, so their properties refine the
+    ``allOf`` members always apply, so their properties refine the
     direct ``properties``. Which ``anyOf``/``oneOf`` branch applies depends
     on argument values a streaming parser only sees incrementally, so a
     branch property is used only when no other branch declares it
@@ -287,7 +287,7 @@ def _root_schema_properties(params: Any) -> dict[str, Any]:
         if isinstance(value := params.get(keyword), list)
     }
     branches = [
-        _root_schema_properties(branch)
+        get_schema_properties(branch)
         for keyword in ("anyOf", "oneOf")
         for branch in combinators.get(keyword, [])
     ]
@@ -300,7 +300,7 @@ def _root_schema_properties(params: Any) -> dict[str, Any]:
     direct = params.get("properties")
     properties = dict(direct) if isinstance(direct, dict) else {}
     for refinement in (
-        *map(_root_schema_properties, combinators.get("allOf", [])),
+        *map(get_schema_properties, combinators.get("allOf", [])),
         shared,
     ):
         for name, schema in refinement.items():
@@ -334,7 +334,7 @@ def find_tool_properties(
             continue
         for name, params in tool_info:
             if name == tool_name:
-                return _root_schema_properties(params or {})
+                return get_schema_properties(params or {})
     return {}
 
 

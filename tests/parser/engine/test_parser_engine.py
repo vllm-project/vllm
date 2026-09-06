@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import regex as re
+from jsonschema import Draft202012Validator
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
@@ -750,22 +751,47 @@ class TestFixArgTypes:
         assert parsed["active"] is True
         assert parsed["score"] == 3.14
 
-    def test_nested_object_coercion(self):
+    def test_openai_strict_nested_anyof_coercion(self):
+        """Coerce fields in OpenAI's user-or-address anyOf example."""
         tool = _make_tool(
             "f",
             {
-                "inner": {
-                    "type": "object",
-                    "properties": {
-                        "count": {"type": "integer"},
-                    },
+                "item": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": properties,
+                            "required": list(properties),
+                            "additionalProperties": False,
+                        }
+                        for properties in (
+                            {"name": {"type": "string"}, "age": {"type": "number"}},
+                            {
+                                "number": {"type": "string"},
+                                "street": {"type": "string"},
+                                "city": {"type": "string"},
+                            },
+                        )
+                    ],
                 },
             },
         )
+        tool.function.strict = True
+        schema = tool.function.parameters
+        schema.update(required=["item"], additionalProperties=False)
+        Draft202012Validator.check_schema(schema)
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"inner": {"count": "42"}}', "f")
-        parsed = json.loads(result)
-        assert parsed["inner"]["count"] == 42
+        for item, expected in (
+            ({"name": "Alice", "age": "42"}, {"name": "Alice", "age": 42}),
+            (
+                {"number": 123, "street": "Main St", "city": "Boston"},
+                {"number": "123", "street": "Main St", "city": "Boston"},
+            ),
+        ):
+            result = engine._fix_arg_types(json.dumps({"item": json.dumps(item)}), "f")
+            parsed = json.loads(result)
+            assert parsed == {"item": expected}
+            Draft202012Validator(schema).validate(parsed)
 
     @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
     def test_nested_root_alternative_branch_properties(self, combinator):

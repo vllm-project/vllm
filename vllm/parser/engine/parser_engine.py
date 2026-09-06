@@ -32,6 +32,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    get_schema_properties,
 )
 
 if TYPE_CHECKING:
@@ -250,15 +251,13 @@ class ParserEngine(Parser):
             types = extract_types_from_schema(schema)
             coerced = coerce_to_schema_type(value, types) if types else value
             if coerced is not value:
+                if isinstance(coerced, (dict, list)):
+                    coerced, _ = ParserEngine._coerce_value(coerced, schema)
                 return coerced, True
             return value, False
 
         if isinstance(value, dict):
-            nested_props = schema.get("properties")
-            if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
-                return value, changed
-            return value, False
+            return ParserEngine._coerce_dict(value, get_schema_properties(schema))
 
         if isinstance(value, list):
             items_schema = schema.get("items")
