@@ -166,7 +166,7 @@ def test_exact_replay_matches_single_shot_prefill(chunk_size, seed, layout):
         )
         slots = all_slots[torch.tensor(active, device=device)]
         meta = build_exact_replay_metadata(
-            [computed[i] for i in active], lens, slots, chunk_size, device
+            [computed[i] for i in active], lens, chunk_size, device
         )
         out = torch.empty_like(x)
         exact_replay_ssd(
@@ -203,4 +203,85 @@ def test_exact_replay_matches_single_shot_prefill(chunk_size, seed, layout):
     for i in range(n):
         assert torch.equal(outs[i].view(torch.int16), refs[i].view(torch.int16)), (
             f"sequence {i}: exact replay diverged from single-shot prefill"
+        )
+
+
+def test_shared_metadata_writes_each_groups_own_slots():
+    """One metadata object must serve layers with different state slots.
+
+    In a hybrid model the model runner builds the Mamba metadata once and hands
+    the other KV cache groups a copy with only the block table swapped, so two
+    layers see the same ``ExactReplayMetadata`` but different ``slots``. Each
+    layer must read and store its partial-chunk inputs at its own slots.
+    """
+    torch.manual_seed(0)
+    device = torch.device(DEVICE)
+    nheads, head_dim, ngroups, dstate, chunk_size = 4, 32, 1, 32, 64
+    dtype = torch.bfloat16
+    A = -(torch.rand(nheads, device=device) * 15 + 1)
+    dt_bias = torch.zeros(nheads, device=device)
+    D = torch.ones(nheads, device=device)
+    total, prompt = 100, 70  # prompt ends 6 tokens into the second chunk
+
+    def make_layer():
+        x = torch.randn(total, nheads, head_dim, device=device).to(dtype)
+        dt = (0.5 * torch.randn(total, nheads, device=device)).to(dtype)
+        B = torch.randn(total, ngroups, dstate, device=device).to(dtype)
+        C = torch.randn(total, ngroups, dstate, device=device).to(dtype)
+        ref = _single_shot(x, dt, A, B, C, D, dt_bias, chunk_size)
+        return x, dt, B, C, ref
+
+    layers = [make_layer(), make_layer()]
+    # both layers' states live in the same paged tensors (KV cache groups of a
+    # hybrid model alias one allocation); layer 0 owns slot 1, layer 1 slot 2
+    num_slots = 3
+    shapes = [
+        (nheads, head_dim, dstate),
+        (chunk_size, nheads, head_dim),
+        (chunk_size, nheads),
+        (chunk_size, ngroups, dstate),
+        (chunk_size, ngroups, dstate),
+    ]
+    dtypes = [torch.float32, dtype, dtype, dtype, dtype]
+    states = _carve_states(num_slots, shapes, dtypes, device, pad_bytes=512)
+    ssm_state, buffers = states[0], ExactReplayBuffers(*states[1:])
+    slots = [
+        torch.tensor([1], dtype=torch.int32, device=device),
+        torch.tensor([2], dtype=torch.int32, device=device),
+    ]
+    outs = [torch.empty_like(layer[0]) for layer in layers]
+
+    def run(step_start, step_len):
+        # one metadata object for both layers, as the model runner does
+        meta = build_exact_replay_metadata([step_start], [step_len], chunk_size, device)
+        for li, (x, dt, B, C, _ref) in enumerate(layers):
+            sl = slice(step_start, step_start + step_len)
+            exact_replay_ssd(
+                x[sl],
+                dt[sl],
+                B[sl],
+                C[sl],
+                A=A,
+                D=D,
+                dt_bias=dt_bias,
+                out=outs[li][sl],
+                ssm_state=ssm_state,
+                slots=slots[li],
+                meta=meta,
+                chunk_size=chunk_size,
+                buffers=buffers,
+            )
+
+    run(0, prompt)
+    # after the prefill every layer's trailing partial chunk sits in its own slot
+    for li, (x, _dt, _B, _C, _ref) in enumerate(layers):
+        stored = buffers.x[li + 1, : prompt % chunk_size]
+        assert torch.equal(
+            stored.view(torch.int16), x[chunk_size:prompt].view(torch.int16)
+        ), f"layer {li} stored its partial chunk in another layer's slot"
+    for pos in range(prompt, total):
+        run(pos, 1)
+    for li, (_x, _dt, _B, _C, ref) in enumerate(layers):
+        assert torch.equal(outs[li].view(torch.int16), ref.view(torch.int16)), (
+            f"layer {li}: exact replay diverged from single-shot prefill"
         )

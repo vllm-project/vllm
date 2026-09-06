@@ -118,9 +118,15 @@ class ExactReplayMetadata:
     first, then this step's tokens. Index tensors are int64 device tensors;
     the varlen/chunk metadata consumed by the SSD kernels is int32.
 
+    The metadata refers to sequences by their row in the batch and never to
+    state slots: the slots come from the layer's own state indices at call
+    time. This keeps one instance valid for every KV cache group of a hybrid
+    model, where the model runner builds the metadata once and only swaps the
+    block table per group.
+
     Attributes:
         num_aug_tokens: total number of tokens in the augmented layout.
-        buffered_slot: state slot of each buffered token to re-feed.
+        buffered_seq: batch row of the sequence each buffered token belongs to.
         buffered_pos: position of each buffered token inside its slot's buffer.
         buffered_dst: destination of each buffered token in the augmented layout.
         step_dst: destination of each of this step's tokens in the augmented
@@ -138,12 +144,12 @@ class ExactReplayMetadata:
             boundary state.
         store_src: positions in the augmented layout of the trailing partial
             chunk's tokens that must be stored into the buffers.
-        store_slot: destination slot of each stored token.
+        store_seq: batch row of the sequence each stored token belongs to.
         store_pos: destination position of each stored token.
     """
 
     num_aug_tokens: int
-    buffered_slot: torch.Tensor
+    buffered_seq: torch.Tensor
     buffered_pos: torch.Tensor
     buffered_dst: torch.Tensor
     step_dst: torch.Tensor
@@ -155,7 +161,7 @@ class ExactReplayMetadata:
     boundary_rows: torch.Tensor
     boundary_chunk_idx: torch.Tensor
     store_src: torch.Tensor
-    store_slot: torch.Tensor
+    store_seq: torch.Tensor
     store_pos: torch.Tensor
 
 
@@ -166,7 +172,6 @@ def _cdiv(a: int, b: int) -> int:
 def build_exact_replay_metadata(
     num_computed: list[int],
     query_lens: list[int],
-    slots: torch.Tensor,
     chunk_size: int,
     device: torch.device,
 ) -> ExactReplayMetadata:
@@ -175,7 +180,6 @@ def build_exact_replay_metadata(
     Args:
         num_computed: per sequence, tokens processed before this step.
         query_lens: per sequence, tokens scheduled in this step.
-        slots: ``(num_seqs,)`` device tensor with each sequence's state slot.
         chunk_size: the model's SSD chunk size.
         device: device for the returned tensors.
 
@@ -235,10 +239,9 @@ def build_exact_replay_metadata(
     def i32(v: list[int]) -> torch.Tensor:
         return async_tensor_h2d(v, dtype=torch.int32, device=device)
 
-    slots64 = slots.to(torch.int64)
     return ExactReplayMetadata(
         num_aug_tokens=offset,
-        buffered_slot=slots64[i64(buffered_seq)],
+        buffered_seq=i64(buffered_seq),
         buffered_pos=i64(buffered_pos),
         buffered_dst=i64(buffered_dst),
         step_dst=i64(step_dst),
@@ -252,7 +255,7 @@ def build_exact_replay_metadata(
         boundary_rows=i64(boundary_rows),
         boundary_chunk_idx=i64(boundary_chunk_idx),
         store_src=i64(store_src),
-        store_slot=slots64[i64(store_seq)],
+        store_seq=i64(store_seq),
         store_pos=i64(store_pos),
     )
 
@@ -347,27 +350,21 @@ class Mamba2AttentionMetadataBuilder(
             num_computed_cpu = (seq_lens_cpu - query_lens).tolist()
             query_lens_cpu = query_lens.tolist()
             num_reqs = common.num_reqs
+            # The metadata carries batch rows, not state slots, so the copy
+            # that `update_block_table` hands to the other KV cache groups of a
+            # hybrid model stays valid: each layer resolves its own slots from
+            # its state indices when it runs the SSD step.
             if common.num_decodes > 0:
-                assert common.state_indices_tensor_d is not None
-                slots_d = common.state_indices_tensor_d
-                if slots_d.dim() == 2:
-                    slots_d = slots_d[:, 0]
                 exact_replay_d = build_exact_replay_metadata(
                     num_computed_cpu[: common.num_decodes],
                     query_lens_cpu[: common.num_decodes],
-                    slots_d,
                     self.chunk_size,
                     device,
                 )
             if common.num_prefills > 0:
-                assert common.state_indices_tensor_p is not None
-                slots_p = common.state_indices_tensor_p
-                if slots_p.dim() == 2:
-                    slots_p = slots_p[:, 0]
                 exact_replay_p = build_exact_replay_metadata(
                     num_computed_cpu[num_reqs - common.num_prefills : num_reqs],
                     query_lens_cpu[num_reqs - common.num_prefills : num_reqs],
-                    slots_p,
                     self.chunk_size,
                     device,
                 )

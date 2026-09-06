@@ -75,6 +75,8 @@ def exact_replay_ssd(
             in place.
         ssm_state: the fp32 SSM cache, ``(num_slots, nheads, head_dim, dstate)``.
         slots: ``(num_seqs,)`` state slot of each sequence, in batch order.
+            These are the calling layer's own state indices; the metadata
+            only refers to batch rows.
         meta: an ``ExactReplayMetadata`` built for these sequences.
         chunk_size: the model's SSD chunk size.
         buffers: the partial-chunk input buffers.
@@ -82,16 +84,18 @@ def exact_replay_ssd(
     nheads, head_dim = x.shape[1], x.shape[2]
     ngroups, dstate = B.shape[1], B.shape[2]
     n_aug = meta.num_aug_tokens
-    augmented = meta.buffered_slot.numel() > 0
+    slots64 = slots.to(torch.int64)
+    augmented = meta.buffered_seq.numel() > 0
     if augmented:
+        buffered_slot = slots64[meta.buffered_seq]
         x_aug = x.new_empty((n_aug, nheads, head_dim))
         dt_aug = dt.new_empty((n_aug, nheads))
         B_aug = B.new_empty((n_aug, ngroups, dstate))
         C_aug = C.new_empty((n_aug, ngroups, dstate))
-        x_aug[meta.buffered_dst] = buffers.x[meta.buffered_slot, meta.buffered_pos]
-        dt_aug[meta.buffered_dst] = buffers.dt[meta.buffered_slot, meta.buffered_pos]
-        B_aug[meta.buffered_dst] = buffers.B[meta.buffered_slot, meta.buffered_pos]
-        C_aug[meta.buffered_dst] = buffers.C[meta.buffered_slot, meta.buffered_pos]
+        x_aug[meta.buffered_dst] = buffers.x[buffered_slot, meta.buffered_pos]
+        dt_aug[meta.buffered_dst] = buffers.dt[buffered_slot, meta.buffered_pos]
+        B_aug[meta.buffered_dst] = buffers.B[buffered_slot, meta.buffered_pos]
+        C_aug[meta.buffered_dst] = buffers.C[buffered_slot, meta.buffered_pos]
         x_aug[meta.step_dst] = x
         dt_aug[meta.step_dst] = dt
         B_aug[meta.step_dst] = B
@@ -127,9 +131,10 @@ def exact_replay_ssd(
     if augmented:
         out.copy_(out_aug[meta.step_dst])
     if meta.boundary_rows.numel() > 0:
-        ssm_state[slots[meta.boundary_rows]] = states[meta.boundary_chunk_idx]
+        ssm_state[slots64[meta.boundary_rows]] = states[meta.boundary_chunk_idx]
     if meta.store_src.numel() > 0:
-        buffers.x[meta.store_slot, meta.store_pos] = x_aug[meta.store_src]
-        buffers.dt[meta.store_slot, meta.store_pos] = dt_aug[meta.store_src]
-        buffers.B[meta.store_slot, meta.store_pos] = B_aug[meta.store_src]
-        buffers.C[meta.store_slot, meta.store_pos] = C_aug[meta.store_src]
+        store_slot = slots64[meta.store_seq]
+        buffers.x[store_slot, meta.store_pos] = x_aug[meta.store_src]
+        buffers.dt[store_slot, meta.store_pos] = dt_aug[meta.store_src]
+        buffers.B[store_slot, meta.store_pos] = B_aug[meta.store_src]
+        buffers.C[store_slot, meta.store_pos] = C_aug[meta.store_src]
