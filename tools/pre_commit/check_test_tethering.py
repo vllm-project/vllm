@@ -10,9 +10,12 @@ rots.
 
 How it works
 ------------
-1. Parse every job in ``.buildkite/test_areas/*.yaml`` (and its ``mirror.amd``
-   sub-step) plus the legacy ``.buildkite/test-amd.yaml``, and turn each shell
-   command into a :class:`Selection` describing which test files it runs.
+1. Parse every job in every Buildkite pipeline yaml (and each ``mirror.amd``
+   sub-step), and turn each shell command into a :class:`Selection` describing
+   which test files it runs. The pipeline directories are read from
+   ``.buildkite/ci_config*.yaml`` (``job_dirs:``) - currently ``test_areas/``,
+   ``hardware_tests/`` and ``intel_jobs/`` across the CUDA, ROCm and Intel
+   pipelines - plus the legacy ``.buildkite/test-amd.yaml``.
 2. Build the inventory of test files under ``tests/``.
 3. A file is a problem if no selection runs it and it is not in the allowlist
    (``tools/pre_commit/test_tethering_allowlist.txt`` - the set of pre-existing
@@ -29,10 +32,10 @@ Modes
   allowlist entries that have since become tethered, or whose file is gone, so
   the list stays honest.
 
-Coverage from either ``.buildkite/test_areas/`` or the legacy
-``.buildkite/test-amd.yaml`` counts. ``test-amd.yaml`` is being folded into
-``test_areas/`` a group at a time; when it is gone, this checker stops parsing
-it and reverts to ``test_areas/`` only.
+Coverage from *any* of those pipelines counts - the question is "does some
+Buildkite job run this test", not "which pipeline". ``test-amd.yaml`` is being
+folded into ``test_areas/`` a group at a time; when it is gone the checker stops
+parsing it automatically.
 
 Usage::
 
@@ -52,13 +55,14 @@ import regex as re
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TEST_AREAS_DIR = REPO_ROOT / ".buildkite" / "test_areas"
+BUILDKITE_DIR = REPO_ROOT / ".buildkite"
+# Fallback pipeline dir, always parsed even if ``ci_config*.yaml`` can't be read.
+TEST_AREAS_DIR = BUILDKITE_DIR / "test_areas"
 # The legacy hand-maintained AMD pipeline. It is being migrated into
 # ``test_areas/`` piecemeal; until that finishes, a test wired only into this
 # file is still genuinely run by CI, so it counts as tethered. When the file is
-# removed, drop it from ``_pipeline_yaml_paths()`` and the checker is back to
-# ``test_areas/`` only, flagging anything the migration left behind.
-TEST_AMD_YAML = REPO_ROOT / ".buildkite" / "test-amd.yaml"
+# removed, ``_pipeline_yaml_paths()`` stops appending it automatically.
+TEST_AMD_YAML = BUILDKITE_DIR / "test-amd.yaml"
 TESTS_DIR = REPO_ROOT / "tests"
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "test_tethering_allowlist.txt"
 
@@ -613,11 +617,29 @@ def _iter_job_steps(yaml_doc: dict):
                 yield merged
 
 
+def _pipeline_job_dirs() -> list[Path]:
+    """The Buildkite job directories, read from every ``.buildkite/ci_config*.yaml``
+    (``job_dirs:``). Buildkite itself uses these files to assemble each pipeline,
+    so a test wired into any job under any of them is genuinely run by CI. Falls
+    back to ``test_areas/`` alone if no config is readable."""
+    job_dirs: set[Path] = {TEST_AREAS_DIR}
+    for config in sorted((REPO_ROOT / ".buildkite").glob("ci_config*.yaml")):
+        try:
+            doc = yaml.safe_load(config.read_text()) or {}
+        except yaml.YAMLError:
+            continue
+        for rel in doc.get("job_dirs") or []:
+            job_dirs.add(REPO_ROOT / rel)
+    return sorted(job_dirs)
+
+
 def _pipeline_yaml_paths() -> list[Path]:
-    """Every Buildkite pipeline yaml whose jobs count as CI coverage: the
-    ``test_areas/`` set plus the legacy ``test-amd.yaml`` (see ``TEST_AMD_YAML``).
-    """
-    paths = sorted(TEST_AREAS_DIR.glob("*.yaml"))
+    """Every Buildkite pipeline yaml whose jobs count as CI coverage: the yamls
+    in every :func:`_pipeline_job_dirs` directory plus the legacy ``test-amd.yaml``
+    (see ``TEST_AMD_YAML``)."""
+    paths: list[Path] = []
+    for job_dir in _pipeline_job_dirs():
+        paths.extend(sorted(job_dir.glob("*.yaml")))
     if TEST_AMD_YAML.is_file():
         paths.append(TEST_AMD_YAML)
     return paths
@@ -750,9 +772,8 @@ def run_full_scan(
     if untethered:
         print(
             f"\n{len(untethered)} test file(s) exist but run in no CI job. Wire "
-            "each into a job's `commands` in .buildkite/test_areas/ (or "
-            ".buildkite/test-amd.yaml), or add it "
-            f"to {ALLOWLIST_PATH.relative_to(REPO_ROOT)} with a reason."
+            "each into a job's `commands` in a .buildkite/ pipeline yaml, or add "
+            f"it to {ALLOWLIST_PATH.relative_to(REPO_ROOT)} with a reason."
         )
 
     error_count = len(untethered)
@@ -780,8 +801,8 @@ def run_changed_files_check(
     if untethered:
         print(
             "\nAdd the test to a job's `commands` (and `source_file_dependencies`)"
-            " in .buildkite/test_areas/, or, if it is intentionally not run in "
-            f"CI, add it to {ALLOWLIST_PATH.relative_to(REPO_ROOT)} with a "
+            " in a .buildkite/ pipeline yaml, or, if it is intentionally not run "
+            f"in CI, add it to {ALLOWLIST_PATH.relative_to(REPO_ROOT)} with a "
             "comment explaining why."
         )
     return 1 if untethered else 0
@@ -794,10 +815,14 @@ def _to_repo_relative(path: str) -> str:
 
 
 def _change_set_touches_ci_config(paths: list[str]) -> bool:
-    """A change to a pipeline yaml or to the allowlist can orphan a test that is
-    not itself in the change set, so those changes force a full scan."""
+    """A change to a pipeline yaml, a ci_config, or the allowlist can orphan a
+    test that is not itself in the change set, so those changes force a full
+    scan."""
     return any(
         ".buildkite/test_areas/" in path
+        or ".buildkite/hardware_tests/" in path
+        or ".buildkite/intel_jobs/" in path
+        or ".buildkite/ci_config" in path
         or path.endswith("test-amd.yaml")
         or path.endswith("test_tethering_allowlist.txt")
         for path in paths
