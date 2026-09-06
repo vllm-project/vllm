@@ -218,7 +218,13 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 class NemotronHMultiTokenPredictor(nn.Module):
     """MTP predictor with NemotronH layers."""
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
 
         speculative_config = vllm_config.speculative_config
@@ -226,7 +232,8 @@ class NemotronHMultiTokenPredictor(nn.Module):
         draft_model_config = speculative_config.draft_model_config
         assert draft_model_config is not None
         config = draft_model_config.hf_config.get_text_config()
-        quant_config = get_draft_quant_config(vllm_config)
+        if quant_config is None:
+            quant_config = get_draft_quant_config(vllm_config)
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -350,7 +357,13 @@ class NemotronHMTP(nn.Module, SupportsPP):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = get_draft_quant_config(vllm_config)
-
+        if self.quant_config is not None:
+            self.quant_config.apply_vllm_mapper(
+                self.hf_to_vllm_mapper.get_rename_mapper()
+            )
+            self.quant_config.packed_modules_mapping.update(
+                self.packed_modules_mapping
+            )
         # Needed for load_weights mapping
         self.mtp_start_layer_idx = config.num_hidden_layers
 
@@ -363,7 +376,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         # MTP predictor
         self.model = NemotronHMultiTokenPredictor(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
+            vllm_config=vllm_config,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "mtp"),
         )
 
         # LM head for generating logits
