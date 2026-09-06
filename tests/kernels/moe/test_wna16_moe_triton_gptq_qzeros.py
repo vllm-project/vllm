@@ -6,8 +6,9 @@
 Both AutoGPTQ and compressed-tensors checkpoints persist their packed weights
 K-first int32; the TRITON branch transposes w13/w2 and scales to the N-first
 uint8 layout `fused_moe_kernel_gptq_awq` expects. This test locks in that the
-zero-points get the matching transform -- and that its result actually maps
-zero-point k to output channel k, not just that the shape/dtype line up.
+zero-points get the matching transform -- and that channel `bn`'s zero-point
+actually lands at the kernel's `out[bn // 2, kg]` byte, not just that the
+shape/dtype line up.
 
 The compressed-tensors case is run asymmetric (`symmetric=False`), where the
 zero-point values are load-bearing: a byte/nibble permutation bug there
@@ -148,8 +149,8 @@ def test_triton_qzeros_reshaped_to_kernel_expected_layout(make_config):
     assert w13_qz_out.dtype == torch.uint8
     assert w2_qz_out.dtype == torch.uint8
 
-    # ...and the transform maps zero-point k to output channel k, verified
-    # against an independently constructed expected tensor.
+    # ...and channel bn's zero-point lands at the kernel's out[bn // 2, kg] byte,
+    # verified against an independently constructed expected tensor.
     torch.testing.assert_close(
         w13_qz_out, _ref_qzeros_kernel_layout(w13_qzeros), rtol=0, atol=0
     )
