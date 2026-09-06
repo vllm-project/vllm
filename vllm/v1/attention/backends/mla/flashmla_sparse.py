@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -294,6 +295,13 @@ class FlashMLASparseMetadataBuilder(
         sm_count = num_compute_units(device.index)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
+        # Fused multi-step draft decode opt-in (see update_draft_decode_metadata).
+        # Default-off: without the env opt-in the builder declares no support,
+        # keeping pre-change behavior; the disable flag wins over the opt-in.
+        self.supports_draft_decode_metadata_update = (
+            envs.VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA
+            and not envs.VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA
+        )
         # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
         self.fp8_decode_padded_heads = (
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
@@ -415,6 +423,22 @@ class FlashMLASparseMetadataBuilder(
         )
 
         return fp8_metadata
+
+    def update_draft_decode_metadata(self, _metadata: FlashMLASparseMetadata) -> None:
+        """No-op between fused draft steps; all state is already advanced.
+
+        The fused draft loop advances positions/seq_lens/slot mappings in
+        the captured graph (the speculator's `_update_draft_inputs_kernel`
+        and per-step `compute_slot_mappings`), and the sparse kernels never
+        consume metadata seq_lens: the fp8 path reads the constant
+        `cache_lens=max_model_len_tensor` plus topk indices, and the bf16
+        path reads `topk_length`. The genuine per-step data — the topk
+        indices — is rewritten inside `forward_mqa` on every step by the
+        triton conversion running on the persistent `topk_indices_buffer`,
+        so the captured forward carries the step dependence and this hook
+        has nothing to refresh. Mirrors `TritonMLAMetadataBuilder`.
+        """
+        pass
 
     def _build_fp8_separate_prefill_decode(
         self,
