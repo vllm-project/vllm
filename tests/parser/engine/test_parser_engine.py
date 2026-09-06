@@ -668,10 +668,13 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"val": null}', "f")
         assert '"val": "null"' in result
 
-    def test_int_param_not_changed(self):
-        tool = _make_tool("f", {"count": {"type": "integer"}})
+    def test_integer_type_preserved_with_value_alternatives(self):
+        tool = _make_tool(
+            "f",
+            {"count": {"type": "integer", "anyOf": [{"minimum": 0}, {"maximum": -1}]}},
+        )
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"count": 42}', "f")
+        result = engine._fix_arg_types('{"count": "42"}', "f")
         assert '"count": 42' in result
 
     def test_no_tools_returns_unchanged(self):
@@ -765,7 +768,7 @@ class TestFixArgTypes:
         assert parsed["inner"]["count"] == 42
 
     @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
-    def test_root_alternative_branch_properties(self, combinator):
+    def test_nested_root_alternative_branch_properties(self, combinator):
         """A property declared by one branch is coerced, one the branches type
         differently is left alone since no branch is selected, and one all
         branches agree on refines the direct schema."""
@@ -776,22 +779,26 @@ class TestFixArgTypes:
                 parameters={
                     "type": "object",
                     "properties": {"count": {"type": ["string", "integer"]}},
-                    combinator: [
+                    "allOf": [
                         {
-                            "properties": {
-                                "kind": {"const": "a"},
-                                "payload": {"type": "object"},
-                                "value": {"type": "integer"},
-                                "count": {"type": "string"},
-                            },
-                        },
-                        {
-                            "properties": {
-                                "kind": {"const": "b"},
-                                "value": {"type": "string"},
-                                "count": {"type": "string"},
-                            },
-                        },
+                            combinator: [
+                                {
+                                    "properties": {
+                                        "kind": {"const": "a"},
+                                        "payload": {"type": "object"},
+                                        "value": {"type": "integer"},
+                                        "count": {"type": "string"},
+                                    },
+                                },
+                                {
+                                    "properties": {
+                                        "kind": {"const": "b"},
+                                        "value": {"type": "string"},
+                                        "count": {"type": "string"},
+                                    },
+                                },
+                            ]
+                        }
                     ],
                 },
             ),
@@ -853,17 +860,19 @@ class TestFixArgTypes:
                 parameters={
                     "type": "object",
                     "properties": {
+                        "value": {"type": "integer"},
                         "payload": {
                             "type": "object",
                             "properties": {"kept": {"type": "integer"}},
-                        }
+                        },
                     },
                     "allOf": [
                         {
                             "properties": {
+                                "value": {"type": "number"},
                                 "payload": {
                                     "properties": {"count": {"type": "integer"}}
-                                }
+                                },
                             }
                         }
                     ],
@@ -871,8 +880,13 @@ class TestFixArgTypes:
             ),
         )
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"payload": {"kept": "1", "count": "42"}}', "f")
-        assert json.loads(result) == {"payload": {"kept": 1, "count": 42}}
+        result = engine._fix_arg_types(
+            '{"value": "1.5", "payload": {"kept": "1", "count": "42"}}', "f"
+        )
+        assert json.loads(result) == {
+            "value": "1.5",
+            "payload": {"kept": 1, "count": 42},
+        }
 
     def test_malformed_root_combinator_preserves_direct_coercion(self):
         tool = _make_tool("f", {})

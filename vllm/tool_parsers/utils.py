@@ -11,6 +11,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+from jsonschema import Draft202012Validator
 from openai.types.responses import (
     FunctionTool,
     NamespaceTool,
@@ -269,31 +270,24 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _dict_properties(schema: Any) -> dict[str, dict[str, Any]]:
-    """Property schemas of *schema* that are dicts; booleans carry no types."""
-    if not isinstance(schema, dict) or not isinstance(
-        properties := schema.get("properties"), dict
-    ):
-        return {}
-    return {name: prop for name, prop in properties.items() if isinstance(prop, dict)}
-
-
-def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
+def _root_schema_properties(params: Any) -> dict[str, Any]:
     """Property schemas declared directly or inside root combinators.
 
     Root ``allOf`` members always apply, so their properties refine the
     direct ``properties``. Which ``anyOf``/``oneOf`` branch applies depends
     on argument values a streaming parser only sees incrementally, so a
     branch property is used only when no other branch declares it
-    differently; it then always applies and refines the schema as well.
+    differently. These are static coercion hints, not branch validation.
     """
+    if not isinstance(params, dict):
+        return {}
     combinators = {
         keyword: value
         for keyword in ("anyOf", "oneOf", "allOf")
         if isinstance(value := params.get(keyword), list)
     }
     branches = [
-        _dict_properties(branch)
+        _root_schema_properties(branch)
         for keyword in ("anyOf", "oneOf")
         for branch in combinators.get(keyword, [])
     ]
@@ -305,11 +299,16 @@ def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
     }
     direct = params.get("properties")
     properties = dict(direct) if isinstance(direct, dict) else {}
-    for refinement in (*map(_dict_properties, combinators.get("allOf", [])), shared):
+    for refinement in (
+        *map(_root_schema_properties, combinators.get("allOf", [])),
+        shared,
+    ):
         for name, schema in refinement.items():
+            if not isinstance(schema, dict):
+                continue
             base = properties.get(name)
             if isinstance(base, dict):
-                schema = base | schema
+                schema = base | schema | {"allOf": [base, schema]}
                 if isinstance(base.get("properties"), dict) and isinstance(
                     schema.get("properties"), dict
                 ):
@@ -1095,16 +1094,31 @@ def extract_types_from_schema(schema: Any, *, infer_const: bool = True) -> list[
             elif isinstance(value, dict):
                 types.add("object")
 
+    constraints = [types] if types else []
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
-            for choice in schema[choice_field]:
-                choice_types = extract_types_from_schema(
-                    choice, infer_const=infer_const and choice_field == "allOf"
+            branch_types = [
+                set(
+                    extract_types_from_schema(
+                        choice, infer_const=infer_const and choice_field == "allOf"
+                    )
                 )
-                if not choice_types and choice_field in ("anyOf", "oneOf"):
-                    return []
-                types.update(choice_types)
+                for choice in schema[choice_field]
+            ]
+            if choice_field == "allOf":
+                constraints.extend(branch for branch in branch_types if branch)
+            elif branch_types and all(branch_types):
+                constraints.append(set.union(*branch_types))
 
+    if not constraints:
+        return []
+    # JSON Schema numbers include integers; conjunctions must preserve that subset.
+    for constraint in constraints:
+        if "number" in constraint:
+            constraint.add("integer")
+    types = set.intersection(*constraints)
+    if "number" in types:
+        types.discard("integer")
     return list(types)
 
 
@@ -1218,6 +1232,11 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     # inf/nan inside a parsed list/dict) which json.dumps would render as
     # invalid JSON (Infinity/NaN). Preserve the raw string instead.
     if not _is_json_finite(parsed):
+        return value
+    known_types = normalized_types.intersection(type_priority)
+    if known_types and not any(
+        Draft202012Validator.TYPE_CHECKER.is_type(parsed, t) for t in known_types
+    ):
         return value
     return parsed
 
