@@ -87,7 +87,12 @@ def test_aggregate_workers_output():
     assert aggregated.finished_sending is None
     assert aggregated.finished_recving == {"req2"}
     assert aggregated.invalid_block_ids == {3, 4, 5}
-    assert aggregated.failed_recving == {"req3"}
+    assert not aggregated.failed_recving
+
+    output1 = DummyModelRunnerOutput(finished_recving={"req3"})
+    output2 = DummyModelRunnerOutput(finished_recving={"req3"})
+    aggregated = aggregator.aggregate([output1, output2])
+    assert aggregated.kv_connector_output.failed_recving == {"req3"}
 
 
 def test_aggregate_workers_output_with_expected_finished_count():

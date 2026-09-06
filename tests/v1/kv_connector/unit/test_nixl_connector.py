@@ -29,7 +29,10 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorRole,
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -630,6 +633,12 @@ class TestNixlHandshake:
         done_sending, done_recving = connector.get_finished(set())
         assert done_sending == ({"sent"} if pcp_rank == 0 else set())
         assert done_recving == set()
+
+        worker.get_transfer_results = MagicMock(
+            return_value=KVConnectorTransferResults(finished_sending={"sent"})
+        )
+        results = connector.get_transfer_results(set())
+        assert results.finished_sending == ({"sent"} if pcp_rank == 0 else set())
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",

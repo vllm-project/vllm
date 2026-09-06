@@ -60,6 +60,7 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
+        self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
     @classmethod
@@ -94,7 +95,6 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
-        failed_recving = set[str]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
@@ -157,7 +157,10 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
-            failed_recving |= kv_output.failed_recving
+            self._failed_recving_pending |= kv_output.failed_recving
+
+        failed_recving = self._failed_recving_pending & finished_recving
+        self._failed_recving_pending -= failed_recving
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
