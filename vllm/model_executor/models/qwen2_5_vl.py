@@ -316,9 +316,10 @@ class Qwen2_5_VisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        num_heads: int | None = None,
     ):
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
@@ -356,7 +357,7 @@ class Qwen2_5_VisionAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.tp_size = (
             1
             if use_data_parallel
@@ -500,6 +501,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            num_heads=num_heads,
         )
 
     def forward(
@@ -577,9 +579,10 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         spatial_merge_size: int = 2,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        num_heads: int | None = None,
     ) -> None:
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -649,7 +652,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
         self._rope_by_thw_cache = LRUCache(capacity=1024)
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(self.num_heads)
         self.tp_size = (
             1
             if use_data_parallel
@@ -706,6 +709,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            num_heads=self.num_heads,
         )
 
     @property
