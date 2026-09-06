@@ -18,7 +18,7 @@ def _make_connector(
     backend = Mock()
     backend.handle_preemptions.side_effect = lambda _: events.append("handle")
     backend.bind_connector_metadata.side_effect = lambda _: events.append("bind")
-    backend.start_load_kv.side_effect = lambda _: events.append("start")
+    backend.start_load_kv.side_effect = lambda *_args, **_kwargs: events.append("start")
     backend.wait_for_save.side_effect = lambda: events.append("wait")
     backend.get_finished.side_effect = lambda _: (set(), set())
     backend.get_block_ids_with_load_errors.return_value = set()
@@ -26,6 +26,7 @@ def _make_connector(
     backend.get_kv_connector_kv_cache_events.return_value = None
     backend.build_connector_worker_meta.return_value = None
     backend.clear_connector_metadata.side_effect = lambda: events.append("clear")
+    backend.requires_pre_forward_start = False
     monkeypatch.setattr(kv_connector_module, "get_kv_transfer_group", lambda: backend)
     monkeypatch.setattr(
         kv_connector_module, "is_forward_context_available", lambda: True
@@ -77,3 +78,13 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
     assert events == ["handle", "bind", "start", "clear"]
+
+
+def test_connector_can_require_pre_forward_start(monkeypatch: pytest.MonkeyPatch):
+    events: list[str] = []
+    connector = _make_connector(monkeypatch, events)
+    connector.kv_connector.requires_pre_forward_start = True
+
+    connector.pre_forward(_scheduler_output(False))  # type: ignore[arg-type]
+
+    assert events == ["handle", "bind", "start"]

@@ -208,6 +208,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return False
 
+    @property
+    def requires_pre_forward_start(self) -> bool:
+        return True
+
     def finish_forward(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.finish_forward()

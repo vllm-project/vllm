@@ -213,6 +213,11 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @property
+    def requires_pre_forward_start(self) -> bool:
+        """Whether every step's connector state must be bound before forward."""
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

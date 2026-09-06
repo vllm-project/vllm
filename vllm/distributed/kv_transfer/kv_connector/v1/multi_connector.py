@@ -235,6 +235,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
+    @property
+    def requires_pre_forward_start(self) -> bool:
+        return any(c.requires_pre_forward_start for c in self._connectors)
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
