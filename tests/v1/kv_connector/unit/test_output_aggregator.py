@@ -101,6 +101,7 @@ def test_aggregate_workers_output():
 def test_aggregate_hisparse_stats():
     aggregator = KVOutputAggregator(expected_finished_count=2)
     outputs = [
+        DummyModelRunnerOutput(),
         DummyModelRunnerOutput(hisparse_stats=HiSparseStats(7, 3, 48)),
         DummyModelRunnerOutput(hisparse_stats=HiSparseStats(5, 1, 16)),
     ]

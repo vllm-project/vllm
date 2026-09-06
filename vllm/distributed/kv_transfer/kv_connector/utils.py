@@ -98,10 +98,11 @@ class KVOutputAggregator:
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
-            if aggregated_hisparse_stats is None:
-                aggregated_hisparse_stats = model_runner_output.hisparse_stats
-            elif hisparse_stats := model_runner_output.hisparse_stats:
-                aggregated_hisparse_stats.aggregate(hisparse_stats)
+            if (hisparse_stats := model_runner_output.hisparse_stats) is not None:
+                if aggregated_hisparse_stats is None:
+                    aggregated_hisparse_stats = hisparse_stats
+                else:
+                    aggregated_hisparse_stats.aggregate(hisparse_stats)
 
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
