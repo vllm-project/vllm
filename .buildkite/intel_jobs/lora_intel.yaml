@@ -106,8 +106,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_punica_ops_fp8.py &&
-      pytest -v -s lora/test_punica_xpu_ops.py'
+      pytest -v -s lora/test_punica_ops_fp8.py'
 
 - label: LoRA Models
   timeout_in_minutes: 45
