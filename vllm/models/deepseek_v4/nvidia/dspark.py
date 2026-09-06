@@ -53,6 +53,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    _select_dsv4_attn_cls,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
 )
@@ -87,9 +88,9 @@ class _DSparkContextKVAttention(nn.Module):
 class _DSparkContextKVLayer(nn.Module):
     """A draft layer stripped down to its context-KV projection."""
 
-    def __init__(self, layer: DeepseekV4DecoderLayer) -> None:
+    def __init__(self, attn: nn.Module) -> None:
         super().__init__()
-        self.attn = _DSparkContextKVAttention(layer.attn)
+        self.attn = _DSparkContextKVAttention(attn)
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -141,20 +142,30 @@ class DSparkDeepseekV4Model(nn.Module):
         layers: list[nn.Module] = []
         for i in range(self.num_dspark_layers):
             layer_prefix = maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}")
-            layer = DeepseekV4DecoderLayer(
-                current_vllm_config,
-                prefix=layer_prefix,
-                topk_indices_buffer=self.topk_indices_buffer,
-            )
             if self.context_kv_only:
+                # Only the attention submodule participates in context-KV
+                # materialization; building the full decoder layer would
+                # transiently allocate its MoE experts, norms, and
+                # hyper-connection parameters on the device.
+                attn = _select_dsv4_attn_cls(current_vllm_config)(
+                    current_vllm_config,
+                    prefix=f"{layer_prefix}.attn",
+                    topk_indices_buffer=self.topk_indices_buffer,
+                )
                 # The full attention object registers itself for metadata lookup,
                 # but only its SWA cache layer participates in materialization.
                 current_vllm_config.compilation_config.static_forward_context.pop(
                     f"{layer_prefix}.attn", None
                 )
-                layers.append(_DSparkContextKVLayer(layer))
+                layers.append(_DSparkContextKVLayer(attn))
             else:
-                layers.append(layer)
+                layers.append(
+                    DeepseekV4DecoderLayer(
+                        current_vllm_config,
+                        prefix=layer_prefix,
+                        topk_indices_buffer=self.topk_indices_buffer,
+                    )
+                )
         self.layers = nn.ModuleList(layers)
 
         if not self.context_kv_only:

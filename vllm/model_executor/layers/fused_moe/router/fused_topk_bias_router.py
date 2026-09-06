@@ -148,9 +148,13 @@ def fused_topk_bias(
         )
 
         output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        padding_mask = _get_padding_mask(gating_output.shape[0])
         if (
             scoring_func == "sqrtsoftplus"
             and hash_indices_table is None
+            # dsv4_topk marks padded rows with a -1 sentinel, which unsigned
+            # indices cannot represent; keep the generic path for that pair.
+            and (padding_mask is None or output_indices_dtype != torch.uint32)
             and can_use_dsv4_topk(
                 gating_output,
                 e_score_correction_bias,
@@ -165,7 +169,7 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
-                is_padding=_get_padding_mask(gating_output.shape[0]),
+                is_padding=padding_mask,
                 input_ids=input_tokens,
                 bias_vl=bias_vl,
                 image_sentinel_lo=image_sentinel_lo,
