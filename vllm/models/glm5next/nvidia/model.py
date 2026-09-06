@@ -60,9 +60,11 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vForConditionalGeneration,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -575,7 +577,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
 
-class Glm5NextModel(nn.Module):
+class Glm5NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -682,9 +684,23 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
+        aux_hidden_states: list[torch.Tensor] = []
+        capture_layers = self.aux_hidden_state_layers
+        for layer_idx, layer in enumerate(self._active_layers, self.start_layer):
+            if layer_idx in capture_layers:
+                aux_hidden_states.append(
+                    self._aux_hidden_state(
+                        layer_idx, hidden_states, residual, post, comb, full_num_tokens
+                    )
+                )
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
+            )
+        if self.end_layer in capture_layers:
+            aux_hidden_states.append(
+                self._aux_hidden_state(
+                    self.end_layer, hidden_states, residual, post, comb, full_num_tokens
+                )
             )
 
         if not get_pp_group().is_last_rank:
@@ -701,7 +717,39 @@ class Glm5NextModel(nn.Module):
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _aux_hidden_state(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post: torch.Tensor | None,
+        comb: torch.Tensor | None,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Residual stream entering ``layer_idx`` (HF ``hidden_states[layer_idx]``).
+
+        Used for EAGLE-3 / DFlash auxiliary hidden states. mHC layers defer the
+        hyper-connection post-mix into the next layer's fused pre-op, so the
+        plain stream is never materialized between layers: apply the previous
+        layer's post-mix here and contract the streams, exactly as the last
+        layer does before the final norm. Non-mHC layers, and the embedding
+        before layer 0, already carry the summed stream in ``hidden_states``.
+        """
+        if post is not None:
+            assert residual is not None and comb is not None
+            prev = self.layers[layer_idx - 1]
+            value = hc_contract(
+                prev.hc_post(hidden_states, residual, post, comb), prev.n
+            )
+        else:
+            value = hidden_states
+        if self.is_sequence_parallel:
+            value = sp_all_gather(value)[:num_tokens]
+        return value
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -887,7 +935,7 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module, HasInnerState, SupportsPP, SupportsEagle3, MixtureOfExperts, IsHybrid
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -983,7 +1031,11 @@ class Glm5NextForCausalLM(
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(
-    Glm4vForConditionalGeneration, HasInnerState, IsHybrid, MixtureOfExperts
+    Glm4vForConditionalGeneration,
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsEagle3,
 ):
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
