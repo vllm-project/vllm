@@ -81,6 +81,15 @@ class SpecDecodingLogging:
 
     def log(self, log_fn=logger.info):
         if not self.num_drafts:
+            # Nothing was observed during this interval, so there is nothing
+            # to log. Restart the interval anyway: leaving last_log_time at the
+            # previous non-empty interval would charge this idle gap to the
+            # throughput of the next interval that does have traffic.
+            #
+            # reset() rather than a bare clock assignment, to match
+            # PerfMetricsLogging and because observe() appends to all four lists
+            # together, so an empty num_drafts implies the rest are empty too.
+            self.reset()
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
