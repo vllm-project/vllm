@@ -459,7 +459,7 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._enqueue_row_dma.assert_not_called()
 
 
-def test_hisparse_finish_step_submits_lazy_post_forward_transfer(monkeypatch):
+def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
     runtime = SimpleNamespace(eager_host_mirror=False)
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
@@ -468,16 +468,19 @@ def test_hisparse_finish_step_submits_lazy_post_forward_transfer(monkeypatch):
     worker._post_forward_transfers = [transfer]
     worker._forward_ready_event = MagicMock()
     worker._enqueue_host_mirror = MagicMock()
-    worker._enqueue_transfers = MagicMock()
-    worker._record_transfer_completion = MagicMock()
+    worker._submit_transfers = MagicMock()
     worker._dma_submitted = False
     worker._submitted_mirror_layers = set()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", MagicMock())
+    worker._finish_mirror_phase = MagicMock()
+    worker._release_completed_dma_descriptors = MagicMock()
+    stream = MagicMock()
+    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
 
-    worker.finish_step()
+    worker.finish_forward()
 
-    worker._enqueue_transfers.assert_called_once_with([transfer])
-    worker._record_transfer_completion.assert_not_called()
+    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
+    worker._submit_transfers.assert_called_once_with([transfer])
+    worker.host_write_event.record.assert_called_once_with(stream)
 
 
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
@@ -590,7 +593,7 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
         worker._enqueue_host_mirror()
 
 
-def test_hisparse_finish_step_orders_next_forward_after_dma(monkeypatch):
+def test_hisparse_finish_forward_orders_next_forward_after_dma(monkeypatch):
     current_stream = MagicMock()
     worker = _make_hisparse_worker()
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:0"))
@@ -605,11 +608,13 @@ def test_hisparse_finish_step_orders_next_forward_after_dma(monkeypatch):
     worker._post_forward_transfers = []
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
+    worker._forward_ready_event = MagicMock()
+    worker._finish_mirror_phase = MagicMock()
     monkeypatch.setattr(
         hisparse_worker_module, "current_stream", lambda: current_stream
     )
 
-    worker.finish_step()
+    worker.finish_forward()
 
     current_stream.wait_event.assert_called_once_with(worker.host_write_event)
     assert not worker._dma_submitted

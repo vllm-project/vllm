@@ -507,16 +507,6 @@ class HiSparseConnectorWorker:
         for runtime in self.leader_runtimes:
             runtime.reset_hot_state()
 
-    def finish_step(self) -> None:
-        self._finish_mirror_phase()
-        transfers = self._post_forward_transfers
-        self._post_forward_transfers = []
-        self._submit_transfers(transfers)
-        if self.is_host_writer and self._dma_submitted:
-            current_stream().wait_event(self.host_write_event)
-            self._dma_submitted = False
-        self._release_completed_dma_descriptors()
-
     def _release_completed_dma_descriptors(self) -> None:
         pending = self._pending_dma_descriptors
         while pending and pending[0][0].query():
@@ -811,8 +801,16 @@ class HiSparseConnectorWorker:
         compute_stream = current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
-        if self.is_host_writer and not self._dma_submitted:
-            self.host_write_event.record(compute_stream)
+        transfers = self._post_forward_transfers
+        self._post_forward_transfers = []
+        self._submit_transfers(transfers)
+        if self.is_host_writer:
+            if self._dma_submitted:
+                compute_stream.wait_event(self.host_write_event)
+                self._dma_submitted = False
+            else:
+                self.host_write_event.record(compute_stream)
+        self._release_completed_dma_descriptors()
 
     def take_transfer_updates(self) -> tuple[list[int], list[int]]:
         enqueued = self._enqueued_transfer_ids
