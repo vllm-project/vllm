@@ -2057,6 +2057,7 @@ class SpeculativeConfig:
         DFlash and DSpark draft in a separate query pass rather than adding
         rows to the target batch.
         """
+        assert self.num_speculative_tokens is not None
         num_draft_tokens = self.num_speculative_tokens
 
         if self.use_dflash() or self.use_dspark():
@@ -2168,6 +2169,7 @@ class SpeculativeConfig:
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
+        assert self.num_speculative_tokens is not None
         num_mtp_layers = getattr(
             self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
         )
