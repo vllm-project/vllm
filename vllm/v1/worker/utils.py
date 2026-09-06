@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -115,6 +116,7 @@ class KVBlockZeroer:
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         static_forward_context: dict[str, Any],
+        num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
@@ -158,8 +160,6 @@ class KVBlockZeroer:
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
-            ratio = spec.block_size // kernel_bs
-
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
@@ -167,6 +167,12 @@ class KVBlockZeroer:
                 if not isinstance(kv, torch.Tensor):
                     continue
                 dp = kv.data_ptr()
+
+                assert kv.shape[0] % num_blocks == 0, (
+                    f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
+                    f"multiple of {num_blocks} logical blocks"
+                )
+                ratio = kv.shape[0] // num_blocks
 
                 el = kv.element_size()
                 block_stride_bytes = kv.stride(0) * el
@@ -267,11 +273,19 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
-        )
+        if kernel_block_size is None:
+            kv_cache_spec_builder = self.kv_cache_spec
+        elif (
+            isinstance(self.kv_cache_spec, MLAAttentionSpec)
+            and self.kv_cache_spec.storage_block_size is not None
+        ):
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                self.kv_cache_spec.storage_block_size
+            )
+        else:
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                kernel_block_size
+            )
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
@@ -291,6 +305,9 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        if kernel_block_size is not None:
+            for builder in self.metadata_builders:
+                builder.set_kernel_block_size(kernel_block_size)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -427,6 +444,8 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
+        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
+            kernel_block_size = spec.storage_block_size
 
         views = create_kv_cache_views(
             buf,
@@ -518,27 +537,29 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     """
     Calculate the amount of memory vLLM may use on this device.
 
-    The budget is ``total_memory * gpu_memory_utilization``, clamped to the
-    actually-free memory so that a GPU shared with another process gets a
-    smaller budget automatically while unshared GPUs keep their full budget.
+    The budget is ``total_memory * gpu_memory_utilization``, clamped to
+    ``free_memory * gpu_memory_utilization`` when the device is shared
+    with another process, preserving the same proportional safety margin.
     """
-    requested_memory = math.ceil(
-        init_snapshot.total_memory * cache_config.gpu_memory_utilization
-    )
+    util = cache_config.gpu_memory_utilization
+    requested_memory = math.ceil(init_snapshot.total_memory * util)
 
     if init_snapshot.free_memory < requested_memory:
+        clamped = math.ceil(init_snapshot.free_memory * util)
         logger.warning(
             "Free memory on device %s (%s/%s GiB) is less than "
             "gpu_memory_utilization=%.4f would request (%s GiB). "
-            "Clamping memory budget to available free memory. "
+            "Clamping memory budget to %s GiB (%.4f of free memory). "
             "This is expected when sharing a GPU with another process.",
             init_snapshot.device_,
             format_gib(init_snapshot.free_memory),
             format_gib(init_snapshot.total_memory),
-            cache_config.gpu_memory_utilization,
+            util,
             format_gib(requested_memory),
+            format_gib(clamped),
+            util,
         )
-        requested_memory = init_snapshot.free_memory
+        requested_memory = clamped
 
     return requested_memory
 
