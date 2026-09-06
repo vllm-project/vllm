@@ -78,7 +78,7 @@ def test_resolve_kv_cache_layout_intersects_worker_preferences(monkeypatch):
         config,
         [
             ["LBNHC", "LBHNC", "BLNHC", "BLHNC"],
-            ["BLNHC", "BLHNC"],
+            ["BLHNC", "BLNHC"],
         ],
     )
 
