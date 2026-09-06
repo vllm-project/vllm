@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
+    flashinfer_jit_unsupported_reason,
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
@@ -49,6 +50,9 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         if compute_capability is not None and compute_capability < 100:
             return False, "requires compute capability 100 and above."
+
+        if (reason := flashinfer_jit_unsupported_reason()) is not None:
+            return False, f"cannot JIT-compile FlashInfer for this GPU: {reason}"
 
         return True, None
 
@@ -137,7 +141,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        # A is BF16 — FlashInfer handles FP8 conversion internally.
+        # A is BF16: FlashInfer handles FP8 conversion internally.
         # As is a placeholder (apply_input_quant=False) and is not used here.
         return torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
             A,  # BF16 input
@@ -158,7 +162,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     apply_input_quant is False because FlashInfer accepts BF16 input and
     handles FP8 conversion internally.  The DeepGEMM branch therefore
     quantises BF16→FP8 inside apply_mm via a closure before dispatching to
-    the DeepGEMM kernel — keeping both branches compatible with the single
+    the DeepGEMM kernel, keeping both branches compatible with the single
     BF16 tensor operand list passed by torch.cond.
     """
 
