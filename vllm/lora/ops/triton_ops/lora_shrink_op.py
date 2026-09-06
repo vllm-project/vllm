@@ -33,6 +33,7 @@ def _lora_shrink_kernel(
     lora_token_start_loc,
     lora_ids,
     scaling,
+    slice_active_mask,
     input_d0_stride,
     input_d1_stride,
     lora_d0_stride,
@@ -49,6 +50,7 @@ def _lora_shrink_kernel(
     GROUP_SIZE_M: tl.constexpr,
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
+    HAS_SLICE_MASK: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
@@ -74,6 +76,15 @@ def _lora_shrink_kernel(
     if lora_id == -1:
         # Early exit for the no-lora case.
         return
+
+    # Early exit for zero-weight slices. When an adapter doesn't target a
+    # sub-module in a packed layer, its A/B weights are all-zeros — skip
+    # the entire (adapter, slice) computation. Works under CUDA graphs
+    # since the mask is a device tensor read at kernel runtime.
+    if HAS_SLICE_MASK:
+        slice_active = tl.load(slice_active_mask + lora_id * SLICE_NUM + slice_id)
+        if slice_active == 0:
+            return
 
     lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
 
@@ -141,6 +152,7 @@ def _lora_shrink(
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
+    slice_active_mask: torch.Tensor | None = None,
 ) -> None:
     """
     Args:
@@ -228,6 +240,7 @@ def _lora_shrink(
 
     # PDL only works when dual-stream is being used.
     use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    HAS_SLICE_MASK = slice_active_mask is not None
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -240,6 +253,7 @@ def _lora_shrink(
         lora_token_start_loc,
         lora_ids,
         scaling,
+        slice_active_mask,
         inputs.stride(0),
         inputs.stride(1),
         lora_strides_d0,
@@ -256,6 +270,7 @@ def _lora_shrink(
         GROUP_SIZE_M,
         NUM_SLICES,
         use_gdc,
+        HAS_SLICE_MASK,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
@@ -277,6 +292,7 @@ def _lora_shrink_fake(
     no_lora_flag_cpu: torch.Tensor,
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
+    slice_active_mask: torch.Tensor | None = None,
 ) -> None:
     return
 

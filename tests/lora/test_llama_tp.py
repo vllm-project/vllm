@@ -140,6 +140,25 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
     generate_and_test(llm, llama32_lora_files)
 
 
+@create_new_process_for_each_test()
+def test_llama_lora_full_cudagraph_no_compile(llama32_lora_files):
+    """Zero-slice skip must not fire during FULL-cudagraph capture without
+    torch.compile, else LoRA kernels are omitted from the graph and replay runs
+    base-only (non-SQL output that fails generate_and_test)."""
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=7,
+        max_model_len=1024,
+        max_loras=4,
+        compilation_config=vllm.config.CompilationConfig(
+            mode=vllm.config.CompilationMode.NONE,
+            cudagraph_mode=vllm.config.CUDAGraphMode.FULL,
+        ),
+    )
+    generate_and_test(llm, llama32_lora_files)
+
+
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )

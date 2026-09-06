@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.forward_context import (
@@ -79,9 +80,23 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
         self._init_lora_stream_context()
+        # The layer-level early-return is disabled under CUDA graphs; see
+        # _apply_lora_to_output.
+        self._cudagraph_enabled = self._compute_cudagraph_enabled()
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+
+    def _compute_cudagraph_enabled(self) -> bool:
+        try:
+            vllm_config = get_current_vllm_config()
+        except Exception:
+            return False
+        compilation_config = vllm_config.compilation_config
+        cudagraph_mode = compilation_config.cudagraph_mode
+        if cudagraph_mode is None:
+            return False
+        return cudagraph_mode.max_cudagraph_mode() != CUDAGraphMode.NONE
 
     def _init_lora_stream_context(self) -> None:
         if not self._enable_aux_cuda_stream:
@@ -150,10 +165,36 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
+        # Zero-slice early-exit: tracks which (adapter, slice) pairs have
+        # non-zero weights to skip unnecessary kernel launches.
+        self.slice_active_mask = torch.zeros(
+            max_loras,
+            self.n_slices,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._num_adapters_with_active_slices = 0
+        # Mask passed to the kernels: the tensor only when some adapter has a
+        # partial slice pattern (a per-CTA skip is then possible), else None to
+        # skip the mask overhead. Recomputed on load/reset by
+        # _recompute_mask_can_skip so the hot path is a plain attribute read.
+        self._kernel_slice_mask: torch.Tensor | None = None
+
+    def _recompute_mask_can_skip(self) -> None:
+        active_per_adapter = self.slice_active_mask.sum(dim=1)
+        can_skip = bool(
+            ((active_per_adapter > 0) & (active_per_adapter < self.n_slices)).any()
+        )
+        self._kernel_slice_mask = self.slice_active_mask if can_skip else None
+
     def reset_lora(self, index: int):
+        if self.slice_active_mask[index].any():
+            self._num_adapters_with_active_slices -= 1
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+        self.slice_active_mask[index] = 0
+        self._recompute_mask_can_skip()
 
     def set_lora(
         self,
@@ -182,6 +223,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+        if lora_a.any() and lora_b.any():
+            self.slice_active_mask[index, 0] = 1
+            self._num_adapters_with_active_slices += 1
+        self._recompute_mask_can_skip()
 
     def _get_quant_method(self) -> QuantizeMethodBase:
         quant_method = self.base_layer.quant_method
@@ -215,6 +260,18 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_lora_to_output(
         self, x: torch.Tensor, output: torch.Tensor
     ) -> torch.Tensor:
+        # Skip the LoRA path when no adapter has active slices, but only in
+        # eager. Under CUDA graphs / compile the skip must be identical across
+        # warmup, capture and replay (warmup uses zero-weight dummies), so we
+        # always run the kernels and let the per-CTA slice_active_mask skip
+        # zero-weight work on device.
+        if (
+            self._num_adapters_with_active_slices == 0
+            and not self._cudagraph_enabled
+            and not torch.compiler.is_compiling()
+        ):
+            return output
+
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -225,7 +282,13 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             x = x.flatten(0, 1)
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            slice_active_mask=self._kernel_slice_mask,
         )
         if not current_platform.can_update_inplace():
             output = lora_output

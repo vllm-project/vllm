@@ -96,6 +96,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
+        *,
+        slice_active_mask: torch.Tensor | None = None,
         **kwargs,
     ):
         """
@@ -110,8 +112,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
+            slice_active_mask (torch.Tensor | None): Per-adapter per-slice
+                mask [max_loras, n_slices]. 0 = skip slice (zero weights).
         """
-
         x = x.view(-1, x.shape[-1])
         lora_shrink(
             x,
@@ -121,6 +124,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 x.size(0), self.lora_config.specialize_active_lora
             ),
             scale,
+            slice_active_mask=slice_active_mask,
         )
 
     def add_expand(
@@ -131,6 +135,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
+        *,
+        slice_active_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -150,6 +156,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs (bool): If True, add LoRA output to y; if False, write
                 LoRA-only output to y (used for dual-stream when base and LoRA
                 run on different CUDA streams). Defaults to True.
+            slice_active_mask (torch.Tensor | None): Per-adapter per-slice
+                mask [max_loras, n_slices]. 0 = skip slice (zero weights).
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -167,6 +175,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             offset_start=offset_start,
             add_inputs=add_inputs,
+            slice_active_mask=slice_active_mask,
         )
 
         y = y.view_as(y_org)
@@ -213,6 +222,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         *,
         buffer: torch.Tensor | None = None,
+        slice_active_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -234,6 +244,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
+            slice_active_mask (torch.Tensor | None): Per-adapter per-slice
+                mask [max_loras, n_slices]. 0 = skip slice (zero weights).
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -255,6 +267,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             scale,
+            slice_active_mask=slice_active_mask,
             **kwargs,
         )
         self.add_expand(
@@ -263,6 +276,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked,
             output_slices,
             add_inputs=add_inputs,
+            slice_active_mask=slice_active_mask,
             **kwargs,
         )
 
