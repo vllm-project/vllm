@@ -248,7 +248,7 @@ class ParserEngine(Parser):
         """
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
-            coerced = coerce_to_schema_type(value, types)
+            coerced = coerce_to_schema_type(value, types) if types else value
             if coerced is not value:
                 return coerced, True
             return value, False
@@ -275,6 +275,8 @@ class ParserEngine(Parser):
             return value, False
 
         types = extract_types_from_schema(schema)
+        if not types:
+            return value, False
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
         if type(coerced) is not type(value) or coerced != value:
@@ -374,7 +376,7 @@ class ParserEngine(Parser):
 
         streamable: set[str] = set()
         for key, schema in properties.items():
-            if set(extract_types_from_schema(schema)) == {"string"}:
+            if set(extract_types_from_schema(schema)) <= {"string"}:
                 streamable.add(key)
         return streamable
 

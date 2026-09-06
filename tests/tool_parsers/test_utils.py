@@ -272,14 +272,14 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
-    def test_none_schema_defaults_to_string(self):
-        assert extract_types_from_schema(None) == ["string"]
+    def test_none_schema_has_no_types(self):
+        assert extract_types_from_schema(None) == []
 
-    def test_non_dict_schema_defaults_to_string(self):
-        assert extract_types_from_schema("string") == ["string"]
+    def test_non_dict_schema_has_no_types(self):
+        assert extract_types_from_schema("string") == []
 
-    def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+    def test_empty_dict_has_no_types(self):
+        assert extract_types_from_schema({}) == []
 
     def test_nested_anyof(self):
         schema = {

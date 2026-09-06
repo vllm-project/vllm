@@ -808,6 +808,43 @@ class TestFixArgTypes:
             "count": "7",
         }
 
+    def test_root_combinator_preserves_scalar_types(self):
+        tool = _make_tool("f", {})
+        tool.function.parameters = {
+            "oneOf": [
+                {
+                    "properties": {
+                        "version": {"const": 42},
+                        "count": {"description": "A count"},
+                    }
+                }
+            ]
+        }
+        engine = _make_engine(tools=[tool])
+        original = '{"version": 42, "count": 42}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    @pytest.mark.parametrize(
+        "schema, value",
+        [
+            ({"anyOf": [{"type": "string"}, {"const": 42}]}, "123"),
+            (
+                {
+                    "$defs": {"Text": {"type": "string"}},
+                    "anyOf": [
+                        {"type": "integer"},
+                        {"$ref": "#/properties/value/$defs/Text"},
+                    ],
+                },
+                "true",
+            ),
+        ],
+    )
+    def test_constrained_or_unknown_alternative_preserves_strings(self, schema, value):
+        engine = _make_engine(tools=[_make_tool("f", {"value": schema})])
+        original = json.dumps({"value": value})
+        assert engine._fix_arg_types(original, "f") == original
+
     def test_root_allof_refines_direct_property(self):
         tool = ChatCompletionToolsParam(
             type="function",
@@ -815,7 +852,12 @@ class TestFixArgTypes:
                 name="f",
                 parameters={
                     "type": "object",
-                    "properties": {"payload": {"type": "object"}},
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "properties": {"kept": {"type": "integer"}},
+                        }
+                    },
                     "allOf": [
                         {
                             "properties": {
@@ -829,8 +871,19 @@ class TestFixArgTypes:
             ),
         )
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"payload": {"count": "42"}}', "f")
-        assert json.loads(result) == {"payload": {"count": 42}}
+        result = engine._fix_arg_types('{"payload": {"kept": "1", "count": "42"}}', "f")
+        assert json.loads(result) == {"payload": {"kept": 1, "count": 42}}
+
+    def test_malformed_root_combinator_preserves_direct_coercion(self):
+        tool = _make_tool("f", {})
+        tool.function.parameters = {
+            "properties": {"count": {"type": "integer"}},
+            "anyOf": 1,
+            "allOf": [{"properties": [1]}],
+        }
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "42"}', "f")
+        assert json.loads(result) == {"count": 42}
 
     def test_array_item_coercion(self):
         tool = _make_tool(
@@ -1574,6 +1627,12 @@ class TestArgDeltaWithConverter:
     converted JSON grows prefix-monotonically across streaming ticks.
     These tests exercise that path with a synthetic config.
     """
+
+    def test_root_schema_streaming_preserves_types(self):
+        tool = _make_tool("f", {})
+        tool.function.parameters = {"oneOf": [{"properties": {"value": {"const": 42}}}]}
+        engine = _make_engine(_converter_config(), tools=[tool])
+        assert _run_streaming_tool(engine, "f", ["value=4", "2"]) == {"value": 42}
 
     def test_streaming_arg_deltas_prefix_monotonic(self):
         engine = _make_engine(_converter_config())

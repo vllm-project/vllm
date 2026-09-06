@@ -271,13 +271,11 @@ def _extract_tool_info(
 
 def _dict_properties(schema: Any) -> dict[str, dict[str, Any]]:
     """Property schemas of *schema* that are dicts; booleans carry no types."""
-    if not isinstance(schema, dict):
+    if not isinstance(schema, dict) or not isinstance(
+        properties := schema.get("properties"), dict
+    ):
         return {}
-    return {
-        name: prop
-        for name, prop in schema.get("properties", {}).items()
-        if isinstance(prop, dict)
-    }
+    return {name: prop for name, prop in properties.items() if isinstance(prop, dict)}
 
 
 def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
@@ -289,10 +287,15 @@ def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
     branch property is used only when no other branch declares it
     differently; it then always applies and refines the schema as well.
     """
+    combinators = {
+        keyword: value
+        for keyword in ("anyOf", "oneOf", "allOf")
+        if isinstance(value := params.get(keyword), list)
+    }
     branches = [
         _dict_properties(branch)
         for keyword in ("anyOf", "oneOf")
-        for branch in params.get(keyword, [])
+        for branch in combinators.get(keyword, [])
     ]
     shared = {
         name: schema
@@ -300,11 +303,19 @@ def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
         for name, schema in branch.items()
         if all(other.get(name, schema) == schema for other in branches)
     }
-    properties = dict(params.get("properties", {}))
-    for refinement in (*map(_dict_properties, params.get("allOf", [])), shared):
+    direct = params.get("properties")
+    properties = dict(direct) if isinstance(direct, dict) else {}
+    for refinement in (*map(_dict_properties, combinators.get("allOf", [])), shared):
         for name, schema in refinement.items():
             base = properties.get(name)
-            properties[name] = base | schema if isinstance(base, dict) else schema
+            if isinstance(base, dict):
+                schema = base | schema
+                if isinstance(base.get("properties"), dict) and isinstance(
+                    schema.get("properties"), dict
+                ):
+                    # Refinements can add fields without replacing existing ones.
+                    schema["properties"] = base["properties"] | schema["properties"]
+            properties[name] = schema
     return properties
 
 
@@ -1042,15 +1053,16 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def extract_types_from_schema(schema: Any) -> list[str]:
-    """Extract all possible type strings from a JSON Schema definition.
+def extract_types_from_schema(schema: Any, *, infer_const: bool = True) -> list[str]:
+    """Extract type hints for schema-aware argument coercion.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
-    when no type information can be determined.
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``. Returns an empty list
+    when types cannot be inferred safely. Constants are not inferred inside
+    alternatives: their primitive types would lose the value constraints.
     """
     if schema is None or not isinstance(schema, dict):
-        return ["string"]
+        return []
 
     types: set[str] = set()
 
@@ -1063,8 +1075,11 @@ def extract_types_from_schema(schema: Any) -> list[str]:
                 if isinstance(t, str):
                     types.add(t)
 
-    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
-        for value in schema["enum"]:
+    values = (
+        [schema["const"]] if infer_const and "const" in schema else schema.get("enum")
+    )
+    if isinstance(values, list):
+        for value in values:
             if value is None:
                 types.add("null")
             elif isinstance(value, bool):
@@ -1083,9 +1098,14 @@ def extract_types_from_schema(schema: Any) -> list[str]:
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
             for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice))
+                choice_types = extract_types_from_schema(
+                    choice, infer_const=infer_const and choice_field == "allOf"
+                )
+                if not choice_types and choice_field in ("anyOf", "oneOf"):
+                    return []
+                types.update(choice_types)
 
-    return list(types) if types else ["string"]
+    return list(types)
 
 
 _TYPE_ALIASES: dict[str, str] = {
