@@ -167,6 +167,22 @@ def test_registry_supports_replayssm(model_arch, supported):
     assert model_info.supports_replayssm is supported
 
 
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        # Exact replay is opt-in per model; only Mamba2ForCausalLM sets the flag.
+        ("Mamba2ForCausalLM", True),
+        ("NemotronHForCausalLM", False),
+        ("Zamba2ForCausalLM", False),
+    ],
+)
+def test_registry_supports_mamba_exact_replay(model_arch, supported):
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_mamba_exact_replay is supported
+
+
 def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     package_dir = tmp_path / "model_package"
     package_dir.mkdir()
