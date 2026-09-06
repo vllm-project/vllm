@@ -1641,12 +1641,15 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
 def _exact_topk_reference(
     logits: torch.Tensor, lengths: torch.Tensor, top_k: int
 ) -> torch.Tensor:
-    """Top-k by value desc, ties by index asc; emitted in ascending index order."""
-    out = torch.empty((logits.shape[0], top_k), dtype=torch.int32, device="cuda")
+    """Top-k by value desc, ties by index asc; emitted in ascending index order.
+
+    A row shorter than top_k yields its own indices and -1 in the unused slots.
+    """
+    out = torch.full((logits.shape[0], top_k), -1, dtype=torch.int32, device="cuda")
     for r in range(logits.shape[0]):
         n = int(lengths[r])
         order = torch.argsort(logits[r, :n], descending=True, stable=True)[:top_k]
-        out[r] = torch.sort(order.to(torch.int32)).values
+        out[r, : order.numel()] = torch.sort(order.to(torch.int32)).values
     return out
 
 
@@ -1687,6 +1690,30 @@ def test_persistent_topk_deterministic(
         ).float()
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     lengths[0] = seq_len - 3
+    ref = _exact_topk_reference(logits, lengths, top_k)
+    outs = [_run_persistent_topk(logits, lengths, top_k) for _ in range(6)]
+    for out in outs[1:]:
+        assert torch.equal(out, outs[0]), "persistent_topk is not reproducible"
+    assert torch.equal(outs[0], ref), "persistent_topk differs from the exact reference"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_rows", [1, 8, 64])
+@pytest.mark.parametrize("seq_len", [256, 512, 700, 1024, 2048])
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+def test_persistent_topk_short_rows(num_rows: int, seq_len: int, top_k: int) -> None:
+    """Rows no longer than top_k: every index is selected and the unused
+    slots are -1. The block-level indexer calls this shape at warm-up
+    (top_k 512 over a few hundred blocks), so it must not be rejected by
+    the launcher's chunk_size check, which only applies to the
+    cooperative path."""
+    if seq_len > top_k:
+        pytest.skip("covered by the general case")
+    torch.set_default_device("cuda:0")
+    gen = torch.Generator(device="cuda").manual_seed(num_rows * 11 + seq_len + top_k)
+    logits = torch.randn(num_rows, seq_len, generator=gen, device="cuda")
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    lengths[0] = max(seq_len - 3, 1)
     ref = _exact_topk_reference(logits, lengths, top_k)
     outs = [_run_persistent_topk(logits, lengths, top_k) for _ in range(6)]
     for out in outs[1:]:
