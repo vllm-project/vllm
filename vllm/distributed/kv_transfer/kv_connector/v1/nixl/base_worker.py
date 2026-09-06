@@ -2079,7 +2079,7 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             ):
                 if self._mixed_mem_types:
-                    handle_data = np.asarray(handle_data)
+                    handle_data = np.asarray(handle_data, dtype=np.uint64)
                     desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
                     dram_descs = self.nixl_wrapper.get_xfer_descs(
                         handle_data[desc_is_dram], "DRAM"
