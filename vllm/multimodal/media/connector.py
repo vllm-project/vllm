@@ -55,6 +55,10 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
 }
 
 
+def derive_media_uuid(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
 def _wrap_media_fetch_error(
     url: str, exc: Exception
 ) -> VLLMUnprocessableEntityError | Exception:

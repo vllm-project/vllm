@@ -65,7 +65,11 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.media import (
+    MEDIA_CONNECTOR_REGISTRY,
+    MediaConnector,
+    derive_media_uuid,
+)
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
@@ -100,6 +104,12 @@ MODALITY_PLACEHOLDERS_MAP = {
     "video": "<##VIDEO##>",
     "prompt_embeds": "<##PROMPT_EMBEDS##>",
 }
+
+
+def _resolve_media_uuid(url: str | None, uuid: str | None) -> str | None:
+    if uuid is None and url is not None and envs.VLLM_UUID_AUTO_DERIVE:
+        return derive_media_uuid(url)
+    return uuid
 
 
 PROMPT_EMBEDS_PLACEHOLDER_TOKEN: Final[str] = "<prompt_embeds>"
@@ -1036,6 +1046,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(image_url, uuid)
         image = self._connector.fetch_image(image_url, uuid=uuid) if image_url else None
 
         placeholder = self._tracker.add("image", (image, uuid))
@@ -1102,6 +1113,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(audio_url, uuid)
         audio = self._connector.fetch_audio(audio_url, uuid=uuid) if audio_url else None
 
         placeholder = self._tracker.add("audio", (audio, uuid))
@@ -1124,6 +1136,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(video_url, uuid)
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
@@ -1240,6 +1253,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return image, uuid
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(image_url, uuid)
         placeholder = self._tracker.add(
             "image", partial(self._image_with_uuid_async, image_url, uuid)
         )
@@ -1338,6 +1352,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return audio, uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(audio_url, uuid)
         placeholder = self._tracker.add(
             "audio", partial(self._audio_with_uuid_async, audio_url, uuid)
         )
@@ -1372,6 +1387,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        uuid = _resolve_media_uuid(video_url, uuid)
         placeholder = self._tracker.add(
             "video", partial(self._video_with_uuid_async, video_url, uuid)
         )
