@@ -86,3 +86,26 @@ staging and temporary tensors. Prevalidation prevents ordinary layout errors
 from causing partial writes but is not model-wide transactional rollback if
 a GPU copy fails. Cold load may still install activation and derived scale
 Parameters; the no-replacement invariant applies to runtime reload writes.
+
+## Reduced-model day0 NCCL validation
+
+`Qwen3-30B-A3B-FP8` was reduced to two transformer layers while preserving its
+original block-wise FP8 checkpoint and 128 experts. A/B checkpoints were
+constructed from the real seven-shard checkpoint; B halves only the stored MoE
+`down_proj` FP8 weights, leaving scales and non-MoE tensors unchanged.
+
+The run used the dedicated remote vLLM worktree and a separate day0-kit
+worktree pinned to kit commit `152c2c0`, plus a compatibility adapter for the
+current NCCL request API. Server GPU 1 and publisher GPU 2 joined one NCCL
+group (`transfer world size=2`). The server selected `FLASHINFER_CUTLASS` and
+the extension found the expected `Fp8MoEMethod` layers. START/update/FINISH
+completed through NCCL; warm-B runtime hashes, Parameter/kernel/config
+identities and pointers matched independent cold-B, and three deterministic
+completion prompts matched exactly.
+
+Evidence: `/inspire/hdd/global_user/wangtongyu-25057/day0-moe-block-qwen3-validation-20260906-02/`
+(`comparison.json`: `status=PASS`, `layers=2`, `runtime_changed=true`,
+`warm_matches_cold=true`; `update.json`, `evidence.json`, server logs and
+`client.log` are present). The first attempt with the latest kit failed before
+NCCL because its `WeightTransferStartRequest` API was newer than this vLLM
+branch; it is not counted. The compatibility run is authoritative.
