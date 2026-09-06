@@ -315,6 +315,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window,
             )
 
+        if kv_cache_dtype == "fp8_ds_mla":
+            # fp8_ds_mla is the packed DeepSeek-MLA cache layout (one 656-byte
+            # tile per token); it has no meaning for a regular attention layer.
+            # Such layers exist next to a DS-MLA target whenever a GQA drafter
+            # (EAGLE-3 / DFlash) is loaded, so keep the model dtype for them
+            # instead of failing backend selection.
+            logger.info_once(
+                "kv_cache_dtype=fp8_ds_mla applies to DeepSeek-MLA layers only; "
+                "regular attention layers (e.g. %s) keep the model dtype.",
+                prefix,
+            )
+            kv_cache_dtype = "auto"
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
