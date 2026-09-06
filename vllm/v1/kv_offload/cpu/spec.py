@@ -167,7 +167,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             capacity_tokens = self.num_chunks * tokens_per_chunk
 
         return CPUCacheTierInfo(
-            num_blocks=self.num_chunks,
+            num_chunks=self.num_chunks,
             blocks_per_chunk=self.blocks_per_chunk,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             capacity_tokens=capacity_tokens,
