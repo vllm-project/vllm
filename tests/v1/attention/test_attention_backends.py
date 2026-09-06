@@ -1225,6 +1225,49 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
     )
 
 
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_nvfp4_kv_cache_dtype_gate():
+    """NVFP4 KV cache dtype support must follow the servicing path per arch.
+
+    SM100/SM103 NVFP4 is serviced by trtllm-gen (both phases), so it is
+    gated on TRTLLM availability. SM12x NVFP4 is serviced by the XQA decode
+    and native FA2 prefill paths, which are JIT-compiled, so the dtype must
+    be accepted regardless of TRTLLM cubin availability.
+    """
+    import unittest.mock
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.platforms import current_platform as platform
+
+    # SM12x must accept NVFP4 independent of TRTLLM availability.
+    with unittest.mock.patch.object(platform, "is_device_capability_family",
+                                    side_effect=lambda n: n == 120):
+        assert FlashInferBackend.supports_kv_cache_dtype("nvfp4")
+        assert FlashInferBackend.supports_kv_cache_dtype("nvfp4_4over6")
+
+    # SM100 requires trtllm-gen for both prefill and decode.
+    with unittest.mock.patch.object(platform, "is_device_capability_family",
+                                    side_effect=lambda n: n == 100):
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.supports_trtllm_attention",
+            side_effect=lambda is_prefill=True: True,
+        ):
+            assert FlashInferBackend.supports_kv_cache_dtype("nvfp4")
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.supports_trtllm_attention",
+            side_effect=lambda is_prefill=True: is_prefill,  # decode missing
+        ):
+            assert not FlashInferBackend.supports_kv_cache_dtype("nvfp4")
+
+    # Other arches (SM80/SM90) must not claim NVFP4 support.
+    with unittest.mock.patch.object(platform, "is_device_capability_family",
+                                    side_effect=lambda n: False):
+        assert not FlashInferBackend.supports_kv_cache_dtype("nvfp4")
+
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
