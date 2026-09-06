@@ -2190,7 +2190,8 @@ def _warn_if_unannotated_eagle_mamba(
     no error and no metric to show it.
 
     Every flag-all fallback is gated on ``use_eagle_block_drop()``:
-    ``KVCacheCoordinator.__init__``, ``SchedulerOffloadConfig.from_spec`` and
+    ``KVCacheCoordinator.__init__`` (also reached through
+    ``simple_kv_offload/manager.py``), ``SchedulerOffloadConfig.from_spec`` and
     ``MooncakeStoreCoordinator._verify_and_split_kv_cache_groups``. So
     ``disable_eagle_block_drop`` leaves every group unflagged *and* leaves
     reuse intact, and this warning must not fire -- what keeping the volatile
