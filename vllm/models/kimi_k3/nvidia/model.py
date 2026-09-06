@@ -62,12 +62,14 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -83,6 +85,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -91,7 +94,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MegaMoEExperts,
+    DeepseekV4MLP,
+)
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
@@ -133,6 +139,7 @@ def shard_sequence_parallel_mlp(
     hidden_size: int,
     intermediate_size: int,
     use_sequence_parallel: bool,
+    eligible: bool,
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
@@ -140,12 +147,68 @@ def shard_sequence_parallel_mlp(
     the trade-off and :mod:`vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
-    if not (use_sequence_parallel and enabled):
+    if not (use_sequence_parallel and eligible and enabled):
         return False
     tp_size = get_tensor_model_parallel_world_size()
     return (
         tp_size > 1 and intermediate_size % tp_size == 0 and hidden_size % tp_size == 0
     )
+
+
+def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
+    # Both feature flags may be enabled; the worker's static SP topology binds
+    # its singleton to exactly one mode.
+    all_reduce = not use_sequence_parallel
+    mode = "GEMM-AR" if all_reduce else "GEMM-RS"
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    if not enabled:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.use_ubatching:
+        reason = "ubatching is enabled"
+    elif vllm_config.model_config.dtype != torch.bfloat16:
+        reason = "the model dtype is not BF16"
+    elif not current_platform.is_cuda():
+        reason = "the device is not CUDA"
+    elif not current_platform.is_device_capability_family(100):
+        reason = "the device is not SM100-family"
+    elif not 1 < tp_size <= 16:
+        reason = "TP size is not in the supported range 2-16"
+    elif 128 % tp_size != 0:
+        reason = "TP size does not divide 128"
+    else:
+        reason = None
+
+    if reason is not None:
+        logger.warning_once("%s is disabled because %s.", mode, reason)
+        return False
+
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
+
+    config = vllm_config.model_config.hf_text_config
+    try:
+        init_gemm_rs_ar(
+            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            N=config.hidden_size,
+            all_reduce=all_reduce,
+        )
+    except RuntimeError as e:
+        logger.warning_once(
+            "%s is disabled because initialization failed: %s. This may mean "
+            "the TP ranks do not share one NVLink domain.",
+            mode,
+            e,
+        )
+        return False
+    if all_reduce:
+        logger.info_once(
+            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
+        )
+    else:
+        logger.info_once("GEMM-RS is enabled.")
+    return True
 
 
 class KimiMLP(nn.Module):
@@ -172,6 +235,8 @@ class KimiMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
+        can_shard_sequence_parallel: bool = False,
+        run_gemm_rs_ar: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
@@ -182,6 +247,7 @@ class KimiMLP(nn.Module):
             hidden_size,
             intermediate_size,
             use_sequence_parallel,
+            can_shard_sequence_parallel,
         )
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
@@ -204,6 +270,21 @@ class KimiMLP(nn.Module):
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
         )
+        self.gemm_rs_ar = None
+        # RS requires sequence sharding; AR operates on replicated tokens.
+        use_gemm_rs_ar = self.shard_sequence_parallel or (
+            not use_sequence_parallel and reduce_results
+        )
+        if use_gemm_rs_ar and run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
+
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.down_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
+                gemm_rs_ar.warn_incompatible_projection()
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "situ":
@@ -226,6 +307,10 @@ class KimiMLP(nn.Module):
             x = sp_all_gather(x)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
+
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
+            return self.gemm_rs_ar(x, self.down_proj.weight)
+
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
             x = sp_reduce_scatter(x)
@@ -292,7 +377,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         torch.distributed.barrier(group=ep_group.cpu_group)
         self._synchronized_ep_groups.add(key)
 
-    def finalize_weights(self) -> None:
+    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         if self._transformed_l1_weights is not None:
             return
 
@@ -426,8 +511,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            activation_beta=self.activation_beta,
-            activation_linear_beta=self.activation_linear_beta,
+            situ_beta=self.activation_beta,
+            situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
         )
         return y
@@ -462,6 +547,7 @@ class KimiMoE(nn.Module):
         prefix: str = "",
         layer_idx: int = 0,
         use_sequence_parallel: bool = False,
+        run_gemm_rs_ar: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -546,6 +632,11 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
+                # Only the MegaMoE path calls the shared experts directly; the
+                # FusedMoE path below hands them to the runner, which fuses
+                # their reduction and assumes the replicated layout.
+                can_shard_sequence_parallel=self.use_mega_moe,
+                run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -767,6 +858,7 @@ class KimiDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -801,6 +893,8 @@ class KimiDecoderLayer(nn.Module):
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
+                    aux_stream=aux_stream,
+                    run_gemm_rs_ar=run_gemm_rs_ar,
                 )
                 self._self_attn_writes_output = False
             else:
@@ -837,6 +931,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 aux_stream=aux_stream,
+                run_gemm_rs_ar=run_gemm_rs_ar,
             )
             self._self_attn_writes_output = False
 
@@ -851,6 +946,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
                 use_sequence_parallel=self.use_sequence_parallel,
+                run_gemm_rs_ar=run_gemm_rs_ar,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -861,6 +957,8 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
+                can_shard_sequence_parallel=True,
+                run_gemm_rs_ar=run_gemm_rs_ar,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
@@ -991,15 +1089,18 @@ class KimiDecoderLayer(nn.Module):
         )
         assert hidden_states is not None
 
+        M = None
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)
             # Remove SP padding before attention.
             hidden_states = hidden_states[: positions.shape[0]]
+            M = hidden_states.shape[0]
 
         # Attention.
         hidden_states = self._run_self_attn(positions, hidden_states)
 
-        if self.use_sequence_parallel:
+        # GEMM-RS returns the local sequence shard; standard O-proj preserves M.
+        if self.use_sequence_parallel and hidden_states.shape[0] == M:
             # Add SP padding if needed, and then perform reduce scatter.
             hidden_states = sp_reduce_scatter(hidden_states)
 
@@ -1018,7 +1119,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
         "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkv_a_g_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
     }
+
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1038,7 +1142,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        # GEMM-RS/AR uses NCCL symmetric-memory multicast, which requires all
+        # TP ranks to belong to one NVLink domain.
+        self.run_gemm_rs_ar = maybe_init_gemm_rs_ar(
+            vllm_config, self.use_sequence_parallel
+        )
+
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1058,6 +1168,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 vllm_config,
                 prefix,
                 aux_stream=aux_stream,
+                run_gemm_rs_ar=self.run_gemm_rs_ar,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1118,6 +1229,65 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             }
         )
 
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        super()._set_aux_hidden_state_layers(layers)
+        if self.use_attn_res and self._aux_attn_res_stream:
+            pp = get_pp_group()
+            if not pp.is_last_rank and self.end_layer in self.aux_hidden_state_layers:
+                raise ValueError(
+                    f"Auxiliary layer {self.end_layer} cannot end a non-final PP "
+                    "stage when VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=1"
+                )
+        if self.use_attn_res:
+            logger.info_once(
+                "Kimi-K3 aux hidden capture: layers=%s mode=%s "
+                "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
+                self.aux_hidden_state_layers,
+                "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
+                int(self._aux_attn_res_stream),
+            )
+
+    @property
+    def _aux_attn_res_stream(self) -> bool:
+        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
+
+    def _capture_aux_hidden_stream(
+        self,
+        layer_idx: int,
+        prefix_sum: torch.Tensor,
+        pending_mlp_out: torch.Tensor | None,
+        block_residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the AttnRes stream after ``layer_idx``."""
+        prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
+        if not (self._aux_attn_res_stream and self.use_attn_res):
+            return prefix
+
+        if layer_idx + 1 < self.end_layer:
+            consumer = self.layers[layer_idx + 1]
+            score_norm = consumer.self_attention_res_norm
+            score_proj = consumer.self_attention_res_proj
+            num_blocks = consumer.prev_valid_blocks
+        elif get_pp_group().is_last_rank:
+            score_norm = self.output_attn_res_norm
+            score_proj = self.output_attn_res_proj
+            num_blocks = self.num_attn_res_blocks
+        else:
+            raise RuntimeError("Auxiliary AttnRes capture crossed a PP boundary")
+
+        return attn_res(
+            prefix,
+            None,
+            block_residual,
+            score_norm.weight,
+            score_proj.weight.squeeze(0),
+            None,
+            num_blocks=num_blocks,
+            block_write_idx=-1,
+            eps=score_norm.variance_epsilon,
+            output_norm_eps=0.0,
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1151,9 +1321,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if (
+            get_pp_group().is_first_rank
+            and self.start_layer in self.aux_hidden_state_layers
+        ):
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1185,7 +1360,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 if self.use_attn_res:
                     assert prefix_sum is not None
-                    aux_hidden_state = prefix_sum + hidden_states
+                    assert residual is not None
+                    aux_hidden_state = self._capture_aux_hidden_stream(
+                        layer_idx, prefix_sum, hidden_states, residual
+                    )
                 else:
                     assert residual is not None
                     aux_hidden_state = hidden_states + residual
@@ -1201,7 +1379,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         if self.use_attn_res:
@@ -1238,6 +1420,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1269,10 +1452,17 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         if use_full_rank_gate:
             stacked_params_mapping.append((".in_proj_qkvgfab", ".g_proj", 3))
         if getattr(self.config, "q_lora_rank", None) is not None:
-            stacked_params_mapping += [
-                (".fused_qkv_a_proj", ".q_a_proj", 0),
-                (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_g_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_g_proj", ".kv_a_proj_with_mqa", 1),
+                    (".fused_qkv_a_g_proj", ".g_proj", 2),
+                ]
+            else:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+                ]
         use_mega_moe = any(
             module.use_mega_moe
             for module in self.modules()
@@ -1397,7 +1587,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    MixtureOfExperts,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsReplaySSM,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1451,15 +1647,20 @@ class KimiLinearForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
+    ) -> tuple[torch.dtype, ...]:
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
+                dtypes, vllm_config.model_config.dtype
+            )
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         tp_size = parallel_config.tensor_parallel_size
@@ -1468,13 +1669,22 @@ class KimiLinearForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_attn_config["num_heads"],
             hf_config.linear_attn_config["head_dim"],
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes,
+                hf_config.linear_attn_config["num_heads"],
+                hf_config.linear_attn_config["head_dim"],
+                tp_world_size=tp_size,
+                spec_query_len=1 + num_spec,
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -1492,10 +1702,7 @@ class KimiLinearForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights)
         self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
@@ -1535,6 +1742,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 

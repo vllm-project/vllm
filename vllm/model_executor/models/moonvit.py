@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
 
@@ -550,9 +551,11 @@ class MoonVitEncoder(nn.Module):
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if rope_freqs_cis is None:
+            assert grid_hw is not None
             rope_freqs_cis = self.rope_2d.get_freqs_cis_by_seqlens(grid_hws=grid_hw)
 
         if cu_seqlens is None:
+            assert grid_hw is not None
             lengths = torch.cat(
                 (
                     torch.zeros(1, device=hidden_states.device, dtype=grid_hw.dtype),
@@ -577,7 +580,7 @@ class MoonVitEncoder(nn.Module):
 def patch_merger(
     x: torch.Tensor,
     grid_hw: torch.Tensor,
-    merge_kernel_size: list[int, int] = (2, 2),
+    merge_kernel_size: tuple[int, int] = (2, 2),
 ) -> list[torch.Tensor]:
     d_model = x.size(-1)
 
@@ -811,9 +814,14 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 merge_kernel_size=self.merge_kernel_size,
             )
 
-        hidden_states = self.patch_embed(pixel_values, grid_hw)
-        hidden_states = self.encoder(hidden_states, grid_hw)
-        hidden_states = patch_merger(
-            hidden_states, grid_hw, merge_kernel_size=self.merge_kernel_size
-        )
+        # Legacy path: patch_embed, encoder and patch_merger each iterate the
+        # per-image grids in Python, so all three read `grid_hw` back to the
+        # host. The `encoder_metadata` path above precomputes that outside the
+        # graph and does not sync.
+        with gpu_sync_allowed():
+            hidden_states = self.patch_embed(pixel_values, grid_hw)
+            hidden_states = self.encoder(hidden_states, grid_hw)
+            hidden_states = patch_merger(
+                hidden_states, grid_hw, merge_kernel_size=self.merge_kernel_size
+            )
         return hidden_states

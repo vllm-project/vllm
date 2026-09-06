@@ -34,6 +34,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -344,7 +345,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoEFactory:
+    def maybe_get_fused_moe(self) -> MoERunner:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -560,6 +561,8 @@ class Param2MoEModel(nn.Module):
 class Param2MoEMixtureOfExperts(MixtureOfExperts):
     """Implements the vLLM MixtureOfExperts protocol for Param2MoE."""
 
+    moe_mlp_layers: list[Param2MoEMoEBlock]
+
     def extract_moe_parameters(self, example_moe: Param2MoEMoEBlock | None) -> None:
         if example_moe is None:
             raise RuntimeError(
@@ -649,15 +652,14 @@ class Param2MoEForCausalLM(
 
         self.tie_word_embeddings: bool = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if self.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()

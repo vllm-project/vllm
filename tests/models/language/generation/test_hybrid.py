@@ -9,6 +9,7 @@ import pytest
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
+from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -210,6 +211,8 @@ def test_mamba_cache_cg_padding(
     cudagraph_dispatcher.initialize_cudagraph_keys(
         vllm_config.compilation_config.cudagraph_mode
     )
+    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+        pytest.skip("CUDA/XPU graph is disabled.Please enable it to run this test. ")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens

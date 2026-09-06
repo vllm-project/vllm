@@ -20,6 +20,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -54,6 +56,27 @@ class ECConnectorMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+class ECConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker ECConnector -> Scheduler ECConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler ECConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "ECConnectorWorkerMetadata"
+    ) -> "ECConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `ECConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class ECConnectorBase(ABC):
@@ -189,6 +212,16 @@ class ECConnectorBase(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def build_connector_worker_meta(self) -> ECConnectorWorkerMetadata | None:
+        """
+        Build the ECConnector worker metadata for this engine step.
+
+        Returns:
+            ECConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
+        """
+        return None
 
     # ==============================
     # Scheduler-side methods

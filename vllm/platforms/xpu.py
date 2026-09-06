@@ -135,6 +135,10 @@ class XPUPlatform(Platform):
             import vllm._moe_C  # noqa: F401
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",

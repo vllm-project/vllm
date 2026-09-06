@@ -278,9 +278,13 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    SPLIT_BATCH_HEAD_GRID: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
-    i_n, i_hv = i_nh // HV, i_nh % HV
+    if SPLIT_BATCH_HEAD_GRID:
+        i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    else:
+        i_v, i_nh = tl.program_id(0), tl.program_id(1)
+        i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
     o_k = tl.arange(0, BK)
@@ -322,7 +326,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     x = a_val + dt_bias_val
     softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
     g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+    beta_val = tl.sigmoid(b_val)
 
     b_h *= exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
@@ -446,7 +450,9 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     stride_indices_seq = ssm_state_indices.stride(0)
 
     NV = triton.cdiv(V, BV)
-    grid = (NV, B * HV)
+    # CUDA limits grid Y/Z dimensions to 65535.
+    split_batch_head_grid = B * HV > 65535
+    grid = (NV, HV, B) if split_batch_head_grid else (NV, B * HV)
     fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,
         a=a,
@@ -472,6 +478,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         num_warps=num_warps,
         num_stages=num_stages,
     )
