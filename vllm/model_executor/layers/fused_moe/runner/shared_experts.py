@@ -105,15 +105,19 @@ class SharedExperts(torch.nn.Module):
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
-        if self._mk_can_overlap_shared_experts():
-            return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
-
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda_alike()
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
+
+        if self._mk_can_overlap_shared_experts() and not (
+            should_run_shared_in_aux_stream
+            and self._moe_config.moe_parallel_config.use_deepep_ll_kernels
+            and envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL
+        ):
+            return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         if should_run_shared_in_aux_stream:
             return SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
