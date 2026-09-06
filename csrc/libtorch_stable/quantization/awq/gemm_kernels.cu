@@ -119,6 +119,29 @@ __global__ void __launch_bounds__(64)
     // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
     int* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
 
+    // Precompute -zero * scale once (deq = q * scale - zero * scale), so the
+    // inner N/16 loop needs a single FMA per f16x2 register instead of a
+    // sub.f16x2 + fma.rn.f16x2 pair. B_loaded_zero is negated in place to
+    // avoid extra registers. The sign-bit flip is used rather than neg.f16x2,
+    // which requires sm_80+.
+    uint32_t scale_sign_flip = 0x80008000u;
+    asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+                 : "=r"(B_loaded_zero.x)
+                 : "r"(B_loaded_zero.x), "r"(B_loaded_scale.x), "r"(ZERO));
+    asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+                 : "=r"(B_loaded_zero.y)
+                 : "r"(B_loaded_zero.y), "r"(B_loaded_scale.y), "r"(ZERO));
+    asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+                 : "=r"(B_loaded_zero.z)
+                 : "r"(B_loaded_zero.z), "r"(B_loaded_scale.z), "r"(ZERO));
+    asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+                 : "=r"(B_loaded_zero.w)
+                 : "r"(B_loaded_zero.w), "r"(B_loaded_scale.w), "r"(ZERO));
+    B_loaded_zero.x ^= scale_sign_flip;
+    B_loaded_zero.y ^= scale_sign_flip;
+    B_loaded_zero.z ^= scale_sign_flip;
+    B_loaded_zero.w ^= scale_sign_flip;
+
     for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < N / 16; ++ax0_ax1_fused_0) {
       // B: 32 x 136 (128+8) float16
       // each warp: 32 x 4
@@ -134,33 +157,24 @@ __global__ void __launch_bounds__(64)
           *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride * (OC / 8));
       uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
 
-      // - zero and * scale
-      // TODO (Haotian): can save 4 assembly instructions if sormulate as deq =
-      // q * scale - zero * scale.
-      asm volatile("sub.f16x2 %0, %1, %2;\n"
-                   : "=r"(B_loaded_fp16.x)
-                   : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
+      // deq = q * scale - zero * scale using a single FMA per register (the
+      // -zero * scale term was precomputed above the N/16 loop).
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                    : "=r"(B_loaded_fp16.x)
-                   : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n"
-                   : "=r"(B_loaded_fp16.y)
-                   : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
+                   : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x),
+                     "r"(B_loaded_zero.x));
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                    : "=r"(B_loaded_fp16.y)
-                   : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n"
-                   : "=r"(B_loaded_fp16.z)
-                   : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
+                   : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y),
+                     "r"(B_loaded_zero.y));
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                    : "=r"(B_loaded_fp16.z)
-                   : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
-      asm volatile("sub.f16x2 %0, %1, %2;\n"
-                   : "=r"(B_loaded_fp16.w)
-                   : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
+                   : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z),
+                     "r"(B_loaded_zero.z));
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                    : "=r"(B_loaded_fp16.w)
-                   : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+                   : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w),
+                     "r"(B_loaded_zero.w));
       /*
       if (ax0_ax1_fused_0 == 0 && blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 ==
       0 && threadIdx.x == 17 && threadIdx.y == 0){ printf("[x] %X %X %X %X\n",
