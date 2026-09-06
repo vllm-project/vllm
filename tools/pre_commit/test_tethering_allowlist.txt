@@ -15,8 +15,6 @@
 #     line.
 #   * `check_test_tethering.py --all` reports entries here that have since
 #     become tethered, and entries whose file no longer exists.
-#
-# Tracking: https://github.com/vllm-project/vllm/issues/53944
 
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
