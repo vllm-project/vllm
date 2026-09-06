@@ -289,19 +289,23 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "is_rocm,has_mamba,use_host_buffer,done_recving,expected_syncs",
+    "is_rocm,is_cuda,has_mamba,has_hisparse,use_host_buffer,"
+    "done_recving,expected_syncs",
     [
-        (True, True, False, {"req"}, 1),
-        (False, False, False, {"req"}, 0),
-        (False, True, False, {"req"}, 0),
-        (True, True, True, {"req"}, 0),
-        (True, True, False, set(), 0),
+        (True, False, True, False, False, {"req"}, 1),
+        (False, True, False, True, False, {"req"}, 1),
+        (False, False, False, False, False, {"req"}, 0),
+        (False, False, True, False, False, {"req"}, 0),
+        (True, False, True, False, True, {"req"}, 0),
+        (True, False, True, False, False, set(), 0),
     ],
 )
 def test_sync_device_after_direct_recv_gates(
     monkeypatch,
     is_rocm,
+    is_cuda,
     has_mamba,
+    has_hisparse,
     use_host_buffer,
     done_recving,
     expected_syncs,
@@ -314,10 +318,12 @@ def test_sync_device_after_direct_recv_gates(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._hisparse_destination = object() if has_hisparse else None
     worker.use_host_buffer = use_host_buffer
 
     sync_calls = []
     monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(base_worker.current_platform, "is_cuda", lambda: is_cuda)
     monkeypatch.setattr(
         base_worker.torch.accelerator,
         "synchronize",
@@ -471,6 +477,7 @@ def test_divergent_regions_notify_prefill_when_decode_request_is_aborted():
     worker._bidirectional_kv_xfer_enabled = False
     worker._has_mamba = False
     worker._hisparse_destination = None
+    worker._mixed_mem_types = False
     worker.use_mla = True
     worker.dcp_size = 1
     worker.region_group_ids = [0, 1]
@@ -1366,12 +1373,14 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
+    scheduler.kv_cache_manager.hisparse_coordinator = MagicMock()
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
 
     request = MagicMock()
     request.request_id = "req-1"
     request.num_computed_tokens = 48  # Truncated at the first invalid block.
+    request.hisparse_host_import_pending = True
 
     scheduler._update_waiting_for_remote_kv(request)
 
@@ -1379,6 +1388,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     # and flow into the next step's zero list; Mamba blocks are not.
     scheduler._skip_zero_block_ids = set()
     assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
+
 
 
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────

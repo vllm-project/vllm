@@ -2324,6 +2324,9 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
+        if request.hisparse_host_import_pending:
+            self.coordinator.complete_host_import(request.request_id, num_tokens)
+            request.hisparse_host_import_pending = False
         self.coordinator.publish_when_ready(
             request,
             num_tokens,
