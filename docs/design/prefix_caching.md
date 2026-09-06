@@ -144,18 +144,20 @@ of the token content. See `vllm/distributed/kv_events.py`.
 `BlockStored.extra_keys` is a per-block list of typed keys that describe why a
 block's hash is what it is. Each entry is a tuple of `ExtraKey` items:
 
-- `MultiModalKey(modality, hash, block_offset)` – the block references a
+* `MultiModalKey(modality, hash, block_offset)` – the block references a
   multi-modal input whose encoder-output cache hash is `hash` (the same value
   as `MultiModalFeatures.mm_hashes[modality][i]` from the render step),
   starting `block_offset` tokens into the block.
-- `LoRAKey(name)` – the block was computed under a LoRA adapter.
-- `CacheSaltKey(salt)` – the request's `cache_salt` (first block only).
-- `PromptEmbedsKey(hash)` – prompt-embeddings contributed to the block hash.
-- `LegacyExtraKey(value)` – an unrecognized extra-key shape, preserved as-is.
+* `LoRAKey(name)` – the block was computed under a LoRA adapter.
+* `CacheSaltKey(salt)` – the request's `cache_salt` (first block only).
+* `PromptEmbedsKey(hash)` – prompt-embeddings contributed to the block hash.
+* `LegacyExtraKey(value)` – an unrecognized extra-key shape, preserved as-is.
 
-Events carry `event_version` (currently `1`) so consumers can branch on schema
-changes. To decode `extra_keys`, use the explicit `ExtraKeyUnion` type (msgspec
-only resolves explicitly-spelled unions, not base-class subclass unions).
+Events with typed `extra_keys` carry `event_version` (currently `1`) so
+consumers can branch on schema changes; legacy events (`extra_keys=None`)
+omit the field to preserve their wire shape. To decode `extra_keys`, use the
+explicit `ExtraKeyUnion` type (msgspec only resolves explicitly-spelled
+unions, not base-class subclass unions).
 
 ### Block Allocation
 
