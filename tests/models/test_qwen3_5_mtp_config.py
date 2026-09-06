@@ -7,6 +7,8 @@ from transformers import PretrainedConfig
 
 from vllm.config.speculative import SpeculativeConfig
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _mtp_config(model_type: str) -> PretrainedConfig:
     return PretrainedConfig(
