@@ -172,6 +172,15 @@ class FixFunctionalizationPass(VllmInductorPass):
                 )
                 self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             elif (
+                hasattr(torch.ops.vllm, "ple_offload_wait")
+                and at_target == torch.ops.vllm.ple_offload_wait.default
+            ):
+                # Functionalization would clone the declared-mutated buffer
+                # before the wait, potentially reading it before the CPU signals.
+                # Restore the wait and keep users on the original IPC buffer.
+                mutated_args = {1: "gpu_output_buffer"}
+                self.defunctionalize(graph, node, mutated_args)
+            elif (
                 hasattr(torch.ops.vllm, "fused_rope_and_unified_kv_cache_update")
                 and at_target
                 == torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
