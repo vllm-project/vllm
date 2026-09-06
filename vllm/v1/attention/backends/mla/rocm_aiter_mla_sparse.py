@@ -15,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import np_to_pinned_tensor
@@ -744,7 +747,9 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(
+    MLAAttentionImpl[ROCMAiterMLASparseMetadata], SharedTopkIndicesBuffer
+):
     is_sparse = True
     supports_dense_mha_prefill = False
     supports_dcp = False
@@ -789,12 +794,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
