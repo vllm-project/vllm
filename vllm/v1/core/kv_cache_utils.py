@@ -1089,8 +1089,12 @@ def _pool_bytes_per_block(
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    layout_name = vllm_config.cache_config.kv_cache_layout if vllm_config else None
-    layout = KVCacheLayout[layout_name] if layout_name is not None else None
+    layout = (
+        vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if vllm_config is not None
+        and vllm_config.cache_config.kv_cache_layout is not None
+        else None
+    )
     return _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
 
 

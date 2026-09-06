@@ -19,6 +19,7 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
@@ -640,6 +641,39 @@ def test_packed_stride_alignment_leaves_dense_pages_unchanged(layout):
     after = get_kv_cache_config_from_groups(config, [_uniform_group(aligned)], MEMORY)
     assert before.num_blocks == after.num_blocks
     assert before.kv_cache_tensors == after.kv_cache_tensors
+
+
+@pytest.mark.parametrize(
+    "layout_name,resolved",
+    [
+        ("NHD", KVCacheLayout.LBNHC),
+        ("HND", KVCacheLayout.LBHNC),
+        ("BLHNC", KVCacheLayout.BLHNC),
+        (None, None),
+    ],
+)
+def test_pool_bytes_resolves_layout_aliases(layout_name, resolved):
+    config = _mock_vllm_config(layout_name)
+    specs = {
+        name: replace(_mla(width), block_stride_alignment_bytes=width)
+        for name, width in [("mla", 576), ("idx", 132)]
+    }
+    if resolved is None:
+        groups = [_uniform_group(specs)]
+        expected = sum(spec.page_size_bytes for spec in specs.values())
+        assert _pool_bytes_per_block(groups, config) == expected
+        assert _pool_bytes_per_block(groups) == expected
+        return
+    assert resolve_kv_cache_layout(config, [[resolved.name]]) == resolved
+    assert config.cache_config.kv_cache_layout == layout_name
+    groups = get_kv_cache_groups(config, specs)
+    cache = get_kv_cache_config_from_groups(config, groups, MEMORY)
+    views = allocate_kv_cache(cache, torch.device("cpu"), resolved)
+    allocation_bytes = views["mla"].untyped_storage().nbytes()
+    # Capacity accounting must accept the same names and bytes as allocation.
+    pool_bytes = _pool_bytes_per_block(groups, config)
+    assert allocation_bytes == cache.num_blocks * pool_bytes
+    assert cache.num_blocks == MEMORY // pool_bytes
 
 
 @pytest.mark.parametrize("layout", ["LBNHC", "LBHNC"])
