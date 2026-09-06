@@ -107,7 +107,13 @@ class WorkerBase:
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
-        return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
+        with set_current_vllm_config(self.vllm_config):
+            # Backend classmethods may query config (e.g. FlashInfer needs the
+            # KV cache dtype to pick the layout family on sm120).
+            return [
+                layout.name
+                for layout in get_supported_kv_cache_layouts(backends)
+            ]
 
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""
