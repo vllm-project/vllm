@@ -659,3 +659,133 @@ def test_v2_loop_break_continues_the_multi_token_end_marker():
     assert out[0, END_A] == pytest.approx(1.0e9)
     assert out[0, END_B] == 0
     assert out[1, END_B] == pytest.approx(1.0e9)
+
+
+# --- A forced end sequence distinct from the parser's natural marker ---------
+
+
+class MockLoopBreakDistinctEndConfig(MockDistinctEndReasoningConfig):
+    loop_break_max_pattern_size = 8
+    loop_break_min_pattern_size = 2
+    loop_break_min_count = 3
+    loop_break_min_reasoning_tokens = 16
+    loop_break_check_interval = 1
+
+
+def test_v2_thinking_budget_stops_after_a_committed_forced_end_sequence():
+    """``reasoning_end_str`` may carry a transition phrase, so the sequence
+    forcing writes can differ from the parser's natural marker. Committing it
+    ends the section; otherwise forcing restarts and the answer never begins."""
+    tokens = [1, START, 10, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [12], [0])
+    assert out[0, END_A] == pytest.approx(1.0e9)
+
+    # One token per step, as a plain decode commits them: the second half of the
+    # marker only matches if the incremental scan overlaps the previous edge.
+    _append_committed(req_states, len(tokens), [END_A])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END_A], [0])
+    assert out[0, END_B] == pytest.approx(1.0e9)
+
+    _append_committed(req_states, len(tokens) + 1, [END_B])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END_B], [0])
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_stops_forcing_inside_the_draft_window():
+    """The forced sequence can complete among speculative positions; the ones
+    after it belong to the answer."""
+    tokens = [1, START, 10, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((3, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12, END_A, END_B], local_pos=[0, 1, 2])
+
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert out[1, END_B] == pytest.approx(1.0e9)
+    assert torch.all(out[2] == 0)
+
+
+def test_v2_loop_break_closes_on_a_committed_forced_end_sequence():
+    """The loop-break flag is sticky until the section closes, so a forced end
+    the committed scan cannot see would keep the request forcing forever."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    req_states, state = _loop_break_state(
+        tokens, config=MockLoopBreakDistinctEndConfig()
+    )
+
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[tokens[-1]],
+        local_pos=[0],
+    )
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert state.loop_break_fired[3].item() == 1
+
+    _append_committed(req_states, len(tokens), [END_A])
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[END_A],
+        local_pos=[0],
+    )
+    assert out[0, END_B] == pytest.approx(1.0e9)
+    assert state.loop_break_fired[3].item() == 1
+
+    _append_committed(req_states, len(tokens) + 1, [END_B])
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[END_B],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0), "still forcing after the forced end was committed"
+    assert state.loop_break_fired[3].item() == 0
+
+
+class MockTransitionEndReasoningConfig:
+    # The documented shape: a transition phrase before the parser's own marker,
+    # so the natural sequence is a SUFFIX of the forced one.
+    reasoning_start_token_ids = [START]
+    reasoning_end_token_ids = [END_A, END]
+    natural_reasoning_end_token_ids = [END]
+
+
+def test_v2_thinking_budget_natural_close_survives_forced_end_tracking():
+    """With a shared suffix both scans see the same close. Tracking the forced
+    sequence must not shadow a section the model ended on its own."""
+    req_states = _make_req_states([1, START, 10, 11, 12, END, 13], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockTransitionEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [13], [0])
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_transition_phrase_end_closes_the_section():
+    """The same config closed by forcing: transition phrase, then the marker."""
+    tokens = [1, START, 10, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockTransitionEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [12], [0])
+    assert out[0, END_A] == pytest.approx(1.0e9)
+
+    _append_committed(req_states, len(tokens), [END_A])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END_A], [0])
+    assert out[0, END] == pytest.approx(1.0e9)
+
+    _append_committed(req_states, len(tokens) + 1, [END])
+    out = _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [END], [0])
+    assert torch.all(out == 0)
