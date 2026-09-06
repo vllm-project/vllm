@@ -226,8 +226,9 @@ def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
     """A tap owned by an earlier PP stage must reach the last stage intact.
 
     The drafter's taps can reference layers outside the last stage (K3 taps
-    [24, 48, 72, 88, 92]); each stage packs the taps it owns into
-    IntermediateTensors and the last stage returns the full ordered set.
+    [24, 48, 72, 88, 92]); each stage packs the taps it owns under global
+    per-tap keys (EagleModelMixin.pack_local_aux_hidden_states) and the last
+    stage prepends the collected remote taps to its own.
     """
     stage0_hidden = torch.tensor([[1.0, 2.0]])
     stage0_residual = torch.tensor([[3.0, 4.0]])
@@ -244,6 +245,11 @@ def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
         taps=(1, 2),
         layer_outputs=[(stage1_hidden, None, stage1_residual)],
     )
+    # EagleModelMixin caches the PP aux layout in _set_aux_hidden_state_layers;
+    # the stubs set layers directly, so prime the caches by hand.
+    object.__setattr__(stage0, "_aux_slot_base_cached", 0)
+    object.__setattr__(stage1, "_aux_slot_base_cached", 1)
+    object.__setattr__(stage1, "_aux_upstream_total_cached", 1)
 
     monkeypatch.setattr(
         kimi_model,
@@ -257,15 +263,12 @@ def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
         inputs_embeds=torch.zeros(1, 2),
     )
 
-    # Stage 0 owns the post-layer-1 tap; it is packed for the wire.
+    # Stage 0 owns the post-layer-1 tap; it rides the wire under its global
+    # slot key.
     stage0_aux = stage0_hidden + stage0_residual
-    torch.testing.assert_close(stage0_out.tensors["aux_hidden_states"], stage0_aux)
-
-    # The receiving buffer on stage 1 must be sized for exactly that one tap.
-    stage1_buffers = stage1.make_empty_intermediate_tensors(
-        batch_size=1, dtype=torch.bfloat16, device=torch.device("cpu")
+    torch.testing.assert_close(
+        stage0_out.tensors["aux_hidden_states_0"], stage0_aux
     )
-    assert stage1_buffers.tensors["aux_hidden_states"].shape == (1, 2)
 
     monkeypatch.setattr(
         kimi_model,
@@ -287,18 +290,13 @@ def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
 
 
 def test_kimi_linear_first_stage_without_taps_sends_no_aux_buffer(monkeypatch):
-    """No taps at or below the stage boundary -> no aux key on the wire."""
+    """No taps captured on the stage -> no aux keys on the wire."""
     stage0 = _make_stage(
         start_layer=0,
         taps=(2,),
         layer_outputs=[(torch.ones(1, 2), None, torch.zeros(1, 2))],
     )
-    assert (
-        "aux_hidden_states"
-        not in stage0.make_empty_intermediate_tensors(
-            batch_size=1, dtype=torch.bfloat16, device=torch.device("cpu")
-        ).tensors
-    )
+    object.__setattr__(stage0, "_aux_slot_base_cached", 0)
 
     monkeypatch.setattr(
         kimi_model,
@@ -311,4 +309,4 @@ def test_kimi_linear_first_stage_without_taps_sends_no_aux_buffer(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.zeros(1, 2),
     )
-    assert "aux_hidden_states" not in out.tensors
+    assert not any(key.startswith("aux_hidden_states_") for key in out.tensors)

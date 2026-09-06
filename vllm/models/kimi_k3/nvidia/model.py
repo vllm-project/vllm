@@ -85,6 +85,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -283,10 +284,7 @@ class KimiMLP(nn.Module):
             if gemm_rs_ar.can_run(self.down_proj):
                 self.gemm_rs_ar = gemm_rs_ar
             else:
-                logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
-                    prefix,
-                )
+                gemm_rs_ar.warn_incompatible_projection()
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "situ":
@@ -1116,10 +1114,6 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
-    # Aux hidden taps ride the pipeline packed inside IntermediateTensors, so a
-    # DSpark drafter on the last stage may tap target layers on any stage.
-    supports_pp_aux_hidden_state_transport = True
-
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
@@ -1127,6 +1121,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "fused_qkv_a_g_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
     }
+
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1152,7 +1148,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             vllm_config, self.use_sequence_parallel
         )
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1224,37 +1220,29 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 cdiv(self.start_layer, self.attn_res_block_size),
                 self.config.hidden_size,
             )
-        tensors: dict[str, torch.Tensor] = {
-            "hidden_states": torch.zeros(
-                (batch_size, self.config.hidden_size), dtype=dtype, device=device
-            ),
-            "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
-        }
-        # Aux taps at or below this stage's first layer are captured by earlier
-        # stages and arrive packed along the feature dim.
-        num_incoming_aux = sum(
-            layer <= self.start_layer
-            for layer in getattr(self, "aux_hidden_state_layers", ())
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
+            }
         )
-        if num_incoming_aux:
-            tensors["aux_hidden_states"] = torch.zeros(
-                (batch_size, num_incoming_aux * self.config.hidden_size),
-                dtype=dtype,
-                device=device,
-            )
-        return IntermediateTensors(tensors)
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
+        if self.use_attn_res and self._aux_attn_res_stream:
+            pp = get_pp_group()
+            if not pp.is_last_rank and self.end_layer in self.aux_hidden_state_layers:
+                raise ValueError(
+                    f"Auxiliary layer {self.end_layer} cannot end a non-final PP "
+                    "stage when VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=1"
+                )
         if self.use_attn_res:
-            # Emitted once, at configuration time. Which layers are tapped and
-            # which convention is in force are the two things you need to
-            # confirm from a running process, and neither is recoverable from
-            # the served output.
             logger.info_once(
                 "Kimi-K3 aux hidden capture: layers=%s mode=%s "
                 "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
-                layers,
+                self.aux_hidden_state_layers,
                 "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
                 int(self._aux_attn_res_stream),
             )
@@ -1270,25 +1258,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
-
-        The wire between layers only carries the current block's running prefix;
-        the committed blocks live in the bank. The value the next consumer
-        actually reads is the pre-norm AttnRes mixture over
-        ``bank[:num_blocks] + prefix``, which is what the DFlash drafters were
-        trained against. ``attn_res`` with no delta, no block write and no
-        output norm computes exactly that and leaves both the prefix and the
-        bank untouched.
-
-        Folding the pending MLP output into the prefix rather than passing it as
-        ``delta`` is deliberate: the kernel writes an applied delta back into
-        the prefix in place, which would double-add it into the live residual
-        stream.
-        """
+        """Return the AttnRes stream after ``layer_idx``."""
         prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
-        # `use_attn_res` is what constructs the norm and projection weights this
-        # reads; without it there is no mixture to compute and the attribute
-        # lookups below would raise.
         if not (self._aux_attn_res_stream and self.use_attn_res):
             return prefix
 
@@ -1298,17 +1269,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             score_proj = consumer.self_attention_res_proj
             num_blocks = consumer.prev_valid_blocks
         elif get_pp_group().is_last_rank:
-            # Nothing downstream but the model's own output-side aggregation.
             score_norm = self.output_attn_res_norm
             score_proj = self.output_attn_res_proj
             num_blocks = self.num_attn_res_blocks
         else:
-            # Last layer of a non-final pipeline stage: the consumer lives on
-            # the next rank and the output-side aggregation only exists on the
-            # last one, so there is nothing here to mix against. Falling back
-            # to the running prefix keeps the tap defined rather than reaching
-            # for weights this rank does not construct.
-            return prefix
+            raise RuntimeError("Auxiliary AttnRes capture crossed a PP boundary")
 
         return attn_res(
             prefix,
@@ -1340,14 +1305,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
-            packed_aux_hidden_states = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            packed_aux_hidden_states = intermediate_tensors.tensors.get(
-                "aux_hidden_states"
-            )
         assert hidden_states is not None
 
         full_num_tokens = positions.shape[0]
@@ -1360,15 +1321,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
+        # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if packed_aux_hidden_states is not None:
-            # Unpack the taps earlier stages captured (ascending layer order).
-            aux_hidden_states.extend(
-                packed_aux_hidden_states.split(self.config.hidden_size, dim=-1)
-            )
-        # The stage-entry capture doubles the previous stage's own last-layer
-        # tap once aux states flow across stages, so it only makes sense on the
-        # first stage (e.g. a tap on the embedding output).
         if (
             get_pp_group().is_first_rank
             and self.start_layer in self.aux_hidden_state_layers
@@ -1422,10 +1378,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            tensors = {"hidden_states": hidden_states, "residual": residual}
-            if aux_hidden_states:
-                tensors["aux_hidden_states"] = torch.cat(aux_hidden_states, dim=-1)
-            return IntermediateTensors(tensors)
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1461,6 +1420,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

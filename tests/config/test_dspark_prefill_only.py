@@ -44,7 +44,6 @@ def test_dspark_prefill_materializer_uses_pp1_draft_config():
     draft = SpeculativeConfig.create_draft_parallel_config(
         target,
         speculative_draft_tensor_parallel_size=1,
-        pipeline_parallel_size=1,
     )
 
     assert draft.pipeline_parallel_size == 1
