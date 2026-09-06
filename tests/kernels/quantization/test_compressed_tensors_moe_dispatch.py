@@ -48,6 +48,7 @@ ALL_PREDICATES = [
 ]
 
 LAYER_NAME = "layer.0"
+GOOD_BITS = WNA16_SUPPORTED_BITS[0]
 
 
 def _make_quant_config(scheme_dict, **predicate_overrides):
@@ -210,19 +211,31 @@ class TestWeightInputBackendRouting:
         mock_cls.assert_called_once_with(weight_quant, None, layer.moe_config)
         assert result is mock_cls.return_value
 
-    def test_wna16_invalid_bits_or_format_raises(self, mock_platform):
+    @pytest.mark.parametrize(
+        "num_bits,fmt",
+        [
+            (99, CompressionFormat.pack_quantized.value),
+            (GOOD_BITS, CompressionFormat.naive_quantized.value),
+            (99, CompressionFormat.naive_quantized.value),
+        ],
+        ids=["bad-bits", "bad-format", "both-bad"],
+    )
+    def test_wna16_invalid_bits_or_format_raises(self, mock_platform, num_bits, fmt):
         mock_platform.is_rocm.return_value = False
-        weight_quant = _weight_quant(num_bits=99)  # not in WNA16_SUPPORTED_BITS
+        weight_quant = _weight_quant(num_bits=num_bits)
         quant_config = _make_quant_config(
             scheme_dict={
                 "weights": weight_quant,
                 "input_activations": None,
-                "format": CompressionFormat.pack_quantized.value,
+                "format": fmt,
             },
             _is_wNa16_group_channel=True,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as excinfo:
             _call(quant_config)
+        # the error must report what was received, not restate the requirement
+        assert f"got format: {fmt}" in str(excinfo.value)
+        assert f"and bits: {num_bits}" in str(excinfo.value)
 
 
 class TestNvfp4Routing:

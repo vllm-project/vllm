@@ -84,7 +84,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     "For Fused MoE layers, only format: "
                     f"{CompressionFormat.pack_quantized.value} "
                     f"and bits: {WNA16_SUPPORTED_BITS} is supported "
-                    f"but got format: {CompressionFormat.pack_quantized.value} "
+                    f"but got format: {format} "
                     f"and bits: {weight_quant.num_bits}"
                 )
 
