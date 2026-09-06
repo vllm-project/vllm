@@ -631,6 +631,68 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
     _assert_matches_shared_gdn(reference, actual)
 
 
+@pytest.mark.parametrize(
+    "builder_cls",
+    [
+        GDNAttentionMetadataBuilder,
+        # The Kimi-K3 builder stages spec-decode state indices on the device.
+        pytest.param(
+            KimiK3KDAMetadataBuilder,
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="requires CUDA"
+            ),
+        ),
+    ],
+)
+def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
+    builder_cls: type[AttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
+):
+    """`build_for_cudagraph_capture` is not capture-only: a DP rank with nothing
+    scheduled re-stages its FULL-graph metadata through it on every dummy step,
+    so it must not synchronize the device. The host-side draft counts have to
+    come from `query_start_loc_cpu` and match the device-derived values."""
+    num_speculative_tokens = 2
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.zeros(batch.batch_size, dtype=torch.bool))
+    builder = _make_builder(
+        builder_cls, num_speculative_tokens, full_cuda_graph=True, device=device
+    )
+
+    device_to_host_copies: list[torch.Size] = []
+    original_cpu = torch.Tensor.cpu
+
+    def counting_cpu(self: torch.Tensor, *args, **kwargs):
+        device_to_host_copies.append(self.shape)
+        return original_cpu(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", counting_cpu)
+    actual = builder.build_for_cudagraph_capture(common_attn_metadata)
+    monkeypatch.undo()
+
+    assert not device_to_host_copies, device_to_host_copies
+
+    num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
+    reference = builder.build(
+        0,
+        common_attn_metadata,
+        num_accepted_tokens,
+        (num_accepted_tokens - 1).cpu(),
+    )
+    assert actual.num_spec_decodes == batch.batch_size
+    assert actual.num_decodes == 0
+    assert actual.num_prefills == 0
+    for field in fields(type(actual)):
+        actual_value = getattr(actual, field.name)
+        reference_value = getattr(reference, field.name)
+        if isinstance(actual_value, torch.Tensor):
+            torch.testing.assert_close(actual_value, reference_value)
+        else:
+            assert actual_value == reference_value, field.name
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_recoverssm_spec_cudagraph_stages_one_checkpoint_per_request():
     device = torch.device("cuda")
