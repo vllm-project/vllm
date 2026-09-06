@@ -1359,6 +1359,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state.num_new_sampled_tokens_per_step,
         )
 
+        # Any residual -1 placeholder in the input grid (async spec-decode
+        # stubs that the draft scatter did not cover) would be embedded as a
+        # negative index -> indexSelectSmallIndex device-side assert. Replace
+        # with token 1 so the forward stays in bounds on both PP ranks.
+        input_grid = self.input_buffers.input_ids[:num_tokens]
+        neg = input_grid < 0
+        if neg.any():
+            input_grid[neg] = 1
+
         fast_prefill = None
         if self.fast_prefill is not None:
             fast_prefill = self.fast_prefill.prepare(
