@@ -14,6 +14,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -84,8 +85,14 @@ def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> 
     if (untied := _get_untied_lm_head(model)) is None:
         return
 
-    # On device, torch.equal segfaults on ROCm when sleep mode is enabled
-    if not torch.equal(untied.lm_head.weight.cpu(), untied.embed_tokens.weight.cpu()):
+    # On device, torch.equal segfaults on ROCm when sleep mode is enabled.
+    lm_head_weight = untied.lm_head.weight
+    embed_tokens_weight = untied.embed_tokens.weight
+    if current_platform.is_rocm():
+        lm_head_weight = lm_head_weight.cpu()
+        embed_tokens_weight = embed_tokens_weight.cpu()
+
+    if not torch.equal(lm_head_weight, embed_tokens_weight):
         logger.warning(
             "The config for %s says the word embeddings are tied, but the checkpoint "
             "contains a different %s, which has been used instead of tying. "

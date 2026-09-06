@@ -12,6 +12,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.platforms import current_platform
 
 VOCAB_SIZE = 16
 HIDDEN_SIZE = 4
@@ -84,3 +85,23 @@ def test_no_retie_without_checkpoint_override():
     maybe_retie_word_embeddings(model, make_model_config())
 
     assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only test")
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize("identical", [True, False])
+def test_retie_compares_weights_on_cuda(monkeypatch, identical: bool):
+    model = UntiedModel().cuda()
+    if not identical:
+        model.lm_head.weight.data[-1, -1] = 2.0
+    torch_equal = torch.equal
+
+    def assert_cuda_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
+        assert left.is_cuda
+        assert right.is_cuda
+        return torch_equal(left, right)
+
+    monkeypatch.setattr(torch, "equal", assert_cuda_equal)
+    maybe_retie_word_embeddings(model, make_model_config(untied_by_checkpoint=True))
+
+    assert (model.lm_head.weight is model.embed_tokens.weight) is identical
