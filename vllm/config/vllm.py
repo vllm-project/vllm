@@ -1670,17 +1670,38 @@ class VllmConfig:
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
 
-        if (
-            self.parallel_config.all2all_backend == "moonep"
-            and self.model_config is not None
-            and self.model_config.quantization is not None
-        ):
-            raise ValueError(
-                "The moonep all2all backend currently supports unquantized "
-                "BF16 models only; got "
-                f"quantization={self.model_config.quantization!r}. Use a "
-                "different --all2all-backend for quantized models."
-            )
+        if self.parallel_config.all2all_backend == "moonep":
+            if (
+                self.model_config is not None
+                and self.model_config.quantization is not None
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports unquantized "
+                    "BF16 models only; got "
+                    f"quantization={self.model_config.quantization!r}. Use a "
+                    "different --all2all-backend for quantized models."
+                )
+            if (
+                self.model_config is not None
+                and self.model_config.dtype != torch.bfloat16
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports BF16 models "
+                    f"only; got dtype={self.model_config.dtype}. Use a "
+                    "different --all2all-backend or --dtype bfloat16."
+                )
+            # Enforced here rather than in set_splitting_ops_for_v1 so it
+            # holds for every compilation mode: MoonEP dispatch/combine are
+            # eager-only and must not be captured.
+            if (
+                self.parallel_config.data_parallel_size > 1
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                logger.info(
+                    "MoonEP: Disabling CUDA Graphs since the MoonEP "
+                    "integration is currently eager-only."
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (

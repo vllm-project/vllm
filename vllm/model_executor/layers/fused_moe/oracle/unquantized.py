@@ -370,6 +370,16 @@ def convert_to_unquantized_kernel_format(
             num_global_experts=moe_config.num_experts,
             num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
         )
+        # On weight updates (e.g. RL reloads), refresh the existing layout
+        # in place: the experts and prepare/finalize hold references to its
+        # tensors, and the up projection is not a registered parameter so
+        # replace_parameter would never reach it.
+        existing = getattr(layer, "_moonep_weight_layout", None)
+        if existing is not None:
+            existing.full_gate_weight.copy_(layout.full_gate_weight)
+            existing.full_up_weight.copy_(layout.full_up_weight)
+            existing.full_down_weight.copy_(layout.full_down_weight)
+            layout = existing
         layer._moonep_weight_layout = layout
         return layout.full_gate_weight, layout.full_down_weight
 
