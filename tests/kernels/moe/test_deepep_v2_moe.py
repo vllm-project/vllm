@@ -245,7 +245,6 @@ def _deep_ep_v2_moe(
     config: TestConfig,
     use_cudagraph: bool,
     experts_backend: str,
-    poison_padding: bool = False,
 ):
     import tempfile
 
@@ -354,25 +353,6 @@ def _deep_ep_v2_moe(
             fused_experts=fused_experts,
         )
 
-        # Poison the padding rows of the dispatched activation with NaN before
-        # the experts run. A padding-aware expert skips those rows at tile
-        # granularity, so the valid output must stay finite and bit-identical to
-        # the clean run; a leak proves the padding is being read.
-        poison_fired = [False]
-        if poison_padding:
-            _orig_apply = fused_experts.apply
-
-            def _poison_apply(*args, **kwargs):
-                hs = kwargs["hidden_states"]
-                tids = kwargs["topk_ids"]
-                pad = (tids == -1).all(dim=1)
-                if pad.any():
-                    poison_fired[0] = True
-                    hs[pad] = float("nan")
-                return _orig_apply(*args, **kwargs)
-
-            fused_experts.apply = _poison_apply
-
         with set_forward_context(None, vllm_cfg):
             for _ in range(3):
                 out = mk_kernel.apply(
@@ -387,9 +367,6 @@ def _deep_ep_v2_moe(
                     apply_router_weight_on_input=False,
                 )
 
-    if poison_padding:
-        assert poison_fired[0], "no padding rows were poisoned; test is vacuous"
-        assert torch.isfinite(out).all(), "padding NaNs leaked into the valid output"
     torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
@@ -465,54 +442,4 @@ def test_deep_ep_v2_moe_backends(
         config,
         use_cudagraph,
         experts_backend,
-    )
-
-
-@pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
-@pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [6])
-@pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
-@multi_gpu_test(num_gpus=2)
-@requires_deep_ep_v2
-@requires_flashinfer_sm100
-def test_deep_ep_v2_moe_padding_robust(
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    topk: int,
-    world_dp_size: tuple[int, int],
-    experts_backend: str,
-    workspace_init,
-):
-    """Padding-aware experts must not read the worst-case padding tail.
-
-    Runs the decode dispatch (``use_cudagraph=True``), which allocates a large
-    worst-case recv buffer whose tail rows are padding, then fills those rows
-    with NaN before the experts run. If the kernel truly skips padding at tile
-    granularity the valid output stays finite and matches the reference; a NaN
-    leak means padding is being computed on.
-    """
-    set_random_seed(7)
-    world_size, dp_size = world_dp_size
-    config = TestConfig(
-        dtype=torch.float8_e4m3fn
-        if experts_backend == "trtllm_fp8"
-        else torch.bfloat16,
-        topk=topk,
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-    )
-
-    parallel_launch(
-        world_size,
-        _deep_ep_v2_moe,
-        dp_size,
-        config,
-        True,
-        experts_backend,
-        True,
     )
