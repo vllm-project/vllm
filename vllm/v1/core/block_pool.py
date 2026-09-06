@@ -493,23 +493,32 @@ class BlockPool:
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
         )
+        incoming_num_tokens = num_hash_blocks * self.hash_block_size
         already_cached = block.block_hash == block_hash_with_group_id or (
             self.cached_block_hash_to_block.contain(
                 block_hash_with_group_id, block.block_id
             )
         )
+        # After full-block promotion the primary hash covers more tokens than
+        # this partial boundary. Do not re-insert the superseded key.
+        if (
+            not already_cached
+            and block.block_hash_num_tokens is not None
+            and block.block_hash_num_tokens >= incoming_num_tokens
+        ):
+            return None
         if (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
-            and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
+            and block.block_hash_num_tokens < incoming_num_tokens
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
-            num_tokens=num_hash_blocks * self.hash_block_size,
+            num_tokens=incoming_num_tokens,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
