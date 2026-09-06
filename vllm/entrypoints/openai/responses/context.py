@@ -159,6 +159,31 @@ def _create_json_parse_error_messages(
         )
     ]
 
+def _create_parsable_json_parse_error_messages(
+    last_msg: Union["FunctionCall", "ResponseFunctionToolCall"], e: json.JSONDecodeError
+) -> list["ResponseFunctionToolCallOutputItem"]:
+    """
+    Creates an error message when JSON parsing fails for ParsableContext built-in tools.
+    """
+    error_msg = (
+        f"Error parsing tool arguments as JSON: {str(e)}. "
+        "Please ensure the tool call arguments are valid JSON and try again."
+    )
+    
+    # Harmony Message vs ResponseFunctionToolCall have different ID field names.
+    call_id = getattr(last_msg, "call_id", f"call_{random_uuid()}")
+    
+    return [
+        ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=call_id,
+            output=error_msg,
+            status="completed",
+        )
+    ]
+
+
 
 class SimpleContext(ConversationContext):
     """This is a context that cannot handle MCP tool calls"""
@@ -428,9 +453,15 @@ class ParsableContext(ConversationContext):
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
-        args = json.loads(last_msg.arguments)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_parsable_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
         param = {
-            "code": args["code"],
+            "code": args.get("code", ""),
         }
         result = await tool_session.call_tool("python", param)
         result_str = result.content[0].text
@@ -455,7 +486,7 @@ class ParsableContext(ConversationContext):
             try:
                 args = json.loads(last_msg.arguments)
             except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+                return _create_parsable_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("search", args)
@@ -498,7 +529,7 @@ class ParsableContext(ConversationContext):
             try:
                 args = json.loads(last_msg.arguments)
             except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+                return _create_parsable_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("exec", args)
@@ -815,7 +846,7 @@ class HarmonyContext(ConversationContext):
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+                return _create_parsable_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
@@ -902,7 +933,7 @@ class HarmonyContext(ConversationContext):
             try:
                 args = json.loads(last_msg.content[0].text)
             except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+                return _create_parsable_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
