@@ -71,6 +71,31 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def supports_selective_reload(self) -> bool:
+        """Whether this method supports in-place selective weight reload."""
+        return False
+
+    def restore_weights_before_loading(self, layer: nn.Module) -> None:
+        """Restore runtime storage to checkpoint layout before an update."""
+        return
+
+    def reload_parameter(self, layer, parameter_name, target, bound_args, loader):
+        """Optionally consume one reload parameter directly into runtime storage."""
+        return False
+
+    def refresh_derived_state(
+        self,
+        layer: nn.Module,
+        updated_parameter_names: frozenset[str] | None = None,
+    ) -> None:
+        """Refresh derived runtime state in-place after a weight update.
+
+        Implementations must preserve storage identity and be safe to call
+        repeatedly. The default is intentionally fail-closed: methods must
+        opt in explicitly before a selective reload dispatcher uses them.
+        """
+        return
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """

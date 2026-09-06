@@ -154,6 +154,38 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
                 setattr(layer, name, materialize_meta_tensor(tensor))
 
 
+class ReloadCopyTracker(TorchDispatchMode):
+    """Track disjoint contiguous writes into one checkpoint staging parameter."""
+
+    def __init__(self, target: torch.Tensor, regions: list[tuple[int, int]]):
+        super().__init__()
+        self.target = target
+        self.regions = regions
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten.copy_.default:
+            destination = args[0]
+            same_storage = (
+                destination.untyped_storage().data_ptr()
+                == self.target.untyped_storage().data_ptr()
+            )
+            if same_storage:
+                if not destination.is_contiguous():
+                    raise ValueError(
+                        "FP8 reload requires contiguous destination shards"
+                    )
+                start = destination.storage_offset() - self.target.storage_offset()
+                end = start + destination.numel()
+                if start < 0 or end > self.target.numel():
+                    raise ValueError("FP8 reload write exceeds staging parameter")
+                if any(start < stop and begin < end for begin, stop in self.regions):
+                    raise ValueError("FP8 reload has overlapping shards")
+                result = func(*args, **(kwargs or {}))
+                self.regions.append((start, end))
+                return result
+        return func(*args, **(kwargs or {}))
+
+
 class CopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.

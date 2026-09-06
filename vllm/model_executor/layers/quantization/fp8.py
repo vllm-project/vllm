@@ -413,6 +413,97 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
+    def supports_selective_reload(self) -> bool:
+        """Only the audited tensor-scaled CUTLASS layout is supported."""
+        return (
+            self.quant_config.is_checkpoint_fp8_serialized
+            and not self.block_quant
+            and type(getattr(self, "fp8_linear", None))
+            is CutlassFP8ScaledMMLinearKernel
+        )
+
+    def restore_weights_before_loading(self, layer: torch.nn.Module) -> None:
+        if self.supports_selective_reload():
+            layer._fp8_reload_staging = {}
+            layer._fp8_reload_regions = {}
+
+    def reload_parameter(self, layer, parameter_name, target, bound_args, loader):
+        if not self.supports_selective_reload():
+            return False
+        from vllm.model_executor.model_loader.reload.meta import (
+            ReloadCopyTracker,
+            materialize_meta_tensor,
+        )
+
+        staging = layer._fp8_reload_staging
+        if parameter_name not in staging:
+            with torch.device(target.device):
+                staging[parameter_name] = materialize_meta_tensor(
+                    bound_args.arguments["param"]
+                )
+        source = staging[parameter_name]
+        incoming = bound_args.arguments.get("loaded_weight")
+        if incoming is not None and incoming.dtype != source.dtype:
+            raise ValueError("Serialized FP8 reload requires checkpoint tensor dtype")
+        bound_args.arguments["param"] = source
+        regions = layer._fp8_reload_regions.setdefault(parameter_name, [])
+        with ReloadCopyTracker(source, regions):
+            loader(*bound_args.args, **bound_args.kwargs)
+        return True
+
+    def refresh_derived_state(
+        self,
+        layer: torch.nn.Module,
+        updated_parameter_names: frozenset[str] | None = None,
+    ) -> None:
+        """Merge staged shard scales and copy into existing CUTLASS storage."""
+        staging = getattr(layer, "_fp8_reload_staging", None)
+        if not staging:
+            return
+        required = {"weight", "weight_scale"}
+        if self.act_q_static:
+            required.add("input_scale")
+        if not required.issubset(staging):
+            raise ValueError("FP8 reload requires weight and all scale parameters")
+        regions = layer._fp8_reload_regions
+        for name, value in staging.items():
+            if (
+                sum(end - start for start, end in regions.get(name, []))
+                != value.numel()
+            ):
+                raise ValueError(f"FP8 reload has incomplete shards for {name}")
+        # The conversion may requantize its input in-place. Keep canonical
+        # staging intact until every destination has been validated and copied.
+        weight, scale, input_scale = process_fp8_weight_tensor_strategy(
+            staging["weight"].clone(),
+            staging["weight_scale"].clone(),
+            layer.logical_widths,
+            staging.get("input_scale"),
+        )
+        weight = weight.t()
+        pad_k = layer.weight.shape[0] - weight.shape[0]
+        pad_n = layer.weight.shape[1] - weight.shape[1]
+        if pad_k < 0 or pad_n < 0:
+            raise ValueError("FP8 reload changed runtime weight shape")
+        if pad_k or pad_n:
+            weight = torch.nn.functional.pad(
+                weight.t().contiguous(), (0, pad_k, 0, pad_n)
+            ).t()
+        values = {"weight": weight, "weight_scale": scale}
+        if self.act_q_static:
+            assert input_scale is not None
+            values["input_scale"] = input_scale.max()
+        values.update({k: v for k, v in staging.items() if k not in required})
+        for name, value in values.items():
+            target = getattr(layer, name)
+            if target.shape != value.shape or target.dtype != value.dtype:
+                raise ValueError(f"FP8 reload changed runtime layout for {name}")
+        with torch.no_grad():
+            for name, value in values.items():
+                getattr(layer, name).copy_(value)
+        staging.clear()
+        regions.clear()
+
     def apply(
         self,
         layer: torch.nn.Module,

@@ -109,6 +109,12 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
+        # Restore transformed runtime tensors to checkpoint layout before the
+        # incoming loaders materialize this layer. The default hook is a no-op.
+        quant_method = getattr(layer, "quant_method", None)
+        restore = getattr(quant_method, "restore_weights_before_loading", None)
+        if callable(restore):
+            restore(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
@@ -183,6 +189,16 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
+        quant_method = getattr(layer, "quant_method", None)
+        target = info.kernel_tensors[0].get(param_name) if info.kernel_tensors else None
+        reload_parameter = getattr(quant_method, "reload_parameter", None)
+        if target is not None and callable(reload_parameter):
+            num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+            if reload_parameter(layer, param_name, target, bound_args, original_loader):
+                info.load_numel += num_loaded
+                info.eager_parameter_names.add(param_name)
+                return ret
+
         # Buffer loaded weights, track loading progress
         info.loaded_weights.append((param_name, bound_args))
         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
@@ -217,7 +233,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 
         # Process and copy when all weights are loaded
         if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
-            _layerwise_process(layer, info)
+            if info.loaded_weights:
+                _layerwise_process(layer, info)
             LOADING_LAYERS.discard(layer)
 
         return ret
@@ -225,7 +242,11 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     return online_process_loader
 
 
-def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
+def finalize_layerwise_processing(
+    model: torch.nn.Module,
+    model_config: ModelConfig,
+    updated_parameter_names: frozenset[str] | None = None,
+):
     """
     Apply processing to any layers which were not layerwise processed during loading.
     This includes attention layers and layers which have weight elements which are not
@@ -272,6 +293,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
+        elif info.eager_parameter_names and not info.loaded_weights:
+            _place_kernel_tensors(layer, info)
         elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
@@ -282,6 +305,12 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     for layer, info in deferred_attn:
         _finalize_attention_layer(layer, info, model_config)
         info.reset()
+
+    # Opted-in modules defer derived-state work until every checkpoint tensor
+    # has arrived. Unrecognized modules remain on the layerwise fallback path.
+    from .selective import refresh_derived_state
+
+    refresh_derived_state(model, updated_parameter_names)
 
     LOADING_LAYERS.clear()
 
@@ -329,7 +358,11 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
     _copy_and_restore_kernel_tensors(layer, info)
 
 
-def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
+def _layerwise_process(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    updated_parameter_names: frozenset[str] | None = None,
+):
     """
     Finalize layer loading after all weights have been buffered.
 
@@ -359,13 +392,27 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
-    if isinstance(quant_method, QuantizeMethodBase):
+    selective_reload = _supports_selective_reload(layer)
+    if isinstance(quant_method, QuantizeMethodBase) and not selective_reload:
         quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.
         if hasattr(layer, "update_param_tp_status"):
             layer.update_param_tp_status()
+
+    # Selective methods receive checkpoint-layout parameters in this temporary
+    # layer. They must rebuild runtime-derived state before the transformed
+    # values are copied back to the original storage captured above. This keeps
+    # PWAL on the cold-load path only.
+    if selective_reload:
+        refresh = getattr(quant_method, "refresh_derived_state", None)
+        if refresh is None:
+            raise RuntimeError(
+                f"{type(quant_method).__name__} opted into selective reload "
+                "without refresh_derived_state"
+            )
+        refresh(layer, updated_parameter_names)
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
@@ -374,6 +421,13 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
+
+
+def _supports_selective_reload(layer: torch.nn.Module) -> bool:
+    """Return whether a layer explicitly opts into derived-state refresh."""
+    owner = getattr(layer, "quant_method", None) or layer
+    capability = getattr(owner, "supports_selective_reload", None)
+    return callable(capability) and bool(capability())
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:

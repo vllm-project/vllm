@@ -24,6 +24,7 @@ __all__ = [
     "finalize_layerwise_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
+    "refresh_derived_state",
 ]
 
 from .layerwise import (
@@ -36,3 +37,4 @@ from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,
 )
+from .selective import refresh_derived_state

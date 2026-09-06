@@ -516,6 +516,124 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
 
+@pytest.mark.parametrize("activation_scheme", ["dynamic", "static"])
+@pytest.mark.parametrize("width", [16, 17])
+@pytest.mark.parametrize(
+    "shard_case", ["complete", "missing", "duplicate", "overlap", "missing_scale"]
+)
+def test_per_tensor_refresh_without_pwal(
+    default_vllm_config, dist_init, monkeypatch, activation_scheme, width, shard_case
+):
+    """Fused shard scales refresh twice without rebuilding runtime objects."""
+    from unittest.mock import Mock
+
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.kernel_config.linear_backend = "cutlass"
+
+    def weight_loader(param, loaded_weight, shard_id=None, offset=None):
+        if offset is not None:
+            param.data.narrow(0, offset, loaded_weight.shape[0]).copy_(loaded_weight)
+        elif shard_id is None:
+            default_weight_loader(param, loaded_weight)
+        else:
+            param.data.narrow(0, shard_id * width, width).copy_(loaded_weight)
+
+    with torch.device("cuda:0"):
+        method = Fp8LinearMethod(Fp8Config(True, activation_scheme))
+        layer = torch.nn.Module()
+        layer.quant_method = method
+        method.create_weights(
+            layer,
+            32,
+            [width, width],
+            32,
+            2 * width,
+            torch.bfloat16,
+            weight_loader=weight_loader,
+        )
+        record_metadata_for_reloading(layer)
+        layer.weight.data.fill_(1)
+        layer.weight_scale.data.fill_(1)
+        if activation_scheme == "static":
+            layer.input_scale.data.fill_(1)
+        method.process_weights_after_loading(layer)
+        assert method.supports_selective_reload()
+        originals = dict(layer.named_parameters())
+        pointers = {k: v.data_ptr() for k, v in originals.items()}
+        kernel = method.fp8_linear
+        monkeypatch.setattr(
+            method,
+            "process_weights_after_loading",
+            Mock(side_effect=AssertionError("method PWAL called during reload")),
+        )
+        monkeypatch.setattr(
+            kernel,
+            "process_weights_after_loading",
+            Mock(side_effect=AssertionError("kernel PWAL called during reload")),
+        )
+        for generation in (2, 4):
+            initialize_layerwise_reload(layer)
+            source = torch.full((width, 32), 8, dtype=torch.float8_e4m3fn)
+            values = {
+                "weight_scale": torch.tensor([generation / 2, generation]),
+            }
+            if activation_scheme == "static":
+                values["input_scale"] = torch.tensor([0.5, 2.0])
+            if shard_case == "missing_scale":
+                values.pop("weight_scale")
+            for name, value in values.items():
+                param = getattr(layer, name)
+                param.weight_loader(param, value)
+            param = layer.weight
+            param.weight_loader(param, source, shard_id=0)
+            if shard_case in ("duplicate", "overlap"):
+                before = originals["weight"].float().clone()
+                with pytest.raises(ValueError, match="overlapping shards"):
+                    param.weight_loader(
+                        param,
+                        source,
+                        offset=0 if shard_case == "duplicate" else width // 2,
+                    )
+                torch.testing.assert_close(originals["weight"].float(), before)
+            if shard_case in ("complete", "missing_scale"):
+                param.weight_loader(param, source, shard_id=1)
+            # Runtime is not mutated before FINISH.
+            assert originals["weight_scale"].item() == generation / 2
+            if shard_case != "complete":
+                before = originals["weight"].float().clone()
+                error = (
+                    "requires weight and all scale parameters"
+                    if shard_case == "missing_scale"
+                    else "incomplete shards for weight"
+                )
+                with pytest.raises(ValueError, match=error):
+                    finalize_layerwise_reload(layer, None)
+                torch.testing.assert_close(layer.weight.float(), before, rtol=0, atol=0)
+                assert layer.weight is originals["weight"]
+                break
+            finalize_layerwise_reload(layer, None)
+            method.refresh_derived_state(layer)
+            assert method.fp8_linear is kernel
+            assert layer.weight_scale.item() == generation
+            expected = torch.zeros(layer.weight.shape, dtype=torch.float32)
+            expected[:, :width] = 4
+            expected[:, width : 2 * width] = 8
+            torch.testing.assert_close(layer.weight.float(), expected, rtol=0, atol=0)
+            for name, original in originals.items():
+                assert getattr(layer, name) is original
+                assert original.data_ptr() == pointers[name]
+            if activation_scheme == "static":
+                assert layer.input_scale.item() == 2
+        method.process_weights_after_loading.assert_not_called()
+        kernel.process_weights_after_loading.assert_not_called()
+
+
 def test_kv_cache_scale_sync_to_host_copies():
     """Test device-to-host sync of the k/v quantization scales, for both the
     checkpoint-load and runtime-calc paths that produce them.
