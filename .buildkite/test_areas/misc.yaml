@@ -11,6 +11,7 @@ steps:
   source_file_dependencies:
   - tools/pre_commit/validate_config.py
   - vllm/distributed/
+  - vllm/platforms/__init__.py
   - vllm/platforms/cpu.py
   - tests/distributed/test_expert_placement.py
   - tests/distributed/test_file_store.py
@@ -19,7 +20,7 @@ steps:
   - tests/distributed/test_kvlayout.py
   - tests/distributed/test_mq_connect_ip.py
   - tests/distributed/test_pipeline_partition.py
-  - tests/platforms/test_cpu.py
+  - tests/platforms/
   - tests/tools/test_config_validator.py
   commands:
   - >-
@@ -31,7 +32,7 @@ steps:
     tests/distributed/test_kvlayout.py
     tests/distributed/test_mq_connect_ip.py
     tests/distributed/test_pipeline_partition.py
-    tests/platforms/test_cpu.py
+    tests/platforms/
     tests/tools/test_config_validator.py
 
 - label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
@@ -383,6 +384,7 @@ steps:
   - vllm/entrypoints/generate/base/protocol.py
   - vllm/envs.py
   - vllm/exceptions.py
+  - vllm/connections.py
   - vllm/inputs/
   - vllm/model_executor/layers/quantization/quark/
   - vllm/multimodal/

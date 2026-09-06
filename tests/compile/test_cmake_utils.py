@@ -18,7 +18,7 @@ def _get_cmake_bin() -> str:
 
 
 def test_exact_family_arch_precedes_generic_family_fallback(tmp_path: Path):
-    repo_root = Path(__file__).parents[1]
+    repo_root = Path(__file__).parents[2]
     script = tmp_path / "test_cuda_archs.cmake"
     script.write_text(
         f"""
@@ -41,7 +41,7 @@ def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     """torch's autodetection can emit a bogus arch=compute_* half (e.g.
     capability 12.1 corrupted to arch=compute_20,code=sm_121); the SASS
     target must win, while PTX-only entries keep the virtual arch."""
-    repo_root = Path(__file__).parents[1]
+    repo_root = Path(__file__).parents[2]
     script = tmp_path / "test_extract_archs.cmake"
     script.write_text(
         f"""
@@ -61,7 +61,7 @@ endif()
 
 
 def test_clear_cuda_gencode_flags(tmp_path: Path):
-    repo_root = Path(__file__).parents[1]
+    repo_root = Path(__file__).parents[2]
     script = tmp_path / "test_clear_flags.cmake"
     script.write_text(
         f"""
