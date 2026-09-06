@@ -29,6 +29,7 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache,
     prepare_kernel_block_sizes,
+    propagate_kv_sharing_scales,
 )
 
 
@@ -225,8 +226,11 @@ def init_kv_cache(
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
         )
-    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    for layer_name, target in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target]
+    # Sharing layers read a cache written with the target's k/v scales.
+    propagate_kv_sharing_scales(forward_context, shared_kv_cache_layers)
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (

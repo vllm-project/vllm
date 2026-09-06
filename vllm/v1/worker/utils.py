@@ -556,6 +556,33 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     return requested_memory
 
 
+def propagate_kv_sharing_scales(
+    forward_context: dict[str, Any],
+    shared_kv_cache_layers: dict[str, str],
+) -> None:
+    """Give KV-sharing layers the quantized-KV scales of the layer they read.
+
+    A sharing layer never writes the cache; the target layer wrote it with its
+    own ``k_scale``/``v_scale`` (quantized-KV checkpoints carry no scales for
+    sharing layers, which have no K/V projections), so the sharing layer would
+    otherwise dequantize with the 1.0 default. Copies the device buffers, the
+    host floats and the CPU mirrors so every attention backend sees the same
+    value. No-op for unquantized KV (all scales are 1.0 either way).
+    """
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        src = forward_context.get(target_layer_name)
+        dst = forward_context.get(layer_name)
+        if src is None or dst is None or not hasattr(src, "_k_scale"):
+            continue
+        with torch.no_grad():
+            for attr in ("_k_scale", "_v_scale", "_k_scale_cpu", "_v_scale_cpu"):
+                if hasattr(src, attr) and hasattr(dst, attr):
+                    getattr(dst, attr).copy_(getattr(src, attr))
+        for attr in ("_k_scale_float", "_v_scale_float"):
+            if hasattr(src, attr):
+                setattr(dst, attr, getattr(src, attr))
+
+
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
