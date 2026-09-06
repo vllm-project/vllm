@@ -368,12 +368,15 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/
+  - vllm/models/kimi_k3/
   - vllm/v1/attention/ops/
   - tests/distributed/test_dcp_a2a.py
   - tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+  - tests/distributed/test_kimi_linear_context_parallel.py
   commands:
   - pytest -v -s distributed/test_dcp_a2a.py
   - pytest -v -s distributed/test_dcp_direct_a2a_lse_reduce.py
+  - pytest -v -s distributed/test_kimi_linear_context_parallel.py
 
 - label: ":nvidia: (H100) Distributed MoE + Weight Transfer"
   key: distributed-moe-weight-transfer-4xh100
@@ -386,14 +389,11 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/model_executor/layers/fused_moe/
-  - vllm/models/kimi_k3/
   - tests/distributed/test_eplb_fused_moe_layer.py
-  - tests/distributed/test_kimi_linear_context_parallel.py
   - tests/distributed/test_split_group.py
   - tests/distributed/test_weight_transfer_nccl_uid.py
   commands:
   - pytest -v -s distributed/test_eplb_fused_moe_layer.py
-  - pytest -v -s distributed/test_kimi_linear_context_parallel.py
   - VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1 pytest -v -s distributed/test_split_group.py
   - pytest -v -s distributed/test_weight_transfer_nccl_uid.py
 
