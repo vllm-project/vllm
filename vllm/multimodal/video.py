@@ -124,6 +124,53 @@ def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArra
     return sampled_frames
 
 
+def _sample_frames_by_interval(
+    total_frames: int,
+    seconds_per_frame: float,
+    sample_interval: float,
+    stop_time: float,
+    max_samples: int | None = None,
+) -> list[int]:
+    """Select the first source frame at each sampling timestamp."""
+    if total_frames <= 0:
+        return []
+    if seconds_per_frame <= 0:
+        return [0]
+
+    frame_indices: list[int] = []
+    sample_time = 0.0
+    if max_samples is not None and total_frames <= max_samples * 8:
+        for frame in range(total_frames):
+            if frame * seconds_per_frame >= sample_time:
+                frame_indices.append(frame)
+                sample_time += sample_interval
+                if sample_time >= stop_time:
+                    break
+        return frame_indices
+
+    next_frame = 0
+    while next_frame < total_frames:
+        frame = max(next_frame, math.ceil(sample_time / seconds_per_frame))
+
+        # Preserve the original floating-point comparison at exact boundaries.
+        while frame > next_frame and (frame - 1) * seconds_per_frame >= sample_time:
+            frame -= 1
+        while frame < total_frames and frame * seconds_per_frame < sample_time:
+            frame += 1
+        if frame >= total_frames:
+            break
+
+        frame_indices.append(frame)
+        if max_samples is not None and len(frame_indices) > max_samples:
+            break
+        sample_time += sample_interval
+        if sample_time >= stop_time:
+            break
+        next_frame = frame + 1
+
+    return frame_indices
+
+
 class VideoLoader:
     @classmethod
     def compute_frames_index_to_sample(
@@ -624,15 +671,14 @@ class GLM46VVideoBackend(VideoBackend):
                 0, total_frames_num - 1, extract_t, dtype=int
             ).tolist()
         else:
-            frame_indices = []
-            current_second = 0.0
             inv_fps = 1 / (temporal_patch_size * target_fps)
-            for frame_index in range(total_frames_num):
-                if frame_index * duration_per_frame >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= max_second:
-                        break
+            frame_indices = _sample_frames_by_interval(
+                total_frames_num,
+                duration_per_frame,
+                inv_fps,
+                max_second,
+                max_samples=extract_t,
+            )
 
         if len(frame_indices) < extract_t:
             if len(frame_indices) == 0:
@@ -825,15 +871,14 @@ class GLMGAVideoBackend(VideoBackend):
                 math.floor(i * total_frames_num / extract_t) for i in range(extract_t)
             ]
         else:
-            frame_indices = []
-            current_second = 0.0
             inv_fps = 1 / target_fps
-            for frame_index in range(total_frames_num):
-                if frame_index * duration_per_frame >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= duration - inv_fps:
-                        break
+            frame_indices = _sample_frames_by_interval(
+                total_frames_num,
+                duration_per_frame,
+                inv_fps,
+                duration - inv_fps,
+                max_samples=extract_t,
+            )
 
         if len(frame_indices) < extract_t:
             if len(frame_indices) == 0:
