@@ -9,7 +9,9 @@ use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{
+    ReasoningEosPolicy, RepetitionDetectionParams,
+};
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
@@ -86,6 +88,9 @@ pub struct SamplingParams {
     /// here; `-1` is normalized to `None` (and other negatives rejected) during
     /// lowering (see `lower_sampling_params`).
     pub thinking_token_budget: Option<i64>,
+    /// What to do when EOS/stop would end generation inside a reasoning block.
+    #[serde(default)]
+    pub reasoning_eos_policy: ReasoningEosPolicy,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -150,6 +155,7 @@ impl Default for SamplingParams {
             max_tokens: None,
             min_tokens: None,
             thinking_token_budget: None,
+            reasoning_eos_policy: ReasoningEosPolicy::Stop,
             logprobs: None,
             prompt_logprobs: None,
             min_p: None,

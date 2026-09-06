@@ -258,6 +258,44 @@ To use this feature:
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
 
+## Reasoning EOS Policy
+
+Some reasoning models (notably Qwen3.8) occasionally sample the chat EOS token (`<|im_end|>`) *inside* `<think>`. vLLM treats that as a real stop: the request ends with `finish_reason: "stop"`, the parser routes the unfinished think block to `reasoning`, and `content` is empty. The HTTP status is still 200, so a client cannot tell this apart from a legitimate empty answer.
+
+`reasoning_eos_policy` is a per-request sampling parameter (Chat Completions and Completions, same placement as `thinking_token_budget`):
+
+| Value | Behavior |
+|-------|----------|
+| `"stop"` (default) | Current behavior. EOS/stop inside `<think>` ends the request. |
+| `"force_end"` | If the request is still in the think block and EOS/stop would be sampled (greedy-top, or an accepted speculative token), vLLM masks those tokens and forces `reasoning_end_str`, then continues into the answer. The same `ThinkingBudgetStateHolder` path as an exhausted `thinking_token_budget`. |
+
+`ignore_eos` is unchanged: this policy never suppresses EOS outside the think block. A Qwen3 `<tool_call>` started inside `<think>` counts as leaving the think block, so the policy does not rewrite tool-call tokens.
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-8B",
+    "messages": [
+      { "role": "user", "content": "9.11 and 9.8, which is greater?" }
+    ],
+    "reasoning_eos_policy": "force_end"
+  }'
+```
+
+Offline:
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(model="Qwen/Qwen3-8B", reasoning_parser="qwen3")
+sampling_params = SamplingParams(reasoning_eos_policy="force_end")
+outputs = llm.chat(
+    [{"role": "user", "content": "9.11 and 9.8, which is greater?"}],
+    sampling_params=sampling_params,
+)
+```
+
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 

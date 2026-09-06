@@ -23,6 +23,7 @@ pub use output::{
     TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
+pub use vllm_engine_core_client::protocol::sampling::ReasoningEosPolicy;
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;

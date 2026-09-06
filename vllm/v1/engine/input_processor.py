@@ -112,14 +112,22 @@ class InputProcessor:
                         "bound sampling mask size, reduce transfer overhead, "
                         "and avoid potential OOMs"
                     )
-            if params.thinking_token_budget is not None and (
+            reasoning_missing = (
                 self.vllm_config.reasoning_config is None
                 or not self.vllm_config.reasoning_config.enabled
-            ):
+            )
+            if params.thinking_token_budget is not None and reasoning_missing:
                 raise VLLMValidationError(
                     "thinking_token_budget is set but reasoning_config is "
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
+                )
+            if params.reasoning_eos_policy == "force_end" and reasoning_missing:
+                raise VLLMValidationError(
+                    'reasoning_eos_policy="force_end" is set but '
+                    "reasoning_config is not configured. Please set "
+                    "--reasoning-parser and/or --reasoning-config to use "
+                    "reasoning_eos_policy."
                 )
             if (
                 params.trace_decode_token_ids

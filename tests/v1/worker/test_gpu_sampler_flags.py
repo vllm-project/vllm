@@ -49,6 +49,11 @@ def _make_sampler() -> Sampler:
         pytest.param(
             SamplingParams(thinking_token_budget=3), True, id="thinking-budget"
         ),
+        pytest.param(
+            SamplingParams(reasoning_eos_policy="force_end"),
+            True,
+            id="reasoning-eos-policy",
+        ),
         pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
         pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
         pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),

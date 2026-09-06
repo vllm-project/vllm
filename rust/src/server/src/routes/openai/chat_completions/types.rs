@@ -178,6 +178,10 @@ pub struct ChatCompletionRequest {
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
 
+    /// What to do when EOS/stop would end generation inside a reasoning block.
+    #[serde(default)]
+    pub reasoning_eos_policy: vllm_text::ReasoningEosPolicy,
+
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
     pub include_reasoning: bool,
@@ -279,6 +283,7 @@ impl Default for ChatCompletionRequest {
             tool_choice: None,
             reasoning_effort: None,
             thinking_token_budget: None,
+            reasoning_eos_policy: vllm_text::ReasoningEosPolicy::Stop,
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,

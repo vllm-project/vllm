@@ -65,6 +65,64 @@ def test_completion_request_accepts_valid_thinking_token_budget():
     assert request.thinking_token_budget == 5
 
 
+def test_chat_completion_request_accepts_reasoning_eos_policy():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_eos_policy": "force_end",
+        }
+    )
+    assert request.reasoning_eos_policy == "force_end"
+
+
+def test_chat_completion_request_rejects_invalid_reasoning_eos_policy():
+    with pytest.raises(Exception, match="reasoning_eos_policy"):
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_eos_policy": "drop",
+            }
+        )
+
+
+def test_chat_completion_request_to_sampling_params_forwards_policy():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_eos_policy": "force_end",
+        }
+    )
+    params = request.to_sampling_params(max_tokens=16, default_sampling_params={})
+    assert params.reasoning_eos_policy == "force_end"
+
+
+def test_completion_request_accepts_reasoning_eos_policy():
+    request = CompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "prompt": "hello",
+            "reasoning_eos_policy": "force_end",
+        }
+    )
+    assert request.reasoning_eos_policy == "force_end"
+    params = request.to_sampling_params(max_tokens=16, default_sampling_params={})
+    assert params.reasoning_eos_policy == "force_end"
+
+
+def test_completion_request_rejects_invalid_reasoning_eos_policy():
+    with pytest.raises(Exception, match="reasoning_eos_policy"):
+        CompletionRequest.model_validate(
+            {
+                "model": "qwen",
+                "prompt": "hello",
+                "reasoning_eos_policy": "drop",
+            }
+        )
+
+
 def test_completion_request_accepts_minus_one_as_unlimited():
     request = CompletionRequest.model_validate(
         {

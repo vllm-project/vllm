@@ -28,6 +28,15 @@ class MockReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END]
     natural_reasoning_end_token_ids = [END]
+    implicit_reasoning_end_token_ids = None
+
+
+EOS = 3
+TOOL_CALL = 4
+
+
+class MockReasoningConfigWithToolCall(MockReasoningConfig):
+    implicit_reasoning_end_token_ids = [TOOL_CALL]
 
 
 class MockMultiTokenEndReasoningConfig:
@@ -299,3 +308,66 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+def test_v2_force_end_replaces_eos_argmax_with_reasoning_end():
+    req_states = _make_req_states([1, START, 10, 11], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(
+        3,
+        SamplingParams(
+            reasoning_eos_policy="force_end",
+            stop_token_ids=[EOS],
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    logits[0, EOS] = 5.0
+    logits[0, 7] = 1.0
+    out = _apply(state, logits, input_ids=[11], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert out[0, EOS] < 0
+
+
+def test_v2_force_end_masks_eos_when_not_argmax():
+    req_states = _make_req_states([1, START, 10, 11], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(
+        3,
+        SamplingParams(
+            reasoning_eos_policy="force_end",
+            stop_token_ids=[EOS],
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    logits[0, EOS] = 1.0
+    logits[0, 7] = 5.0
+    out = _apply(state, logits, input_ids=[11], local_pos=[0])
+
+    assert out[0, EOS] < 0
+    assert out[0, END] == 0
+    assert out[0, 7] == pytest.approx(5.0)
+
+
+def test_v2_force_end_does_not_protect_tool_call():
+    req_states = _make_req_states([1, START, 10, TOOL_CALL, 30], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfigWithToolCall())
+    state.add_request(
+        3,
+        SamplingParams(
+            reasoning_eos_policy="force_end",
+            stop_token_ids=[EOS],
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    logits[0, EOS] = 5.0
+    out = _apply(state, logits, input_ids=[30], local_pos=[0])
+
+    assert out[0, EOS] == pytest.approx(5.0)
+    assert out[0, END] == 0

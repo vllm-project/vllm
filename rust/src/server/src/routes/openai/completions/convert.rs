@@ -121,6 +121,7 @@ pub(super) fn prepare_completion_request(
             max_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
+            reasoning_eos_policy: request.reasoning_eos_policy,
             logprobs,
             prompt_logprobs,
             min_p: request.min_p,

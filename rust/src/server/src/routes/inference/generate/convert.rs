@@ -193,6 +193,31 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_forwards_reasoning_eos_policy() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "reasoning_eos_policy": "force_end"
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare");
+
+        assert_eq!(
+            prepared.text_request.sampling_params.reasoning_eos_policy,
+            vllm_text::ReasoningEosPolicy::ForceEnd
+        );
+    }
+
+    #[test]
     fn prepare_generate_request_gates_continuous_usage_on_include_usage() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",

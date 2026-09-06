@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic import BeforeValidator
@@ -74,6 +74,27 @@ def validate_thinking_token_budget(value: int | float | bool | None) -> int | No
 ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
+]
+
+_REASONING_EOS_POLICIES = ("stop", "force_end")
+
+
+def validate_reasoning_eos_policy(value: str | None) -> str:
+    """Validate ``reasoning_eos_policy``; default ``"stop"`` if unset."""
+    if value is None:
+        return "stop"
+    if not isinstance(value, str) or value not in _REASONING_EOS_POLICIES:
+        raise VLLMValidationError(
+            '`reasoning_eos_policy` must be "stop" or "force_end".',
+            parameter="reasoning_eos_policy",
+            value=value,
+        )
+    return value
+
+
+ReasoningEosPolicy = Annotated[
+    Literal["stop", "force_end"],
+    BeforeValidator(validate_reasoning_eos_policy),
 ]
 
 
@@ -358,6 +379,20 @@ class SamplingParams(
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
+    reasoning_eos_policy: Literal["stop", "force_end"] = "stop"
+    """What to do when an EOS or stop token would end generation while the
+    request is still inside a reasoning block.
+
+    * ``"stop"`` (default): current behavior. The request finishes with
+      ``finish_reason="stop"`` and the unfinished think block is parsed as
+      reasoning, leaving ``content`` empty.
+    * ``"force_end"``: mask those stop tokens for the step and force
+      ``reasoning_end_str`` (the same path as an exhausted
+      ``thinking_token_budget``). Generation then continues into the answer.
+      Has no effect outside a think block and does not change ``ignore_eos``.
+      An implicit reasoning end such as Qwen3 ``<tool_call>`` counts as
+      leaving the think block, so the policy does not rewrite tool calls.
+    """
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -396,6 +431,7 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
+        reasoning_eos_policy: Literal["stop", "force_end"] = "stop",
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -462,6 +498,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            reasoning_eos_policy=reasoning_eos_policy,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -500,6 +537,9 @@ class SamplingParams(
 
         self.thinking_token_budget = validate_thinking_token_budget(
             self.thinking_token_budget
+        )
+        self.reasoning_eos_policy = validate_reasoning_eos_policy(
+            self.reasoning_eos_policy
         )
 
         if self.stop is None:
@@ -794,6 +834,18 @@ class SamplingParams(
     def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
 
+    def stop_token_ids_that_finish_request(self) -> list[int]:
+        """Token ids that would finish generation if sampled.
+
+        ``ignore_eos`` keeps its meaning: the primary EOS id is omitted, but
+        caller-supplied ``stop_token_ids`` still count.
+        """
+        if self.ignore_eos:
+            ids = self.stop_token_ids or []
+        else:
+            ids = list(self.all_stop_token_ids)
+        return list(dict.fromkeys(int(tok) for tok in ids))
+
     @property
     def bad_words_token_ids(self) -> list[list[int]] | None:
         # For internal use only. Backward compatibility not guaranteed
@@ -979,6 +1031,11 @@ class SamplingParams(
         if self.thinking_token_budget is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with thinking_token_budget."
+            )
+        if self.reasoning_eos_policy == "force_end":
+            raise ValueError(
+                "trace_decode_token_ids is not supported with "
+                'reasoning_eos_policy="force_end".'
             )
         if self.bad_words:
             raise ValueError("trace_decode_token_ids is not supported with bad_words.")
@@ -1266,6 +1323,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"reasoning_eos_policy={self.reasoning_eos_policy}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
