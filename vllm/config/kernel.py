@@ -141,6 +141,7 @@ MoEBackend = Literal[
     "flydsl",
     "hpc",
     "emulation",
+    "rdna3",
 ]
 
 # Backends that run the mega-MoE model path through the flashinfer moe_ep
@@ -264,6 +265,7 @@ class KernelConfig:
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
