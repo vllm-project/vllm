@@ -364,7 +364,10 @@ class Qwen3_5ForCausalLMBase(
         return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
+        # Use the mixin setter so the per-PP-rank aux-slot layout cache
+        # (_aux_slot_base_cached / _aux_upstream_total_cached) is populated;
+        # a bare attribute write leaves it at 0 and breaks the PP relay.
+        self.model._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)

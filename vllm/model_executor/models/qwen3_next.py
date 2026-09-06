@@ -633,6 +633,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             ".shared_expert.up_proj": (".shared_expert.gate_up_proj", 1),
         }
     )
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -703,6 +704,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
@@ -724,7 +727,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         if self.use_sequence_parallel:
@@ -739,6 +746,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             else:
                 hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
                 hidden_states = hidden_states[:full_num_tokens]
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
