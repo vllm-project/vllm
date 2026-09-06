@@ -45,6 +45,8 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    resume_device_comms,
+    suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -216,13 +218,15 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # pending non-blocking PP send work from the previous iteration
+
+        # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
-    def _get_sleep_mode_backend(self) -> "SleepModeBackend":
+    @property
+    def sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
             from vllm.device_allocator.sleep_mode_backend import (
                 SleepModeBackendFactory,
@@ -249,7 +253,9 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self._get_sleep_mode_backend().suspend(level)
+        self.sleep_mode_backend.suspend(level)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            suspend_device_comms()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -269,7 +275,9 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self._get_sleep_mode_backend().resume(tags)
+        self.sleep_mode_backend.resume(tags)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            resume_device_comms()
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
@@ -782,6 +790,10 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        if self.use_v2_model_runner:
+            # A workspace resize after capture frees what the graphs point at.
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
@@ -860,10 +872,7 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if self.use_v2_model_runner:
-            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
-        elif get_pp_group().is_last_rank:
+        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.
@@ -1108,7 +1117,8 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # ensure any previous non-blocking PP sends are complete
+        # Wait for the previous step's sends so this forward pass cannot
+        # overwrite buffers they are still reading.
         if self._pp_send_work:
             for handle in self._pp_send_work:
                 handle.wait()
@@ -1186,12 +1196,15 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        # Non-blocking send of the intermediate tensors. The metadata handle
+        # is reaped lazily by the GroupCoordinator; the device handles are
+        # waited at the top of the next step.
+        handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
         )
+        self._pp_send_work = handles[1:]
 
         return None
 

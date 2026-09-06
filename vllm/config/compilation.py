@@ -703,9 +703,8 @@ class CompilationConfig:
     If not specified, max_cudagraph_capture_size is capped at 512 by default,
     or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
     scenarios with small max_num_seqs, and limits capture of large graphs that
-    increase startup time and memory usage. When the uniform decode query length
-    exceeds one, uniform decode sizes are appended and can raise the final value
-    above this default.
+    increase startup time and memory usage. Uniform decode sizes are appended
+    only within this default ceiling.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -769,6 +768,9 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
+        "vllm::qwen4_exp_compute_ple_ngram_ids",
+        "vllm::qwen4_exp_ple_short_conv",
+        "vllm::qwen4_exp_qsa_with_output",
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
