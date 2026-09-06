@@ -16,10 +16,9 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
-    # Whether blocks in this cache holds tokens, which is what makes
-    # tokens_per_block meaningful and a block count convertible to a token
-    # count. False for Mamba, for example.
-    blocks_hold_tokens: bool = True
+    # Chunks of this group the tier keeps for one request, or None when
+    # attention reaches back without a bound (a full layer).
+    sliding_window_size_in_chunks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +27,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Longest request the engine accepts, in tokens. 0 when not known.
+    max_model_len: int = 0
 
 
 @dataclass(frozen=True)
