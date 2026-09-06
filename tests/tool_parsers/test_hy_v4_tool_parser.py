@@ -116,21 +116,29 @@ class TestHYV4ToolParser(ToolParserTests):
             ),
             malformed_input_outputs=[
                 # no inner <tool_call> tags -> nothing extracted
-                "<tool_calls>get_weather\n"
-                "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
-                "</tool_calls>",
+                (
+                    "<tool_calls>get_weather\n"
+                    "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
+                    "</tool_calls>"
+                ),
                 # tags present, function name absent
-                "<tool_calls><tool_call>\n"
-                "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
-                "</tool_call></tool_calls>",
+                (
+                    "<tool_calls><tool_call>\n"
+                    "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
+                    "</tool_call></tool_calls>"
+                ),
                 # unbalanced <tool_call> vs </tool_call>
-                "<tool_calls><tool_call>get_weather\n"
-                "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
-                "</tool_calls>",
+                (
+                    "<tool_calls><tool_call>get_weather\n"
+                    "<arg_key>city</arg_key><arg_value>Paris</arg_value>\n"
+                    "</tool_calls>"
+                ),
                 # unbalanced <arg_key> vs </arg_key>
-                "<tool_calls><tool_call>get_weather\n"
-                "<arg_key>city<arg_value>Paris</arg_value>\n"
-                "</tool_call></tool_calls>",
+                (
+                    "<tool_calls><tool_call>get_weather\n"
+                    "<arg_key>city<arg_value>Paris</arg_value>\n"
+                    "</tool_call></tool_calls>"
+                ),
             ],
             single_tool_call_expected_name="get_weather",
             single_tool_call_expected_args={"city": "Tokyo", "unit": "celsius"},
