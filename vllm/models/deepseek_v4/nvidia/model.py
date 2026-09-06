@@ -1386,17 +1386,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     dtype=dtype,
                     device=device,
                 ),
+                "input_ids": torch.zeros(
+                    batch_size,
+                    dtype=torch.int64,
+                    device=device,
+                ),
             }
         )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
+            assert input_ids is not None
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -1404,6 +1410,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            input_ids = intermediate_tensors["input_ids"]
 
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
@@ -1457,6 +1464,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
+                    "input_ids": input_ids,
                     **self.pack_local_aux_hidden_states(aux_hidden_states),
                 }
             )
