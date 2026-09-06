@@ -71,9 +71,18 @@ class TestTensors:
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=torch.bfloat16) / 10
         )
-        # Skewed router logits so the planner has to duplicate hot experts.
-        logits = config.router_skew * torch.randn(
-            config.m, config.num_experts, device="cuda", dtype=torch.float32
+        # Skewed routing via a per-expert bias: scaling logits by a scalar
+        # preserves their ordering and would not change the selected topk
+        # ids, but a shared bias makes a few experts hot on every token so
+        # the planner has to fill redundant-expert prefetch slots.
+        expert_bias = config.router_skew * torch.randn(
+            1, config.num_experts, device="cuda", dtype=torch.float32
+        )
+        logits = (
+            torch.randn(
+                config.m, config.num_experts, device="cuda", dtype=torch.float32
+            )
+            + expert_bias
         )
         topk_weights, topk = torch.topk(logits, config.topk, dim=-1)
         topk_weights = torch.softmax(topk_weights, dim=-1)
@@ -187,6 +196,11 @@ def moonep_moe_impl(
             quant_config=_no_quant_config(),
         )
         assert route_weights_nvs is not None
+        if config.router_skew >= 8 and config.m >= 100:
+            # Heavy skew must actually engage the redundant-expert planner.
+            assert (pf.plan.experts_to_copy >= 0).any(), (
+                "no prefetch slot used despite heavy router skew"
+            )
         expert_out = reference_moonep_experts(
             hidden_nvsh, route_weights_nvs, pf.cu_seqlens, weight_layout
         )
