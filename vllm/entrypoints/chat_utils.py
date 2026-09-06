@@ -1452,10 +1452,11 @@ def validate_chat_template(chat_template: Path | str | None):
 
             builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
             if not builtin_template_path.exists():
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}"
+                    f"Tried: {chat_template} and {builtin_template_path}",
+                    parameter="chat_template",
                 )
 
     else:
@@ -1503,7 +1504,7 @@ def _load_chat_template(
                     f"Tried: {chat_template} and {builtin_template_path}. "
                     f"Reason: {e}"
                 )
-                raise ValueError(msg) from e
+                raise VLLMValidationError(msg, parameter="chat_template") from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
@@ -1581,7 +1582,8 @@ def _get_full_multimodal_text_prompt(
             logger.debug("Input prompt: %s", text_prompt)
             raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
-                "actual multimodal data items."
+                "actual multimodal data items.",
+                parameter="messages",
             )
 
         missing_placeholders.extend([placeholder] * placeholder_counts[placeholder])
@@ -1839,7 +1841,8 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
         raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-            )
+            ),
+            parameter="messages",
         )
 
 
