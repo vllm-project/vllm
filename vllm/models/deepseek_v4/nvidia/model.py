@@ -1431,6 +1431,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1503,6 +1504,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+
+        # Gather-first head: when the runner only needs the logits rows
+        # (prefill steps), reduce to [L, hc, H] before hc_head + norm. Both
+        # ops are row-wise, so selected rows match the full-width path. The
+        # full-T consumers above (aux_hidden_states, _mtp_hidden_buffer)
+        # are unaffected.
+        if logits_indices is not None:
+            hidden_states = hidden_states[logits_indices]
 
         hidden_states = hc_head_fused_kernel_tilelang(
             hidden_states,
@@ -1873,9 +1882,14 @@ class DeepseekV4ForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            logits_indices,
         )
         return hidden_states
 

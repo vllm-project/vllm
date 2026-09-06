@@ -110,6 +110,11 @@ class InputBatch:
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
 
+    # True when the model already gathered the logits rows before its head
+    # (hc_head + final norm); hidden_states then holds [total_num_logits, H]
+    # and sample() must not gather again.
+    head_gather_first: bool = False
+
     # Arms the KV-sharing fast prefill path for this step. Absent for dummy
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None

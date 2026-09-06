@@ -1375,6 +1375,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        # Gather-first head: on prefill-containing steps the model may gather
+        # the logits rows before hc_head + final norm instead of running them
+        # on all T rows. All conditions are CPU-known. Restricted to eager
+        # steps: a captured graph (FULL decode, or breakable PIECEWISE for
+        # T <= max capture size) bakes shapes/addresses and replays without
+        # model_inputs, so the flag must stay False whenever a graph may run.
+        # Full hidden states are still required by prompt logprobs, PCP
+        # restore, pooling, batch-sharded sampling, and speculators other
+        # than dspark/dflash (eagle3 unverified).
+        spec_method = (
+            self.speculative_config.method
+            if self.speculative_config is not None
+            else None
+        )
+        prompt_logprobs_flags = (
+            self.prompt_logprobs_worker.uses_prompt_logprobs
+            if self.prompt_logprobs_worker is not None
+            else None
+        )
+        has_prompt_logprobs_reqs = (
+            prompt_logprobs_flags is not None
+            and bool(prompt_logprobs_flags[idx_mapping_np].any())
+        )
+        head_gather_first = (
+            envs.VLLM_MOE_HEAD_GATHER_FIRST
+            and batch_desc.cg_mode == CUDAGraphMode.NONE
+            and batch_req_state.has_prefill
+            and self.is_last_pp_rank
+            and not self.is_pooling_model
+            and self.pcp_manager is None
+            and self.batch_sharder is None
+            and not has_prompt_logprobs_reqs
+            and (spec_method is None or spec_method in ("dspark", "dflash"))
+            and fast_prefill is None
+        )
+
         input_batch = InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1404,6 +1440,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            head_gather_first=head_gather_first,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
             fast_prefill=fast_prefill,
@@ -1481,7 +1518,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            if input_batch.head_gather_first:
+                # Model already reduced hidden_states to the logits rows.
+                sample_hidden_states = hidden_states
+            else:
+                sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
         if grammar_output is not None:
@@ -1803,6 +1844,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if input_batch.head_gather_first:
+            # Only reachable for eager/PW steps (prefill); FULL-graph decode
+            # batches never set the flag, so capture shapes stay untouched.
+            model_inputs["logits_indices"] = input_batch.logits_indices
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
