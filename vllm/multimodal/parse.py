@@ -101,6 +101,18 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
     def get_all_items_for_hash(self) -> list[object]:
         return [self.get_item_for_hash(idx) for idx in range(self.get_count())]
 
+    def get_item_content_size(self, index: int) -> int | None:
+        """Cheap content discriminator for UUID-keyed cache entries.
+
+        Binds a client-provided UUID to the item's canonical size so that
+        reusing a UUID for a different-sized payload cannot serve stale
+        cached features: that yields silent wrong output when the
+        processed lengths happen to match, and a fatal engine failure
+        when they do not (#55547). ``None`` means no discriminator is
+        available and the UUID is trusted as-is.
+        """
+        return None
+
     @abstractmethod
     def get_processor_data(self) -> Mapping[str, object]:
         """Get the data to pass to the HF processor."""
@@ -339,12 +351,19 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem | None]):
     def __init__(self, data: Sequence[HfAudioItem | None]) -> None:
         super().__init__(data, "audio")
 
-    def get_audio_length(self, item_idx: int) -> int:
-        audio = self.get(item_idx)
+    def get_item_content_size(self, index: int) -> int | None:
+        audio = self.get(index)
         if audio is None:
-            raise ValueError(f"Cannot get length of cached audio at {item_idx}")
+            return None
 
         return len(audio)
+
+    def get_audio_length(self, item_idx: int) -> int:
+        size = self.get_item_content_size(item_idx)
+        if size is None:
+            raise ValueError(f"Cannot get length of cached audio at {item_idx}")
+
+        return size
 
 
 class AudioEmbeddingItems(EmbeddingItems):
@@ -364,6 +383,13 @@ class ImageSize(NamedTuple):
 class ImageProcessorItems(ProcessorBatchItems[HfImageItem | None]):
     def __init__(self, data: Sequence[HfImageItem | None]) -> None:
         super().__init__(data, "image")
+
+    def get_item_content_size(self, index: int) -> int | None:
+        if self.get(index) is None:
+            return None
+
+        size = self.get_image_size(index)
+        return size.width * size.height
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.get(item_idx)
@@ -417,6 +443,13 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
             if metadata is not None:
                 return item, metadata
         return item
+
+    def get_item_content_size(self, index: int) -> int | None:
+        if self.get(index) is None:
+            return None
+
+        frame_size = self.get_frame_size(index)
+        return self.get_num_frames(index) * frame_size.width * frame_size.height
 
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)

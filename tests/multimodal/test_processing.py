@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
     overlay_modality_mm_kwargs,
@@ -1276,9 +1276,16 @@ def test_processor_inputs_hashes_partial_uuids():
         mm_uuid_items={"image": ["image-uuid", None]},
     )
 
+    width, height = images[0].size
     assert inputs.get_mm_hashes("test-model", "blake3") == {
         "image": [
-            "image-uuid",
+            MultiModalHasher.hash_kwargs(
+                "blake3",
+                model_id="test-model",
+                modality="image",
+                mm_uuid="image-uuid",
+                mm_content_size=width * height,
+            ),
             MultiModalHasher.hash_kwargs(
                 "blake3", model_id="test-model", image=images[1]
             ),
@@ -1330,4 +1337,53 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
         hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
     )
 
-    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+    width, height = image.size
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": [
+            MultiModalHasher.hash_kwargs(
+                "blake3",
+                model_id="test-model",
+                modality="image",
+                mm_uuid="image-uuid",
+                mm_content_size=width * height,
+            )
+        ]
+    }
+
+
+def test_processor_inputs_uuid_bound_to_content_size():
+    """Reusing a UUID for different-sized payloads must not share a cache key
+    (stale features under a fresh splice: silent wrong output when the
+    processed lengths match, fatal engine failure when they do not), while
+    the same payload under the same UUID must keep deduplicating."""
+    audio_a = np.zeros(16000, dtype=np.float32)
+    audio_b = np.zeros(32000, dtype=np.float32)
+
+    def hashes(audio):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=MultiModalDataParser().parse_mm_data({"audio": [audio]}),
+            mm_uuid_items={"audio": ["audio-uuid"]},
+        ).get_mm_hashes("test-model", "blake3")["audio"][0]
+
+    assert hashes(audio_a) == MultiModalHasher.hash_kwargs(
+        "blake3",
+        model_id="test-model",
+        modality="audio",
+        mm_uuid="audio-uuid",
+        mm_content_size=16000,
+    )
+    assert hashes(audio_a) != hashes(audio_b)
+    assert hashes(audio_a) == hashes(audio_a.copy())
+
+
+def test_processor_inputs_uuid_verbatim_when_no_content_size():
+    """Without a size discriminator (e.g. a cache-resident placeholder
+    item), the UUID is trusted as-is, preserving the existing behavior."""
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items={"audio": AudioProcessorItems([None])},
+        mm_uuid_items={"audio": ["audio-uuid"]},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {"audio": ["audio-uuid"]}

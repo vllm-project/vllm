@@ -99,8 +99,27 @@ class ProcessorInputs:
                         )
                     )
                 else:
-                    # If there are no extra kwargs, use the client-provided UUID.
-                    hashes.append(uuid_item)
+                    # Bind the client-provided UUID to the item's content
+                    # size so that reusing a UUID for a different payload
+                    # cannot serve stale cached features: that yields silent
+                    # wrong output when the processed lengths happen to
+                    # match, and a fatal engine failure when they do not
+                    # (#55547). Falls back to trusting the UUID as-is when
+                    # no size discriminator is available.
+                    content_size = data_items.get_item_content_size(i)
+                    if content_size is not None:
+                        hashes.append(
+                            hasher.hash_kwargs(
+                                hash_algorithm,
+                                model_id=model_id,
+                                modality=modality,
+                                mm_uuid=uuid_item,
+                                mm_content_size=content_size,
+                            )
+                        )
+                    else:
+                        # If there are no extra kwargs, use the client-provided UUID.
+                        hashes.append(uuid_item)
 
             mm_hashes[modality] = hashes
 
