@@ -438,6 +438,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
+ADD ./cmake/ ./cmake/
+ADD ./tools/pre_commit/ ./tools/pre_commit/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
