@@ -109,9 +109,6 @@ __device__ __forceinline__ void nvfp4_unpack16_e2m1(uint64_t raw,
 #endif
 }
 
-// Rounded UP to the next e4m3 value so amax / sf never exceeds the payload
-// range: round-to-nearest can land up to 33% low near e4m3's 2^-9 floor, which
-// would saturate the tile's largest values.
 __device__ __forceinline__ float nvfp4_tile_scale(const float* vals,
                                                   float max_val,
                                                   uint8_t* sf_out) {
@@ -121,15 +118,8 @@ __device__ __forceinline__ float nvfp4_tile_scale(const float* vals,
     amax = fmaxf(amax, fabsf(vals[i]));
   }
   const float sf_f = fmaxf(amax / max_val, 0.001953125f);  // 2^-9
-  __nv_fp8_e4m3 sf8(sf_f);
-  uint8_t sf_bits = *reinterpret_cast<const uint8_t*>(&sf8);
-  if (float(sf8) < sf_f && sf_bits < 0x7E) {
-    // Bump to the next e4m3 value (bit patterns of positive e4m3 values are
-    // monotonic; 0x7E = 448 is the max finite value).
-    sf_bits += 1;
-    sf8 = *reinterpret_cast<const __nv_fp8_e4m3*>(&sf_bits);
-  }
-  *sf_out = sf_bits;
+  const __nv_fp8_e4m3 sf8(sf_f);
+  *sf_out = *reinterpret_cast<const uint8_t*>(&sf8);
   return float(sf8);
 }
 

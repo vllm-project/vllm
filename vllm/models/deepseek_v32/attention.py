@@ -231,7 +231,9 @@ class DeepseekV32Attention(MLAAttention):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
-        self._fp8_kv_needs_view = fp8_attention and self.kv_cache_dtype != "fp8_ds_mla"
+        self._fp8_kv_needs_view = fp8_attention and not self.kv_cache_dtype.endswith(
+            "_ds_mla"
+        )
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 

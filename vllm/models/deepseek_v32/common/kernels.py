@@ -149,6 +149,7 @@ def _fused_norm_rope_kernel(
     mla_cache_ds_scale_ptr,
     mla_cache_ds_rope_ptr,
     MLA_CACHE_DS_MLA: tl.constexpr,
+    MLA_CACHE_NVFP4: tl.constexpr,
     MLA_NUM_TILES: tl.constexpr,
     MLA_TILE_DIM: tl.constexpr,
     # Top k indices
@@ -259,6 +260,59 @@ def _fused_norm_rope_kernel(
             mla_block_size = MLA_CACHE_BLOCK_SIZE
             mla_block_idx = slot_idx // mla_block_size
             mla_block_off = slot_idx % mla_block_size
+
+            if MLA_CACHE_NVFP4:
+                # nvfp4_ds_mla layout (352 B/token, KV_DIM == 512):
+                #   [0, 256)    512 e2m1 NoPE, packed 2/byte (low nibble = even)
+                #   [256, 320)   64 e4m3 RoPE, unscaled
+                #   [320, 352)   32 e4m3 NoPE scales, byte-permuted
+                # Keep in lockstep with concat_and_cache_nvfp4_ds_mla (CUDA) and
+                # nvfp4_sf_byte() in FlashMLA: byte(s) = 8*(s&3) + (s>>2).
+                byte_base = (
+                    mla_block_idx * mla_cache_block_stride
+                    + mla_block_off * mla_cache_entry_stride
+                )
+                kv_2d = tl.reshape(kv_c.to(tl.float32), (MLA_NUM_TILES, MLA_TILE_DIM))
+                amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
+                # sf = e4m3(max(amax/6, 2^-9)), rounded UP so amax/sf <= 6 and the
+                # tile's largest element cannot saturate e2m1.
+                sf_f = tl.maximum(amax * (1.0 / 6.0), 0.001953125)
+                # Round-to-nearest, matching cvt_warp_fp16_to_fp4 and the rest
+                # of vLLM's NVFP4 quantizers.
+                sf8 = sf_f.to(tl.float8e4nv)
+                q = kv_2d * (1.0 / sf8.to(tl.float32))
+                qp = tl.reshape(q, (KV_DIM // 2, 2))
+                sel = tl.arange(0, 2)[None, :]
+                even = tl.sum(tl.where(sel == 0, qp, 0.0), axis=1)
+                odd = tl.sum(tl.where(sel == 1, qp, 0.0), axis=1)
+                # Same instruction the CUDA writer uses, so the two are bit-exact
+                # by construction: dest byte = {high: odd, low: even}.
+                packed = tl.inline_asm_elementwise(
+                    "{ .reg .b8 t; .reg .b32 w;"
+                    " cvt.rn.satfinite.e2m1x2.f32 t, $2, $1;"
+                    " mov.b32 w, {t, t, t, t}; and.b32 $0, w, 255; }",
+                    "=r,f,f",
+                    [even, odd],
+                    dtype=tl.int32,
+                    is_pure=True,
+                    pack=1,
+                ).to(tl.uint8)
+                tl.store(
+                    mla_cache_ptr + byte_base + tl.arange(0, KV_DIM // 2),
+                    packed.to(tl.float8e4nv, bitcast=True),
+                )
+                # RoPE: unscaled e4m3, interleaved like the fp8_ds_mla path
+                rope_base = mla_cache_ptr + byte_base + KV_DIM // 2
+                tl.store(rope_base + dim_off * 2, r1.to(tl.float8e4nv))
+                tl.store(rope_base + dim_off * 2 + 1, r2.to(tl.float8e4nv))
+                # scales, permuted: byte(s) = 8*(s&3) + (s>>2)
+                sf_tile = tl.arange(0, MLA_NUM_TILES)
+                sf_perm = 8 * (sf_tile % 4) + (sf_tile // 4)
+                tl.store(
+                    mla_cache_ptr + byte_base + (KV_DIM // 2 + 64) + sf_perm,
+                    tl.reshape(sf8, (MLA_NUM_TILES,)),
+                )
+                return
 
             if MLA_CACHE_DS_MLA:
                 # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
@@ -487,7 +541,8 @@ def fused_norm_rope(
         idx_cache_stride = 0
 
     # --- MLA KV cache setup ---
-    mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
+    mla_cache_nvfp4 = mla_kv_cache_dtype == "nvfp4_ds_mla"
+    mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla" or mla_cache_nvfp4
     mla_cache_fp8 = is_quantized_kv_cache(mla_kv_cache_dtype) and not mla_cache_ds_mla
     mla_num_tiles = 1
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
@@ -498,8 +553,8 @@ def fused_norm_rope(
             # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
             # 1-byte fp8 view, so block/entry strides are byte offsets and the
             # fp32/bf16 views share the same buffer.
-            assert kv_dim == 512, "fp8_ds_mla requires kv_lora_rank == 512"
-            mla_num_tiles = kv_dim // 128
+            assert kv_dim == 512, "ds_mla layouts require kv_lora_rank == 512"
+            mla_num_tiles = kv_dim // 16 if mla_cache_nvfp4 else kv_dim // 128
             u8_cache = mla_kv_cache.view(torch.uint8)
             mla_block_stride = u8_cache.stride(0)
             mla_entry_stride = u8_cache.stride(1)
@@ -591,7 +646,8 @@ def fused_norm_rope(
         mla_k_scale,
         mla_ds_scale_view,
         mla_ds_rope_view,
-        mla_cache_ds_mla,
+        mla_cache_ds_mla and not mla_cache_nvfp4,
+        mla_cache_nvfp4,
         mla_num_tiles,
         kv_dim // mla_num_tiles if mla_cache_ds_mla else 1,
         # Top k indices buffer
