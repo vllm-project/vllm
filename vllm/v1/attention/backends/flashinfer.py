@@ -1235,6 +1235,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and cache_config is not None
             and cache_config.cache_dtype.startswith("nvfp4")
         ):
+            # head_size > 256 (Gemma 4 global layers) runs the two-pass VO
+            # split: the builder sets reorder_batch_threshold = 0 and every
+            # request, decode included, goes through the per-step-planned
+            # prefill wrapper, which has no cudagraph buffers. A FULL decode
+            # graph captured around it replays stale plan data and produces
+            # garbage, so refuse capture for these groups (the runner falls
+            # back to PIECEWISE for the model).
+            for spec in iter_layer_specs(kv_cache_spec):
+                if isinstance(spec, AttentionSpec) and spec.head_size > 256:
+                    return AttentionCGSupport.NEVER
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)

@@ -179,3 +179,49 @@ def test_spans_skip_decode_requests():
     # query_start_loc covers [decode, prefill] -> prefill qo_len = 10.
     out = _spans({1: [(3, 6)]}, [0, 1, 11], [5, 11], 1, 1)
     assert out == [[(3, 6)]]
+
+
+# --------------------------------------------------------------------------- #
+# get_cudagraph_support: no decode-graph capture for VO-split NVFP4 groups
+# --------------------------------------------------------------------------- #
+def _sm12x_nvfp4_cg_support(head_size, monkeypatch):
+    """Cudagraph support the builder advertises for one NVFP4 KV group on
+    sm12x, with the platform capability checks pinned (no GPU needed)."""
+    import vllm.v1.attention.backends.flashinfer as fi
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "1")
+    monkeypatch.setattr(fi.current_platform, "is_device_capability", lambda cap: False)
+    monkeypatch.setattr(
+        fi.current_platform, "is_device_capability_family", lambda fam: fam == 120
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="nvfp4"),
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.uint8
+    )
+    return FlashInferMetadataBuilder.get_cudagraph_support(vllm_config, spec)
+
+
+def test_cudagraph_support_vo_split_nvfp4_sm12x_is_never(monkeypatch):
+    # Gemma 4 global layers (head 512) run the two-pass VO split: every
+    # request, decode included, goes through the per-step-planned prefill
+    # wrapper, which has no cudagraph buffers. Capturing a FULL decode graph
+    # around it replayed stale plan data (garbage decodes on E2B/12B), so the
+    # builder must refuse capture for these groups.
+    from vllm.v1.attention.backend import AttentionCGSupport
+
+    assert _sm12x_nvfp4_cg_support(512, monkeypatch) == AttentionCGSupport.NEVER
+
+
+def test_cudagraph_support_uniform_head_nvfp4_sm12x_keeps_decode(monkeypatch):
+    # Uniform 256-wide heads (Gemma 3, Qwen) keep the single-token decode
+    # capture they had.
+    from vllm.v1.attention.backend import AttentionCGSupport
+
+    assert (
+        _sm12x_nvfp4_cg_support(256, monkeypatch)
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
