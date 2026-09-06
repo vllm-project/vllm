@@ -358,8 +358,8 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
-- label: ":nvidia: (H100) Direct Context Parallelism"
-  key: distributed-direct-context-parallelism-4xh100
+- label: ":nvidia: (H100) Decode Context Parallelism"
+  key: distributed-decode-context-parallelism-4xh100
   timeout_in_minutes: 60
   device: h100
   num_devices: 4
