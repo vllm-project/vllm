@@ -433,8 +433,11 @@ def test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill(backend):
         if any(logprobs is None for logprobs, _ in bs1):
             pytest.skip("Logprobs are not available on RequestOutput.")
 
+        outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+        assert len(outs_batched) == len(prompts)
+
         mismatches = []
-        for i, out in enumerate(llm.generate(prompts, sp, use_tqdm=False)):
+        for i, out in enumerate(outs_batched):
             logprobs, tokens = _extract_step_logprobs(out)
             bs1_logprobs, bs1_tokens = bs1[i]
             n = prompt_lens[i]
