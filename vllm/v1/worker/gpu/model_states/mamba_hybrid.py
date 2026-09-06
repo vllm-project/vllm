@@ -111,6 +111,15 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_block_size: int | None = None
+
+    @staticmethod
+    def _seed_state_block_idx(num_computed_tokens: int, mamba_block_size: int) -> int:
+        """Mamba block of the last computed token; -1 for a fresh request.
+
+        Any other divisor points the precopy source outside the request's
+        block-table row."""
+        return (num_computed_tokens - 1) // mamba_block_size
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -118,8 +127,18 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            assert (
+                new_req_data.num_computed_tokens == 0
+                or self._mamba_block_size is not None
+            ), (
+                "request admitted with computed tokens before the mamba block "
+                "size was resolved; seeding would corrupt the precopy source"
+            )
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                self._seed_state_block_idx(
+                    new_req_data.num_computed_tokens,
+                    self._mamba_block_size or self.cache_config.block_size,
+                )
             )
 
     def _get_mamba_group_info(
@@ -136,6 +155,7 @@ class MambaHybridModelState(DefaultModelState):
             ), "all mamba groups must share cache scheduling parameters"
             self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
             self._mamba_spec = mamba_spec
+            self._mamba_block_size = mamba_spec.block_size
         return self._mamba_group_ids, self._mamba_spec
 
     def _ensure_align_ctx(
