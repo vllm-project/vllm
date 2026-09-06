@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config_or_none
@@ -30,6 +29,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    sparse_indexer_max_logits_bytes,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -322,7 +322,7 @@ def sparse_attn_indexer_kpool(
             )
         # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
         decode_logits_elems = worst_decode_tokens * max_model_len * 4
-        prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        prefill_cap_elems = sparse_indexer_max_logits_bytes()
         max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
