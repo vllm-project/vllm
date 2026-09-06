@@ -30,6 +30,24 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
+def _token_strided(x: torch.Tensor) -> bool:
+    """Whether a ``[B, T, H, D]`` (or ``[B, T, H]``) tensor has a contiguous
+    per-token block, i.e. only the token stride may be non-dense. Column
+    slices of a wider per-token projection buffer satisfy this without a
+    copy. Pure stride arithmetic: this runs eagerly per layer per step (the
+    KDA forward is a CUDA-graph break), so it must not create views.
+    """
+    st = x.stride()
+    if x.dim() == 4:
+        return st[3] == 1 and st[2] == x.shape[3]
+    return x.dim() == 3 and st[2] == 1
+
+
+def _token_stride(x: torch.Tensor, inner: int) -> int:
+    assert _token_strided(x), (x.shape, x.stride())
+    return x.stride(1)
+
+
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -70,7 +88,7 @@ def fused_recurrent_kda_fwd(
         g_bias = g_bias.reshape(-1).contiguous()
 
     if out is None:
-        o = torch.empty_like(k)
+        o = torch.empty(k.shape, dtype=k.dtype, device=k.device)
     else:
         # Caller-provided output buffer; must be layout-compatible with the
         # tensor the kernel indexes (contiguous, same shape/dtype as k).
@@ -91,6 +109,11 @@ def fused_recurrent_kda_fwd(
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    stride_q_t = _token_stride(q, H * K)
+    stride_k_t = _token_stride(k, H * K)
+    stride_v_t = _token_stride(v, HV * V)
+    stride_beta_t = _token_stride(beta, HV * (V if beta.ndim == v.ndim else 1))
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -119,6 +142,10 @@ def fused_recurrent_kda_fwd(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        stride_q_t=stride_q_t,
+        stride_k_t=stride_k_t,
+        stride_v_t=stride_v_t,
+        stride_beta_t=stride_beta_t,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
@@ -165,12 +192,14 @@ def fused_recurrent_kda(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
+    # The kernel walks q/k/v/beta with an explicit token stride, so column
+    # slices of the fused projection buffer are consumed in place (no copy).
     o, final_state = fused_recurrent_kda_fwd(
-        q=q.contiguous(),
-        k=k.contiguous(),
-        v=v.contiguous(),
+        q=q if _token_strided(q) else q.contiguous(),
+        k=k if _token_strided(k) else k.contiguous(),
+        v=v if _token_strided(v) else v.contiguous(),
         g=g.contiguous(),
-        beta=beta.contiguous(),
+        beta=beta if _token_strided(beta) else beta.contiguous(),
         scale=scale,
         initial_state=initial_state,
         inplace_final_state=inplace_final_state,
