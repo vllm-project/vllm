@@ -493,11 +493,20 @@ class TestRocmFlydslConditionsAllRequired:
         vllm_config.lora_config = lora_config
         vllm_config.kernel_config.moe_backend = moe_backend
 
+        flydsl_cls_mock = MagicMock()
+        fake_flydsl_module = MagicMock(
+            CompressedTensorsW4A16FlydslMoEMethod=flydsl_cls_mock
+        )
+
         with (
             patch(f"{MODULE}.current_platform") as mock_platform,
             patch(f"{PKG}.rocm_moe_rdna.is_supported", return_value=False),
             patch(f"{MODULE}.get_current_vllm_config", return_value=vllm_config),
             patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950_return),
+            patch.dict(
+                sys.modules,
+                {f"{PKG}.compressed_tensors_moe_w4a16_flydsl": fake_flydsl_module},
+            ),
             patch(
                 f"{PKG}.compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod"
             ) as mock_wna16_cls,
@@ -505,8 +514,8 @@ class TestRocmFlydslConditionsAllRequired:
             mock_platform.is_rocm.return_value = True
             result, layer = _call(quant_config)
 
-        # The flydsl submodule imports `aiter` (gfx950-only); it must never
-        # get imported when the AND-chain isn't fully satisfied.
-        assert f"{PKG}.compressed_tensors_moe_w4a16_flydsl" not in sys.modules
+        # A broken AND term must not reach the FlyDSL construction; falling
+        # through to the default WNA16 method is the only correct outcome.
+        flydsl_cls_mock.assert_not_called()
         mock_wna16_cls.assert_called_once_with(weight_quant, None, layer.moe_config)
         assert result is mock_wna16_cls.return_value
