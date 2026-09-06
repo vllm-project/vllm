@@ -257,7 +257,7 @@ def test_cpu_manager_reports_tier_info_as_info_gauge():
     CPU_TIER_INFO_LABELS order with the value pinned to 1.
     """
     tier_info = CPUCacheTierInfo(
-        num_blocks=4,
+        num_chunks=4,
         blocks_per_chunk=2,
         kv_bytes_per_chunk=16384,
         capacity_tokens=128,
@@ -274,7 +274,7 @@ def test_cpu_manager_renders_unknown_token_capacity_as_none():
     manager = make_cpu_manager(
         num_blocks=4,
         tier_info=CPUCacheTierInfo(
-            num_blocks=4,
+            num_chunks=4,
             blocks_per_chunk=1,
             kv_bytes_per_chunk=16384,
             capacity_tokens=None,

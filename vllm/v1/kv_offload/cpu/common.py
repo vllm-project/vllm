@@ -20,11 +20,11 @@ class CPUCacheTierInfo:
     Static, per-engine facts about the CPU offload tier.
     """
 
-    # Slot count. Chunks, not GPU blocks; see blocks_per_chunk.
-    num_blocks: int
+    # Chunk count, not GPU blocks; see blocks_per_chunk.
+    num_chunks: int
     # GPU blocks per chunk; the CPU-slot to GPU-block conversion factor.
     blocks_per_chunk: int
-    # Page-aligned bytes per chunk. With num_blocks this is the tier's exact
+    # Page-aligned bytes per chunk. With num_chunks this is the tier's exact
     # size in bytes, the only capacity valid for every model shape.
     kv_bytes_per_chunk: int
     # KV tokens resident when the tier is full, or None when a slot count does

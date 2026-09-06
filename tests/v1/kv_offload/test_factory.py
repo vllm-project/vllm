@@ -260,7 +260,7 @@ def test_cpu_spec_tier_info_mirrors_spec_sizing():
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.tier_info.num_blocks == spec.num_blocks
+    assert spec.tier_info.num_chunks == spec.num_blocks
     assert spec.tier_info.blocks_per_chunk == spec.blocks_per_chunk
     assert spec.tier_info.kv_bytes_per_chunk == spec.kv_bytes_per_chunk
 

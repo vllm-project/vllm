@@ -650,7 +650,7 @@ def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
     OffloadingSpecFactory resolves by default.
     """
     tier_info = CPUCacheTierInfo(
-        num_blocks=4096,
+        num_chunks=4096,
         blocks_per_chunk=2,
         kv_bytes_per_chunk=262144,
         capacity_tokens=None,
@@ -680,7 +680,7 @@ def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
     assert dict(zip(gauge_def.kwargs["labelnames"], gauge.labelvalues)) == {
         "model_name": "model",
         "engine": "0",
-        "num_blocks": "4096",
+        "num_chunks": "4096",
         "blocks_per_chunk": "2",
         "kv_bytes_per_chunk": "262144",
         "capacity_tokens": "None",
