@@ -11,30 +11,33 @@
 #
 # Env:
 #   MODEL                    HF model id (default: Qwen/Qwen2.5-VL-3B-Instruct)
-#   GPU_SINGLE / GPU_E / GPU_PD   GPU ids (defaults 0 / 1 / 2)
+#   GPU_SINGLE / GPU_E / GPU_PD   GPU ids (defaults 0 / 0 / 1)
 #   ENDPOINT_PORT, ENCODE_PORT, PREFILL_DECODE_PORT
-#   MOONCAKE_EC_PROTOCOL        rdma | tcp (default rdma)
+#   MOONCAKE_EC_PROTOCOL        tcp | rdma (default tcp)
 #   USE_MM_PROMPTS              1 (default) or 0 for text-only quick sanity
 #   TIMEOUT_SECONDS             wait_for_server timeout (default 1200)
 #   SKIP_BASELINE               set to 1 to reuse existing BASELINE_FILE
+#   CONCURRENCY / REPEAT        concurrent requests / rounds (defaults 3 / 2)
+#   MAX_MODEL_LEN               context length (default 16384)
 
 set -euo pipefail
 
-GIT_ROOT=$(git rev-parse --show-toplevel)
+GIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 cd "$GIT_ROOT" || exit 1
 export PYTHONPATH="${GIT_ROOT}:${PYTHONPATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-${GIT_ROOT}/.venv/bin/python}"
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
-MM_FLAG=""
+TEST_ARGS=(--concurrency "${CONCURRENCY:-3}" --repeat "${REPEAT:-2}")
 if [[ "$USE_MM_PROMPTS" == "1" ]]; then
-  MM_FLAG="--use_mm_prompts"
+  TEST_ARGS+=(--use_mm_prompts --mm_smoke_test)
 fi
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 GPU_SINGLE="${GPU_SINGLE:-0}"
-GPU_E="${GPU_E:-1}"
-GPU_PD="${GPU_PD:-2}"
+GPU_E="${GPU_E:-0}"
+GPU_PD="${GPU_PD:-1}"
 
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19537}"
@@ -42,14 +45,15 @@ ENDPOINT_PORT="${ENDPOINT_PORT:-10002}"
 BASELINE_PORT="${BASELINE_PORT:-10003}"
 
 EC_MOONCAKE_RESERVATION_PORT="${EC_MOONCAKE_RESERVATION_PORT:-19019}"
-MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-rdma}"
+MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-tcp}"
 export EC_MOONCAKE_RESERVATION_PORT
 export MOONCAKE_EC_PROTOCOL
-# Mooncake cannot register CUDA memory through the peer-memory path on hosts
-# whose kernel lacks the OFED peer-memory API; every transfer then fails at
-# setup with -202. Opting out selects the path that works there and is a no-op
-# where GPUDirect is available.
-export WITH_NVIDIA_PEERMEM="${WITH_NVIDIA_PEERMEM:-0}"
+if [[ "$MOONCAKE_EC_PROTOCOL" == "tcp" ]]; then
+  # TransferEngine may otherwise auto-select RDMA on hosts with an HCA.
+  export MC_FORCE_TCP=1
+else
+  unset MC_FORCE_TCP
+fi
 
 LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_epd_mooncake_baseline.txt}"
@@ -66,7 +70,7 @@ print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
-        "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "rdma"),
+        "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
     },
 }, separators=(",", ":")))
 PY
@@ -80,7 +84,7 @@ print(json.dumps({
     "ec_ip": os.environ.get("EC_MOONCAKE_RESERVATION_HOST", "127.0.0.1"),
     "ec_port": int(os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")),
     "ec_connector_extra_config": {
-        "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "rdma"),
+        "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
     },
 }, separators=(",", ":")))
 PY
@@ -88,10 +92,16 @@ PY
 
 wait_for_server() {
   local port=$1
-  timeout "$TIMEOUT_SECONDS" bash -c "
-        until curl -fsS http://localhost:${port}/health >/dev/null 2>&1; do
-            sleep 2
-        done" && return 0 || return 1
+  local pid=$2
+  local deadline=$((SECONDS + TIMEOUT_SECONDS))
+  while ((SECONDS < deadline)); do
+    kill -0 "$pid" 2>/dev/null || return 1
+    if curl --max-time 2 -fsS "http://localhost:${port}/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 cleanup_instances() {
@@ -121,7 +131,20 @@ cleanup_instances() {
   PIDS=()
 }
 
-trap cleanup_instances EXIT
+finish() {
+  local status=$?
+  cleanup_instances
+  if ((status != 0)); then
+    for log in "${LOG_PATH}"/mooncake_epd_*.log; do
+      [[ -f "$log" ]] || continue
+      echo "=== $log (last 100 lines) ==="
+      tail -100 "$log"
+    done
+  fi
+  exit "$status"
+}
+
+trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -136,12 +159,15 @@ run_baseline() {
     --port "$PORT" \
     --gpu-memory-utilization 0.75 \
     --max-num-seqs 32 \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --no-enable-prefix-caching \
+    --limit-mm-per-prompt '{"image":2,"video":0}' \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     >"${LOG_PATH}/mooncake_epd_baseline.log" 2>&1 &
   local BASELINE_PID=$!
   PIDS+=("$BASELINE_PID")
   echo "Waiting for baseline..."
-  wait_for_server "$PORT" || { echo "Baseline failed to start; tail log:"; tail -80 "${LOG_PATH}/mooncake_epd_baseline.log"; return 1; }
+  wait_for_server "$PORT" "$BASELINE_PID" || { echo "Baseline failed to start"; return 1; }
   curl -s "http://127.0.0.1:${PORT}/v1/models" | head -c 200 || true
   echo ""
   "$PYTHON_BIN" "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
@@ -149,7 +175,7 @@ run_baseline() {
     --model_name "$MODEL" \
     --mode baseline \
     --baseline_file "$BASELINE_FILE" \
-    $MM_FLAG
+    "${TEST_ARGS[@]}"
   cleanup_instances
 }
 
@@ -168,12 +194,15 @@ run_epd_mooncake() {
     --mm-tensor-ipc torch_shm \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
-    --max-num-batched-tokens 114688 \
+    --max-num-batched-tokens "$MAX_MODEL_LEN" \
     --max-num-seqs 32 \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --limit-mm-per-prompt '{"image":2,"video":0}' \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$ENC_EC_JSON" \
     >"${LOG_PATH}/mooncake_epd_encoder.log" 2>&1 &
-  PIDS+=("$!")
+  local ENCODER_PID=$!
+  PIDS+=("$ENCODER_PID")
 
   echo "Starting PD on GPU $GPU_PD port $PREFILL_DECODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_PD" "${VLLM_SERVE[@]}" "$MODEL" \
@@ -183,15 +212,19 @@ run_epd_mooncake() {
     --enable-mm-embeds \
     --enable-request-id-headers \
     --max-num-seqs 32 \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --no-enable-prefix-caching \
+    --limit-mm-per-prompt '{"image":2,"video":0}' \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$PD_EC_JSON" \
     >"${LOG_PATH}/mooncake_epd_pd.log" 2>&1 &
-  PIDS+=("$!")
+  local PD_PID=$!
+  PIDS+=("$PD_PID")
 
   echo "Waiting for encoder..."
-  wait_for_server "$ENCODE_PORT" || { echo "Encoder log:"; tail -100 "${LOG_PATH}/mooncake_epd_encoder.log"; return 1; }
+  wait_for_server "$ENCODE_PORT" "$ENCODER_PID" || { echo "Encoder failed to start"; return 1; }
   echo "Waiting for PD..."
-  wait_for_server "$PREFILL_DECODE_PORT" || { echo "PD log:"; tail -100 "${LOG_PATH}/mooncake_epd_pd.log"; return 1; }
+  wait_for_server "$PREFILL_DECODE_PORT" "$PD_PID" || { echo "PD failed to start"; return 1; }
 
   echo "Starting EPD proxy on $ENDPOINT_PORT"
   "$PYTHON_BIN" "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
@@ -203,10 +236,11 @@ run_epd_mooncake() {
     --ec-consumer-zmq-addrs \
       "tcp://localhost:$EC_MOONCAKE_RESERVATION_PORT" \
     >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
-  PIDS+=("$!")
+  local PROXY_PID=$!
+  PIDS+=("$PROXY_PID")
 
   echo "Waiting for proxy..."
-  wait_for_server "$ENDPOINT_PORT" || { echo "Proxy log:"; tail -80 "${LOG_PATH}/mooncake_epd_proxy.log"; return 1; }
+  wait_for_server "$ENDPOINT_PORT" "$PROXY_PID" || { echo "Proxy failed to start"; return 1; }
   curl -s "http://127.0.0.1:${ENDPOINT_PORT}/health" || true
   echo ""
 
@@ -215,7 +249,7 @@ run_epd_mooncake() {
     --model_name "$MODEL" \
     --mode disagg \
     --baseline_file "$BASELINE_FILE" \
-    $MM_FLAG
+    "${TEST_ARGS[@]}"
 
   cleanup_instances
 }
