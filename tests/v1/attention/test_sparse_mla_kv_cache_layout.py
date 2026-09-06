@@ -356,6 +356,13 @@ def test_cuda_sparse_rows_and_cache_offsets_above_two_gib():
     stride = cache.kv_cache_tensors[0].block_stride
     config.cache_config.num_gpu_blocks_override = 2**31 // stride + 2
     cache = get_kv_cache_config_from_groups(config, [group], 0)
+    # All layer views share this allocation; leave 10% for scratch/allocator overhead.
+    required_free_bytes = cache.kv_cache_tensors[0].size * 11 // 10
+    if torch.accelerator.get_memory_info()[0] < required_free_bytes:
+        pytest.skip(
+            f"Requires approximately {required_free_bytes / 2**30:.2f} GiB of free "
+            "CUDA memory (including 10% headroom)"
+        )
     views = allocate_kv_cache(cache, torch.device("cuda"), KVCacheLayout.BLHNC)
     view = views["mla"].squeeze(1)
     last = cache.num_blocks - 1

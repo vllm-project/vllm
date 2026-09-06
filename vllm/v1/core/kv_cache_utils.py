@@ -984,9 +984,9 @@ def check_enough_kv_cache_memory(
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
 
