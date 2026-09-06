@@ -66,6 +66,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     create_hisparse_cache_handle,
+    is_hisparse_decode_batch,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
@@ -498,10 +499,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
         if self.hisparse_cache is None or attn_metadata is None:
             return
-        self.hisparse_cache.decode_batch = (
-            attn_metadata.max_query_len == 1
-            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
-        )
+        self.hisparse_cache.decode_batch = is_hisparse_decode_batch(attn_metadata)
 
     def forward(
         self,
