@@ -198,8 +198,13 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for
-    multi-modal inputs. """
+    """Allowlist of domains that multi-modal media URLs may be fetched from
+    (including every redirect hop). When unset (or empty), external HTTP(S)
+    media URLs are DENIED by default -- the server will not fetch arbitrary
+    hosts referenced by untrusted chat requests (SSRF protection). Pass
+    `--allowed-media-domains` to enable URL media inputs, listing every host
+    in the fetch chain you trust (redirect targets are re-validated and must
+    not change the destination port)."""
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""

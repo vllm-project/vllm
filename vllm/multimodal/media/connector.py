@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urljoin
 from urllib.request import url2pathname
 
 import aiohttp
@@ -40,6 +41,18 @@ from .video import VideoEmbeddingMediaIO, VideoMediaIO
 logger = init_logger(__name__)
 
 _M = TypeVar("_M")
+
+# Default ports used to normalize redirect target ports for comparison.
+_DEFAULT_HTTP_PORTS = {"http": 80, "https": 443}
+
+
+def _effective_port(url_spec: Url) -> int | None:
+    """Effective TCP port of a parsed URL (scheme default when omitted)."""
+    if url_spec.port is not None:
+        return url_spec.port
+    scheme = (url_spec.scheme or "").lower()
+    return _DEFAULT_HTTP_PORTS.get(scheme)
+
 
 global_thread_pool = ThreadPoolExecutor(
     max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
@@ -170,8 +183,13 @@ class MediaConnector:
                              `--media-io-kwargs '{"video":{"num_frames":40}}'`
             connection: HTTP connection client to download media contents.
             allowed_local_media_path: A local directory to load media files from.
-            allowed_media_domains: If set, only media URLs that belong to this
-                                   domain can be used for multi-modal inputs.
+            allowed_media_domains: Allowlist of domains media URLs (and every
+                                   redirect hop they follow) must belong to.
+                                   An empty/None allowlist fails CLOSED: no
+                                   external HTTP(S) media may be fetched at
+                                   all (SSRF protection). The special entry
+                                   "*" disables domain restrictions and is
+                                   reserved for offline user-code helpers.
         """
         super().__init__()
 
@@ -353,15 +371,57 @@ class MediaConnector:
         return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
-        if (
-            self.allowed_media_domains
-            and url_spec.hostname not in self.allowed_media_domains
-        ):
+        # "*" explicitly disables domain restrictions; it is meant for the
+        # offline user-code helpers (vllm.multimodal.utils.fetch_*), not for
+        # serving traffic.
+        if "*" in self.allowed_media_domains:
+            return
+        if not self.allowed_media_domains:
+            # Fail closed: without an allowlist, untrusted chat requests
+            # must not be able to make the server fetch arbitrary URLs
+            # (SSRF). Operators who want URL media inputs must list the
+            # hosts they trust via --allowed-media-domains.
+            raise ValueError(
+                "External media URLs are not allowed because no "
+                "`--allowed-media-domains` allowlist is configured. Add the "
+                "media host to --allowed-media-domains, or use data:/file: "
+                "media URLs."
+            )
+        if url_spec.hostname not in self.allowed_media_domains:
             raise ValueError(
                 f"The URL must be from one of the allowed domains: "
                 f"{self.allowed_media_domains}. Input URL domain: "
                 f"{url_spec.hostname}"
             )
+
+    def _validate_redirect_target(self, location: str, current_url: str) -> str:
+        """Validate one redirect hop of a media fetch (fail closed).
+
+        Unlike the original URL (chosen by the API client), a redirect
+        target is chosen by the responding server, so every hop must be
+        re-checked against the allowlist. A redirect must also stay on an
+        allowlisted host WITHOUT changing the destination port: a port
+        change can pivot the fetch to a different service on the same
+        machine (e.g. a local metadata/admin endpoint).
+
+        Returns the validated absolute target URL.
+        """
+        target_url = urljoin(current_url, location)
+        target_spec = parse_url(target_url)
+        if not target_spec.scheme or not target_spec.scheme.startswith("http"):
+            raise ValueError(
+                "Media URL redirect to a non-HTTP scheme is not allowed: "
+                f"{current_url} -> {target_url}"
+            )
+        self._assert_url_in_allowed_media_domains(target_spec)
+        if "*" not in self.allowed_media_domains and _effective_port(
+            target_spec
+        ) != _effective_port(parse_url(current_url)):
+            raise ValueError(
+                "Media URL redirect changed the destination port, which is "
+                f"not allowed: {current_url} -> {target_url}"
+            )
+        return target_url
 
     def load_from_url(
         self,
@@ -389,6 +449,11 @@ class MediaConnector:
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                    redirect_validator=(
+                        self._validate_redirect_target
+                        if envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
+                        else None
+                    ),
                     max_bytes=max_bytes,
                 )
             except Exception as e:
@@ -442,6 +507,11 @@ class MediaConnector:
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                    redirect_validator=(
+                        self._validate_redirect_target
+                        if envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
+                        else None
+                    ),
                     max_bytes=max_bytes,
                 )
             except Exception as e:

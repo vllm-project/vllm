@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 from io import BytesIO
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import aiohttp
@@ -18,9 +19,11 @@ import torch
 from PIL import Image, ImageChops
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media.base import MediaIO
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -61,7 +64,8 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_http(image_url: str):
-    connector = MediaConnector()
+    # External HTTP(S) media requires an explicit allowlist (fail closed).
+    connector = MediaConnector(allowed_media_domains=["127.0.0.1", "localhost"])
 
     image_sync = connector.fetch_image(image_url)
     image_async = await connector.fetch_image_async(image_url)
@@ -143,7 +147,7 @@ async def test_fetch_image_keep_original_mode():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_local_files(image_url: str):
-    connector = MediaConnector()
+    connector = MediaConnector(allowed_media_domains=["127.0.0.1"])
 
     with TemporaryDirectory() as temp_dir:
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
@@ -201,7 +205,7 @@ async def test_fetch_image_local_files_relative_allowed_path(tmp_path, monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
 async def test_fetch_image_local_files_with_space_in_name(image_url: str):
-    connector = MediaConnector()
+    connector = MediaConnector(allowed_media_domains=["127.0.0.1"])
 
     with TemporaryDirectory() as temp_dir:
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
@@ -286,7 +290,10 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             "video": {
                 "num_frames": num_frames,
             }
-        }
+        },
+        # github.com raw links redirect to raw.githubusercontent.com;
+        # "*" keeps this fetch-behavior test independent of CDN topology.
+        allowed_media_domains=["*"],
     )
 
     try:
@@ -317,7 +324,8 @@ async def test_fetch_video_http_with_dynamic_loader(
                     "max_duration": max_duration,
                     "requested_fps": requested_fps,
                 }
-            }
+            },
+            allowed_media_domains=["*"],
         )
 
         video_sync, metadata_sync = connector.fetch_video(video_url)
@@ -380,6 +388,248 @@ def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_external_media_denied_without_allowlist():
+    """Fail closed: with no allowlist configured the connector must refuse
+    external HTTP(S) media fetches (SSRF) before any request is made."""
+    connector = MediaConnector()
+
+    with pytest.raises(ValueError, match="allowed-media-domains"):
+        connector.fetch_image("http://169.254.169.254/latest/meta-data/")
+
+    with pytest.raises(ValueError, match="allowed-media-domains"):
+        await connector.fetch_image_async("https://internal.example.com/secret.png")
+
+
+class _FakeSyncResponse:
+    """Minimal requests.Response stand-in for redirect-chain tests."""
+
+    def __init__(self, status_code: int, location: str | None, body: bytes):
+        self.status_code = status_code
+        self.headers = {"Location": location} if location else {}
+        self.content = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error")
+
+    def iter_content(self, chunk_size: int = 1):
+        if self.content:
+            yield self.content[:chunk_size]
+
+
+class _FakeAsyncResponse:
+    """Minimal aiohttp.ClientResponse stand-in for redirect-chain tests."""
+
+    def __init__(self, status: int, location: str | None, body: bytes):
+        self.status = status
+        self.headers = {"Location": location} if location else {}
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise aiohttp.ClientResponseError(
+                request_info=None,
+                history=(),
+                status=self.status,
+                message=f"{self.status} error",
+                headers=None,
+            )
+
+    async def read(self):
+        return self._body
+
+    @property
+    def content_length(self) -> int | None:
+        return len(self._body)
+
+    @property
+    def content(self):
+        return self
+
+    async def iter_chunked(self, chunk_size: int):
+        if self._body:
+            yield self._body[:chunk_size]
+
+
+def _fake_connection(hops):
+    """Build an HTTPConnection whose responses replay ``hops``, a list of
+    ``(status, location, body)`` tuples, recording every requested URL.
+
+    The real (retry-wrapped) get_bytes/async_get_bytes redirect loop runs on
+    top of these fakes, so per-hop validation is exercised end to end.
+    """
+    from vllm.connections import HTTPConnection
+
+    conn = HTTPConnection()
+    requested = []
+
+    def get_response(
+        url, *, timeout=None, extra_headers=None, allow_redirects=True, stream=False
+    ):
+        requested.append(url)
+        hop = hops[min(len(requested) - 1, len(hops) - 1)]
+        return _FakeSyncResponse(*hop)
+
+    async def get_async_response(
+        url, *, timeout=None, extra_headers=None, allow_redirects=True
+    ):
+        requested.append(url)
+        hop = hops[min(len(requested) - 1, len(hops) - 1)]
+        return _FakeAsyncResponse(*hop)
+
+    conn.get_response = get_response
+    conn.get_async_response = get_async_response
+    return conn, requested
+
+
+_PNG_BYTES = b"fake-png-bytes"
+
+
+class _PassthroughMediaIO(MediaIO[bytes]):
+    """Returns fetched bytes undecoded so tests can assert on raw bytes."""
+
+    def load_bytes(self, data: bytes) -> bytes:
+        return data
+
+    def load_base64(self, media_type: str, data: str) -> bytes:
+        raise NotImplementedError
+
+    def load_file(self, filepath: Path) -> bytes:
+        raise NotImplementedError
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_redirect_within_allowlisted_host_port_ok():
+    """A redirect that stays on an allowlisted host AND port is followed."""
+    conn, requested = _fake_connection(
+        [(302, "http://cdn.example.org/real.png", b""), (200, None, _PNG_BYTES)]
+    )
+    connector = MediaConnector(
+        connection=conn, allowed_media_domains=["cdn.example.org"]
+    )
+
+    assert (
+        connector.load_from_url("http://cdn.example.org/img.png", _PassthroughMediaIO())
+        == _PNG_BYTES
+    )
+    assert requested == [
+        "http://cdn.example.org/img.png",
+        "http://cdn.example.org/real.png",
+    ]
+
+    conn2, requested2 = _fake_connection(
+        [(302, "http://cdn.example.org/real.png", b""), (200, None, _PNG_BYTES)]
+    )
+    connector2 = MediaConnector(
+        connection=conn2, allowed_media_domains=["cdn.example.org"]
+    )
+    assert (
+        await connector2.load_from_url_async(
+            "http://cdn.example.org/img.png", _PassthroughMediaIO()
+        )
+        == _PNG_BYTES
+    )
+    assert len(requested2) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "hops",
+    [
+        # Redirect to a host that is not allowlisted.
+        [(302, "http://evil.example.net/img.png", b""), (200, None, _PNG_BYTES)],
+        # Allowlisted host but a DIFFERENT service (port changed).
+        [(302, "http://127.0.0.1:8500/meta", b""), (200, None, _PNG_BYTES)],
+        # Redirect to a non-HTTP scheme.
+        [(302, "file:///etc/passwd", b""), (200, None, _PNG_BYTES)],
+    ],
+)
+async def test_redirect_blocked(hops):
+    """Every redirect hop is re-validated: non-allowlisted hosts, port
+    changes and non-HTTP schemes must all be denied."""
+    conn, requested = _fake_connection(hops)
+    connector = MediaConnector(connection=conn, allowed_media_domains=["127.0.0.1"])
+
+    # The connector wraps fetch-time URL-validation failures into a 422
+    # client error (VLLMUnprocessableEntityError); the fetch is blocked.
+    with pytest.raises(VLLMUnprocessableEntityError):
+        connector.load_from_url("http://127.0.0.1/img.png", _PassthroughMediaIO())
+    # The blocked hop was never fetched.
+    assert requested == ["http://127.0.0.1/img.png"]
+
+    conn2, requested2 = _fake_connection(hops)
+    connector2 = MediaConnector(connection=conn2, allowed_media_domains=["127.0.0.1"])
+
+    with pytest.raises(VLLMUnprocessableEntityError):
+        await connector2.load_from_url_async(
+            "http://127.0.0.1/img.png", _PassthroughMediaIO()
+        )
+    assert requested2 == ["http://127.0.0.1/img.png"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_redirect_chain_cross_host_allowlisted_ok():
+    """Cross-host redirects are fine when every hop's host is allowlisted
+    (and the port is preserved)."""
+    conn, requested = _fake_connection(
+        [
+            (302, "https://origin.example.net/file.png", b""),
+            (200, None, _PNG_BYTES),
+        ]
+    )
+    connector = MediaConnector(
+        connection=conn,
+        allowed_media_domains=["cdn.example.org", "origin.example.net"],
+    )
+
+    assert (
+        connector.load_from_url(
+            "https://cdn.example.org/file.png", _PassthroughMediaIO()
+        )
+        == _PNG_BYTES
+    )
+    assert requested == [
+        "https://cdn.example.org/file.png",
+        "https://origin.example.net/file.png",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_wildcard_allowlist_allows_any_redirect():
+    """The '*' entry (offline user-code helpers) disables restrictions."""
+    conn, requested = _fake_connection(
+        [
+            (302, "http://anywhere.example:9999/x.png", b""),
+            (200, None, _PNG_BYTES),
+        ]
+    )
+    connector = MediaConnector(connection=conn, allowed_media_domains=["*"])
+
+    assert (
+        connector.load_from_url("http://local.example/img.png", _PassthroughMediaIO())
+        == _PNG_BYTES
+    )
+    assert len(requested) == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_allowed_media_domains(video_url: str, num_frames: int):
@@ -391,6 +641,11 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
         },
         allowed_media_domains=[
             VLLM_S3_BUCKET_URL.removeprefix("https://"),
+            "www.bogotobogo.com",
+            "github.com",
+            # github.com/<org>/<repo>/raw/... redirects cross-host to
+            # raw.githubusercontent.com; every hop's host must be allowed.
+            "raw.githubusercontent.com",
         ],
     )
 

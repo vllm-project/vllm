@@ -347,6 +347,9 @@ def fetch_audio(
     media_connector = MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
+        # Offline user-code helper (never used by the online server):
+        # unrestricted media fetching is intentional here.
+        allowed_media_domains=["*"],
     )
     return media_connector.fetch_audio(audio_url)
 
@@ -368,6 +371,9 @@ def fetch_image(
     media_connector = MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
+        # Offline user-code helper (never used by the online server):
+        # unrestricted media fetching is intentional here.
+        allowed_media_domains=["*"],
     )
     return media_connector.fetch_image(image_url)
 
@@ -389,6 +395,9 @@ def fetch_video(
     media_connector = MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
+        # Offline user-code helper (never used by the online server):
+        # unrestricted media fetching is intentional here.
+        allowed_media_domains=["*"],
     )
     return media_connector.fetch_video(video_url)
 
