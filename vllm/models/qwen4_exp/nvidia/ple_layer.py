@@ -22,6 +22,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -132,6 +135,11 @@ def _get_ple_embedding_quant_method(
     prefix: str,
 ) -> QuantizeMethodBase | None:
     """Select global-scale FP8 only for quantized PLE checkpoint shards."""
+
+    if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+        if quant_config._resolve_quant_algo(prefix) == "FP8":
+            return Qwen4ExpPLEFp8EmbeddingMethod()
+        return None
 
     if not isinstance(quant_config, Fp8Config):
         return None
