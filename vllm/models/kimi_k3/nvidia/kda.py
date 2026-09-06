@@ -609,6 +609,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         return replace(
             spec,
             num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+            prefill_checkpoint_alignment=(
+                16 if self.kda_prefill_backend == "flashkda" else None
+            ),
         )
 
     def forward(
