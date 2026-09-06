@@ -1527,6 +1527,51 @@ class TestGLMGASamplingCaps:
         assert all(0 <= idx < 1000 for idx in indices)
 
 
+class TestGlm5NextSamplingCaps:
+    """Same bound as TestGLMGASamplingCaps, for the glm5next sampler.
+
+    ``fps`` and ``max_frames`` size a candidate walk of
+    ``duration * target_fps`` entries before deduplication, so an oversized
+    value allocates work unrelated to how many frames the clip holds.
+    """
+
+    @staticmethod
+    def _source(
+        total_frames: int, fps: float = 30.0, duration: float = 0
+    ) -> VideoSourceMetadata:
+        if duration == 0 and fps > 0 and total_frames > 1:
+            duration = round((total_frames - 1) / fps) + 1
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    def test_class_cap_overrides_kwargs_max_frames(self):
+        source = self._source(total_frames=10_000, fps=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=30, max_duration=-1)
+        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=100_000,
+        )
+        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
+
+    def test_class_cap_overrides_target_fps(self):
+        source = self._source(total_frames=2, fps=2.0, duration=1.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
+        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=2_000_000,
+        )
+        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
+
+    def test_normal_operation_unchanged(self):
+        """A 30s clip at the default 2.0 fps interval keeps its sampling."""
+        source = self._source(total_frames=900, fps=30.0, duration=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
+        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
+        assert all(0 <= idx < 900 for idx in indices)
+
+
 def test_glm5next_backend_selected_for_processor():
     """Glm5NextVideoProcessor maps to the glm5next loader so only the
     sampled frames are decoded instead of the whole container. Both the
