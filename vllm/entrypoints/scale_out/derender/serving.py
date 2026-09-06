@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import cast
 
 import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -19,16 +18,11 @@ from vllm.entrypoints.openai.models.serving import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import (
-    EngineInput,
-    MultiModalHashes,
-    MultiModalInput,
-    MultiModalPlaceholders,
-)
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.renderers.online_derenderer import OnlineDerenderer
 
-from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
+from ..token_in_token_out.mm_features import extract_mm_features
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
     DerenderChatStreamRequest,
@@ -37,7 +31,6 @@ from ..token_in_token_out.protocol import (
     DerenderStreamState,
     GenerateResponse,
     MultiModalFeatures,
-    PlaceholderRangeInfo,
 )
 
 logger = init_logger(__name__)
@@ -337,37 +330,4 @@ class ServingDerender(BaseServing):
     def _extract_mm_features(
         engine_input: EngineInput,
     ) -> MultiModalFeatures | None:
-        """Extract multimodal metadata from a rendered engine prompt.
-
-        Returns ``None`` for text-only prompts.
-        """
-        if engine_input.get("type") != "multimodal":
-            return None
-
-        # At this point engine_input is a MultiModalInput TypedDict.
-        mm_engine_input = cast(MultiModalInput, engine_input)
-        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
-        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
-
-        mm_placeholders = {
-            modality: [
-                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
-            ]
-            for modality, ranges in raw_placeholders.items()
-        }
-
-        # Serialize tensor data per modality.
-        kwargs_data: dict[str, list[str | None]] | None = None
-        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
-            kwargs_data = {}
-            for modality, items in raw_mm_kwargs.items():
-                kwargs_data[modality] = [
-                    encode_mm_kwargs_item(item) if item is not None else None
-                    for item in items
-                ]
-
-        return MultiModalFeatures(
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholders,
-            kwargs_data=kwargs_data,
-        )
+        return extract_mm_features(engine_input)

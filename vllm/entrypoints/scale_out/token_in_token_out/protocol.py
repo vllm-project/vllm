@@ -44,6 +44,14 @@ class PlaceholderRangeInfo(BaseModel):
     # placeholder masks that cannot be recomputed from offset+length alone.
 
 
+def _has_serialized_mm_items(
+    payload: dict[str, list[str | None]] | None,
+) -> bool:
+    if not payload:
+        return False
+    return any(item is not None for items in payload.values() for item in items)
+
+
 class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
@@ -67,6 +75,18 @@ class MultiModalFeatures(BaseModel):
     ``None`` for metadata-only (cache-hit) responses.
     """
 
+    mm_metadata: dict[str, list[str | None]] | None = None
+    """Per-modality serialized metadata for disaggregated prefill.
+
+    Each value is a list parallel to ``mm_hashes[modality]``. A ``str``
+    entry is a base64-encoded ``MultiModalKwargsItem`` containing only
+    placeholder-metadata and ``keep_on_cpu`` fields. ``None`` means that
+    the metadata is unavailable for that item. Prefill can use this
+    instead of ``kwargs_data`` only when ``ec_transfer_params`` is also
+    set, so embeddings arrive through the EC connector rather than from
+    ``pixel_values``.
+    """
+
     @model_validator(mode="after")
     def _validate_parallel_fields(self) -> "MultiModalFeatures":
         modalities = set(self.mm_hashes)
@@ -76,6 +96,8 @@ class MultiModalFeatures(BaseModel):
             )
         if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
             raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+        if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
+            raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
         flattened_ranges: list[tuple[int, int]] = []
         for modality in modalities:
@@ -92,6 +114,13 @@ class MultiModalFeatures(BaseModel):
             ):
                 raise ValueError(
                     f"{modality} kwargs_data and mm_hashes must have the same length"
+                )
+            if (
+                self.mm_metadata is not None
+                and len(self.mm_metadata[modality]) != num_hashes
+            ):
+                raise ValueError(
+                    f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
             flattened_ranges.extend(
                 (placeholder.offset, placeholder.offset + placeholder.length)
@@ -155,6 +184,22 @@ class GenerateRequest(BaseModel):
         if self.content_parts and self.features:
             raise ValueError("content_parts and features are mutually exclusive")
         return self
+
+    @model_validator(mode="after")
+    def _require_ec_for_metadata_only(self) -> "GenerateRequest":
+        features = self.features
+        if features is None:
+            return self
+        if not _has_serialized_mm_items(features.mm_metadata):
+            return self
+        if _has_serialized_mm_items(features.kwargs_data):
+            return self
+        if self.ec_transfer_params:
+            return self
+        raise ValueError(
+            "features.mm_metadata without features.kwargs_data requires "
+            "ec_transfer_params so embeddings can be loaded by the EC connector"
+        )
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
