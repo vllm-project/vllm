@@ -287,6 +287,81 @@ def test_force_end_does_not_protect_tool_call_inside_think():
     assert float(out[0, THINK_END]) == 0.0
 
 
+def test_force_end_does_not_rewrite_eos_after_speculative_tool_call():
+    h = ThinkingBudgetStateHolder(
+        _MockReasoningConfigWithToolCall(),
+        8,
+        2,
+        torch.device("cpu"),
+        False,
+    )
+    tokens = [THINK_START, 10, 11]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(
+                        reasoning_eos_policy="force_end",
+                        thinking_token_budget=10_000,
+                        stop_token_ids=[EOS],
+                    ),
+                    None,
+                    tokens,
+                )
+            ],
+            moved=(),
+        )
+    )
+    h.update_state([tokens], [[TOOL_CALL, EOS]])
+    assert h._state[0]["in_end"] is False
+    assert h._state[0]["force_index"] == []
+
+    logits = torch.zeros((2, VOCAB), dtype=torch.float32)
+    logits[1, EOS] = 5.0
+    out = h.apply_to_logits(logits, False, [[TOOL_CALL, EOS]])
+    assert float(out[1, EOS]) == 5.0
+    assert float(out[0, THINK_END]) == 0.0
+    assert float(out[1, THINK_END]) == 0.0
+
+
+def test_force_end_empty_spec_does_not_mask_next_request_row():
+    h = ThinkingBudgetStateHolder(
+        _MockReasoningConfig(),
+        8,
+        2,
+        torch.device("cpu"),
+        False,
+    )
+    tokens = [THINK_START, 10, 11]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(
+                        reasoning_eos_policy="force_end",
+                        stop_token_ids=[EOS],
+                    ),
+                    None,
+                    tokens,
+                ),
+            ],
+            moved=(),
+        )
+    )
+    h.update_state([tokens, [1]], [[], [7]])
+    logits = torch.zeros((1, VOCAB), dtype=torch.float32)
+    logits[0, EOS] = 5.0
+    out = h.apply_to_logits(logits, False, [[], [7]])
+    assert float(out[0, EOS]) == 5.0
+    assert float(out[0, THINK_END]) == 0.0
+
+
 def test_force_end_forces_at_speculative_eos_index():
     h = ThinkingBudgetStateHolder(
         _MockReasoningConfig(),
@@ -355,6 +430,29 @@ def test_from_optional_forwards_reasoning_eos_policy():
     assert SamplingParams.from_optional().reasoning_eos_policy == "stop"
     params = SamplingParams.from_optional(reasoning_eos_policy="force_end")
     assert params.reasoning_eos_policy == "force_end"
+
+
+def test_from_optional_preserves_positional_include_stop_str_in_output():
+    # thinking_token_budget is the 13th positional arg; include_stop_str_in_output
+    # must still bind at the 14th, not to reasoning_eos_policy.
+    params = SamplingParams.from_optional(
+        1,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        0,
+        0.0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+    assert params.include_stop_str_in_output is True
+    assert params.reasoning_eos_policy == "stop"
 
 
 def test_stop_token_ids_that_finish_request_respects_ignore_eos():

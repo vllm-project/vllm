@@ -280,6 +280,20 @@ class ThinkingBudgetStateHolder:
         stop_set = set(stop_ids)
         return any(tok in stop_set for tok in state.get("spec_token_ids") or [])
 
+    @staticmethod
+    def _sequence_at(tokens: list[int], index: int, sequence: list[int]) -> bool:
+        n = len(sequence)
+        return bool(n) and tokens[index : index + n] == sequence
+
+    def _spec_reasoning_exit_index(self, spec: list[int]) -> int | None:
+        """First spec index that leaves think (implicit end or ``</think>``)."""
+        for i in range(len(spec)):
+            if self._sequence_at(spec, i, self.implicit_end_token_ids):
+                return i
+            if self._sequence_at(spec, i, self.think_end_token_ids):
+                return i
+        return None
+
     def _maybe_force_end_from_spec_eos(self, state: dict[str, Any]) -> None:
         if (
             state.get("reasoning_eos_policy") != "force_end"
@@ -290,8 +304,11 @@ class ThinkingBudgetStateHolder:
         stop_ids = set(state.get("stop_token_ids") or [])
         if not stop_ids:
             return
-        for i, token_id in enumerate(state.get("spec_token_ids") or []):
-            if token_id in stop_ids:
+        spec = state.get("spec_token_ids") or []
+        exit_at = self._spec_reasoning_exit_index(spec)
+        limit = len(spec) if exit_at is None else exit_at
+        for i in range(limit):
+            if spec[i] in stop_ids:
                 state["in_think"] = False
                 state["in_end"] = True
                 state["end_count"] = 0
@@ -595,9 +612,14 @@ class ThinkingBudgetStateHolder:
     ) -> int:
         if not self.in_spec_mode or predict_bonus_token:
             return 1
-        if seq_idx < len(spec_token_ids_for_layout):
-            return max(len(spec_token_ids_for_layout[seq_idx]), 1)
-        return 1
+        if seq_idx >= len(spec_token_ids_for_layout):
+            return 0
+        spec = spec_token_ids_for_layout[seq_idx]
+        n_rows = len(spec)
+        exit_at = self._spec_reasoning_exit_index(spec)
+        if exit_at is not None:
+            n_rows = min(n_rows, exit_at)
+        return n_rows
 
     def _apply_eos_policy_to_logits(
         self,

@@ -13,7 +13,11 @@ if not torch.cuda.is_available():
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
+from vllm.v1.worker.gpu.sample.thinking_budget import (
+    _COLD_SCAN_BLOCK,
+    _MAX_STOP_IDS,
+    ThinkingBudgetState,
+)
 from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = torch.device("cuda")
@@ -351,6 +355,41 @@ def test_v2_force_end_masks_eos_when_not_argmax():
     assert out[0, EOS] < 0
     assert out[0, END] == 0
     assert out[0, 7] == pytest.approx(5.0)
+
+
+def test_v2_force_end_rejects_too_many_stop_token_ids():
+    req_states = _make_req_states([1, START, 10], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    with pytest.raises(ValueError, match="reasoning_eos_policy"):
+        state.add_request(
+            3,
+            SamplingParams(
+                reasoning_eos_policy="force_end",
+                stop_token_ids=list(range(_MAX_STOP_IDS + 1)),
+            ),
+        )
+
+
+def test_v2_force_end_keeps_tool_call_across_cold_scan_blocks():
+    pad = [10] * _COLD_SCAN_BLOCK
+    tokens = [1, START, *pad, TOOL_CALL, 30]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfigWithToolCall())
+    state.add_request(
+        3,
+        SamplingParams(
+            reasoning_eos_policy="force_end",
+            stop_token_ids=[EOS],
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    logits[0, EOS] = 5.0
+    out = _apply(state, logits, input_ids=[30], local_pos=[0])
+
+    assert out[0, EOS] == pytest.approx(5.0)
+    assert out[0, END] == 0
 
 
 def test_v2_force_end_does_not_protect_tool_call():

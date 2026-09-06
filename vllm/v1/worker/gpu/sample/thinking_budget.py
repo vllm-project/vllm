@@ -124,11 +124,14 @@ class ThinkingBudgetState:
         self._stop_cpu[req_idx].fill(-1)
         if policy == 1:
             stop_ids = sampling_params.stop_token_ids_that_finish_request()
-            n_stop = min(len(stop_ids), _MAX_STOP_IDS)
-            if n_stop:
-                self._stop_cpu[req_idx, :n_stop] = np.asarray(
-                    stop_ids[:n_stop], dtype=np.int32
+            n_stop = len(stop_ids)
+            if n_stop > _MAX_STOP_IDS:
+                raise ValueError(
+                    "reasoning_eos_policy='force_end' supports at most "
+                    f"{_MAX_STOP_IDS} finishing stop token IDs"
                 )
+            if n_stop:
+                self._stop_cpu[req_idx, :n_stop] = np.asarray(stop_ids, dtype=np.int32)
             self._eos_dirty = True
 
     def apply_staged_writes(self) -> None:
@@ -240,11 +243,11 @@ def _update_committed_marker_cache_kernel(
         last_end = -1
 
     if scan_pos == 0 and last_start < 0 and last_end < 0:
-        # Cold scan: walk backward in vectorized blocks, stopping at the first
-        # block with a marker; only the relative order of the two positions
-        # found matters below.
+        # Cold scan: walk backward in vectorized blocks. Keep the latest start
+        # and end across blocks so an implicit end in a later block is not
+        # overwritten when an earlier block has only ``<think>``.
         block_hi = total_len
-        while block_hi > 0 and last_start < 0 and last_end < 0:
+        while block_hi > 0 and (last_start < 0 or last_end < 0):
             block_lo = block_hi - BLOCK
             if block_lo < 0:
                 block_lo = 0
@@ -270,8 +273,12 @@ def _update_committed_marker_cache_kernel(
                 )
                 end_match = end_match & (actual == expected)
 
-            last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
-            last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
+            last_start = tl.maximum(
+                last_start, tl.max(tl.where(start_match, offs, -1), axis=0)
+            )
+            last_end = tl.maximum(
+                last_end, tl.max(tl.where(end_match, offs, -1), axis=0)
+            )
             if IMPLICIT_LEN > 0:
                 impl_match = (offs < block_hi) & (offs + IMPLICIT_LEN <= total_len)
                 for j in tl.static_range(0, IMPLICIT_LEN):

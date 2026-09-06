@@ -77,7 +77,7 @@ def test_chat_completion_request_accepts_reasoning_eos_policy():
 
 
 def test_chat_completion_request_rejects_invalid_reasoning_eos_policy():
-    with pytest.raises(Exception, match="reasoning_eos_policy"):
+    with pytest.raises(VLLMValidationError, match="reasoning_eos_policy"):
         ChatCompletionRequest.model_validate(
             {
                 "model": "qwen",
@@ -113,7 +113,7 @@ def test_completion_request_accepts_reasoning_eos_policy():
 
 
 def test_completion_request_rejects_invalid_reasoning_eos_policy():
-    with pytest.raises(Exception, match="reasoning_eos_policy"):
+    with pytest.raises(VLLMValidationError, match="reasoning_eos_policy"):
         CompletionRequest.model_validate(
             {
                 "model": "qwen",
