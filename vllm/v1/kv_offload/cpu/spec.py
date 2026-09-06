@@ -114,10 +114,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "its size in slots and in bytes, and the most KV tokens it "
                     "can serve when full, at any request length up to "
                     "max_model_len, or 'None' when max_model_len is not known. "
-                    "The token count assumes the tier keeps only the window tail "
-                    "of a bounded group, which prefix_cache_retention_interval=0 "
-                    "gives. Emitted from the first scheduler step, so absent on "
-                    "an idle engine. Sum across engines for the whole instance."
+                    "The token count charges a bounded group its cap: the window "
+                    "tail for a sliding window, which "
+                    "prefix_cache_retention_interval=0 gives, and one state for a "
+                    "recurrent group. Emitted from the first scheduler step, so "
+                    "absent on an idle engine. Sum across engines for the whole "
+                    "instance."
                 ),
                 labelnames=CPU_TIER_INFO_LABELS,
             ),
