@@ -171,8 +171,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "pure MLA models"
                 )
             assert len(plan.all_source_ranks) == 1
+            remote_physical_block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
             remote_by_region = self._block_ids_by_region(
-                meta.remote.block_ids, remote_region_groups
+                remote_physical_block_ids, remote_region_groups
             )
             read_specs = [
                 ReadSpec(
@@ -194,9 +198,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
             def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
                 return [
-                    list(block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
+                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
                     for g in range(num_groups)
                 ]
 
@@ -227,9 +229,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_info.remote_physical_blocks_per_logical,
                     )
                 else:
-                    local_physical_ids = group_ids(
-                        meta.local_physical_block_ids, rank
-                    )
+                    local_physical_ids = group_ids(meta.local_physical_block_ids, rank)
                     remote_physical_ids = group_ids(meta.remote.block_ids, rank)
                 read_specs.append(
                     ReadSpec(
@@ -262,12 +262,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 # reads. Get the memory chunk onto which we will write to.
                 split_key = (tp_ratio, remote_block_size)
                 local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
+                local_dram_handle = (
+                    self._dram_src_handles_by_tp_ratio[split_key][i]
+                    if self._mixed_mem_types
+                    else None
+                )
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
                 ]
+                local_dram_handle = (
+                    self._dram_src_handles_by_block_size[remote_block_size]
+                    if self._mixed_mem_types
+                    else None
+                )
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
@@ -280,6 +290,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
+                local_dram_handle=local_dram_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
             ):
@@ -303,6 +314,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         request_id: str,
         remote_request_id: str,
         local_xfer_side_handle: int,
+        local_dram_handle: int | None,
         remote_xfer_side_handle: int,
         expected_consumers: int,
     ) -> bool:
@@ -426,6 +438,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     request_id=request_id,
                     local_block_size_key=remote_info.remote_block_size,
                     local_device_handle=local_xfer_side_handle,
+                    local_dram_handle=local_dram_handle,
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
@@ -466,6 +479,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         request_id: str,
         local_block_size_key: int,
         local_device_handle: int,
+        local_dram_handle: int | None,
         remote_xfer_side_handle: int,
         local_block_descs_ids: np.ndarray,
         remote_block_descs_ids: np.ndarray,
@@ -479,8 +493,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
+        assert local_dram_handle is not None
         reads = (
-            (is_dram, self._dram_src_handles_by_block_size[local_block_size_key]),
+            (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
         )
         handles: list[int] = []

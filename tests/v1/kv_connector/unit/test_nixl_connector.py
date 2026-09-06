@@ -1911,6 +1911,7 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
     worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
     worker._dram_src_handles_by_block_size = {16: 10}
+    worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
     worker._failed_recv_pending = set()
@@ -1923,6 +1924,7 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
         request_id="request",
         local_block_size_key=16,
         local_device_handle=20,
+        local_dram_handle=10,
         remote_xfer_side_handle=30,
         local_block_descs_ids=np.array([0, 2]),
         remote_block_descs_ids=np.array([5, 7]),
@@ -2771,9 +2773,9 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=([1, 2, 3],),
+        local_block_ids=([1, 2, 3], [7, 8]),
         kv_transfer_params={
-            "remote_block_ids": ([4, 5, 6],),
+            "remote_block_ids": ([4, 5, 6], [9, 10]),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -2795,7 +2797,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
 
     # Check that blocks were marked invalid
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {1, 2, 3}
+    assert invalid_blocks == {1, 2, 3, 7, 8}
 
     # Check that request appears in get_finished
     _, done_recving = connector.get_finished(finished_req_ids=set())

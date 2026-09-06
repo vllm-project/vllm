@@ -628,6 +628,7 @@ class NixlBaseConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
+        self._dram_src_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
@@ -2068,6 +2069,8 @@ class NixlBaseConnectorWorker:
             # while the SSM state is sharded across every remote TP rank.
             # We only do this once per remote (tp_size, block_size).
             self.src_xfer_handles_by_tp_ratio[split_key] = []
+            if self._mixed_mem_types:
+                self._dram_src_handles_by_tp_ratio[split_key] = []
 
             for handle_data in self._build_local_splits_from_plan(
                 plan,
@@ -2075,6 +2078,17 @@ class NixlBaseConnectorWorker:
                 self.num_descs * block_size_ratio,
                 block_size_ratio,
             ):
+                if self._mixed_mem_types:
+                    handle_data = np.asarray(handle_data)
+                    desc_is_dram = self._desc_is_dram_by_block_size[remote_block_size]
+                    dram_descs = self.nixl_wrapper.get_xfer_descs(
+                        handle_data[desc_is_dram], "DRAM"
+                    )
+                    dram_handle = self.nixl_wrapper.prep_xfer_dlist(
+                        "NIXL_INIT_AGENT", dram_descs
+                    )
+                    self._dram_src_handles_by_tp_ratio[split_key].append(dram_handle)
+                    handle_data = handle_data[~desc_is_dram]
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
                 )
@@ -2763,7 +2777,9 @@ class NixlBaseConnectorWorker:
             self._pending_recv_notifs.pop(req_id, None)
             return
         if not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+            self._invalid_block_ids.put(
+                {block_id for group in meta.local_block_ids for block_id in group}
+            )
         self._failed_recv_reqs.put(req_id)
         self._pending_recv_notifs.pop(req_id, None)
 
@@ -3197,6 +3213,10 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
+        for handles in self._dram_src_handles_by_tp_ratio.values():
+            for handle in handles:
+                self.nixl_wrapper.release_dlist_handle(handle)
+        self._dram_src_handles_by_tp_ratio.clear()
         for handle in self._dram_src_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
         self._dram_src_handles_by_block_size.clear()
