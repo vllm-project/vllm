@@ -65,15 +65,22 @@ def test_hisparse_worker_finish_step_reads_completed_snapshot(monkeypatch):
     worker._metrics_pending = False
     worker._metrics_event = MagicMock()
     worker._metrics_event.query.return_value = True
+    compute_stream = MagicMock()
     group = SimpleNamespace(
         swap_stats=torch.tensor([12, 4], dtype=torch.uint64),
         swap_stats_host=torch.empty(2, dtype=torch.uint64),
         stats_row_bytes=16,
+        copy_stream=MagicMock(),
     )
     worker.leader_runtimes = [SimpleNamespace(index_group=group)]
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        hisparse_worker_module, "current_stream", lambda: compute_stream
+    )
 
     assert worker.finish_step() is None
+    compute_stream.wait_stream.assert_called_once_with(group.copy_stream)
+    group.copy_stream.wait_stream.assert_called_once_with(compute_stream)
     worker._metrics_event.record.assert_called_once_with()
     assert group.swap_stats.tolist() == [0, 0]
     assert worker.finish_step() == HiSparseStats(12, 4, 64)

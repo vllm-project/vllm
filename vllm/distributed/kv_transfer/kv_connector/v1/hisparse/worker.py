@@ -528,10 +528,13 @@ class HiSparseConnectorWorker:
             and not self._metrics_pending
             and not torch.cuda.is_current_stream_capturing()
         ):
+            compute_stream = current_stream()
             for runtime in self.leader_runtimes:
                 group = runtime.index_group
+                compute_stream.wait_stream(group.copy_stream)
                 group.swap_stats_host.copy_(group.swap_stats, non_blocking=True)
                 group.swap_stats.zero_()
+                group.copy_stream.wait_stream(compute_stream)
             self._metrics_event.record()
             self._metrics_pending = True
         return delta
