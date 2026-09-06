@@ -1182,17 +1182,17 @@ class ModelConfig:
         runner: RunnerOption,
         convert: ConvertOption,
     ) -> RunnerType:
+        """Determine the runner type based on runner options and architecture.
+
+        Args:
+            architectures: List of model architecture names.
+            runner: The specified runner option ("auto", "generate", etc.).
+            convert: The specified model convert option.
+
+        Returns:
+            The resolved RunnerType.
+        """
         if runner != "auto":
-            if runner == "pooling" and not self.registry.is_pooling_model(
-                architectures, self
-            ):
-                pooling_converts = _RUNNER_CONVERTS["pooling"]
-                convert_option = "<" + "|".join(pooling_converts) + ">"
-                raise ValueError(
-                    "This model does not support `--runner pooling`. "
-                    f"You can pass `--convert {convert_option}` to adapt "
-                    "it into a pooling model."
-                )
             return runner
 
         if convert in {"auto", "none"}:
