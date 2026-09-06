@@ -236,6 +236,7 @@ from .utils import (
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    propagate_kv_sharing_scales,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -7256,6 +7257,11 @@ class GPUModelRunner(
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
+        # Sharing layers read a cache written with the target's k/v scales.
+        propagate_kv_sharing_scales(
+            self.compilation_config.static_forward_context,
+            self.shared_kv_cache_layers,
+        )
 
         num_attn_module = (
             2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
