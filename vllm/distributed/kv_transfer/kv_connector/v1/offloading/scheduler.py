@@ -1240,6 +1240,10 @@ class OffloadingConnectorScheduler:
     ) -> dict[int, TransferJob]:
         store_jobs: dict[int, TransferJob] = {}
         num_groups = len(self.config.kv_group_configs)
+        config_idx_by_group = {
+            config.group_idx: idx
+            for idx, config in enumerate(self.config.kv_group_configs)
+        }
         for req_id, entries in handoffs.items():
             req_status = self._req_status.get(req_id)
             if req_status is None:
@@ -1247,7 +1251,10 @@ class OffloadingConnectorScheduler:
             req = req_status.req
             max_boundary = self._calc_num_offloadable_tokens(req_status, req.num_tokens)
             for group_idx, block_id, boundary in entries:
-                group_config = self.config.kv_group_configs[group_idx]
+                config_idx = config_idx_by_group.get(group_idx)
+                if config_idx is None:
+                    continue
+                group_config = self.config.kv_group_configs[config_idx]
                 if (
                     block_id == 0
                     or boundary > max_boundary
@@ -1276,9 +1283,11 @@ class OffloadingConnectorScheduler:
                     fenced_block_ids=[block_id],
                 )
                 group_sizes = [0] * num_groups
-                group_sizes[group_idx] = 1
+                group_sizes[config_idx] = 1
                 block_indices = [0] * num_groups
-                block_indices[group_idx] = boundary // group_config.tokens_per_block - 1
+                block_indices[config_idx] = (
+                    boundary // group_config.tokens_per_block - 1
+                )
                 store_jobs[job_id] = TransferJob(
                     req_id=req_id,
                     src_spec=GPULoadStoreSpec(

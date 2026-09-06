@@ -68,7 +68,6 @@ class OffloadingConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
-        num_blocks = kv_cache_config.num_blocks
         selected_group_ids = get_offloading_group_ids(kv_cache_config)
         selected_groups = tuple(
             kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
@@ -84,6 +83,10 @@ class OffloadingConnectorWorker:
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
         for kv_cache_group in selected_groups:
+            assert kv_cache_group.block_pool_id is not None
+            num_blocks = kv_cache_config.num_blocks_by_pool[
+                kv_cache_group.block_pool_id
+            ]
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -142,6 +145,7 @@ class OffloadingConnectorWorker:
             kv_cache_config.kv_cache_groups
         ):
             (tensor,) = tensors_per_block[packed_layer_name]
+            num_blocks = tensor.shape[0]
             block_stride = tensor.stride(0)
             packed_tensor = tensor.as_strided(
                 (num_blocks, block_stride),

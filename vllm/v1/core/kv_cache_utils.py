@@ -1852,7 +1852,7 @@ def _get_hisparse_hma_config(
     gpu_num_blocks = available_memory // gpu_stride
     override = vllm_config.cache_config.num_gpu_blocks_override
     if override is not None:
-        host_num_blocks = gpu_num_blocks = override
+        gpu_num_blocks = override
     if host_num_blocks <= 0 or gpu_num_blocks <= 0:
         raise ValueError(
             "HiSparse HMA has no allocatable blocks: "
@@ -2782,7 +2782,7 @@ def _estimate_max_model_len_from_groups(
             try:
                 config = _get_hisparse_hma_config(
                     vllm_config,
-                    kv_cache_groups[0],
+                    kv_cache_groups,
                     available_memory,
                     hisparse_host_budget,
                     log_layout=False,

@@ -1522,7 +1522,10 @@ class KVCacheConfig:
             group.block_pool_id
             for group in self.kv_cache_groups
             if group.block_pool_id is not None
-            and isinstance(group.kv_cache_spec, MambaSpec)
+            and any(
+                isinstance(spec, MambaSpec)
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            )
         }
         for group in self.kv_cache_groups:
             if group.block_pool_id is None:

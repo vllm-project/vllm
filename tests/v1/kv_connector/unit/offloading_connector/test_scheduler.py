@@ -301,6 +301,22 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     assert src_spec.block_indices == [0, 0]
 
 
+def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
+    scheduler = _make_partial_tail_scheduler()
+    indexer_config = scheduler.config.kv_group_configs[1]
+    scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
+    _make_partial_tail_request(scheduler)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
+
+    [job] = jobs.values()
+    assert job.src_spec.group_sizes == [1]
+    assert job.src_spec.block_indices == [0]
+
+
 def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)

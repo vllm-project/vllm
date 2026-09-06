@@ -136,6 +136,9 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         host_budget=2**30,
         log_layout=False,
     )
+    assert cache_config.num_blocks == 7
+    assert cache_config.hisparse_host_num_blocks is not None
+    assert cache_config.hisparse_host_num_blocks > 7
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert host_group.kv_cache_spec.block_size == gpu_block_size
@@ -3954,6 +3957,22 @@ def test_iter_layer_specs_returns_group_members():
         block_size=4, kv_cache_specs={"a": full, "b": mla}
     )
     assert list(iter_layer_specs(wrapped)) == [full, mla]
+
+
+def test_wrapped_mamba_group_requires_block_zeroing():
+    mamba = MambaSpec(
+        block_size=4,
+        shapes=((4, 1),),
+        dtypes=(torch.float32,),
+    )
+    wrapped = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"mamba": mamba})
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], wrapped)],
+    )
+
+    assert config.zeroing_block_pool_ids == frozenset({0})
 
 
 def _spec_decode_grouping_config(method="dspark", model_type=None):

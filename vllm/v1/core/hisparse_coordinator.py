@@ -627,7 +627,7 @@ class HiSparseCoordinator:
                 for manager in self.resident_managers
             ]
             if host_blocks is None or any(blocks is None for blocks in resident_blocks):
-                return ()
+                continue
             token_position = num_computed_tokens
             end_position = token_position + num_scheduled_tokens
             while token_position < end_position:
