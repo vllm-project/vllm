@@ -281,6 +281,9 @@ class AsyncLLM(EngineClient):
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()
 
+    def has_request(self, request_id: str) -> bool:
+        return self.output_processor.has_request(request_id)
+
     def get_num_queued_tokens(self) -> int:
         return self.output_processor.get_num_queued_tokens()
 
@@ -832,7 +835,7 @@ class AsyncLLM(EngineClient):
 
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False
-    ) -> None:
+    ) -> list[str]:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
@@ -843,6 +846,7 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
+        return all_request_ids
 
     async def notify_kv_transfer_request_rejected(
         self,
