@@ -266,9 +266,7 @@ def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
     # Stage 0 owns the post-layer-1 tap; it rides the wire under its global
     # slot key.
     stage0_aux = stage0_hidden + stage0_residual
-    torch.testing.assert_close(
-        stage0_out.tensors["aux_hidden_states_0"], stage0_aux
-    )
+    torch.testing.assert_close(stage0_out.tensors["aux_hidden_states_0"], stage0_aux)
 
     monkeypatch.setattr(
         kimi_model,

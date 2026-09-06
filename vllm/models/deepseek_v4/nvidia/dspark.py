@@ -347,8 +347,11 @@ def _insert_context_kv(
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
-    # load_dspark_model always aliases the target's.
+    # load_dspark_model aliases the target's — except under PP, where the
+    # target's table sits on the first stage and the drafter loads its own
+    # copy of the shared embed weight (see load_weights).
     has_own_embed_tokens = False
+    loads_own_embed_under_pp = True
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None

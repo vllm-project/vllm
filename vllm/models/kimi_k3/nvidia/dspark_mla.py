@@ -9,12 +9,19 @@ import torch.nn as nn
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    model_parallel_is_initialized,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -27,6 +34,12 @@ from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
+
+
+def _target_pp_world_size() -> int:
+    if not model_parallel_is_initialized():
+        return 1
+    return get_pp_group().world_size
 
 
 def _duplicate_context_kv_weights(
@@ -137,8 +150,18 @@ class K3DSparkModel(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
 
-        # The frozen target embedding is aliased after the draft checkpoint loads.
+        # The frozen target embedding is aliased after the draft checkpoint
+        # loads. Under pipeline parallelism that table exists only on the
+        # first stage while the drafter runs on the last, so the draft builds
+        # its own table and loads embed_tokens.weight from its checkpoint
+        # (the K3 DSpark checkpoint always ships it).
         self.embed_tokens: nn.Module | None = None
+        if _target_pp_world_size() > 1:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         self.context_proj = ReplicatedLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
@@ -395,18 +418,19 @@ class K3DSparkModel(nn.Module):
         return hidden_states
 
 
-class K3DSparkForCausalLM(nn.Module):
-    has_own_embed_tokens = False
-    has_own_lm_head = False
-    draft_id_to_target_id = None
-    hf_to_vllm_mapper = WeightsMapper(
-        # confidence_head is training-only. The frozen target embedding and LM
-        # head are shared after this draft-specific checkpoint is loaded.
-        orig_to_new_substr={
-            "confidence_head": None,
-            "embed_tokens": None,
-            "lm_head": None,
-        },
+def _build_weights_mapper(*, drop_embed: bool) -> WeightsMapper:
+    # confidence_head is training-only. The frozen target LM head is shared
+    # after this draft-specific checkpoint is loaded; the embedding is shared
+    # too, except under pipeline parallelism where the drafter cannot reach
+    # the first-stage table and loads its own copy instead.
+    orig_to_new_substr = {
+        "confidence_head": None,
+        "lm_head": None,
+    }
+    if drop_embed:
+        orig_to_new_substr["embed_tokens"] = None
+    return WeightsMapper(
+        orig_to_new_substr=orig_to_new_substr,
         orig_to_new_prefix={"": "model."},
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -415,6 +439,17 @@ class K3DSparkForCausalLM(nn.Module):
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         },
     )
+
+
+class K3DSparkForCausalLM(nn.Module):
+    # The checkpoint ships embed_tokens.weight but no lm_head: the embedding
+    # is aliased from the target, except under PP where the drafter builds
+    # and loads its own table (the target's lives on the first stage).
+    has_own_embed_tokens = False
+    loads_own_embed_under_pp = True
+    has_own_lm_head = False
+    draft_id_to_target_id = None
+    hf_to_vllm_mapper = _build_weights_mapper(drop_embed=True)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -427,6 +462,10 @@ class K3DSparkForCausalLM(nn.Module):
             start_layer_id=target_layer_num,
             prefix=maybe_prefix(prefix, "model"),
         )
+        if _target_pp_world_size() > 1:
+            # The draft built its own embedding table; keep the checkpoint's
+            # embed_tokens.weight mapping instead of dropping it.
+            self.hf_to_vllm_mapper = _build_weights_mapper(drop_embed=False)
 
         # Assigned by load_dspark_model from the target. Keeping no placeholder
         # avoids a transient full-vocabulary allocation for this 163k-vocab model.
