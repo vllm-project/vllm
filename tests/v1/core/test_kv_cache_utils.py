@@ -157,6 +157,19 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         for spec in auxiliary_specs
         if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
     )
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        cache_config,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=16,
+                enable_prefix_caching=True,
+                prefix_match_unit=None,
+            ),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+            kv_transfer_config=object(),
+        ),
+    )
+    assert scheduler_block_size == hash_block_size == gpu_block_size
 
 
 def test_hisparse_rejects_deepseek_v4():
