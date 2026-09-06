@@ -637,7 +637,7 @@ class Glm5NextModel(nn.Module):
             # Reserve room for the incomplete pool tail.
             kpool = config.index_kpool
             assert kpool is not None
-            buffer_width = topk_tokens + tail
+            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
             # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
             sparse_topk_block_n = 128
             buffer_width = (
