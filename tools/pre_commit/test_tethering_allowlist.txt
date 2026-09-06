@@ -74,6 +74,13 @@ tests/test_triton_utils.py  # root test_*.py not in misc.yaml's by-name list
 tests/test_version.py  # root test_*.py not in misc.yaml's by-name list
 tests/test_zen_cpu_platform_detection.py  # root test_*.py not in misc.yaml's by-name list
 
+# tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs;
+# these few are not reached by any job in .buildkite/test_areas/ or test-amd.yaml.
+tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py  # run only by .buildkite/hardware_tests/cpu.yaml, outside the pipeline set this check parses
+tests/v1/e2e/test_replayssm_decode.py  # ReplaySSM decode test (#52506) wired into no job
+tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
+tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py  # run only by .buildkite/intel_jobs/misc_intel.yaml (XPU), outside the pipeline set this check parses
+
 # tests/platforms/
 tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platforms/
 
