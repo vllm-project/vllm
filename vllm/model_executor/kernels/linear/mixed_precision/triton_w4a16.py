@@ -26,6 +26,7 @@ from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layou
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -161,7 +162,7 @@ def triton_w4a16_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-def triton_w4a16_gemm(
+def _triton_w4a16_gemm_impl(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [K, N//8] int32
     scales: torch.Tensor,  # [K//G, N] fp16/bf16
@@ -268,6 +269,36 @@ def triton_w4a16_gemm(
         BLOCK_K=BLOCK_K,
     )
     return c
+
+
+def _triton_w4a16_gemm_fake(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.empty((a.size(0), b_q.size(1) * 8), dtype=a.dtype, device=a.device)
+
+
+direct_register_custom_op(
+    op_name="triton_w4a16_gemm",
+    op_func=_triton_w4a16_gemm_impl,
+    mutates_args=[],
+    fake_impl=_triton_w4a16_gemm_fake,
+)
+
+
+def triton_w4a16_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.ops.vllm.triton_w4a16_gemm(a, b_q, scales, qzeros, group_size, zp_bias)
 
 
 class TritonW4A16LinearKernel(MPLinearKernel):
