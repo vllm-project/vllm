@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.platform_utils import is_uva_available
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -2549,6 +2550,16 @@ class VllmConfig:
         unsupported: list[str] = []
         model_config = self.model_config
         speculative_config = self.speculative_config
+
+        # The V2 runner stages its host->device copies through UVA buffers,
+        # which need pinned host memory. Where the platform reports none
+        # (WSL2 keeps pinned memory opt-in), the worker would otherwise die
+        # at init_device with a bare "UVA is not available".
+        if not is_uva_available():
+            unsupported.append(
+                "platforms without UVA (pinned host memory unavailable; "
+                "on WSL2 set VLLM_WSL2_ENABLE_PIN_MEMORY=1)"
+            )
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
