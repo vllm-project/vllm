@@ -2032,6 +2032,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2280,9 +2281,9 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
