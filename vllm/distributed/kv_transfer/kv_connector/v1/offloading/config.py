@@ -5,6 +5,9 @@
 from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import round_up
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    get_sliding_window_size_in_chunks,
+)
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
@@ -57,32 +60,6 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     return spec.page_size_bytes * len(group.layer_names)
 
 
-def _blocks_hold_tokens(kv_cache_spec: KVCacheSpec) -> bool:
-    """Whether a block in this layer's cache holds tokens.
-
-    MambaSpec is not an AttentionSpec: a block holds one recurrent state
-    regardless of block_size. HiddenStateCacheSpec is an AttentionSpec but its
-    blocks hold activations, not tokens; the grouping code excludes it by name
-    for the same reason (see kv_cache_utils.py).
-    """
-    return isinstance(kv_cache_spec, AttentionSpec) and not isinstance(
-        kv_cache_spec, HiddenStateCacheSpec
-    )
-
-
-def _blocks_hold_tokens(kv_cache_spec: KVCacheSpec) -> bool:
-    """Whether a block in this layer's cache holds tokens.
-
-    MambaSpec is not an AttentionSpec: a block holds one recurrent state
-    regardless of block_size. HiddenStateCacheSpec is an AttentionSpec but its
-    blocks hold activations, not tokens; the grouping code excludes it by name
-    for the same reason (see kv_cache_utils.py).
-    """
-    return isinstance(kv_cache_spec, AttentionSpec) and not isinstance(
-        kv_cache_spec, HiddenStateCacheSpec
-    )
-
-
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -101,26 +78,17 @@ def build_offloading_config(
     )
     if not selected_groups:
         raise ValueError("KV offloading found no eligible cache groups.")
-    groups = tuple(
-        OffloadingGroupConfig(
-            group_id=group_id,
-            tokens_per_block=resolve_dcp_kv_block_size(
-                group.kv_cache_spec,
-                parallel_config.decode_context_parallel_size,
-            ),
-            layer_names=tuple(group.layer_names),
-            blocks_hold_tokens=all(
-                _blocks_hold_tokens(layer_spec)
-                for layer_spec in iter_layer_specs(group.kv_cache_spec)
-            ),
-        )
-        for group_id, group in selected_groups
-    )
 
+    group_tokens_per_block = tuple(
+        resolve_dcp_kv_block_size(
+            group.kv_cache_spec, parallel_config.decode_context_parallel_size
+        )
+        for _, group in selected_groups
+    )
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
-    for group in groups:
-        assert group.tokens_per_block % tokens_per_hash == 0, (
-            f"tokens_per_block={group.tokens_per_block} not divisible by "
+    for tokens_per_block in group_tokens_per_block:
+        assert tokens_per_block % tokens_per_hash == 0, (
+            f"tokens_per_block={tokens_per_block} not divisible by "
             f"tokens_per_hash={tokens_per_hash}. "
             f"Hybrid models (e.g. Mamba+Attention) need "
             f"--enable-prefix-caching to align block sizes."
@@ -145,7 +113,7 @@ def build_offloading_config(
     elif tokens_per_chunk is not None:
         tokens_per_chunk_int = int(tokens_per_chunk)
 
-        unique_tokens_per_block = {group.tokens_per_block for group in groups}
+        unique_tokens_per_block = set(group_tokens_per_block)
 
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "
@@ -164,6 +132,35 @@ def build_offloading_config(
                 f"{round_up(tokens_per_chunk_int, tokens_per_block)} instead, or set "
                 f"'blocks_per_chunk' to express the chunk size in blocks."
             )
+
+    groups = tuple(
+        OffloadingGroupConfig(
+            group_id=group_id,
+            tokens_per_block=tokens_per_block,
+            layer_names=tuple(group.layer_names),
+            sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                next(iter(iter_layer_specs(group.kv_cache_spec))),
+                tokens_per_block * blocks_per_chunk,
+            ),
+        )
+        for (group_id, group), tokens_per_block in zip(
+            selected_groups, group_tokens_per_block
+        )
+    )
+
+    groups = tuple(
+        OffloadingGroupConfig(
+            tokens_per_block=tokens_per_block,
+            layer_names=tuple(group.layer_names),
+            sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                next(iter(iter_layer_specs(group.kv_cache_spec))),
+                tokens_per_block * blocks_per_chunk,
+            ),
+        )
+        for group, tokens_per_block in zip(
+            kv_cache_config.kv_cache_groups, group_tokens_per_block
+        )
+    )
 
     worker_kv_bytes_per_block = 0
     all_groups_selected = len(selected_groups) == len(kv_cache_config.kv_cache_groups)
@@ -282,6 +279,7 @@ def build_offloading_config(
         model=OffloadingModelConfig(
             name=vllm_config.model_config.model,
             dtype=str(cache_dtype).removeprefix("torch."),
+            max_model_len=vllm_config.model_config.max_model_len,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
