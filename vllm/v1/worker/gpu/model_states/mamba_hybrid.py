@@ -118,8 +118,14 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            # Mamba state blocks are sized by mamba_block_size, not by
+            # cache_config.block_size: the latter is lowered by EngineCore to
+            # the smallest prefix-cacheable group (e.g. a sliding-window drafter
+            # group with block 64), which would index the mamba block table in
+            # the wrong units and read past the row on a prefix-cache hit.
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1)
+                // self.cache_config.mamba_block_size
             )
 
     def _get_mamba_group_info(
