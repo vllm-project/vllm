@@ -5,6 +5,7 @@ from http import HTTPStatus
 from unittest.mock import Mock
 
 import pytest
+from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -19,15 +20,34 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
 baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+kimi_vision_chunk_image = {
+    "type": "image",
+    "image": cherry_pil_image,
+    "uuid": "test-image-uuid",
+}
+kimi_vision_chunk_video = {
+    "type": "video_chunk",
+    "video_chunk": [Image.fromarray(frame) for frame in baby_reading_np_ndarrays[:4]],
+    "uuid": "test-video-uuid",
+    "video_idx": 0,
+    "prompt": (
+        "<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
+    ),
+}
 
 
 def _build_renderer(
-    *, mm_cache_gb: float = 4.0, enable_prefix_caching: bool = True
+    *,
+    model: str = "Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_cache_gb: float = 4.0,
+    enable_prefix_caching: bool = True,
+    trust_remote_code: bool = False,
 ) -> HfRenderer:
     model_config = ModelConfig(
-        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        model=model,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
+        trust_remote_code=trust_remote_code,
     )
 
     vllm_config = VllmConfig(
@@ -115,6 +135,54 @@ def test_cached_uuid_skips_url_loading(
     second_input = second_prompts[0]
     assert first_input["mm_hashes"] == second_input["mm_hashes"]
     assert fetch_media.call_count == (2 if skip_early_mm_lookup else 1)
+
+
+@pytest.mark.parametrize(
+    ("modality", "media"),
+    [
+        pytest.param("image", kimi_vision_chunk_image, id="image"),
+        pytest.param("video", kimi_vision_chunk_video, id="video"),
+    ],
+)
+def test_early_uuid_lookup_is_disabled_for_unified_vision_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+    modality: str,
+    media: object,
+):
+    monkeypatch.setenv("VLLM_EARLY_UUID_LOOKUPS", "1")
+    renderer = _build_renderer(
+        model="moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+    )
+    mm_processor_cache = renderer.mm_processor_cache
+    assert mm_processor_cache is not None
+
+    is_cached_item = Mock(return_value=True)
+    monkeypatch.setattr(mm_processor_cache, "is_cached_item", is_cached_item)
+    fetch_media = Mock(return_value=media)
+    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
+
+    media_url = f"https://example.com/test.{modality}"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Describe this {modality}."},
+                {
+                    "type": f"{modality}_url",
+                    f"{modality}_url": {"url": media_url},
+                    "uuid": f"test-{modality}-uuid",
+                },
+            ],
+        }
+    ]
+
+    conversation, prompt = renderer.render_messages(messages, ChatParams())
+
+    assert len(conversation) == 1
+    assert prompt["multi_modal_data"] == {"vision_chunk": [media]}
+    assert fetch_media.call_count == 1
+    is_cached_item.assert_not_called()
 
 
 def test_multi_modal_uuids_length_mismatch_raises():

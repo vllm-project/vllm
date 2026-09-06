@@ -625,6 +625,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         if not (
             envs.VLLM_EARLY_UUID_LOOKUPS
             and not self._skip_early_mm_lookup
+            and not self.use_unified_vision_chunk_modality
             and uuid is not None
             and cache is not None
         ):
