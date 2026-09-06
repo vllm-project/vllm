@@ -20,7 +20,7 @@
 #endif
 
 #if defined(CPU_CAPABILITY_RVV)
-#include "../cpu_types_riscv_defs.hpp"
+#include "cpu/cpu_types_riscv_defs.hpp"
 #endif
 namespace {
 

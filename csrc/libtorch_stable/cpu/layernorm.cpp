@@ -1,3 +1,8 @@
+#include <cmath>
+#include <optional>
+
+#include <torch/csrc/stable/tensor.h>
+
 #include "cpu_types.hpp"
 
 namespace {
@@ -9,7 +14,7 @@ void rms_norm_impl(scalar_t* __restrict__ out,
                    const int hidden_size) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
-  TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
+  STD_TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
 
 #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
@@ -52,7 +57,7 @@ void fused_add_rms_norm_impl(scalar_t* __restrict__ input,
                              const int num_tokens, const int hidden_size) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
-  TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
+  STD_TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
 
 #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
@@ -96,41 +101,46 @@ void fused_add_rms_norm_impl(scalar_t* __restrict__ input,
 }
 }  // namespace
 
-void rms_norm(torch::Tensor& out, torch::Tensor& input,
-              std::optional<torch::Tensor> weight, double epsilon) {
+void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
+              std::optional<torch::stable::Tensor> weight, double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
   if (has_weight) {
-    TORCH_CHECK(weight->is_contiguous());
+    STD_TORCH_CHECK(weight->is_contiguous());
   }
 
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
-    CPU_KERNEL_GUARD_IN(rms_norm_impl)
-    rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                  has_weight ? weight->data_ptr<scalar_t>() : nullptr,
-                  has_weight, epsilon, num_tokens, hidden_size);
-    CPU_KERNEL_GUARD_OUT(rms_norm_impl)
-  });
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_impl", [&] {
+        CPU_KERNEL_GUARD_IN(rms_norm_impl)
+        rms_norm_impl(out.mutable_data_ptr<scalar_t>(),
+                      input.const_data_ptr<scalar_t>(),
+                      has_weight ? weight->const_data_ptr<scalar_t>() : nullptr,
+                      has_weight, epsilon, num_tokens, hidden_size);
+        CPU_KERNEL_GUARD_OUT(rms_norm_impl)
+      });
 }
 
-void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        std::optional<torch::Tensor> weight, double epsilon) {
+void fused_add_rms_norm(torch::stable::Tensor& input,
+                        torch::stable::Tensor& residual,
+                        std::optional<torch::stable::Tensor> weight,
+                        double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
   if (has_weight) {
-    TORCH_CHECK(weight->scalar_type() == input.scalar_type());
-    TORCH_CHECK(weight->is_contiguous());
+    STD_TORCH_CHECK(weight->scalar_type() == input.scalar_type());
+    STD_TORCH_CHECK(weight->is_contiguous());
   }
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "fused_add_rms_norm_impl", [&] {
         CPU_KERNEL_GUARD_IN(fused_add_rms_norm_impl)
         fused_add_rms_norm_impl(
-            input.data_ptr<scalar_t>(), residual.data_ptr<scalar_t>(),
-            has_weight ? weight->data_ptr<scalar_t>() : nullptr, has_weight,
-            epsilon, num_tokens, hidden_size);
+            input.mutable_data_ptr<scalar_t>(),
+            residual.mutable_data_ptr<scalar_t>(),
+            has_weight ? weight->const_data_ptr<scalar_t>() : nullptr,
+            has_weight, epsilon, num_tokens, hidden_size);
         CPU_KERNEL_GUARD_OUT(fused_add_rms_norm_impl)
       });
 }

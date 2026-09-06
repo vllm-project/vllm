@@ -5,8 +5,10 @@
 #include <string>
 #include <unistd.h>
 #include <ATen/cpu/Utils.h>
+#include <torch/all.h>
 
 #include "cpu/cpu_types.hpp"
+#include "dispatch_utils.h"
 
 namespace cpu_utils {
 enum class ISA { AMX, VEC, RVV, NEON, VSX };

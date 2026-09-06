@@ -564,6 +564,13 @@ class CpuPlatform(Platform):
                         import vllm._C  # noqa: F401
                     except ImportError as e:
                         logger.warning_once("Failed to import from vllm._C: %r", e)
+                    try:
+                        import vllm._C_stable_libtorch  # noqa: F401
+                    except ImportError as e:
+                        logger.warning_once(
+                            "Failed to import from vllm._C_stable_libtorch: %r",
+                            e,
+                        )
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
@@ -572,17 +579,37 @@ class CpuPlatform(Platform):
                             logger.warning_once(
                                 "Failed to import from vllm._C_AVX512: %r", e
                             )
+                    try:
+                        import vllm._C_AVX512_stable_libtorch  # noqa: F401
+                    except ImportError as e:
+                        logger.warning_once(
+                            "Failed to import from vllm._C_AVX512_stable_libtorch: %r",
+                            e,
+                        )
             else:
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
                         logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
+                try:
+                    import vllm._C_AVX2_stable_libtorch  # noqa: F401
+                except ImportError as e:
+                    logger.warning_once(
+                        "Failed to import from vllm._C_AVX2_stable_libtorch: %r",
+                        e,
+                    )
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning_once("Failed to import from vllm._C: %r", e)
+            try:
+                import vllm._C_stable_libtorch  # noqa: F401
+            except ImportError as e:
+                logger.warning_once(
+                    "Failed to import from vllm._C_stable_libtorch: %r", e
+                )
 
     @classmethod
     def pack_kv_cache(

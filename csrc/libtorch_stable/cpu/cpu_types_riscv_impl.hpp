@@ -13,7 +13,12 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
-#include <torch/all.h>
+#include <type_traits>
+#include <utility>
+
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
 
 #include "float_convert.hpp"
 
@@ -30,13 +35,6 @@ struct fp8_e5m2_tag {};
 // BFloat16 is always supported on RISC-V: natively when __riscv_zvfbfmin
 // is defined (compiler-provided when -march includes zvfbfmin), otherwise
 // via the FP32-simulation fallback path.
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
-
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
 #define FORCE_INLINE __attribute__((always_inline)) inline
 
@@ -916,7 +914,7 @@ struct INT8Vec64 {
   void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
 
   void save(int8_t* ptr, const int elem_num) const {
-    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    STD_TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
     std::memcpy(ptr, data_, elem_num);
   }
 

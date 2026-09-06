@@ -1404,8 +1404,12 @@ if _is_cpu():
         ext_modules.append(CMakeExtension(name="vllm._C"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512_stable_libtorch"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX2_stable_libtorch"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 if _build_custom_ops():
     if _is_hip():

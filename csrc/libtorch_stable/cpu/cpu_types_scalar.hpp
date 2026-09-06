@@ -1,21 +1,20 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <torch/all.h>
+#include <iostream>
+#include <type_traits>
+#include <utility>
+
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
+
 #include "float_convert.hpp"
 
 namespace vec_op {
 
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
-
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
-
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
 #ifndef CPU_OP_GUARD
   #define CPU_KERNEL_GUARD_IN(NAME)
@@ -440,7 +439,7 @@ struct INT8Vec64 {
   void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
 
   void save(int8_t* ptr, const int elem_num) const {
-    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    STD_TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
     std::memcpy(ptr, data_, elem_num);
   }
 

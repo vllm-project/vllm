@@ -16,10 +16,10 @@ namespace {
 #define MAX_Q_HEAD_NUM_PER_ITER 16
 
 // These do not use vectorized class for loading / converting
-// because csrc/cpu/cpu_types_arm.hpp does not have fallback options
-// for vec_op::BF16Vec* / vec_op::BF16Vec* on Arm HW that
-// doesn't support BF16.
-// We don't use vec_op::FP32Vec* or vec_op::FP16Vec* for consistency.
+// because csrc/libtorch_stable/cpu/cpu_types_arm.hpp does not have fallback
+// options for vec_op::BF16Vec* / vec_op::BF16Vec* on Arm HW that doesn't
+// support BF16. We don't use vec_op::FP32Vec* or vec_op::FP16Vec* for
+// consistency.
 template <typename kv_cache_t>
 FORCE_INLINE void load_row8_B_as_f32(const kv_cache_t* p, float32x4_t& b0,
                                      float32x4_t& b1);
