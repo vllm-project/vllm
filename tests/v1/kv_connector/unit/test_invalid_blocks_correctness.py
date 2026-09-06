@@ -44,6 +44,7 @@ def _make_get_num_new_matched_tokens(
 def fail_scheduler():
     """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 
@@ -52,6 +53,7 @@ def fail_scheduler():
 def recompute_scheduler():
     """scheduler with kv_load_failure_policy='recompute'"""
     vllm_config = create_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
     return create_scheduler(vllm_config)
 
@@ -168,9 +170,7 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     scheduler_output_2 = recompute_scheduler.schedule()
 
     # request should appear in the new schedule to recompute invalid blocks
-    scheduled_req_ids = [
-        req.request_id for req in scheduler_output_2.scheduled_new_reqs
-    ]
+    scheduled_req_ids = [req.req_id for req in scheduler_output_2.scheduled_new_reqs]
     if scheduler_output_2.num_scheduled_tokens:
         scheduled_req_ids.extend(scheduler_output_2.num_scheduled_tokens.keys())
 

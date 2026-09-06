@@ -266,7 +266,7 @@ def test_expired_request_bumps_counter():
         "tid1": SendBlockMeta(
             p_req_id="req1",
             transfer_id="tid1",
-            local_block_ids=[0, 1],
+            local_block_ids=[[0, 1]],
             ready=asyncio.Event(),
             expire_time=-1.0,  # Already expired.
             sending=0,
