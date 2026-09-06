@@ -8,9 +8,8 @@ from vllm import envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import flashinfer_jit_unsupported_reason, has_flashinfer
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -32,39 +31,6 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_stats.register_warmup()
             _topp_split_step.register_warmup()
             _topp_split_mask.register_warmup()
-
-
-def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
-    """Return why FlashInfer JIT codegen cannot target the current GPU, or
-    None if it can.
-
-    FlashInfer swallows arch-detection errors when building its compilation
-    context (e.g. SM 12.x with a CUDA toolkit older than 12.9), leaving an
-    empty target-arch set that makes every JIT spec fail with a misleading
-    "requires sm75 or higher" error at first use — killing the engine during
-    startup profiling (https://github.com/vllm-project/vllm/issues/42393).
-    """
-    try:
-        from flashinfer.jit.core import check_cuda_arch
-    except ImportError:
-        return None
-    try:
-        check_cuda_arch()
-        return None
-    except RuntimeError as e:
-        reason = str(e)
-    try:
-        # Re-derive the real error that FlashInfer swallowed during arch
-        # detection, e.g. "SM 12.x requires CUDA >= 12.9".
-        from flashinfer.compilation_context import CompilationContext
-
-        CompilationContext._normalize_cuda_arch(capability.major, capability.minor)
-    except RuntimeError as e:
-        reason = str(e)
-    except Exception:
-        # FlashInfer internals changed; keep the original error message.
-        pass
-    return reason
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -113,7 +79,7 @@ def flashinfer_sampler_supported() -> bool:
             f"top-k masking requires more than 16 SMs; device has {num_sms}"
         )
     else:
-        unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
+        unsupported_reason = flashinfer_jit_unsupported_reason()
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")

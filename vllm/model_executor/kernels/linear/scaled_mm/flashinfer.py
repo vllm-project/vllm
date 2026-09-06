@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
+    flashinfer_jit_unsupported_reason,
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
@@ -49,6 +50,9 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         if compute_capability is not None and compute_capability < 100:
             return False, "requires compute capability 100 and above."
+
+        if (reason := flashinfer_jit_unsupported_reason()) is not None:
+            return False, f"cannot JIT-compile FlashInfer for this GPU: {reason}"
 
         return True, None
 
