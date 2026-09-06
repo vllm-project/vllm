@@ -1382,8 +1382,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # T <= max capture size) bakes shapes/addresses and replays without
         # model_inputs, so the flag must stay False whenever a graph may run.
         # Full hidden states are still required by prompt logprobs, PCP
-        # restore, pooling, batch-sharded sampling, and speculators other
-        # than dspark/dflash (eagle3 unverified).
+        # restore, pooling, batch-sharded sampling, microbatched forward, and
+        # speculators other than dspark/dflash (eagle3 unverified). Only the
+        # DeepSeek-V4 head accepts the extra kwarg.
+        is_dsv4 = any(
+            arch == "DeepseekV4ForCausalLM"
+            for arch in self.model_config.architectures
+        )
         spec_method = (
             self.speculative_config.method
             if self.speculative_config is not None
@@ -1400,12 +1405,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         head_gather_first = (
             envs.VLLM_MOE_HEAD_GATHER_FIRST
+            and is_dsv4
             and batch_desc.cg_mode == CUDAGraphMode.NONE
             and batch_req_state.has_prefill
             and self.is_last_pp_rank
             and not self.is_pooling_model
             and self.pcp_manager is None
             and self.batch_sharder is None
+            and self.ubatch_runner is None
             and not has_prompt_logprobs_reqs
             and (spec_method is None or spec_method in ("dspark", "dflash"))
             and fast_prefill is None
@@ -2095,11 +2102,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
-            # slice to the active token count that propose() expects.
+            # slice to the scheduled token count that propose() expects.
+            # Default width is draft_hidden_states (pre-PCP-restore). With
+            # gather-first that tensor is only L logits rows, so use the
+            # padded token count (T) the buffer was filled with instead.
             spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
+                mtp_n = (
+                    input_batch.num_tokens_after_padding
+                    if input_batch.head_gather_first
+                    else draft_hidden_states.size(0)
+                )
+                spec_hidden_states = pre_hc_hidden_states[:mtp_n]  # type: ignore[union-attr]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
