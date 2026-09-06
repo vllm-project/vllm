@@ -592,7 +592,38 @@ class Glm5NextModel(nn.Module):
             # Reserve room for the incomplete pool tail.
             kpool = config.index_kpool
             assert kpool is not None
-            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
+            # The sparse-MLA decode kernels are instantiated for an index width
+            # of 2048. With kpool > 1 the always-selected tail widens the buffer
+            # past index_topk (2048 + 3 -> 2176 for GLM-5.3-Flash), which no
+            # compiled shape serves. Fit the effective top-k so that the widened
+            # buffer stays within the kernel width instead of requiring users to
+            # edit index_topk in config.json (the same 2044/2045 every GB10 /
+            # RTX PRO recipe applies by hand). select_k = topk // kpool is
+            # unchanged for 2045 vs 2044 (511 pools).
+            kernel_index_width = 2048
+            tail = kpool - 1 if kpool > 1 else 0
+            overflows = topk_tokens + tail > kernel_index_width
+            if tail and overflows and topk_tokens <= kernel_index_width:
+                fitted = kernel_index_width - tail
+                logger.info_once(
+                    "GLM-5.3 sparse indexer: index_topk=%d + kpool tail %d "
+                    "exceeds the %d-wide sparse index; using effective "
+                    "index_topk=%d (%d pools).",
+                    topk_tokens,
+                    tail,
+                    kernel_index_width,
+                    fitted,
+                    fitted // kpool,
+                )
+                topk_tokens = fitted
+                config.index_topk = fitted
+                text_config = getattr(config, "text_config", None)
+                if (
+                    text_config is not None
+                    and getattr(text_config, "index_topk", None) == fitted + tail
+                ):
+                    text_config.index_topk = fitted
+            buffer_width = topk_tokens + tail
             # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
             sparse_topk_block_n = 128
             buffer_width = (

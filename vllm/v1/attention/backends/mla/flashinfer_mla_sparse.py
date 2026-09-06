@@ -215,7 +215,14 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
                     "FLASHINFER_MLA_SPARSE_SM120 requires a model with "
                     "index_topk config"
                 )
-            if int(index_topk) != 2048:
+            # With index_kpool > 1 the indexer widens the top-k buffer by the
+            # always-selected pool tail (kpool - 1); the glm5next model fits
+            # index_topk down to (2048 - tail) at init so the widened buffer
+            # matches the kernel's 2048-wide index. Validate the fitted value.
+            kpool = getattr(hf_text_config, "index_kpool", 1) or 1
+            tail = kpool - 1 if kpool > 1 else 0
+            fitted = min(int(index_topk), 2048 - tail) if tail else int(index_topk)
+            if ((fitted + tail + 127) // 128) * 128 != 2048:
                 return (
                     "FLASHINFER_MLA_SPARSE_SM120 requires index_topk=2048; "
                     f"got {index_topk}"
