@@ -257,12 +257,12 @@ def test_cpu_manager_reports_tier_info_as_info_gauge():
     CPU_TIER_INFO_LABELS order with the value pinned to 1.
     """
     tier_info = CPUCacheTierInfo(
-        num_blocks=4,
+        num_chunks=4,
         blocks_per_chunk=2,
         kv_bytes_per_chunk=16384,
         capacity_tokens=128,
     )
-    manager = make_cpu_manager(num_blocks=4, tier_info=tier_info)
+    manager = make_cpu_manager(num_chunks=4, tier_info=tier_info)
 
     stats = manager.get_stats()
     assert stats is not None
@@ -272,9 +272,9 @@ def test_cpu_manager_reports_tier_info_as_info_gauge():
 def test_cpu_manager_renders_unknown_token_capacity_as_none():
     """capacity_tokens=None must survive as a label, not crash or vanish."""
     manager = make_cpu_manager(
-        num_blocks=4,
+        num_chunks=4,
         tier_info=CPUCacheTierInfo(
-            num_blocks=4,
+            num_chunks=4,
             blocks_per_chunk=1,
             kv_bytes_per_chunk=16384,
             capacity_tokens=None,
@@ -288,7 +288,7 @@ def test_cpu_manager_renders_unknown_token_capacity_as_none():
 
 def test_cpu_manager_omits_tier_info_when_not_supplied():
     """Callers that pass no tier info keep their previous metric surface."""
-    manager = make_cpu_manager(num_blocks=4)
+    manager = make_cpu_manager(num_chunks=4)
 
     stats = manager.get_stats()
     assert stats is not None

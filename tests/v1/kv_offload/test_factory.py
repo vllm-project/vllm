@@ -185,9 +185,9 @@ def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks == 12 // blocks_per_chunk
+    assert spec.num_chunks == 12 // blocks_per_chunk
     assert spec.tier_info.capacity_tokens == (
-        spec.num_blocks * blocks_per_chunk * tokens_per_block
+        spec.num_chunks * blocks_per_chunk * tokens_per_block
     )
 
 
@@ -210,8 +210,8 @@ def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks == 12 // world_size
-    assert spec.tier_info.capacity_tokens == spec.num_blocks * tokens_per_block
+    assert spec.num_chunks == 12 // world_size
+    assert spec.tier_info.capacity_tokens == spec.num_chunks * tokens_per_block
 
 
 def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
@@ -234,7 +234,7 @@ def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks == 12
+    assert spec.num_chunks == 12
     assert spec.tier_info.capacity_tokens == 12 * tokens_per_block
 
 
@@ -248,7 +248,7 @@ def test_cpu_spec_tier_info_mirrors_spec_sizing():
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.tier_info.num_blocks == spec.num_blocks
+    assert spec.tier_info.num_chunks == spec.num_chunks
     assert spec.tier_info.blocks_per_chunk == spec.blocks_per_chunk
     assert spec.tier_info.kv_bytes_per_chunk == spec.kv_bytes_per_chunk
 
@@ -258,7 +258,7 @@ def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
     spec = _create_spec(worker_kv_bytes_per_block=0)
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks == 0
+    assert spec.num_chunks == 0
     assert spec.tier_info.capacity_tokens == 0
 
 
@@ -269,7 +269,16 @@ def test_cpu_spec_tier_info_no_token_capacity_for_stateful_blocks():
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
+    assert spec.num_chunks > 0
+    assert spec.tier_info.capacity_tokens is None
+
+
+def test_cpu_spec_tier_info_no_token_capacity_for_an_unclassified_group():
+    """An unclassified group fails closed: no capacity rather than a guess."""
+    spec = _create_spec(groups=(OffloadingGroupConfig(16, ("layer",)),))
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
     assert spec.tier_info.capacity_tokens is None
 
 
@@ -287,7 +296,7 @@ def test_cpu_spec_tier_info_no_token_capacity_for_multiple_groups():
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
+    assert spec.num_chunks > 0
     assert spec.tier_info.capacity_tokens is None
 
 
@@ -296,7 +305,7 @@ def test_cpu_spec_tier_info_no_token_capacity_without_a_kv_cache_group():
     spec = _create_spec(groups=())
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
+    assert spec.num_chunks > 0
     assert spec.tier_info.capacity_tokens is None
 
 
