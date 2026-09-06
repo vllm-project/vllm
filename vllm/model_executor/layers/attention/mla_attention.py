@@ -751,6 +751,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_scale: torch.Tensor,
     ) -> None:
         cache = self.hisparse_cache
+        if slot_mapping is None or (cache is not None and cache.dummy_batch):
+            return
         kv_c_normed, k_pe, slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
@@ -758,8 +760,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             self.use_pcp,
         )
-        if slot_mapping is None or (cache is not None and cache.dummy_batch):
-            return
+        assert slot_mapping is not None
         if cache is not None:
             kv_cache, slot_mapping, num_rows = cache.write_target(
                 kv_c_normed.shape[0], slot_mapping.numel()

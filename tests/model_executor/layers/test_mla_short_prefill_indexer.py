@@ -33,7 +33,10 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
         indexer=None,
         skip_topk=True,
         layer_name=MLA_LAYER,
-        impl=SimpleNamespace(prepare_for_batch=refresh_batch_state),
+        impl=SimpleNamespace(
+            prepare_for_batch=refresh_batch_state,
+            record_logical_topk_ready=lambda: None,
+        ),
     )
     monkeypatch.setattr(
         deepseek_attention,
@@ -289,6 +292,10 @@ def test_deepseek_v32_dispatches_selected_mha(
         _fp8_query=fp8_query,
         _use_sparse_mha=lambda _: True,
         rotary_emb=lambda _positions, q: (q + 1, None),
+        impl=SimpleNamespace(
+            record_logical_topk_ready=lambda: None,
+            prepare_for_batch=lambda _: None,
+        ),
         forward_impl=record_forward_impl,
     )
     q_nope = torch.randn(2, 1, 2)

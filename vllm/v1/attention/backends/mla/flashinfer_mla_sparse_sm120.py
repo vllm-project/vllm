@@ -137,7 +137,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                         q[:num_decode_tokens],
                         index_group.physical_kv_cache(self.index_group_index),
                         topk_indices_physical,
-                        attn_metadata.topk_tokens,
                     )
                 )
             if num_decode_tokens < num_actual_toks:
@@ -179,7 +178,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                         q[num_decode_tokens:],
                         prefill_cache,
                         topk_indices_physical,
-                        attn_metadata.topk_tokens,
                     )
                 )
             output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
@@ -200,7 +198,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 q,
                 kv_c_and_k_pe_cache,
                 topk_indices_physical,
-                attn_metadata.topk_tokens,
             ),
             None,
         )
@@ -210,7 +207,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         topk_indices_physical: torch.Tensor,
-        topk_tokens: int,
     ) -> torch.Tensor:
         num_actual_toks = q.shape[0]
 
@@ -226,6 +222,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
 
+        sparse_capacity = topk_indices_physical.shape[1]
         out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
             kv_cache=kv_cache.view(torch.uint8).unsqueeze(1),
@@ -235,11 +232,11 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
             seq_lens=None,
-            max_seq_len=topk_tokens,
+            max_seq_len=sparse_capacity,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            sparse_mla_top_k=topk_tokens,
+            sparse_mla_top_k=sparse_capacity,
             kv_scale_format=self.kv_scale_format,
         )
         return out.squeeze(1)

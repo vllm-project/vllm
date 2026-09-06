@@ -30,6 +30,15 @@ FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
+def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
+    return (
+        attn_metadata is not None
+        and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
+        and attn_metadata.max_query_len == 1
+        and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+    )
+
+
 def _get_max_decode_query_len(vllm_config: VllmConfig) -> int:
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if (
@@ -901,12 +910,7 @@ class HiSparseCacheHandle:
         self.req_id_per_token = (
             attn_metadata.req_id_per_token if attn_metadata is not None else None
         )
-        self.decode_batch = (
-            attn_metadata is not None
-            and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
-            and attn_metadata.max_query_len == 1
-            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
-        )
+        self.decode_batch = is_hisparse_decode_batch(attn_metadata)
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
