@@ -59,6 +59,8 @@ from vllm.v1.kv_cache_interface import (
     KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -94,6 +96,9 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+    # TP-invariant region (e.g. MLA): every TP rank holds the full block,
+    # so it transfers whole regardless of the producer/consumer TP ratio.
+    replicated: bool = False
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -124,6 +129,7 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     group_indices: list[int] | None = None,
+    replicated_flags: list[bool] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -145,6 +151,13 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if replicated_flags is None:
+        replicated_flags = [False] * len(layer_names)
+    assert len(replicated_flags) == len(layer_names), (
+        "Mooncake transfer regions require matching replicated metadata "
+        f"lengths, got replicated_flags={len(replicated_flags)}, "
+        f"layer_names={len(layer_names)}."
+    )
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -153,6 +166,7 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
+        replicated,
     ) in zip(
         base_addrs,
         block_lens,
@@ -160,6 +174,7 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
+        replicated_flags,
     ):
         regions.append(
             TransferRegion(
@@ -169,6 +184,7 @@ def _expand_transfer_regions(
                 block_len=block_len,
                 kv_block_len=kv_block_len,
                 group_index=group_index,
+                replicated=replicated,
             )
         )
     return regions
@@ -253,6 +269,18 @@ def _validate_asymmetric_region_lengths(
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
+        if local_region.replicated or remote_region.replicated:
+            # TP-invariant region (e.g. an MLA side cache of a mixed GQA+MLA
+            # model): every TP rank holds the full block, so lengths must
+            # match regardless of the TP ratio. kv_block_len is already in
+            # kernel-block units on both sides.
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake replicated KV region length mismatch at region "
+                    f"{idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1531,6 +1559,7 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    region_replicated=local_region.replicated,
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2035,6 +2064,18 @@ class MooncakeConnectorWorker:
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
+    def _is_replicated_layer(self, layer_name: str) -> bool:
+        """Whether the layer's KV cache is TP-invariant (held in full by
+        every TP rank), e.g. an MLA attention or side cache.
+
+        A KV-head-count rule cannot be applied here: the spec's
+        num_kv_heads is the per-rank count (total // tp_size), so a
+        TP-sharded GQA layer is indistinguishable from a replicated one.
+        Whole-engine replicated GQA stays covered by the global
+        producer_cache_replicated flag."""
+        spec = self._layer_specs.get(layer_name)
+        return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+
     def _get_transfer_regions(
         self,
         base_addrs: list[int],
@@ -2056,6 +2097,12 @@ class MooncakeConnectorWorker:
             layer_names=layer_names,
             layer_indices=layer_indices,
             group_indices=group_indices,
+            # Both sides register the same model's layers, so the local spec
+            # lookup also classifies the remote regions (region alignment
+            # keys on layer name).
+            replicated_flags=[
+                self._is_replicated_layer(layer_name) for layer_name in layer_names
+            ],
         )
 
     def _get_sender_transfer_plan(
@@ -2064,6 +2111,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        region_replicated: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2072,7 +2120,12 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
+            # A replicated region follows the same plan a fully replicated
+            # (e.g. MLA) producer cache would: whole block at offset 0, sent
+            # by exactly one producer rank per consumer region.
+            producer_cache_replicated=(
+                self._producer_cache_is_replicated() or region_replicated
+            ),
         )
 
     def _log_debug_cache_registration(
