@@ -31,6 +31,7 @@ from .model import (
     Glm5NextMoE,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
+    fit_sparse_index_topk,
     get_spec_layer_idx_from_weight_name,
 )
 from .ops.fused_eh_norm import fused_eh_norm
@@ -50,8 +51,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 
         # Reserve room for the incomplete pool tail and align the sparse MLA
         # buffer width to BLOCK_N=128.
-        topk_tokens = config.index_topk
-        assert topk_tokens is not None
+        topk_tokens = fit_sparse_index_topk(config)
         kpool = config.index_kpool
         assert kpool is not None
         buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
