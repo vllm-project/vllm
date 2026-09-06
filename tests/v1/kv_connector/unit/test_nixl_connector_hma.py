@@ -1193,6 +1193,15 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
+def test_prefix_caching_by_region_preserves_empty_region_geometry():
+    local, remote = bw.NixlBaseConnectorWorker._apply_prefix_caching_by_region(
+        [[], []], [[10, 11], [20, 21]]
+    )
+
+    assert local == remote == [[], []]
+
+
+@pytest.mark.cpu_test
 def test_post_process_zeroes_untransferred_tail():
     """The untransferred sub-blocks of the last local block are zeroed on
     receive; mamba state caches are untouched by the attention permute."""

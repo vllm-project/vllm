@@ -2688,8 +2688,7 @@ class NixlBaseConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
-            if meta.hisparse_host_block_ids is None:
-                direct_device_recving.add(req_id)
+            direct_device_recving.add(req_id)
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -3097,7 +3096,8 @@ class NixlBaseConnectorWorker:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
 
         trimmed_prefill: list[list[int]] = []
         for decode_region, prefill_region in zip(

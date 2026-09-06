@@ -2955,6 +2955,10 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
+                if host_import_pending:
+                    self.kv_cache_manager.hisparse_coordinator.complete_host_import(
+                        request.request_id, request.num_computed_tokens
+                    )
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
                 if self.needs_kv_cache_zeroing:
                     # The failed load left the blocks beyond the valid
