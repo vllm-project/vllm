@@ -8,6 +8,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.metrics.stats import RequestStateStats
 
 
 def test_parent_request_to_output_stream() -> None:
@@ -82,6 +83,51 @@ def test_parallel_sampling_child_requests_preserve_session_id() -> None:
         child_request.sampling_params = child_params
 
         assert child_request.session_id == "session-1"
+
+
+def test_parent_request_aggregates_child_stats() -> None:
+    parent_request = ParentRequest(make_request(SamplingParams(n=2)))
+    parent_request.register_child_stats(
+        "child_id_0",
+        RequestStateStats(
+            num_generation_tokens=2,
+            num_preemptions=1,
+            arrival_time=1.0,
+            queued_ts=2.0,
+            scheduled_ts=4.0,
+            first_token_ts=6.0,
+            last_token_ts=8.0,
+            first_token_latency=5.0,
+            is_corrupted=False,
+        ),
+    )
+    parent_request.register_child_stats(
+        "child_id_1",
+        RequestStateStats(
+            num_generation_tokens=3,
+            num_preemptions=2,
+            arrival_time=0.5,
+            queued_ts=1.5,
+            scheduled_ts=3.0,
+            first_token_ts=5.0,
+            last_token_ts=10.0,
+            first_token_latency=4.5,
+            is_corrupted=True,
+        ),
+    )
+
+    stats = parent_request.aggregate_stats()
+
+    assert stats is not None
+    assert stats.num_generation_tokens == 5
+    assert stats.num_preemptions == 3
+    assert stats.arrival_time == 0.5
+    assert stats.queued_ts == 1.5
+    assert stats.scheduled_ts == 3.0
+    assert stats.first_token_ts == 5.0
+    assert stats.last_token_ts == 10.0
+    assert stats.first_token_latency == 4.5
+    assert stats.is_corrupted
 
 
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
