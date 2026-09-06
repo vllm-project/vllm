@@ -123,7 +123,7 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
-        from vllm.model_executor.layers.batch_invariant import (
+        from vllm.model_executor.determinism.batch_invariant import (
             init_batch_invariance,
         )
 

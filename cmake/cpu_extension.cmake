@@ -519,7 +519,11 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
-        "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/bmm.cpp"
+        "csrc/cpu/sgl-kernels/decode.cpp"
+        "csrc/cpu/sgl-kernels/extend.cpp"
+        "csrc/cpu/sgl-kernels/mla_cache.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"

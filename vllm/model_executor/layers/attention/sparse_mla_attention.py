@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
@@ -58,6 +58,7 @@ def _topk_mask_shape(
     tile_m = 128 if max_query_len <= 128 else 256
     padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
     num_words = triton.cdiv(max_key_len, 32) + int(reserve_key_starts_word)
+    num_words = triton.cdiv(num_words, 4) * 4
     return batch_size, padded_q_len, num_words
 
 
@@ -87,16 +88,27 @@ def _is_masked_mha_available(
     """Check if masked MHA can ever fire for this model configuration."""
     if not current_platform.is_device_capability_family(100):
         return False
-    if (
-        num_heads_total != 128
-        or kv_lora_rank != 512
-        or qk_nope_head_dim != 128
-        or qk_rope_head_dim != 64
-        or v_head_dim != 128
+    model_dims = (
+        num_heads_total,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+    )
+    if model_dims not in (
+        (128, 512, 128, 64, 128),
+        (64, 512, 192, 64, 256),
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    fa_version = get_flash_attn_version(head_size=qk_head_dim, head_size_v=v_head_dim)
+    if qk_head_dim == 256 and v_head_dim == 256:
+        # This path uses contiguous K/V, so it does not need the paged-KV
+        # features that keep head-dim 256 disabled in the general FA selector.
+        fa_version = get_flash_attn_version()
+    else:
+        fa_version = get_flash_attn_version(
+            head_size=qk_head_dim, head_size_v=v_head_dim
+        )
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
@@ -432,12 +444,12 @@ def _build_topk_mask(
     max_seq_len: int,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
+    """Build a bit-packed top-k mask while preserving padded row storage."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
     total_rows = batch_size * max_q_len
     if total_rows == 0:
-        return out[:batch_size, :max_q_len, :num_words]
+        return out[:batch_size, :max_q_len]
 
     total_q = sum(q_lens)
     mask_row_stride = out.stride(-2)
@@ -457,7 +469,7 @@ def _build_topk_mask(
             BLOCK_TOPK=triton.next_power_of_2(num_topk),
             BLOCK_WORDS=block_words,
         )
-        return out[:1, :max_q_len, :num_words]
+        return out[:1, :max_q_len]
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
@@ -478,7 +490,7 @@ def _build_topk_mask(
         BLOCK_TOPK=triton.next_power_of_2(num_topk),
         BLOCK_WORDS=block_words,
     )
-    return out[:batch_size, :max_q_len, :num_words]
+    return out[:batch_size, :max_q_len]
 
 
 class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):

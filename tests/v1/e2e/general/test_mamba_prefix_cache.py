@@ -19,6 +19,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -233,7 +234,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
             assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
+        mamba_groups = get_mamba_groups(self.kv_cache_config)
+        mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
             mamba_group_id
@@ -320,7 +322,8 @@ def get_fake_process_mamba_fn(
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
         else:
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
-            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
             mamba_group_id = mamba_group_ids[0]
             mamba_layer_name = kv_cache_config.kv_cache_groups[
                 mamba_group_id
@@ -873,6 +876,10 @@ def get_mamba_prefix_cache_step_configs(
 def _run_mamba_prefix_cache_mrv1(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
@@ -931,12 +938,12 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
@@ -970,14 +977,18 @@ def _run_mamba_prefix_cache_mrv2(
         forward_context = (
             model_state.vllm_config.compilation_config.static_forward_context
         )
-        group_ids, _ = get_mamba_groups(kv_cache_config)
-        for group_id in group_ids:
-            block_table = block_tables[group_id]
-            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
-                yield forward_context[layer_name].kv_cache[-1], block_table
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        for group_ids in mamba_groups.values():
+            for group_id in group_ids:
+                block_table = block_tables[group_id]
+                for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                    yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
-        return temporal_state[int(block_table[0, col].item())]
+        # Resolving the block id for assertions is a deliberate D2H.
+        with gpu_sync_allowed():
+            block_id = int(block_table[0, col].item())
+        return temporal_state[block_id]
 
     def wrapped_preprocess_state(
         self: MambaHybridModelState,
@@ -1001,19 +1012,24 @@ def _run_mamba_prefix_cache_mrv2(
             self, input_batch, block_tables, kv_cache_config, num_computed_tokens
         )
         if cur_step_action is not None:
-            req_idx = int(input_batch.idx_mapping[0].item())
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            off = int(self._mamba_src_off_gpu[req_idx].item())
-            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            # Reading the GPU-side copy state back to assert on it is a
+            # deliberate D2H.
+            with gpu_sync_allowed():
+                req_idx = int(input_batch.idx_mapping[0].item())
+                src_col = int(self._mamba_src_col_gpu[req_idx].item())
+                off = int(self._mamba_src_off_gpu[req_idx].item())
+                dst = int(self._mamba_state_idx_gpu[req_idx].item())
             actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
             assert actual == expected, (
                 f"V2 align preprocess copy: expected={expected}, "
                 f"actual={actual}, {cur_step_action=}"
             )
-            for temporal, bt, src_state in snapshots:
-                torch.testing.assert_close(
-                    temporal_block(temporal, bt, expected[1]), src_state
-                )
+            # Comparing device tensors for the assertion is a deliberate D2H.
+            with gpu_sync_allowed():
+                for temporal, bt, src_state in snapshots:
+                    torch.testing.assert_close(
+                        temporal_block(temporal, bt, expected[1]), src_state
+                    )
         return ret
 
     def wrapped_postprocess_state(
@@ -1044,10 +1060,12 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_postprocess_state(
             self, idx_mapping, num_sampled, num_computed_tokens
         )
-        for temporal, bt, src_state in snapshots:
-            torch.testing.assert_close(
-                temporal_block(temporal, bt, expected[1]), src_state
-            )
+        # Comparing device tensors for the assertion is a deliberate D2H.
+        with gpu_sync_allowed():
+            for temporal, bt, src_state in snapshots:
+                torch.testing.assert_close(
+                    temporal_block(temporal, bt, expected[1]), src_state
+                )
         return ret
 
     def wrapped_execute_model(
@@ -1068,10 +1086,10 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_execute_model(self, scheduler_output, *args, **kwargs)
         if cur_step_action is not None and self.execute_model_state is not None:
             input_batch = self.execute_model_state.input_batch
-            assert (
-                cur_step_action.num_computed_tokens_start
-                == input_batch.positions[input_batch.query_start_loc[0]].item()
-            )
+            # Reading positions back to assert on them is a deliberate D2H.
+            with gpu_sync_allowed():
+                start_pos = input_batch.positions[input_batch.query_start_loc[0]].item()
+            assert cur_step_action.num_computed_tokens_start == start_pos
         return ret
 
     def fake_sample(
