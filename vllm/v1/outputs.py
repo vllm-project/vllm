@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
+    from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -304,12 +305,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_stats: "ECConnectorStats | None" = None
     ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
 
     def is_empty(self):
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.ec_connector_stats
             and not self.ec_connector_worker_meta
         )
 
