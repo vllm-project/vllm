@@ -17,10 +17,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
-    apply_moe_activation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
@@ -119,6 +117,21 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         # prepare/finalize step must not reduce again.
         return TopKWeightAndReduceNoOP()
 
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        # Weights are packed along the reduction dim -- w1 is
+        # [E, K // 8, 2 * N] and w2 is [E, N // 8, K] -- so neither N nor K can
+        # be read off a trailing dimension the way the base implementation does.
+        assert w1.dim() == 3 and w2.dim() == 3
+        assert a1.dim() == 2
+        assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+        return w1.size(0), a1.size(0), w1.size(2) // 2, a1.size(-1), topk_ids.size(1)
+
     def workspace_shapes(
         self,
         M: int,
@@ -130,9 +143,34 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # apply() allocates its own scratch (shapes derived from the weights),
-        # so request no framework workspaces; output is the reduced [M, K].
-        return ((0,), (0,), (M, K))
+        # The modular kernel provisions `output` out of workspace13, so every
+        # buffer a GEMM reads while another writes `output` has to come out of
+        # workspace2: the activation output stays live across the down GEMM.
+        # The gate/up GEMM output is dead once the activation has run, so the
+        # unfused down GEMM reuses that region.
+        scratch = M * topk * (N + max(2 * N, K))
+        return ((M, K), (scratch,), (M, K))
+
+    def _expert_bias_rows(
+        self,
+        bias: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Per-row expert bias, [M * top_k, N].
+
+        ``topk_ids`` are global expert ids; the bias is stored per *local*
+        expert, so under EP they have to go through ``expert_map`` first. Rows
+        routed to another rank map to -1: the GEMM skips them, so their bias
+        must be zero rather than a wrapped-around lookup.
+        """
+        ids = topk_ids if expert_map is None else expert_map[topk_ids]
+        ids = ids.reshape(-1)
+        rows = bias[ids.clamp_min(0).long()].to(dtype)
+        if expert_map is not None:
+            rows = rows * (ids >= 0).unsqueeze(1).to(dtype)
+        return rows
 
     def apply(
         self,
@@ -153,31 +191,30 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         apply_router_weight_on_input: bool,
     ) -> None:
         qc = self.quant_config
-        M = hidden_states.shape[0]
-        top_k = topk_ids.shape[1]
+        E, M, N, K, top_k = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        n_gate_up = 2 * N
         total = M * top_k
-        n_gate_up = w1.shape[2]  # [E, K/8, 2*intermediate]
-        intermediate = n_gate_up // 2
-        hidden = w2.shape[2]
         dtype = hidden_states.dtype
         device = hidden_states.device
 
-        gne = global_num_experts if global_num_experts > 0 else w1.shape[0]
+        gne = global_num_experts if global_num_experts > 0 else E
         block_size_m = _select_block_size_m(M, top_k, gne)
         sti, eid, ntp = moe_align_block_size(topk_ids, block_size_m, gne, expert_map)
+
+        # workspace2 holds the activation output (live across the down GEMM)
+        # followed by the GEMM output region, which the two GEMMs share.
+        scratch = workspace2.view(-1)
+        act_out = scratch[: total * N].view(total, N)
+        gemm_out = scratch[total * N :]
+        w1_out = gemm_out[: total * n_gate_up].view(total, n_gate_up)
 
         topk_w_f32 = topk_weights.reshape(-1).float()
         empty_tw = torch.empty(0, device=device)
         w1_bias = qc.w1_bias
         w2_bias = qc.w2_bias
-        flat_experts = (
-            topk_ids.reshape(-1).long()
-            if (w1_bias is not None or w2_bias is not None)
-            else None
-        )
 
         # gate_up GEMM (no reduction); router weight optionally folded in here.
-        w1_out = torch.zeros(total, n_gate_up, dtype=dtype, device=device)
+        w1_out.zero_()
         ops.moe_mxfp4_gemm_rdna3(
             hidden_states,
             w1_out,
@@ -193,21 +230,23 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
             0,
         )
         if w1_bias is not None:
-            w1_out = w1_out + w1_bias[flat_experts].to(dtype)
+            w1_out.add_(self._expert_bias_rows(w1_bias, topk_ids, expert_map, dtype))
 
-        act_out = torch.empty(total, intermediate, dtype=dtype, device=device)
+        # The repack de-interleaves GPT-OSS's gate/up rows, so the contiguous
+        # SwiGLU-OAI variant is the matching primitive; both read alpha/beta/
+        # clamp from the activation config.
         if activation == MoEActivation.SWIGLUOAI:
-            self._swiglu_oai(w1_out, act_out, qc)
-        else:
-            apply_moe_activation(activation, act_out, w1_out)
+            activation = MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        self.activation(activation, act_out, w1_out)
 
         # down GEMM. The kernel's fused output_topk reduce is wrong under TP
         # (each rank's down-proj is a partial the layer all-reduces afterwards);
         # a per-expert bias likewise needs adding before the reduction. In both
         # cases write unreduced rows and reduce in Python instead.
-        unfused = w2_bias is not None or get_tensor_model_parallel_world_size() > 1
+        unfused = w2_bias is not None or self.moe_config.moe_parallel_config.tp_size > 1
         if unfused:
-            w2_out = torch.zeros(total, hidden, dtype=dtype, device=device)
+            w2_out = gemm_out[: total * K].view(total, K)
+            w2_out.zero_()
             ops.moe_mxfp4_gemm_rdna3(
                 act_out,
                 w2_out,
@@ -223,10 +262,12 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
                 0,
             )
             if w2_bias is not None:
-                w2_out = w2_out + w2_bias[flat_experts].to(dtype)
+                w2_out.add_(
+                    self._expert_bias_rows(w2_bias, topk_ids, expert_map, dtype)
+                )
             if not apply_router_weight_on_input:
-                w2_out = w2_out * topk_weights.reshape(-1, 1).to(dtype)
-            output.copy_(w2_out.view(M, top_k, hidden).sum(dim=1))
+                w2_out.mul_(topk_weights.reshape(-1, 1).to(dtype))
+            torch.sum(w2_out.view(M, top_k, K), dim=1, out=output)
         else:
             output.zero_()
             ops.moe_mxfp4_gemm_rdna3(
@@ -243,17 +284,3 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
                 not apply_router_weight_on_input,
                 top_k,
             )
-
-    @staticmethod
-    def _swiglu_oai(x: torch.Tensor, out: torch.Tensor, qc) -> None:
-        # gate||up contiguous; OAI clamped SwiGLU with quant-config params.
-        alpha = qc.gemm1_alpha if qc.gemm1_alpha is not None else 1.702
-        beta = qc.gemm1_beta if qc.gemm1_beta is not None else 1.0
-        limit = qc.gemm1_clamp_limit
-        d = x.shape[-1] // 2
-        gate = x[..., :d]
-        up = x[..., d:]
-        if limit is not None:
-            gate = torch.clamp(gate, max=limit)
-            up = torch.clamp(up, min=-limit, max=limit)
-        out.copy_(gate * torch.sigmoid(alpha * gate) * (up + beta))
