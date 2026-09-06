@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import regex as re
-from jsonschema import Draft202012Validator
+from jsonschema import Draft7Validator, Draft202012Validator
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
@@ -964,6 +964,23 @@ class TestFixArgTypes:
             result = engine._fix_arg_types(json.dumps({"nums": '["42", "5"]'}), "f")
             parsed = json.loads(result)
             assert parsed["nums"] == [42, 5]
+
+    def test_draft7_tuple_array_decoding(self):
+        tool = _make_tool(
+            "f",
+            {"value": {"type": "array", "items": [{"$ref": "#/definitions/Count"}]}},
+        )
+        tool.function.parameters.update(
+            {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "definitions": {"Count": {"type": "integer"}},
+            }
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(json.dumps({"value": "[42]"}), "f")
+        parsed = json.loads(result)
+        assert parsed == {"value": [42]}
+        Draft7Validator(tool.function.parameters).validate(parsed)
 
     def test_array_mixed_item_types(self):
         tool = _make_tool(

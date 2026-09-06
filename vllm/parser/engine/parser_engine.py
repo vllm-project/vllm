@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import UnknownType
+from jsonschema.validators import validator_for
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
@@ -35,11 +36,13 @@ from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
     find_tool_name,
-    find_tool_properties,
+    find_tool_schema,
     get_schema_properties,
 )
 
 if TYPE_CHECKING:
+    from jsonschema.protocols import Validator
+
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
@@ -246,22 +249,23 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
+    def _coerce_value(value: object, validator: Validator) -> tuple[object, bool]:
         """Coerce a single value according to its schema.
 
         Returns ``(coerced_value, changed)``.
         """
+        schema = validator.schema
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
             coerced = coerce_to_schema_type(value, types) if types else value
             if coerced is not value:
                 if isinstance(coerced, (dict, list)):
-                    coerced, _ = ParserEngine._coerce_value(coerced, schema)
+                    coerced, _ = ParserEngine._coerce_value(coerced, validator)
                 return coerced, True
             return value, False
 
         if isinstance(value, dict):
-            return ParserEngine._coerce_dict(value, get_schema_properties(schema))
+            return ParserEngine._coerce_dict(value, validator)
 
         if isinstance(value, list):
             # Preserve alternatives when projecting array schemas onto item hints.
@@ -287,11 +291,12 @@ class ParserEngine(Parser):
                     hints.setdefault(keyword, []).extend(branch_hints)
                     pending.extend(zip(branches, branch_hints))
             if items_schema:
+                item_validator = validator.evolve(schema=items_schema)
                 value = value.copy()
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema
+                        item, item_validator
                     )
                     if item_changed:
                         value[i] = coerced
@@ -309,21 +314,20 @@ class ParserEngine(Parser):
         return value, False
 
     @staticmethod
-    def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
-        """Coerce all values in *args* using *properties* schemas."""
+    def _coerce_dict(args: dict, validator: Validator) -> tuple[dict, bool]:
+        """Coerce properties while retaining the validator's draft and root context."""
+        properties = get_schema_properties(validator.schema)
         args = args.copy()
         changed = False
         for key, value in args.items():
             prop = properties.get(key)
             if not isinstance(prop, dict):
                 continue
-            coerced, val_changed = ParserEngine._coerce_value(value, prop)
+            prop_validator = validator.evolve(schema=prop)
+            coerced, val_changed = ParserEngine._coerce_value(value, prop_validator)
             if val_changed:
                 try:
-                    # An empty registry prevents fetching external schema references.
-                    valid = Draft202012Validator(prop, registry=Registry()).is_valid(
-                        coerced
-                    )
+                    valid = prop_validator.is_valid(coerced)
                 except (Unresolvable, UnknownType, TypeError):
                     # Malformed schema keyword values can raise TypeError.
                     valid = False
@@ -433,11 +437,15 @@ class ParserEngine(Parser):
         if not isinstance(args, dict):
             return args_json
 
-        properties = find_tool_properties(self._tools, func_name)
-        if not properties:
+        schema = find_tool_schema(self._tools, func_name)
+        if not schema:
             return args_json
 
-        args, changed = self._coerce_dict(args, properties)
+        # Keep the declared draft and root references without fetching external schemas.
+        validator = validator_for(schema, default=Draft202012Validator)(
+            schema, registry=Registry()
+        )
+        args, changed = self._coerce_dict(args, validator)
 
         if changed:
             return json.dumps(args, ensure_ascii=False)
@@ -905,7 +913,7 @@ class ParserEngine(Parser):
         slot.name = name
         slot.name_sent = True
         slot.string_keys = self._streamable_string_keys(
-            find_tool_properties(self._tools, name)
+            get_schema_properties(find_tool_schema(self._tools, name))
         )
         self._ensure_tool_id(slot, name)
         deltas.append(
@@ -963,7 +971,7 @@ class ParserEngine(Parser):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
-                    find_tool_properties(self._tools, name)
+                    get_schema_properties(find_tool_schema(self._tools, name))
                 )
                 self._ensure_tool_id(slot, name)
                 deltas.append(

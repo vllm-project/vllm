@@ -32,7 +32,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_schema, get_schema_properties
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -117,7 +117,7 @@ def _unwrap_wrapper_args(
         return args_json
     if not isinstance(args, dict):
         return args_json
-    properties = find_tool_properties(tools, func_name)
+    properties = get_schema_properties(find_tool_schema(tools, func_name))
     if not properties:
         return args_json
     allowed = set(properties.keys())

@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
-    find_tool_properties,
+    find_tool_schema,
     get_json_schema_from_tools,
 )
 
@@ -378,14 +378,14 @@ class TestNonFunctionToolsSkipped:
     """Non-function tools (web_search, etc.) must be silently skipped
     by the tool-schema utilities instead of raising TypeError."""
 
-    def test_find_tool_properties_skips_web_search(self):
+    def test_find_tool_schema_skips_web_search(self):
         tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
-        props = find_tool_properties(tools, "get_weather")
-        assert props == {"city": {"type": "string"}}
+        schema = find_tool_schema(tools, "get_weather")
+        assert schema == FUNCTION_TOOL.parameters
 
-    def test_find_tool_properties_only_non_function_tools(self):
-        props = find_tool_properties([WEB_SEARCH_TOOL], "get_weather")
-        assert props == {}
+    def test_find_tool_schema_only_non_function_tools(self):
+        schema = find_tool_schema([WEB_SEARCH_TOOL], "get_weather")
+        assert schema == {}
 
     def test_get_json_schema_with_mixed_tools(self):
         tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]

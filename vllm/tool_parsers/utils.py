@@ -318,11 +318,11 @@ def get_schema_properties(params: Any) -> dict[str, Any]:
     return properties
 
 
-def find_tool_properties(
+def find_tool_schema(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its parameter property schemas, or {}."""
+    """Find a tool by name and return its complete parameter schema, or {}."""
     if not tools:
         return {}
     for tool in tools:
@@ -334,7 +334,7 @@ def find_tool_properties(
             continue
         for name, params in tool_info:
             if name == tool_name:
-                return get_schema_properties(params or {})
+                return params or {}
     return {}
 
 
