@@ -2134,7 +2134,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
-            if self.pp_handler is not None:
+            if self.pp_handler is not None and self.speculator is None:
+                # When a speculator ran, the propose() path above already
+                # broadcast the fresh drafts. Broadcasting here as well would
+                # double-post on the pp_broadcast group and misalign the
+                # recv FIFO on earlier stages, hanging the pipeline.
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
                 )
