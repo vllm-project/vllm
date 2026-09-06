@@ -12,6 +12,10 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 import regex as re
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import UnknownType
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
@@ -271,6 +275,7 @@ class ParserEngine(Parser):
                 if isinstance(all_of := member.get("allOf"), list):
                     pending.extend(all_of)
             if item_schemas:
+                value = value.copy()
                 items_schema = {"allOf": item_schemas}
                 changed = False
                 for i, item in enumerate(value):
@@ -295,6 +300,7 @@ class ParserEngine(Parser):
     @staticmethod
     def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
         """Coerce all values in *args* using *properties* schemas."""
+        args = args.copy()
         changed = False
         for key, value in args.items():
             prop = properties.get(key)
@@ -302,6 +308,15 @@ class ParserEngine(Parser):
                 continue
             coerced, val_changed = ParserEngine._coerce_value(value, prop)
             if val_changed:
+                try:
+                    # An empty registry prevents fetching external schema references.
+                    valid = Draft202012Validator(prop, registry=Registry()).is_valid(
+                        coerced
+                    )
+                except (Unresolvable, UnknownType):
+                    valid = False
+                if not valid:
+                    continue
                 args[key] = coerced
                 changed = True
         return args, changed
@@ -410,7 +425,7 @@ class ParserEngine(Parser):
         if not properties:
             return args_json
 
-        _, changed = self._coerce_dict(args, properties)
+        args, changed = self._coerce_dict(args, properties)
 
         if changed:
             return json.dumps(args, ensure_ascii=False)

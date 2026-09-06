@@ -887,6 +887,7 @@ class TestFixArgTypes:
                     "type": "object",
                     "properties": {
                         "value": {"type": "integer"},
+                        "choice": {"type": ["string", "integer"]},
                         "labels": {"type": "array", "items": {"type": "string"}},
                         "payload": {
                             "type": "object",
@@ -897,6 +898,7 @@ class TestFixArgTypes:
                         {
                             "properties": {
                                 "value": {"type": "number"},
+                                "choice": {"enum": ["42", 7]},
                                 "labels": {"items": {"type": ["string", "integer"]}},
                                 "payload": {
                                     "properties": {"count": {"type": "integer"}}
@@ -909,14 +911,18 @@ class TestFixArgTypes:
         )
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types(
-            '{"value": "1.5", "labels": ["42"], '
+            '{"value": "1.5", "choice": "42", "labels": ["42"], '
             '"payload": {"kept": "1", "count": "42"}}',
             "f",
         )
         assert json.loads(result) == {
             "value": "1.5",
+            "choice": "42",
             "labels": ["42"],
             "payload": {"kept": 1, "count": 42},
+        }
+        assert json.loads(engine._fix_arg_types('{"choice": "7"}', "f")) == {
+            "choice": 7
         }
 
     def test_malformed_root_combinator_preserves_direct_coercion(self):
