@@ -31,6 +31,22 @@ DTYPE = torch.bfloat16
 MAX_MISMATCH_RATE = 1e-4
 
 
+def _mhc_tilelang_available() -> bool:
+    """CUDA and the TileLang kernel dependency must both be present.
+
+    The op is registered at import time even without TileLang, so checking
+    ``torch.ops.vllm.hc_head_fused_kernel_tilelang`` alone is not enough;
+    the lazy kernel import would fail on such builds at runtime.
+    """
+    if not current_platform.is_cuda():
+        return False
+    try:
+        import tilelang  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _make_inputs(num_tokens: int, device: torch.device):
     torch.manual_seed(20260828)
     hs = torch.randn(num_tokens, HC_MULT, HIDDEN_SIZE, device=device).to(DTYPE)
@@ -53,7 +69,9 @@ def _hc_head(hs, fn, hc_scale, hc_base):
     return hc_head_fused_kernel_tilelang(hs, fn, hc_scale, hc_base, RMS_EPS, HC_EPS)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not _mhc_tilelang_available(), reason="requires CUDA + tilelang"
+)
 @pytest.mark.parametrize("num_tokens", [512, 2048])
 @pytest.mark.parametrize("num_logits", [1, 64])
 def test_hc_head_gather_first_bitwise(num_tokens: int, num_logits: int) -> None:
@@ -67,7 +85,9 @@ def test_hc_head_gather_first_bitwise(num_tokens: int, num_logits: int) -> None:
     assert torch.equal(full_then_gather, gather_first)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not _mhc_tilelang_available(), reason="requires CUDA + tilelang"
+)
 def test_head_norm_chain_all_rows_bitwise() -> None:
     """L == T (decode-shaped) gather-first is bitwise identical end to end."""
     device = torch.device("cuda:0")
@@ -80,7 +100,9 @@ def test_head_norm_chain_all_rows_bitwise() -> None:
     assert torch.equal(full_then_gather, gather_first)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not _mhc_tilelang_available(), reason="requires CUDA + tilelang"
+)
 @pytest.mark.parametrize("num_tokens", [2048, 8192])
 def test_head_norm_chain_within_one_ulp(num_tokens: int) -> None:
     """Full chain (hc_head + vllm_c rms_norm) matches within 1 bf16 ULP."""
