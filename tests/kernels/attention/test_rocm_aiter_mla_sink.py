@@ -32,6 +32,95 @@ def _require_aiter() -> None:
         pytest.skip("aiter is required on supported ROCm hardware for this test")
 
 
+@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
+def test_apply_attention_sink_matches_reference(output_dtype: torch.dtype) -> None:
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        apply_attention_sink,
+    )
+
+    set_random_seed(20260902)
+    device = torch.device("cuda")
+    output_storage = torch.randn(3, 8, 17, device=device, dtype=output_dtype)
+    lse_storage = torch.randn(3, 8, device=device, dtype=torch.float32)
+    output = output_storage[:, ::2]
+    lse = lse_storage[:, ::2]
+    sinks = torch.linspace(-2.0, 6.0, 4, device=device, dtype=torch.float32)
+
+    expected_lse = torch.logaddexp(lse, sinks)
+    expected_output = output.float() * torch.exp(lse - expected_lse).unsqueeze(-1)
+    output_ptr = output.data_ptr()
+    lse_ptr = lse.data_ptr()
+
+    actual_output, actual_lse = apply_attention_sink(output, lse, sinks)
+
+    assert actual_output.data_ptr() == output_ptr
+    assert actual_lse.data_ptr() == lse_ptr
+    torch.testing.assert_close(actual_lse, expected_lse)
+    torch.testing.assert_close(
+        actual_output.float(),
+        expected_output,
+        atol=2e-3 if output_dtype == torch.bfloat16 else 1e-6,
+        rtol=2e-3 if output_dtype == torch.bfloat16 else 1e-6,
+    )
+
+
+def test_apply_attention_sink_zeroes_empty_rows_during_graph_replay() -> None:
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        apply_attention_sink,
+    )
+
+    set_random_seed(20260905)
+    device = torch.device("cuda")
+    output_storage = torch.empty(4, 16, V_HEAD_DIM, dtype=torch.bfloat16, device=device)
+    lse_storage = torch.empty(4, 16, dtype=torch.float32, device=device)
+    output = output_storage[:, ::2]
+    lse = lse_storage[:, ::2]
+    sinks = torch.empty(8, dtype=torch.float32, device=device)
+    kv_indptr = torch.empty(5, dtype=torch.int32, device=device)
+
+    output.normal_()
+    lse.normal_()
+    sinks.normal_()
+    kv_indptr.copy_(torch.tensor([0, 5, 10, 15, 20], device=device))
+    apply_attention_sink(output, lse, sinks, kv_indptr)
+    torch.accelerator.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        apply_attention_sink(output, lse, sinks, kv_indptr)
+
+    for lengths in ([5, 5, 5, 5], [7, 0, 3, 0], [0, 2, 0, 9]):
+        output.normal_()
+        lse.normal_()
+        sinks.normal_()
+        indptr = torch.tensor(
+            [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+            dtype=torch.int32,
+            device=device,
+        )
+        kv_indptr.copy_(indptr)
+
+        active = (kv_indptr[1:] > kv_indptr[:-1]).view(-1, 1)
+        expected_lse = torch.logaddexp(lse, sinks)
+        expected_lse = torch.where(active, expected_lse, sinks)
+        expected_output = output.float() * torch.exp(lse - expected_lse).unsqueeze(-1)
+        expected_output = torch.where(
+            active.unsqueeze(-1),
+            expected_output,
+            torch.zeros_like(expected_output),
+        )
+
+        graph.replay()
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(
+            output,
+            expected_output.to(output.dtype),
+            atol=0,
+            rtol=0,
+        )
+        torch.testing.assert_close(lse, expected_lse, atol=2e-7, rtol=2e-7)
+
+
 @pytest.mark.parametrize(
     ("real_heads", "cache_kind"),
     [
@@ -73,10 +162,28 @@ def test_sparse_mla_sink_matches_ragged_reference(
     seq_lens = [1, 5, 23, 17]
     batch_size = len(seq_lens)
 
-    q_source = torch.randn(batch_size, real_heads, Q_HEAD_DIM, device=device) * 0.2
+    q_source = (
+        torch.randn(
+            batch_size,
+            real_heads,
+            Q_HEAD_DIM,
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.2
+    )
 
     pool_size = sum(seq_lens) + 52
-    kv_source = torch.randn(pool_size, 1, Q_HEAD_DIM, device=device) * 0.2
+    kv_source = (
+        torch.randn(
+            pool_size,
+            1,
+            Q_HEAD_DIM,
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.2
+    )
     if cache_kind == "fp8":
         fp8_dtype = current_platform.fp8_dtype()
         q_scale = torch.tensor(0.5, dtype=torch.float32, device=device)
@@ -115,7 +222,13 @@ def test_sparse_mla_sink_matches_ragged_reference(
         reduce_final_map=None,
         reduce_partial_map=None,
     )
-    sinks = torch.linspace(-2.0, 6.0, real_heads, device=device)
+    sinks = torch.linspace(
+        -2.0,
+        6.0,
+        real_heads,
+        device=device,
+        dtype=torch.float32,
+    )
 
     impl = object.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = real_heads
@@ -166,6 +279,7 @@ def _make_noncontiguous_sink() -> torch.Tensor:
         (_make_noncontiguous_sink(), "must be contiguous"),
     ],
 )
+@pytest.mark.usefixtures("default_vllm_config")
 def test_sparse_mla_sink_validation(sinks: torch.Tensor, match: str) -> None:
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         ROCMAiterMLASparseImpl,
@@ -186,6 +300,92 @@ def test_sparse_mla_sink_validation(sinks: torch.Tensor, match: str) -> None:
             sinks=sinks,
             kv_lora_rank=V_HEAD_DIM,
         )
+
+
+@pytest.mark.parametrize("real_heads", [48, 64])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "bfloat16"])
+def test_sparse_mla_sink_rejects_unsupported_gfx942_h64_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    real_heads: int,
+    kv_cache_dtype: str,
+) -> None:
+    from vllm.platforms import rocm as rocm_platform
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse
+
+    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: True)
+    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+    )
+
+    with pytest.raises(ValueError, match="increase tensor_parallel_size"):
+        rocm_aiter_mla_sparse.ROCMAiterMLASparseImpl(
+            num_heads=real_heads,
+            head_size=Q_HEAD_DIM,
+            scale=SM_SCALE,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            sinks=torch.zeros(real_heads, dtype=torch.float32),
+            kv_lora_rank=V_HEAD_DIM,
+        )
+
+
+@pytest.mark.parametrize("real_heads", [48, 64])
+@pytest.mark.parametrize(
+    ("head_size", "kv_cache_dtype"),
+    [
+        (Q_HEAD_DIM, "fp8"),
+        (Q_HEAD_DIM, "fp8_e4m3"),
+    ],
+)
+def test_sparse_mla_sink_accepts_supported_gfx942_construction_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    real_heads: int,
+    head_size: int,
+    kv_cache_dtype: str,
+) -> None:
+    from vllm.platforms import rocm as rocm_platform
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse
+
+    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: True)
+    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=1),
+        ),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "current_workspace_manager",
+        lambda: SimpleNamespace(get_simultaneous=lambda *_args: (torch.empty(0),)),
+    )
+
+    impl = rocm_aiter_mla_sparse.ROCMAiterMLASparseImpl(
+        num_heads=real_heads,
+        head_size=head_size,
+        scale=SM_SCALE,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        sinks=torch.zeros(real_heads, dtype=torch.float32),
+        kv_lora_rank=V_HEAD_DIM,
+    )
+
+    assert impl.sinks is not None
 
 
 @pytest.mark.parametrize("real_heads", [48, 64])

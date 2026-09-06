@@ -11,6 +11,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
+from vllm.models.hy_v4.amd import attention as amd_attention
 from vllm.models.hy_v4.amd.attention import HYV4MLAAttention
 from vllm.models.hy_v4.amd.model import (
     HYV4DecoderLayer,
@@ -25,6 +26,9 @@ from vllm.models.hy_v4.amd.mtp import (
 from vllm.models.hy_v4.amd.rocm import (
     HYV4ROCMAiterMLASparseBackend,
     HYV4ROCMAiterMLASparseImpl,
+)
+from vllm.models.hy_v4.nvidia.attention import (
+    HYV4MLAAttention as NvidiaHYV4MLAAttention,
 )
 from vllm.models.hy_v4.nvidia.model import (
     HYV4ForCausalLM as NvidiaHYV4ForCausalLM,
@@ -117,6 +121,57 @@ def test_rocm_model_and_mtp_use_amd_attention() -> None:
     assert HYV4MultiTokenPredictorLayer.decoder_layer_cls is HYV4DecoderLayer
     assert HYV4MultiTokenPredictor.predictor_layer_cls is HYV4MultiTokenPredictorLayer
     assert HYV4MTP.predictor_cls is HYV4MultiTokenPredictor
+
+
+def test_nvidia_mla_gate_hook_preserves_eager_semantics() -> None:
+    attention = NvidiaHYV4MLAAttention.__new__(NvidiaHYV4MLAAttention)
+    nn.Module.__init__(attention)
+    attn_out = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
+    gate_score = torch.tensor([[-1.0, 0.0, 2.0]], dtype=torch.bfloat16)
+
+    actual = attention._apply_mla_gate(attn_out, gate_score)
+    expected = attn_out * torch.sigmoid(gate_score)
+
+    assert torch.equal(actual, expected)
+
+
+def test_rocm_mla_gate_falls_back_for_unsupported_inputs() -> None:
+    attention = HYV4MLAAttention.__new__(HYV4MLAAttention)
+    nn.Module.__init__(attention)
+    attention.config = SimpleNamespace(gating_type="elementwise")
+    attn_out = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.bfloat16)
+    gate_score = torch.tensor([[-1.0, 0.0, 2.0]], dtype=torch.bfloat16)
+
+    actual = attention._apply_mla_gate(attn_out, gate_score)
+    expected = attn_out * torch.sigmoid(gate_score)
+
+    assert torch.equal(actual, expected)
+
+
+def test_rocm_mla_gate_dispatches_fused_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    attention = HYV4MLAAttention.__new__(HYV4MLAAttention)
+    nn.Module.__init__(attention)
+    attn_out = torch.ones(1, 3)
+    gate_score = torch.zeros(1, 3)
+    sentinel = torch.full_like(attn_out, 7)
+    calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    monkeypatch.setattr(
+        HYV4MLAAttention,
+        "_can_use_fused_mla_gate",
+        lambda self, output, gate: True,
+    )
+
+    def fake_fused(output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        calls.append((output, gate))
+        return sentinel
+
+    monkeypatch.setattr(amd_attention, "hy4_rocm_bf16_sigmoid_mul", fake_fused)
+
+    actual = attention._apply_mla_gate(attn_out, gate_score)
+
+    assert actual is sentinel
+    assert calls == [(attn_out, gate_score)]
 
 
 @pytest.mark.parametrize("soft_cap", [None, 2.0])
@@ -264,6 +319,76 @@ def test_rocm_mtp_local_argmax_supports_graph_replay(default_vllm_config) -> Non
 
     expected = mtp.model.compute_logits(hidden_states).argmax(dim=-1)
     assert torch.equal(graph_tokens, expected)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4, 64])
+@pytest.mark.skipif(
+    getattr(torch.version, "hip", None) is None or not torch.accelerator.is_available(),
+    reason="requires ROCm",
+)
+def test_rocm_bf16_mla_gate_is_bitwise_equal(num_tokens: int) -> None:
+    torch.manual_seed(54594 + num_tokens)
+    attn_out = torch.randn(num_tokens, 2048, dtype=torch.bfloat16, device="cuda")
+    gate_score = torch.randn_like(attn_out)
+    gate_score.view(-1)[:7] = torch.tensor(
+        [float("-inf"), -20.0, -0.0, 0.0, 20.0, float("inf"), float("nan")],
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    expected = attn_out * torch.sigmoid(gate_score)
+    actual = amd_attention.hy4_rocm_bf16_sigmoid_mul(attn_out, gate_score)
+
+    expected_nan = torch.isnan(expected)
+    actual_nan = torch.isnan(actual)
+    assert torch.equal(actual_nan, expected_nan)
+    assert torch.equal(
+        actual.view(torch.int16)[~expected_nan],
+        expected.view(torch.int16)[~expected_nan],
+    )
+
+
+@pytest.mark.skipif(
+    getattr(torch.version, "hip", None) is None or not torch.accelerator.is_available(),
+    reason="requires ROCm",
+)
+def test_rocm_bf16_mla_gate_supports_graph_input_mutation() -> None:
+    torch.manual_seed(54594)
+    attn_out = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    gate_score = torch.randn_like(attn_out)
+    amd_attention.hy4_rocm_bf16_sigmoid_mul(attn_out, gate_score)
+    torch.accelerator.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = amd_attention.hy4_rocm_bf16_sigmoid_mul(attn_out, gate_score)
+
+    attn_out.copy_(torch.randn_like(attn_out))
+    gate_score.copy_(torch.randn_like(gate_score))
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    expected = attn_out * torch.sigmoid(gate_score)
+    assert torch.equal(graph_output.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.skipif(
+    getattr(torch.version, "hip", None) is None or not torch.accelerator.is_available(),
+    reason="requires ROCm",
+)
+def test_rocm_mla_gate_fusion_guard_matches_measured_shape() -> None:
+    attention = HYV4MLAAttention.__new__(HYV4MLAAttention)
+    nn.Module.__init__(attention)
+    attention.config = SimpleNamespace(gating_type="elementwise")
+    attn_out = torch.empty(4, 2048, dtype=torch.bfloat16, device="cuda")
+    gate_score = torch.empty_like(attn_out)
+
+    assert attention._can_use_fused_mla_gate(attn_out, gate_score)
+
+    attention.config.gating_type = "headwise"
+    assert not attention._can_use_fused_mla_gate(attn_out, gate_score)
+    attention.config.gating_type = "elementwise"
+    assert not attention._can_use_fused_mla_gate(attn_out[:, ::2], gate_score[:, ::2])
 
 
 def test_rocm_sparse_backend_preserves_name_and_supports_sink() -> None:

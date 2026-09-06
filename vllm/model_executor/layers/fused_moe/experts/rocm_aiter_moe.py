@@ -199,7 +199,28 @@ def rocm_aiter_grouped_topk(
         topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
         topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
-    if e_score_correction_bias is not None:
+    # HY V4 has one expert group, so group selection is a no-op. Use AITER's
+    # fused biased sigmoid top-k instead of paying for grouped routing.
+    use_hy4_topk_gating = (
+        e_score_correction_bias is not None
+        and hidden_states.shape[-1] == 6144
+        and gating_output.shape[-1] == 256
+        and topk == 8
+        and num_expert_group == 1
+        and topk_group == 1
+        and scoring_func == "sigmoid"
+    )
+    if use_hy4_topk_gating:
+        rocm_aiter_ops.topk_gating(
+            gating_output,
+            e_score_correction_bias,
+            topk_weights,
+            topk_ids,
+            renormalize,
+            routed_scaling_factor,
+            scoring_func,
+        )
+    elif e_score_correction_bias is not None:
         rocm_aiter_ops.biased_grouped_topk(
             gating_output,
             e_score_correction_bias,

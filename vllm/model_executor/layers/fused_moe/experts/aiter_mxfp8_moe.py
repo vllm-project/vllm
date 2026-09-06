@@ -164,15 +164,16 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         expert_mask = expert_map
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
-        # call is captured under HIP graphs / torch.compile (a direct
-        # ``aiter.fused_moe`` is opaque to the dispatcher). aiter requires FP32
-        # routing weights / INT32 ids.
+        # call is captured under HIP graphs / torch.compile. AITER's sorting
+        # kernels consume the routing buffers as packed arrays and do not honor
+        # a strided column slice. ``Tensor.to`` is a no-op when the dtype already
+        # matches, so make both buffers explicitly contiguous here.
         out = rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
             w2,
-            topk_weights.to(torch.float32),
-            topk_ids.to(torch.int32),
+            topk_weights.to(torch.float32).contiguous(),
+            topk_ids.to(torch.int32).contiguous(),
             expert_mask=expert_mask,
             activation_method=activation_method,
             quant_method=QuantType.per_1x32.value,

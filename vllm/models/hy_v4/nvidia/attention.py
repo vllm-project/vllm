@@ -655,6 +655,16 @@ class HYV4MLAAttention(nn.Module):
             "as the dense MLA prefill backends cannot apply sinks."
         )
 
+    def _apply_mla_gate(
+        self, attn_out: torch.Tensor, gate_score: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply the architecture's output gate.
+
+        Platform subclasses may override this hook with a semantically
+        equivalent fused implementation.
+        """
+        return attn_out * torch.sigmoid(gate_score)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -725,10 +735,10 @@ class HYV4MLAAttention(nn.Module):
                     attn_out = attn_out.reshape(
                         *attn_out.shape[:-1], -1, self.v_head_dim
                     )
-                    attn_out = attn_out * torch.sigmoid(gate_score)
+                    attn_out = self._apply_mla_gate(attn_out, gate_score)
                     attn_out = attn_out.reshape(*attn_out.shape[:-2], -1)
                 else:
-                    attn_out = attn_out * torch.sigmoid(gate_score)
+                    attn_out = self._apply_mla_gate(attn_out, gate_score)
 
         out, _ = self.o_proj(attn_out)
         return out

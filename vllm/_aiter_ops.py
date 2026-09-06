@@ -413,6 +413,40 @@ def _rocm_aiter_topk_sigmoid_fake(
     pass
 
 
+def _rocm_aiter_topk_gating_impl(
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    need_renorm: bool,
+    routed_scaling_factor: float = 1.0,
+    scoring_func: str = "sigmoid",
+) -> None:
+    from aiter.ops.topk import topk_gating
+
+    topk_gating(
+        topk_weights,
+        topk_ids,
+        gating_output,
+        correction_bias,
+        need_renorm,
+        routed_scaling_factor,
+        scoring_func,
+    )
+
+
+def _rocm_aiter_topk_gating_fake(
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    need_renorm: bool,
+    routed_scaling_factor: float = 1.0,
+    scoring_func: str = "sigmoid",
+) -> None:
+    pass
+
+
 def _rocm_aiter_biased_grouped_topk_impl(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
@@ -2245,6 +2279,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_topk_gating",
+                op_func=_rocm_aiter_topk_gating_impl,
+                mutates_args=["topk_weights", "topk_ids"],
+                fake_impl=_rocm_aiter_topk_gating_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
@@ -2785,6 +2827,26 @@ class rocm_aiter_ops:
             topk_group,
             need_renorm,
             routed_scaling_factor,
+        )
+
+    @staticmethod
+    def topk_gating(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0,
+        scoring_func: str = "sigmoid",
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_topk_gating(
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            need_renorm,
+            routed_scaling_factor,
+            scoring_func,
         )
 
     @staticmethod

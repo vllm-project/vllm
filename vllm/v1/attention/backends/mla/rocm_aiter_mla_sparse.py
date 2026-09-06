@@ -17,7 +17,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import np_to_pinned_tensor
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -38,6 +38,159 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+def _get_aiter_sink_num_heads(
+    num_heads: int,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+) -> int:
+    """Validate an AITER sink configuration and return its kernel head count."""
+    if q_dtype == torch.bfloat16 and kv_dtype == torch.bfloat16:
+        supported_head_buckets: tuple[int, ...] = (16, 32, 64, 128)
+        head_dtype_name = "BF16"
+    elif (
+        q_dtype == current_platform.fp8_dtype()
+        and kv_dtype == current_platform.fp8_dtype()
+    ):
+        supported_head_buckets = (16, 128)
+        head_dtype_name = "FP8"
+    else:
+        raise ValueError(
+            "ROCm AITER MLA attention sinks require query and KV to "
+            "both use BF16 or both use FP8, got "
+            f"query={q_dtype}, KV={kv_dtype}"
+        )
+
+    from vllm.platforms.rocm import on_gfx942, on_mi3xx
+
+    if not on_mi3xx():
+        return num_heads
+
+    padded_heads = next(
+        (heads for heads in supported_head_buckets if heads >= num_heads),
+        None,
+    )
+    if padded_heads is None:
+        raise ValueError(
+            "ROCm AITER MLA attention sinks support at most 128 "
+            f"padded local {head_dtype_name} heads; increase tensor_parallel_size"
+        )
+    if on_gfx942() and q_dtype == torch.bfloat16 and padded_heads == 64:
+        raise ValueError(
+            "ROCm AITER MLA attention sinks do not support BF16 "
+            "query/KV with 64 padded local heads on gfx942; increase "
+            "tensor_parallel_size"
+        )
+    return padded_heads
+
+
+@triton.jit
+def _apply_attention_sink_kernel(
+    output_ptr,
+    lse_ptr,
+    sink_ptr,
+    kv_indptr_ptr,
+    num_heads: tl.constexpr,
+    head_size: tl.constexpr,
+    output_stride_token,
+    output_stride_head,
+    output_stride_dim,
+    lse_stride_token,
+    lse_stride_head,
+    sink_stride,
+    HAS_KV_INDPTR: tl.constexpr,
+    HEADS_PER_PROGRAM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    group_count: tl.constexpr = tl.cdiv(num_heads, HEADS_PER_PROGRAM)
+    program_idx = tl.program_id(0)
+    token_idx = program_idx // group_count
+    head_group = program_idx % group_count
+
+    head_offsets = head_group * HEADS_PER_PROGRAM + tl.arange(0, HEADS_PER_PROGRAM)
+    head_mask = head_offsets < num_heads
+    row_active = True
+    if HAS_KV_INDPTR:
+        row_active = tl.load(kv_indptr_ptr + token_idx + 1) > tl.load(
+            kv_indptr_ptr + token_idx
+        )
+
+    lse_offsets = token_idx * lse_stride_token + head_offsets * lse_stride_head
+    lse = tl.load(lse_ptr + lse_offsets, mask=head_mask).to(tl.float32)
+    sink = tl.load(sink_ptr + head_offsets * sink_stride, mask=head_mask).to(tl.float32)
+    safe_lse = tl.where(row_active, lse, float("-inf"))
+    maximum = tl.maximum(safe_lse, sink)
+    sink_lse = maximum + tl.log(tl.exp(safe_lse - maximum) + tl.exp(sink - maximum))
+    scale = tl.exp(safe_lse - sink_lse)
+
+    dim_offsets = tl.arange(0, BLOCK_SIZE)
+    dim_mask = dim_offsets < head_size
+    output_offsets = (
+        token_idx * output_stride_token
+        + head_offsets[:, None] * output_stride_head
+        + dim_offsets[None, :] * output_stride_dim
+    )
+    output_mask = head_mask[:, None] & dim_mask[None, :]
+    value = tl.load(
+        output_ptr + output_offsets,
+        mask=output_mask & row_active,
+        other=0.0,
+    ).to(tl.float32)
+    tl.store(
+        output_ptr + output_offsets,
+        value * scale[:, None],
+        mask=output_mask,
+    )
+    tl.store(lse_ptr + lse_offsets, sink_lse, mask=head_mask)
+
+
+def apply_attention_sink(
+    output: torch.Tensor,
+    lse: torch.Tensor,
+    sinks: torch.Tensor,
+    kv_indptr: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply attention sinks and zero empty ragged rows in place."""
+    assert output.ndim == 3
+    assert lse.shape == output.shape[:2]
+    assert sinks.shape == (output.shape[1],)
+    assert lse.dtype == torch.float32
+    assert sinks.dtype == torch.float32
+    if kv_indptr is not None:
+        assert kv_indptr.ndim == 1
+        assert kv_indptr.shape[0] >= output.shape[0] + 1
+        assert kv_indptr.dtype == torch.int32
+        assert kv_indptr.device == output.device
+
+    num_tokens, num_heads, head_size = output.shape
+    if num_tokens == 0:
+        return output, lse
+
+    # HY V4 TP8 exposes eight real heads after AITER's H16 padding. Grouping
+    # those heads amortizes the empty-row check and is faster on gfx950.
+    heads_per_program = 8 if num_heads == 8 and head_size == 512 else 1
+    num_warps = 8 if heads_per_program == 8 else 4
+    group_count = triton.cdiv(num_heads, heads_per_program)
+    _apply_attention_sink_kernel[(num_tokens * group_count,)](
+        output,
+        lse,
+        sinks,
+        kv_indptr if kv_indptr is not None else lse,
+        num_heads=num_heads,
+        head_size=head_size,
+        output_stride_token=output.stride(0),
+        output_stride_head=output.stride(1),
+        output_stride_dim=output.stride(2),
+        lse_stride_token=lse.stride(0),
+        lse_stride_head=lse.stride(1),
+        sink_stride=sinks.stride(0),
+        HAS_KV_INDPTR=kv_indptr is not None,
+        HEADS_PER_PROGRAM=heads_per_program,
+        BLOCK_SIZE=triton.next_power_of_2(head_size),
+        num_warps=num_warps,
+    )
+    return output, lse
 
 
 @triton.jit
@@ -733,6 +886,9 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
+        vllm_config = get_current_vllm_config()
         sinks = mla_args.pop("sinks", None)
         if sinks is not None:
             if sinks.dtype != torch.float32:
@@ -746,9 +902,20 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 )
             if not sinks.is_contiguous():
                 raise ValueError("ROCm AITER MLA sinks must be contiguous")
+            # Reject unsupported AITER sink layouts during construction rather
+            # than deferring the failure until the first real request.
+            model_dtype = vllm_config.model_config.dtype
+            if kv_cache_dtype.startswith("fp8"):
+                q_dtype = kv_dtype = current_platform.fp8_dtype()
+            else:
+                q_dtype = model_dtype
+                kv_dtype = get_kv_cache_torch_dtype(kv_cache_dtype, model_dtype)
+            _get_aiter_sink_num_heads(
+                AiterMLAHelper.get_actual_mla_num_heads(num_heads),
+                q_dtype,
+                kv_dtype,
+            )
         self.sinks: torch.Tensor | None = sinks
-        self.kv_cache_dtype = kv_cache_dtype
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
         # The indexer carries the shared buffer for normal layers and tests;
         # the explicitly-passed buffer covers backbone skip layers, whose
@@ -757,7 +924,6 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
         )
 
-        vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -775,63 +941,19 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         mla_num_heads = base_mla_num_heads
         need_lse = self.sinks is not None
-        # AITER's nonpersistent return-LSE dispatch has discrete head kernels.
-        supported_head_buckets: tuple[int, ...] | None = None
-        head_dtype_name = ""
         if need_lse:
-            if (
-                q.dtype == torch.bfloat16
-                and kv_c_and_k_pe_cache.dtype == torch.bfloat16
-            ):
-                supported_head_buckets = (16, 32, 64, 128)
-                head_dtype_name = "BF16"
-            elif (
-                q.dtype == current_platform.fp8_dtype()
-                and kv_c_and_k_pe_cache.dtype == current_platform.fp8_dtype()
-            ):
-                supported_head_buckets = (16, 128)
-                head_dtype_name = "FP8"
-
-        if supported_head_buckets is not None:
-            from vllm.platforms.rocm import on_mi3xx
-
-            if on_mi3xx():
-                supported_heads = next(
-                    (
-                        heads
-                        for heads in supported_head_buckets
-                        if heads >= mla_num_heads
-                    ),
-                    None,
-                )
-                if supported_heads is None:
-                    raise ValueError(
-                        "ROCm AITER MLA attention sinks support at most 128 "
-                        f"padded local {head_dtype_name} heads; increase "
-                        "tensor_parallel_size"
-                    )
-                if supported_heads != mla_num_heads:
-                    q = AiterMLAHelper.get_mla_padded_q(
-                        mla_num_heads, q, supported_heads
-                    )
-                    mla_num_heads = supported_heads
-        if (
-            need_lse
-            and q.dtype == torch.bfloat16
-            and kv_c_and_k_pe_cache.dtype == torch.bfloat16
-            and mla_num_heads == 64
-        ):
-            from vllm.platforms.rocm import on_gfx942
-
-            if on_gfx942():
-                raise ValueError(
-                    "ROCm AITER MLA attention sinks do not support BF16 "
-                    "query/KV with 64 padded local heads on gfx942; increase "
-                    "tensor_parallel_size"
-                )
-        # Graph-padded rows are not guaranteed to be written by every AITER
-        # kernel variant. Record the zero-fill in the graph so an inactive row
-        # cannot retain values from an earlier replay.
+            supported_heads = _get_aiter_sink_num_heads(
+                mla_num_heads,
+                q.dtype,
+                kv_c_and_k_pe_cache.dtype,
+            )
+            if supported_heads != mla_num_heads:
+                q = AiterMLAHelper.get_mla_padded_q(mla_num_heads, q, supported_heads)
+                mla_num_heads = supported_heads
+        # Retain the graph-recorded zero-fill. Some AITER kernels do not write
+        # every graph-padded row, and leaving those rows uninitialized can make
+        # subsequent graph replays pathologically slow. The sink kernel below
+        # still repairs empty-row LSE values and preserves zero outputs.
         output = torch.zeros(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
@@ -904,11 +1026,12 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
 
         if self.sinks is not None:
             assert lse is not None
-            sink = self.sinks
-            sink_lse = torch.logaddexp(lse, sink)
-            sink_scale = torch.exp(lse - sink_lse)
-            output = (output.float() * sink_scale.unsqueeze(-1)).to(output.dtype)
-            lse = sink_lse
+            output, lse = apply_attention_sink(
+                output,
+                lse,
+                self.sinks,
+                attn_metadata.paged_kv_indptr,
+            )
 
         return output, lse
 

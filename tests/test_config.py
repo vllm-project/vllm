@@ -188,6 +188,48 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         default_breakable_cudagraph_architectures.cache_clear()
 
 
+def test_rocm_hyv4_defaults_to_mrv2_and_breakable_cudagraph(monkeypatch):
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled,
+    )
+    from vllm.config.vllm import (
+        ROCM_DEFAULT_MRV1_ARCHITECTURES,
+        default_breakable_cudagraph_architectures,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    default_breakable_cudagraph_architectures.cache_clear()
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["HYV4ForCausalLM"]),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+        ),
+    )
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert "HYV4ForCausalLM" not in ROCM_DEFAULT_MRV1_ARCHITECTURES
+        assert {
+            "HYV4ForCausalLM",
+            "HYV4MTPModel",
+        } <= default_breakable_cudagraph_architectures()
+        assert VllmConfig.use_v2_model_runner.fget(config)
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert is_breakable_cudagraph_enabled()
+        assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("model", "architecture"),
     [

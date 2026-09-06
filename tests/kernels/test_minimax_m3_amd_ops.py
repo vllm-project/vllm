@@ -474,6 +474,8 @@ def _capture_aiter_mxfp8_apply(
 
     def _fake_fused_moe(hidden_states, w1, w2, tw, ti, *, expert_mask, **kw):
         captured["expert_mask"] = expert_mask
+        captured["topk_weights"] = tw
+        captured["topk_ids"] = ti
         captured.update(kw)
         return torch.zeros_like(hidden_states)
 
@@ -481,8 +483,10 @@ def _capture_aiter_mxfp8_apply(
     w2 = torch.zeros(1, device=DEVICE)
     out = torch.zeros(4, 8, device=DEVICE, dtype=torch.bfloat16)
     hidden = torch.zeros(4, 8, device=DEVICE, dtype=torch.bfloat16)
-    tw = torch.ones(4, 2, device=DEVICE)
-    ti = torch.zeros(4, 2, dtype=torch.int32, device=DEVICE)
+    tw = torch.ones(4, 4, device=DEVICE)[:, ::2]
+    ti = torch.zeros(4, 4, dtype=torch.int32, device=DEVICE)[:, ::2]
+    assert not tw.is_contiguous()
+    assert not ti.is_contiguous()
 
     with mock.patch.object(rocm_aiter_ops, "fused_moe", side_effect=_fake_fused_moe):
         experts.apply(
@@ -538,6 +542,8 @@ def test_aiter_mxfp8_apply_uses_matching_activation_and_layout(
         == getattr(ActivationType, expected_activation).value
     )
     assert captured["gate_mode"] == expected_gate_mode
+    assert captured["topk_weights"].is_contiguous()
+    assert captured["topk_ids"].is_contiguous()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
