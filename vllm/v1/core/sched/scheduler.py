@@ -288,9 +288,11 @@ class Scheduler(SchedulerInterface):
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
-                    "EAGLE trailing prefix-cache block dropping is disabled. "
-                    "This is experimental and may affect speculative-token "
-                    "acceptance rates."
+                    "EAGLE trailing prefix-cache block dropping is disabled, "
+                    "so the trailing block stays eligible for cross-request "
+                    "prefix-cache hits and for external KV offload. This is "
+                    "experimental and may affect speculative-token acceptance "
+                    "rates."
                 )
 
         # Create the KV cache manager.
