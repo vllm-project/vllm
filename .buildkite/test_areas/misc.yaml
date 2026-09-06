@@ -9,6 +9,7 @@ steps:
   device: cpu-small
   working_dir: "/vllm-workspace"
   source_file_dependencies:
+  - cmake/utils.cmake
   - tools/pre_commit/validate_config.py
   - vllm/distributed/
   - vllm/platforms/__init__.py
@@ -21,6 +22,7 @@ steps:
   - tests/distributed/test_mq_connect_ip.py
   - tests/distributed/test_pipeline_partition.py
   - tests/platforms/
+  - tests/tools/test_cmake_utils.py
   - tests/tools/test_config_validator.py
   commands:
   - >-
@@ -33,6 +35,7 @@ steps:
     tests/distributed/test_mq_connect_ip.py
     tests/distributed/test_pipeline_partition.py
     tests/platforms/
+    tests/tools/test_cmake_utils.py
     tests/tools/test_config_validator.py
 
 - label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
