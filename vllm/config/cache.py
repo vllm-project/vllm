@@ -208,6 +208,17 @@ class CacheConfig:
     replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
+    mamba_exact_replay: bool = False
+    """Mamba2 exact-replay mode. Every SSD call for a sequence (prefill, chunked
+    prefill or decode) starts from the fp32 SSM state at the sequence's last
+    chunk boundary and re-feeds the inputs (x, dt, B, C) of the current partial
+    chunk from a per-sequence buffer, so the chunk grid seen by the kernels is
+    the one of a single-shot prefill and the Mamba2 SSM computation produces
+    identical bits on every path. Bit-identical logits additionally need the
+    batch-invariant kernels for the other layers (VLLM_BATCH_INVARIANT=1).
+    Requires mamba_ssm_cache_dtype 'float32', mamba_cache_mode 'none'
+    (prefix caching disabled) and the Triton mamba backend; no speculative
+    decoding; mutually exclusive with use_replayssm. Experimental."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

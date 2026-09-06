@@ -87,4 +87,6 @@ class MambaBase(AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
-        return get_mamba_attn_backend(self.mamba_type)
+        return get_mamba_attn_backend(
+            self.mamba_type, getattr(self, "exact_replay", False)
+        )

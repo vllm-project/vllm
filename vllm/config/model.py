@@ -1924,6 +1924,10 @@ class ModelConfig:
         return self._model_info.supports_replayssm
 
     @property
+    def supports_mamba_exact_replay(self) -> bool:
+        return self._model_info.supports_mamba_exact_replay
+
+    @property
     def use_mla(self) -> bool:
         if envs.VLLM_MLA_DISABLE:
             return False

@@ -214,19 +214,40 @@ def _cached_get_attn_backend(
 
 def get_mamba_attn_backend(
     mamba_type: MambaAttentionBackendEnum,
+    mamba_exact_replay: bool = False,
 ) -> type[AttentionBackend]:
-    """Select which mamba attention backend to use and lazily import it."""
-    return _cached_get_mamba_attn_backend(mamba_type)
+    """Select which mamba attention backend to use and lazily import it.
+
+    Args:
+        mamba_type: the layer's mamba backend kind.
+        mamba_exact_replay: whether Mamba2 exact-replay mode is enabled; a
+            backend whose batch-invariance support depends on it is only
+            accepted in batch-invariant mode when it is set.
+    """
+    return _cached_get_mamba_attn_backend(mamba_type, mamba_exact_replay)
+
+
+def _mamba_backend_supports_batch_invariance(
+    backend: type[AttentionBackend], mamba_exact_replay: bool
+) -> bool:
+    if backend.supports_batch_invariance():
+        return True
+    return mamba_exact_replay and bool(
+        getattr(backend, "supports_batch_invariance_with_exact_replay", False)
+    )
 
 
 @cache
 def _cached_get_mamba_attn_backend(
     mamba_type: MambaAttentionBackendEnum,
+    mamba_exact_replay: bool = False,
 ) -> type[AttentionBackend]:
     assert mamba_type and isinstance(mamba_type, MambaAttentionBackendEnum)
 
     mamba_attn_backend = mamba_type.get_class()
-    if envs.VLLM_BATCH_INVARIANT and not mamba_attn_backend.supports_batch_invariance():
+    if envs.VLLM_BATCH_INVARIANT and not _mamba_backend_supports_batch_invariance(
+        mamba_attn_backend, mamba_exact_replay
+    ):
         raise RuntimeError(
             "VLLM batch_invariant mode is not supported for "
             f"{mamba_attn_backend.get_name()}."

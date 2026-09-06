@@ -1203,6 +1203,35 @@ def supports_replayssm(
 
 
 @runtime_checkable
+class SupportsMambaExactReplay(Protocol):
+    """The interface for models whose Mamba2 layers support exact-replay mode
+    (bit-identical prefill, chunked prefill and decode).
+
+    This is currently experimental.
+    """
+
+    supports_mamba_exact_replay: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_mamba_exact_replay(
+    model: type[object],
+) -> TypeIs[type[SupportsMambaExactReplay]]: ...
+
+
+@overload
+def supports_mamba_exact_replay(
+    model: object,
+) -> TypeIs[SupportsMambaExactReplay]: ...
+
+
+def supports_mamba_exact_replay(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMambaExactReplay]] | TypeIs[SupportsMambaExactReplay]:
+    return getattr(model, "supports_mamba_exact_replay", False)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 

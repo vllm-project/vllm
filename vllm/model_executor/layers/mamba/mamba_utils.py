@@ -95,6 +95,19 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
+    def append_exact_replay_buffers(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the exact-replay partial-chunk buffer dtypes to a base
+        ``(conv, ssm)`` tuple: ``(x, dt, B, C)``, all in the activation dtype.
+        dt is stored raw (before bias and softplus), as the SSD kernels expect.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, *([activation_dtype] * 4))
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -234,6 +247,28 @@ class MambaStateShapeCalculator:
             (local_nheads, ring_buffer_len, head_dim),
             (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
+        )
+
+    @classmethod
+    def append_exact_replay_buffers(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        n_groups: int,
+        tp_world_size: int,
+        chunk_size: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the exact-replay partial-chunk buffer shapes ``(x, dt, B, C)``
+        to a base ``(conv, ssm)`` tuple. Buffers are token-major so that a prefix
+        of one slot's buffer is directly in the SSD kernels' varlen layout.
+        """
+        local_nheads, head_dim, state_size = base_shapes[1]
+        local_ngroups = divide(n_groups, tp_world_size)
+        return (
+            *base_shapes,
+            (chunk_size, local_nheads, head_dim),
+            (chunk_size, local_nheads),
+            (chunk_size, local_ngroups, state_size),
+            (chunk_size, local_ngroups, state_size),
         )
 
     @classmethod

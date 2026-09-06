@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    SupportsMambaExactReplay,
     SupportsMambaPrefixCaching,
 )
 from vllm.sequence import IntermediateTensors
@@ -168,7 +169,11 @@ class Mamba2Model(nn.Module):
 
 
 class Mamba2ForCausalLM(
-    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
+    nn.Module,
+    HasInnerState,
+    IsAttentionFree,
+    SupportsMambaPrefixCaching,
+    SupportsMambaExactReplay,
 ):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".A_log": ".A"})
 
@@ -176,18 +181,23 @@ class Mamba2ForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
+    ) -> tuple[torch.dtype, ...]:
+        base_dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+        if vllm_config.cache_config.mamba_exact_replay:
+            return MambaStateDtypeCalculator.append_exact_replay_buffers(
+                base_dtypes, vllm_config.model_config.dtype
+            )
+        return base_dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, ...], ...]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -197,12 +207,15 @@ class Mamba2ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+            - with mamba_exact_replay: four partial-chunk buffer shapes
+              (x, dt, B, C) appended, see
+              MambaStateShapeCalculator.append_exact_replay_buffers
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.expand * hf_config.hidden_size
 
-        return MambaStateShapeCalculator.mamba2_state_shape(
+        base_shapes = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.n_groups,
@@ -212,6 +225,18 @@ class Mamba2ForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
+        if vllm_config.cache_config.mamba_exact_replay:
+            # Same resolver as the layer and the metadata builder, so the
+            # page size computed here cannot diverge from the allocation.
+            chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+            assert chunk_size is not None
+            return MambaStateShapeCalculator.append_exact_replay_buffers(
+                base_shapes,
+                hf_config.n_groups,
+                parallel_config.tensor_parallel_size,
+                chunk_size,
+            )
+        return base_shapes
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:

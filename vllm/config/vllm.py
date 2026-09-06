@@ -2974,6 +2974,72 @@ class VllmConfig:
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_mamba_exact_replay(self) -> "VllmConfig":
+        if not self.cache_config.mamba_exact_replay:
+            return self
+        # Exact replay adds a 4-tensor partial-chunk buffer to the mamba state;
+        # only models that opt in build a consistent shape on both the layer and
+        # config paths. Reject others so the mamba page size cannot desync.
+        if (
+            self.model_config is not None
+            and not self.model_config.supports_mamba_exact_replay
+        ):
+            raise ValueError(
+                "--mamba-exact-replay is not supported for architecture "
+                f"{self.model_config.architecture!r}"
+            )
+        if self.cache_config.use_replayssm:
+            raise ValueError(
+                "--mamba-exact-replay and --use-replayssm are mutually exclusive"
+            )
+        if self.cache_config.mamba_ssm_cache_dtype != "float32":
+            raise ValueError(
+                "--mamba-exact-replay requires --mamba-ssm-cache-dtype float32: "
+                "the chunk-boundary state must round-trip losslessly for "
+                "replayed steps to reproduce single-shot prefill bits"
+            )
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                "--mamba-exact-replay does not support prefix caching yet; "
+                "pass --no-enable-prefix-caching"
+            )
+        if self.num_speculative_tokens > 0:
+            raise ValueError(
+                "--mamba-exact-replay does not support speculative decoding"
+            )
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError("--mamba-exact-replay requires --mamba-backend triton")
+        if (
+            self.parallel_config.tensor_parallel_size > 1
+            or self.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError(
+                "--mamba-exact-replay currently supports TP=1 and PP=1 only"
+            )
+        if self.scheduler_config.async_scheduling:
+            raise ValueError(
+                "--mamba-exact-replay does not support async scheduling yet"
+            )
+        if self.parallel_config.use_ubatching:
+            # A request split across micro-batches keeps its original
+            # num_computed_tokens in the second slice and the two slices
+            # would read and write the same replay buffers concurrently.
+            raise ValueError(
+                "--mamba-exact-replay does not support DBO / micro-batching"
+            )
+        if self.model_config is not None and not self.model_config.enforce_eager:
+            raise ValueError(
+                "--mamba-exact-replay currently requires --enforce-eager "
+                "(CUDA graphs and torch.compile are not supported yet)"
+            )
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError("--mamba-exact-replay is incompatible with KV connectors")
+        return self
+
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None
