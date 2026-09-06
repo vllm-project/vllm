@@ -111,6 +111,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_path to be set.'
                 )
+            if disk_capacity_bytes <= 0:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:

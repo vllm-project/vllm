@@ -4,6 +4,7 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._ops import OpOverload
@@ -17,6 +18,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType, QuantType
 
 logger = init_logger(__name__)
 
@@ -1790,7 +1794,7 @@ class rocm_aiter_ops:
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
-    def get_aiter_activation_type(activation_str: str):
+    def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
         """
         Given an activation type as a string, returns the corresponding aiter ActivationType enum.
         Supported activation types: "no", "none", "silu", "gelu", "swiglu".
@@ -1823,7 +1827,7 @@ class rocm_aiter_ops:
         return mapping.get(name)
 
     @staticmethod
-    def get_aiter_quant_type(quant_type_str: str):
+    def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
         """
         Given a quantization type as a string, returns the corresponding aiter QuantType enum.
         Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
@@ -3464,7 +3468,7 @@ class rocm_aiter_ops:
         # AITER's Python wrapper allocates intermediate/output tensors without
         # explicit device arguments, so run it under the residual tensor's device.
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input = mhc_pre(
+            args = (
                 residual_flat,
                 fn,
                 hc_scale,
@@ -3474,9 +3478,11 @@ class rocm_aiter_ops:
                 hc_sinkhorn_eps,
                 hc_post_mult_value,
                 sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
             )
+            if norm_weight is None:
+                post_mix, comb_mix, layer_input = mhc_pre(*args)
+            else:
+                post_mix, comb_mix, layer_input = mhc_pre(*args, norm_weight, norm_eps)
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
@@ -3626,23 +3632,26 @@ class rocm_aiter_ops:
                 ),
             )
 
+        args = (
+            x_flat,
+            residual_flat,
+            post_flat,
+            comb_flat,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
-                x_flat,
-                residual_flat,
-                post_flat,
-                comb_flat,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
-            )
+            if norm_weight is None:
+                result = mhc_fused_post_pre(*args)
+            else:
+                result = mhc_fused_post_pre(*args, norm_weight, norm_eps)
+            post_mix, comb_mix, layer_input, next_residual = result
 
         return (
             next_residual.view_as(residual),
