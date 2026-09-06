@@ -11,9 +11,11 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    dcp_world_size_for_kv_cache_spec,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -141,13 +143,20 @@ class KVCacheCoordinator(ABC):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=dcp_world_size_for_kv_cache_spec(
+                    kv_cache_group.kv_cache_spec, dcp_world_size
+                ),
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        # Match Mamba checkpoints to Eagle's attention replay boundary.
+        if use_eagle:
+            for manager in self.single_type_managers:
+                if isinstance(manager, MambaManager):
+                    manager.drop_eagle_checkpoint_block = True
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -506,11 +515,9 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        self.block_size = self.kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
+        self.dcp_world_size = self.single_type_managers[0].dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.block_size = self.single_type_managers[0].block_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (
@@ -598,6 +605,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         self.dcp_world_size = dcp_world_size
+        # Only groups that participate in prefix caching must satisfy the
+        # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
+        # tail, block_size=kpool) are scratch buffers and excluded.
         group_block_sizes = [
             manager.block_size
             for manager, group in zip(
@@ -656,6 +666,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "cache managers require block-aligned lookups: %s.",
                     ", ".join(sorted(unsupported_partial_hit_managers)),
                 )
+        cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+        for manager in self.single_type_managers:
+            manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
 
     @property
@@ -675,6 +688,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail): their blocks are per-request scratch, never
+            # shareable, so they must not participate in hit lookup (their
+            # manager-level hooks already no-op). Their slot in the per-group
+            # hit tuple stays empty.
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
             manager_cls = self.single_type_managers[i].__class__
@@ -852,11 +870,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=(
-                        self.dcp_world_size
-                        if isinstance(spec, FullAttentionSpec)
-                        else 1
-                    ),
+                    dcp_world_size=self.single_type_managers[
+                        first_group_id
+                    ].dcp_world_size,
+                    pcp_world_size=self.single_type_managers[
+                        first_group_id
+                    ].pcp_world_size,
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -913,6 +932,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            manager = self.single_type_managers[group_ids[0]]
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
@@ -921,6 +941,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
+                dcp_world_size=manager.dcp_world_size,
+                pcp_world_size=manager.pcp_world_size,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks
