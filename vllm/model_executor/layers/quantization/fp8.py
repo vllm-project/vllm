@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -785,8 +786,65 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> None:
-        # Shuffle weights to runtime format.
-        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        if self.supports_selective_reload():
+            self._prepare_moe_runtime(layer, w13, w2, w13_scale, w2_scale)
+        w13, w2, w13_scale, w2_scale = self._convert_moe_runtime(
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
+        )
+
+        self._install_moe_kernel(layer, w13, w2, w13_scale, w2_scale)
+
+    def _prepare_moe_runtime(self, layer, w13, w2, w13_scale, w2_scale) -> None:
+        """Allocate final weight/scale storage using source metadata only."""
+        w13_shape, w2_shape = list(w13.shape), list(w2.shape)
+        scale_shape = w13_scale.shape
+        if not self.block_quant:
+            alignment = 16 if layer.activation.is_gated else 128
+            intermediate = w2_shape[-1]
+            padded = (intermediate + alignment - 1) // alignment * alignment
+            w13_shape[-2] = padded * self.moe.w13_num_shards
+            w2_shape[-1] = padded
+            scale_shape = (w13_scale.shape[0],)
+        for name, shape, source in (
+            ("w13_weight", w13_shape, w13),
+            ("w2_weight", w2_shape, w2),
+            (f"w13_{self.weight_scale_name}", scale_shape, w13_scale),
+            (f"w2_{self.weight_scale_name}", w2_scale.shape, w2_scale),
+        ):
+            layer.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    torch.empty(shape, dtype=source.dtype, device=source.device),
+                    requires_grad=False,
+                ),
+            )
+
+    def _convert_moe_runtime(
+        self,
+        layer: RoutedExperts,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None = None,
+        w2_input_scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Convert source-layout expert tensors without changing layer state."""
+        if not self.block_quant:
+            w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
+                w13,
+                w13_scale,
+                w13.shape[1] // self.moe.w13_num_shards,
+                layer.local_num_experts,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            )
+        return convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
             w13=w13,
@@ -797,12 +855,27 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_input_scale=w2_input_scale,
         )
 
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
+    def _install_moe_kernel(
+        self, layer: RoutedExperts, w13, w2, w13_scale, w2_scale
+    ) -> None:
+        """Install cold-load runtime tensors and construct the kernel once."""
+        values = {
+            "w13_weight": w13,
+            "w2_weight": w2,
+            f"w13_{self.weight_scale_name}": w13_scale,
+            f"w2_{self.weight_scale_name}": w2_scale,
+        }
+        if self.supports_selective_reload():
+            for name, value in values.items():
+                target = getattr(layer, name)
+                if target.shape != value.shape or target.dtype != value.dtype:
+                    raise ValueError(f"FP8 MoE cold runtime layout mismatch: {name}")
+            with torch.no_grad():
+                for name, value in values.items():
+                    getattr(layer, name).copy_(value)
+        else:
+            for name, value in values.items():
+                replace_parameter(layer, name, value)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
@@ -816,6 +889,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if self.supports_selective_reload():
+            layer._fp8_moe_source_metadata = {
+                name: (
+                    getattr(layer, name).shape,
+                    getattr(layer, name).dtype,
+                    dict(getattr(layer, name).__dict__),
+                )
+                for name in (
+                    "w13_weight",
+                    "w2_weight",
+                    f"w13_{self.weight_scale_name}",
+                    f"w2_{self.weight_scale_name}",
+                    "w13_input_scale",
+                    "w2_input_scale",
+                    "w13_bias",
+                    "w2_bias",
+                )
+                if hasattr(layer, name) and getattr(layer, name) is not None
+            }
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -849,22 +941,181 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_input_scale", w13_input_scale)
             replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
-        # Per tensor kernels require single weight scale for w13 per expert, but
-        # on disk there is a scale for w1 and w3. Use the max to requantize.
-        if not self.block_quant:
-            shard_size = layer.intermediate_size_per_partition
-            w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
-                w13,
-                w13_scale,
-                shard_size,
-                layer.local_num_experts,
-                is_act_and_mul=self.moe.is_act_and_mul,
-            )
-
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
+
+    def supports_selective_reload(self) -> bool:
+        """Enable staged reload for the FlashInfer CUTLASS FP8 MoE backend."""
+        parallel = getattr(getattr(self, "moe", None), "moe_parallel_config", None)
+        return (
+            self.quant_config.is_checkpoint_fp8_serialized
+            and self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and not getattr(parallel, "enable_eplb", False)
+        )
+
+    def restore_weights_before_loading(self, layer: RoutedExperts) -> None:
+        if self.supports_selective_reload():
+            layer._fp8_moe_reload_staging = {}
+            layer._fp8_moe_reload_regions = {}
+            layer._fp8_moe_input_aliases = set()
+            for name, (shape, dtype, attrs) in layer._fp8_moe_source_metadata.items():
+                if not hasattr(layer, name):
+                    continue
+                parameter = torch.nn.Parameter(
+                    torch.empty(shape, dtype=dtype, device="meta"),
+                    requires_grad=False,
+                )
+                parameter.__dict__.update(attrs)
+                layer._parameters[name] = parameter
+
+    def reload_parameter(self, layer, parameter_name, target, bound_args, loader):
+        if not self.supports_selective_reload():
+            return False
+        from vllm.model_executor.model_loader.reload.meta import (
+            ReloadCopyTracker,
+            ReloadMoETracker,
+            materialize_meta_tensor,
+        )
+
+        staging = layer._fp8_moe_reload_staging
+        if parameter_name not in staging:
+            with torch.device(target.device):
+                staging[parameter_name] = materialize_meta_tensor(
+                    bound_args.arguments["param"]
+                )
+        source = staging[parameter_name]
+        incoming = bound_args.arguments.get("loaded_weight")
+        if incoming is not None and incoming.dtype != source.dtype:
+            raise ValueError("FP8 MoE reload checkpoint dtype changed")
+        bound_args.arguments["param"] = source
+        regions = layer._fp8_moe_reload_regions.setdefault(parameter_name, [])
+        if parameter_name == "w13_input_scale":
+            shard = bound_args.arguments.get("shard_id")
+            expert = layer._map_global_expert_id_to_local_expert_id(
+                bound_args.arguments["expert_id"]
+            )
+            if expert >= 0 and shard in ("w1", "w3"):
+                aliases = getattr(layer, "_fp8_moe_input_aliases", None)
+                if aliases is None:
+                    aliases = layer._fp8_moe_input_aliases = set()
+                key = (expert, shard)
+                if key in aliases:
+                    raise ValueError("Duplicate FP8 MoE activation-scale shard")
+                other = (expert, "w3" if shard == "w1" else "w1")
+                if other in aliases:
+                    if incoming is None or not torch.equal(
+                        source[expert], incoming.to(source.device).reshape(())
+                    ):
+                        raise ValueError("FP8 MoE w1/w3 activation scales must match")
+                    aliases.add(key)
+                    return True
+                aliases.add(key)
+        tracker = (
+            ReloadMoETracker(source, regions)
+            if source.ndim == 3
+            else ReloadCopyTracker(source, regions)
+        )
+        with tracker:
+            loader(*bound_args.args, **bound_args.kwargs)
+        return True
+
+    def refresh_derived_state(self, layer: RoutedExperts, updated_parameter_names=None):
+        del updated_parameter_names
+        staging = getattr(layer, "_fp8_moe_reload_staging", None)
+        if not staging:
+            return
+        required = {
+            "w13_weight",
+            "w2_weight",
+            f"w13_{self.weight_scale_name}",
+            f"w2_{self.weight_scale_name}",
+        }
+        if self.quant_config.activation_scheme == "static":
+            required.update(("w13_input_scale", "w2_input_scale"))
+        if not required.issubset(staging):
+            raise ValueError("FP8 MoE reload requires all expert weights and scales")
+        for name, value in staging.items():
+            regions = layer._fp8_moe_reload_regions.get(name, [])
+            covered = (
+                sum((r1 - r0) * (c1 - c0) for _, r0, r1, c0, c1 in regions)
+                if value.ndim == 3
+                else sum(end - start for start, end in regions)
+            )
+            if covered != value.numel():
+                raise ValueError(f"FP8 MoE reload has incomplete shards for {name}")
+        from copy import copy
+
+        conversion_layer = copy(layer)
+        if hasattr(layer, "moe_config"):
+            conversion_layer.moe_config = copy(layer.moe_config)
+        values = self._convert_moe_runtime(
+            conversion_layer,
+            staging["w13_weight"].clone(),
+            staging["w2_weight"].clone(),
+            staging[f"w13_{self.weight_scale_name}"].clone(),
+            staging[f"w2_{self.weight_scale_name}"].clone(),
+            staging.get("w13_input_scale"),
+            staging.get("w2_input_scale"),
+        )
+        names = (
+            "w13_weight",
+            "w2_weight",
+            f"w13_{self.weight_scale_name}",
+            f"w2_{self.weight_scale_name}",
+        )
+        updates = dict(zip(names, values))
+        for name in ("w13_bias", "w2_bias"):
+            if name in staging:
+                updates[name] = staging[name]
+        for name in ("w13_input_scale", "w2_input_scale"):
+            if name in staging:
+                updates[name] = staging[name].max()
+        derived_updates = []
+        if (
+            getattr(self, "fp8_backend", None) == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and not self.block_quant
+        ):
+            config = self.moe_quant_config
+            for index, prefix in ((1, "w13"), (2, "w2")):
+                activation_scale = updates[f"{prefix}_input_scale"]
+                weight_scale = updates[f"{prefix}_{self.weight_scale_name}"]
+                derived_updates.extend(
+                    (
+                        (
+                            getattr(config, f"g{index}_alphas"),
+                            weight_scale * activation_scale,
+                        ),
+                        (
+                            getattr(config, f"a{index}_gscale"),
+                            activation_scale.reciprocal(),
+                        ),
+                    )
+                )
+        for name, value in updates.items():
+            target = getattr(layer, name)
+            if (
+                target.shape != value.shape
+                or target.dtype != value.dtype
+                or target.device != value.device
+            ):
+                raise ValueError(f"FP8 MoE runtime layout changed for {name}")
+        for target, value in derived_updates:
+            if (
+                target is None
+                or target.shape != value.shape
+                or target.dtype != value.dtype
+                or target.device != value.device
+            ):
+                raise ValueError("FP8 MoE derived scale layout changed")
+        with torch.no_grad():
+            for name, value in updates.items():
+                getattr(layer, name).copy_(value)
+            for target, value in derived_updates:
+                target.copy_(value)
+        staging.clear()
+        layer._fp8_moe_reload_regions.clear()
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")

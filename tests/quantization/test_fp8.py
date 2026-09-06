@@ -634,6 +634,444 @@ def test_per_tensor_refresh_without_pwal(
         kernel.process_weights_after_loading.assert_not_called()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("fused", [False, True])
+def test_moe_reload_tracker_covers_expert_column_shards(fused):
+    """Expert and fused-column shards are tracked without overlap."""
+    from vllm.model_executor.model_loader.reload.meta import ReloadMoETracker
+
+    target = torch.zeros(2, 8, 4, device="cuda")
+    regions = []
+    with ReloadMoETracker(target, regions):
+        if fused:
+            target[:, :, :2].copy_(torch.ones(2, 8, 2, device="cuda"))
+            with pytest.raises(ValueError, match="Overlapping"):
+                target[:, :, 1:3].copy_(torch.full((2, 8, 2), 9.0, device="cuda"))
+            target[:, :, 2:].copy_(torch.ones(2, 8, 2, device="cuda"))
+            torch.testing.assert_close(target, torch.ones_like(target))
+            return
+        target[0, :, :2].copy_(torch.ones(8, 2, device="cuda"))
+        target[0, :, 2:].copy_(torch.ones(8, 2, device="cuda"))
+        with pytest.raises(ValueError, match="Overlapping"):
+            target[0, :, 1:3].copy_(torch.ones(8, 2, device="cuda"))
+        target[1].copy_(torch.ones(8, 4, device="cuda"))
+    torch.testing.assert_close(target, torch.ones_like(target))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("block_quant", [False, True])
+@pytest.mark.parametrize("failure", [None, "layout", "missing_expert", "missing_scale"])
+def test_moe_finish_validates_all_layouts_before_write(
+    monkeypatch, block_quant, failure
+):
+    """FINISH counts expert rectangles and validates every target before copying."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    method = object.__new__(Fp8MoEMethod)
+    method.quant_config = SimpleNamespace(activation_scheme="dynamic")
+    method.weight_scale_name = "weight_scale_inv" if block_quant else "weight_scale"
+    names = (
+        "w13_weight",
+        "w2_weight",
+        f"w13_{method.weight_scale_name}",
+        f"w2_{method.weight_scale_name}",
+    )
+    shapes = (
+        (2, 8, 4),
+        (2, 4, 4),
+        (2, 2, 1) if block_quant else (2, 2),
+        (2, 1, 1) if block_quant else (2,),
+    )
+    layer = torch.nn.Module()
+    staging, regions = {}, {}
+    for name, shape in zip(names, shapes):
+        layer.register_parameter(
+            name,
+            torch.nn.Parameter(torch.zeros(shape, device="cuda"), requires_grad=False),
+        )
+        staging[name] = torch.ones(shape, device="cuda")
+        regions[name] = (
+            [(e, 0, shape[1], 0, shape[2]) for e in range(shape[0])]
+            if len(shape) == 3
+            else [(0, staging[name].numel())]
+        )
+    layer._fp8_moe_reload_staging = staging
+    layer._fp8_moe_reload_regions = regions
+    original = dict(layer.named_parameters())
+    pointers = {name: value.data_ptr() for name, value in original.items()}
+    if failure == "missing_expert":
+        regions["w13_weight"].pop()
+    elif failure == "missing_scale":
+        staging.pop(names[-1])
+    converted = []
+
+    def convert(runtime_layer, w13, w2, s13, s2, *unused):
+        converted.append(True)
+        w13.add_(1)
+        assert torch.equal(staging["w13_weight"], torch.ones_like(w13))
+        return w13, w2, s13, s2.flatten()[:0] if failure == "layout" else s2
+
+    monkeypatch.setattr(method, "_convert_moe_runtime", convert)
+    if failure:
+        message = {
+            "layout": "runtime layout changed",
+            "missing_expert": "incomplete shards",
+            "missing_scale": "requires all expert weights and scales",
+        }[failure]
+        with pytest.raises(ValueError, match=message):
+            method.refresh_derived_state(layer)
+        assert staging
+        if failure != "layout":
+            assert not converted
+    else:
+        method.refresh_derived_state(layer)
+        method.refresh_derived_state(layer)
+        assert not staging and not regions
+    for name, value in original.items():
+        assert getattr(layer, name) is value and value.data_ptr() == pointers[name]
+        expected = 0 if failure else (2 if name == "w13_weight" else 1)
+        torch.testing.assert_close(value, torch.full_like(value, expected))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_moe_finish_refreshes_kernel_owned_scales(monkeypatch):
+    """Refresh alpha and reciprocal storage retained by the CUTLASS kernel."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    method = object.__new__(Fp8MoEMethod)
+    method.block_quant = False
+    method.weight_scale_name = "weight_scale"
+    method.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+    method.quant_config = SimpleNamespace(activation_scheme="static")
+    layer = torch.nn.Module()
+    names = (
+        "w13_weight",
+        "w2_weight",
+        "w13_weight_scale",
+        "w2_weight_scale",
+        "w13_input_scale",
+        "w2_input_scale",
+    )
+    for name in names:
+        shape = () if "input_scale" in name else (2,)
+        layer.register_parameter(
+            name,
+            torch.nn.Parameter(torch.ones(shape, device="cuda"), requires_grad=False),
+        )
+    method.moe_quant_config = SimpleNamespace(
+        g1_alphas=torch.ones(2, device="cuda"),
+        g2_alphas=torch.ones(2, device="cuda"),
+        a1_gscale=torch.ones((), device="cuda"),
+        a2_gscale=torch.ones((), device="cuda"),
+    )
+    config = method.moe_quant_config
+    original = vars(config).copy()
+    pointers = {name: value.data_ptr() for name, value in original.items()}
+    monkeypatch.setattr(
+        method,
+        "_convert_moe_runtime",
+        lambda layer, w13, w2, s13, s2, *unused: (w13, w2, s13, s2),
+    )
+    for scale in (2.0, 4.0):
+        layer._fp8_moe_reload_staging = {
+            name: torch.full((2,), scale, device="cuda") for name in names
+        }
+        layer._fp8_moe_reload_regions = {name: [(0, 2)] for name in names}
+        method.refresh_derived_state(layer)
+        method.refresh_derived_state(layer)
+        assert method.moe_quant_config is config
+        for name, value in original.items():
+            assert getattr(config, name) is value
+            assert value.data_ptr() == pointers[name]
+            expected = scale * scale if "alphas" in name else 1 / scale
+            torch.testing.assert_close(value, torch.full_like(value, expected))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("block_quant", [False, True])
+def test_moe_finish_runs_flashinfer_cutlass_conversion(block_quant):
+    """Exercise real requantization/W31 conversion, not a conversion substitute."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    method = object.__new__(Fp8MoEMethod)
+    method.block_quant = block_quant
+    method.weight_scale_name = "weight_scale_inv" if block_quant else "weight_scale"
+    method.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+    method.quant_config = SimpleNamespace(
+        activation_scheme="dynamic" if block_quant else "static"
+    )
+    method.moe = SimpleNamespace(
+        w13_num_shards=2, is_act_and_mul=True, intermediate_size_per_partition=128
+    )
+    layer = torch.nn.Module()
+    layer.moe_config = method.moe
+    layer.local_num_experts = 2
+    layer.activation = MoEActivation.SILU
+    layer.weight_block_size = [128, 128] if block_quant else None
+    s13, s2 = f"w13_{method.weight_scale_name}", f"w2_{method.weight_scale_name}"
+    with torch.device("cuda"):
+        sources = {
+            "w13_weight": torch.full((2, 256, 128), 8.0, dtype=torch.float8_e4m3fn),
+            "w2_weight": torch.full((2, 128, 128), 8.0, dtype=torch.float8_e4m3fn),
+            s13: torch.tensor([[1.0, 2.0], [1.0, 2.0]]),
+            s2: torch.ones(2),
+        }
+        if block_quant:
+            sources[s13] = sources[s13].unsqueeze(-1)
+            sources[s2] = sources[s2].reshape(2, 1, 1)
+        else:
+            sources.update(w13_input_scale=torch.ones(2), w2_input_scale=torch.ones(2))
+            method.moe_quant_config = SimpleNamespace(
+                g1_alphas=torch.ones(2),
+                g2_alphas=torch.ones(2),
+                a1_gscale=torch.ones(()),
+                a2_gscale=torch.ones(()),
+            )
+        for name, source in sources.items():
+            shape = source.shape
+            if not block_quant and name == s13:
+                shape = (2,)
+            elif "input_scale" in name:
+                shape = ()
+            layer.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    torch.zeros(shape, dtype=source.dtype), requires_grad=False
+                ),
+            )
+    layer._fp8_moe_reload_staging = sources
+    layer._fp8_moe_reload_regions = {
+        name: (
+            [(e, 0, value.shape[1], 0, value.shape[2]) for e in range(2)]
+            if value.ndim == 3
+            else [(0, value.numel())]
+        )
+        for name, value in sources.items()
+    }
+    method.refresh_derived_state(layer)
+    assert layer.moe_config is method.moe
+    assert method.moe.intermediate_size_per_partition == 128
+    expected = torch.full_like(layer.w13_weight.float(), 8.0)
+    if not block_quant:
+        expected[:, 128:] = 4.0
+    torch.testing.assert_close(layer.w13_weight.float(), expected, rtol=0, atol=0)
+    expected_scale = (
+        torch.tensor([[[2.0], [1.0]], [[2.0], [1.0]]], device="cuda")
+        if block_quant
+        else torch.full((2,), 2.0, device="cuda")
+    )
+    torch.testing.assert_close(getattr(layer, s13), expected_scale, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("block_quant", [False, True])
+def test_moe_checkpoint_staging_uses_routed_experts_loader(block_quant):
+    """Use real expert/TP shard loading while keeping runtime storage unchanged."""
+    import inspect
+
+    from vllm.model_executor.layers.fused_moe import (
+        FusedMoeWeightScaleSupported,
+        RoutedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+    from vllm.model_executor.model_loader.reload.meta import to_meta_tensor
+
+    method = object.__new__(Fp8MoEMethod)
+    method.fp8_backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+    method.quant_config = SimpleNamespace(is_checkpoint_fp8_serialized=True)
+    method.weight_scale_refine = None
+    layer = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.quant_config = None
+    layer.quant_method = method
+    layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda e: e)
+    layer.moe_config = SimpleNamespace(
+        is_act_and_mul=True, tp_rank=0, moe_parallel_config=SimpleNamespace(tp_size=1)
+    )
+    layer._fp8_moe_reload_staging = {}
+    layer._fp8_moe_reload_regions = {}
+    loader = layer.weight_loader
+    with torch.device("cuda"):
+        for name, shape, shard_shape in (
+            ("w13_weight", (2, 256, 128), (128, 128)),
+            ("w2_weight", (2, 128, 128), (128, 128)),
+            (
+                "w13_weight_scale_inv" if block_quant else "w13_weight_scale",
+                (2, 2, 1) if block_quant else (2, 2),
+                (1, 1) if block_quant else (),
+            ),
+            (
+                "w2_weight_scale_inv" if block_quant else "w2_weight_scale",
+                (2, 1, 1) if block_quant else (2,),
+                (1, 1) if block_quant else (),
+            ),
+        ):
+            target = torch.nn.Parameter(torch.zeros(shape), requires_grad=False)
+            target.quant_method = (
+                FusedMoeWeightScaleSupported.BLOCK.value
+                if block_quant
+                else FusedMoeWeightScaleSupported.TENSOR.value
+            )
+            metadata = to_meta_tensor(target)
+            for expert in range(2):
+                for shard in ("w1", "w3") if name.startswith("w13") else ("w2",):
+                    args = inspect.signature(loader).bind(
+                        metadata, torch.ones(shard_shape), name, shard, expert
+                    )
+                    args.apply_defaults()
+                    assert method.reload_parameter(layer, name, target, args, loader)
+            torch.testing.assert_close(target, torch.zeros_like(target))
+            staged = layer._fp8_moe_reload_staging[name]
+            torch.testing.assert_close(staged, torch.ones_like(staged))
+        if not block_quant:
+            target = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+            metadata = to_meta_tensor(target)
+            for expert in range(2):
+                for shard in ("w1", "w3"):
+                    args = inspect.signature(loader).bind(
+                        metadata, torch.tensor(2.0), "w13_input_scale", shard, expert
+                    )
+                    args.apply_defaults()
+                    assert method.reload_parameter(
+                        layer, "w13_input_scale", target, args, loader
+                    )
+            with pytest.raises(ValueError, match="Duplicate"):
+                method.reload_parameter(layer, "w13_input_scale", target, args, loader)
+            assert layer._fp8_moe_reload_regions["w13_input_scale"] == [(0, 1), (1, 2)]
+            torch.testing.assert_close(target, torch.zeros_like(target))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "block_quant,intermediate_size", [(False, 256), (False, 257), (True, 256)]
+)
+def test_moe_cutlass_reload_lifecycle(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+    block_quant,
+    intermediate_size,
+):
+    """Cold and warm CUTLASS executions agree after real expert-loader reload."""
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.kernel_config.moe_backend = "flashinfer_cutlass"
+    config = Fp8Config(
+        True,
+        "dynamic" if block_quant else "static",
+        weight_block_size=[128, 128] if block_quant else None,
+    )
+
+    def cold(generation):
+        with torch.device("cuda"):
+            runner = FusedMoEFactory(
+                4,
+                2,
+                256,
+                intermediate_size,
+                params_dtype=torch.bfloat16,
+                quant_config=config,
+                prefix=f"cold_{generation}",
+            )
+            layer = runner.routed_experts
+            method = layer.quant_method
+            record_metadata_for_reloading(layer)
+            sources = {}
+            for name, param in layer.named_parameters(recurse=False):
+                value = 0.125 * generation if "scale" in name else 0.25 * generation
+                sources[name] = torch.full_like(param, value)
+                param.data.copy_(sources[name])
+            method.process_weights_after_loading(layer)
+        return runner, layer, method, sources
+
+    runner, layer, method, _ = cold(1)
+    reference_runner, reference, reference_method, sources = cold(2)
+    originals = dict(layer.named_parameters(recurse=False))
+    pointers = {name: p.data_ptr() for name, p in originals.items()}
+    kernel = method.moe_kernel
+    quant_state = method.moe_quant_config
+    derived = {
+        name: getattr(quant_state, name)
+        for name in ("a1_gscale", "a2_gscale", "g1_alphas", "g2_alphas")
+        if getattr(quant_state, name) is not None
+    }
+    derived_pointers = {name: value.data_ptr() for name, value in derived.items()}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Reload must not rerun PWAL or rebuild the MoE kernel")
+
+    monkeypatch.setattr(method, "process_weights_after_loading", forbidden)
+    monkeypatch.setattr(method, "_install_moe_kernel", forbidden)
+    monkeypatch.setattr(method, "_prepare_moe_runtime", forbidden)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.fp8.make_fp8_moe_kernel", forbidden
+    )
+    for _ in range(2):
+        before = {name: value.detach().clone() for name, value in originals.items()}
+        initialize_layerwise_reload(layer)
+        for name, value in sources.items():
+            param = getattr(layer, name)
+            for expert in range(4):
+                for shard in ("w1", "w3") if name.startswith("w13") else ("w2",):
+                    incoming = value[expert]
+                    if name.startswith("w13") and "input_scale" not in name:
+                        incoming = incoming.chunk(2, dim=0)[shard == "w3"]
+                    param.weight_loader(param, incoming, name, shard, expert)
+        for name, original in originals.items():
+            torch.testing.assert_close(
+                original.float(), before[name].float(), rtol=0, atol=0
+            )
+        finalize_layerwise_reload(layer, default_vllm_config.model_config)
+        method.refresh_derived_state(layer)
+    assert method.moe_kernel is kernel
+    assert method.moe_quant_config is quant_state
+    for name, original in derived.items():
+        assert getattr(quant_state, name) is original
+        assert original.data_ptr() == derived_pointers[name]
+        torch.testing.assert_close(
+            original, getattr(reference_method.moe_quant_config, name), rtol=0, atol=0
+        )
+    for name, original in originals.items():
+        assert (
+            getattr(layer, name) is original and original.data_ptr() == pointers[name]
+        )
+        torch.testing.assert_close(
+            original.float(), getattr(reference, name).float(), rtol=0, atol=0
+        )
+    x = torch.full((4, 256), 0.125, device="cuda", dtype=torch.bfloat16)
+    ids = torch.tensor(
+        [[0, 1], [1, 2], [2, 3], [3, 0]], device="cuda", dtype=torch.int32
+    )
+    weights = torch.full((4, 2), 0.5, device="cuda")
+
+    def run(target, quant):
+        return quant.moe_kernel.apply(
+            x.clone(),
+            target.w13_weight,
+            target.w2_weight,
+            weights,
+            ids,
+            activation=target.activation,
+            global_num_experts=4,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    torch.testing.assert_close(
+        run(layer, method), run(reference, reference_method), rtol=0, atol=0
+    )
+
+
 def test_kv_cache_scale_sync_to_host_copies():
     """Test device-to-host sync of the k/v quantization scales, for both the
     checkpoint-load and runtime-calc paths that produce them.

@@ -186,6 +186,62 @@ class ReloadCopyTracker(TorchDispatchMode):
         return func(*args, **(kwargs or {}))
 
 
+class ReloadMoETracker(TorchDispatchMode):
+    """Track non-overlapping expert and column shard copies."""
+
+    def __init__(self, target: torch.Tensor, regions: list[tuple[int, ...]]):
+        super().__init__()
+        self.target = target
+        self.regions = regions
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten.copy_.default:
+            dest = args[0]
+            if (
+                dest.untyped_storage().data_ptr()
+                == self.target.untyped_storage().data_ptr()
+            ):
+                if (
+                    self.target.ndim != 3
+                    or dest.ndim not in (2, 3)
+                    or dest.stride(-1) != 1
+                ):
+                    raise ValueError("Unsupported FP8 MoE shard layout")
+                width = self.target.shape[-1]
+                plane = self.target.shape[-2] * width
+                offset = dest.storage_offset() - self.target.storage_offset()
+                expert, rem = divmod(offset, plane)
+                row, col = divmod(rem, width)
+                rows, cols = dest.shape[-2:]
+                experts = dest.shape[0] if dest.ndim == 3 else 1
+                if (
+                    dest.stride(-2) != width
+                    or expert < 0
+                    or expert + experts > self.target.shape[0]
+                    or (dest.ndim == 3 and dest.stride(0) != plane)
+                ):
+                    raise ValueError("Unsupported FP8 MoE shard layout")
+                if row + rows > self.target.shape[-2] or col + cols > width:
+                    raise ValueError("FP8 MoE shard exceeds staging parameter")
+                candidates = [
+                    (e, row, row + rows, col, col + cols)
+                    for e in range(expert, expert + experts)
+                ]
+                if any(
+                    expert <= e < expert + experts
+                    and row < r1
+                    and r0 < row + rows
+                    and col < c1
+                    and c0 < col + cols
+                    for e, r0, r1, c0, c1 in self.regions
+                ):
+                    raise ValueError("Overlapping FP8 MoE shards")
+                result = func(*args, **(kwargs or {}))
+                self.regions.extend(candidates)
+                return result
+        return func(*args, **(kwargs or {}))
+
+
 class CopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
