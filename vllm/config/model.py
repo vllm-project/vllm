@@ -1189,7 +1189,7 @@ class ModelConfig:
                     convert_option = "<" + "|".join(pooling_converts) + ">"
                     raise ValueError(
                         "This model does not support `--runner pooling`. "
-                        f"You can pass `--convert {convert_option} to adapt "
+                        f"You can pass `--convert {convert_option}` to adapt "
                         "it into a pooling model."
                     )
             return runner
