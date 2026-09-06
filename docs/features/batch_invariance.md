@@ -118,6 +118,47 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+## Mamba2 Models: Exact-Replay Mode
+
+Mamba2 layers run two different kernels: a chunked scan for prefill and a
+recurrent state update for decode. The two are not bit-identical, so without
+further measures a request's logits depend on how it was scheduled (prefill
+versus decode, chunked-prefill split points, recompute after preemption), and
+batch-invariant mode rejects Mamba2 models.
+
+`--mamba-exact-replay` (experimental) removes that dependence. The SSM state is
+kept in fp32, and every scan call for a sequence (prefill, chunked-prefill
+continuation and each decode step) starts from the fp32 state at the
+sequence's last chunk boundary and re-feeds the inputs of the current partial
+chunk from a per-sequence buffer. The kernels therefore always see the chunk
+grid of a single-shot prefill, and the Mamba2 SSM computation produces
+identical bits for prefill, chunked prefill and decode. This covers the SSM
+path only: bit-identical logits also need the batch-invariant kernels of the
+other layers, i.e. `VLLM_BATCH_INVARIANT=1`, under which the Mamba2 backend
+is accepted when this option is set.
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve <mamba2-model> \
+    --mamba-exact-replay --mamba-ssm-cache-dtype float32 \
+    --no-enable-prefix-caching --enforce-eager
+```
+
+Requirements and current limitations: `--mamba-ssm-cache-dtype float32`,
+`--no-enable-prefix-caching`, `--enforce-eager`, the Triton mamba backend,
+tensor- and pipeline-parallel size 1, no speculative decoding, no async
+scheduling, and not together with `--use-replayssm`. Only models that declare
+support (`Mamba2ForCausalLM`) accept the option; other configurations fail at
+startup.
+
+Costs: each decode step runs the chunked-scan kernels over the current partial
+chunk instead of the single-token update, and the per-layer mamba state grows
+from two tensors (conv state, SSM state) to six: the four partial-chunk
+buffers `x`, raw `dt`, `B` and `C` hold `chunk_size` tokens of scan inputs per
+sequence in addition to the fp32 SSM state. For a layer with `nheads` heads of size `head_dim` and
+`ngroups` groups of size `dstate` in bf16, the buffer takes
+`chunk_size * (nheads * head_dim + 2 * ngroups * dstate + nheads) * 2` bytes
+per sequence.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
