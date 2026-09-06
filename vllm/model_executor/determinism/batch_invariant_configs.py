@@ -101,11 +101,6 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
         ),
     },
     "hopper": {
-        # Configs re-measured on H100 NVL (SM 9.0, 132 SMs, 93 GB HBM3e).
-        # Each bucket picks the winner from a head-to-head sweep (50 runs,
-        # 20 warmup, bfloat16). Buckets M<=32 favour tighter tiles tuned by
-        # #53247; buckets M>=64 favour wider block_n that better utilises
-        # NVL's 256 KB/SM shared memory and 5.6 TB/s HBM3e bandwidth.
         (12288, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
