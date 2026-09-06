@@ -1927,3 +1927,34 @@ class TestSyncNumAcceptedTokens:
             kwargs["num_accepted_tokens_cpu_tensor"]
             is not runner.input_batch.num_accepted_tokens_cpu_tensor
         )
+
+    def test_d2h_target_is_runner_buffer_non_align(self):
+        runner = Mock(spec=GPUModelRunner)
+        runner.speculative_config = Mock()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="none")
+        runner.num_accepted_tokens = SimpleNamespace(
+            cpu=torch.zeros(5, dtype=torch.int32),
+            gpu=torch.zeros(5, dtype=torch.int32),
+        )
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu_tensor=torch.zeros(5, dtype=torch.int32)
+        )
+        runner.kv_cache_config = Mock()
+        runner.num_accepted_tokens_event = Mock()
+
+        GPUModelRunner._update_states_after_model_execute(
+            runner,
+            output_token_ids=torch.tensor([[1, 2, -1], [1, -1, -1]]),
+            scheduler_output=Mock(),
+        )
+
+        assert runner.num_accepted_tokens_event.record.called
+        torch.testing.assert_close(
+            runner.num_accepted_tokens.cpu[:2],
+            torch.tensor([2, 1], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            runner.input_batch.num_accepted_tokens_cpu_tensor[:2],
+            torch.tensor([0, 0], dtype=torch.int32),
+        )

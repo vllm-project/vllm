@@ -1616,7 +1616,7 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
         else:
-            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+            self.num_accepted_tokens.cpu[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
             assert self.num_accepted_tokens_event is not None
