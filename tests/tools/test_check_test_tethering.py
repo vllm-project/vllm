@@ -105,6 +105,16 @@ def test_pytest_path_arguments(command, test_file, expected):
             "lora/test_llama_tp.py",
             False,
         ),
+        # --ignore-glob is a whole-path fnmatch (pytest semantics): its `*`
+        # crosses `/`, so a bare `*_tp.py` drops a nested match too. A positional
+        # path glob would not - that is the distinction the parser has to keep.
+        ("pytest -v -s kernels --ignore-glob=*_tp.py", "kernels/test_a_tp.py", False),
+        (
+            "pytest -v -s kernels --ignore-glob=*_tp.py",
+            "kernels/nested/test_a_tp.py",
+            False,
+        ),
+        ("pytest -v -s kernels --ignore-glob '*_tp.py'", "kernels/test_a.py", True),
         # A node-id deselect leaves the file collected; a bare-path one does not.
         (
             "pytest -v -s kernels --deselect kernels/test_a.py::test_one",
@@ -139,8 +149,10 @@ def test_ignore_and_deselect(command, test_file, expected):
         ("pytest -n 4 kernels/test_a.py", "kernels/test_a.py", True),
         # Buildkite shard flags carry a $$VAR and must not swallow the path.
         (
-            "pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB "
-            "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT",
+            (
+                "pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB "
+                "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT"
+            ),
             "kernels/test_a.py",
             True,
         ),
@@ -228,6 +240,30 @@ def test_option_and_token_handling(command, test_file, expected):
             "v1/test_scheduler.py",
             False,
         ),
+        # -exec pytest wires the sweep just as `| xargs pytest` does.
+        (
+            "find compile -name 'test_*.py' -exec pytest -s -v {} \\;",
+            "compile/test_a.py",
+            True,
+        ),
+        # A pytest in a *separate* command on the line (not fed by the find) does
+        # not arm the sweep - the find here is piped to `wc`.
+        (
+            "find kernels -name 'test_*.py' | wc -l ; pytest test_regression.py",
+            "kernels/test_a.py",
+            False,
+        ),
+        (
+            "find kernels -name 'test_*.py' -delete && pytest test_regression.py",
+            "kernels/test_a.py",
+            False,
+        ),
+        # ...but an intermediate pipe stage before `xargs pytest` is fine.
+        (
+            "find kernels -name 'test_*.py' | sort | xargs pytest",
+            "kernels/test_a.py",
+            True,
+        ),
     ],
 )
 def test_find_pipelines(command, test_file, expected):
@@ -272,6 +308,30 @@ def test_find_pipeline_parses_as_find_selection():
         (
             "VLLM_X=1 python3 standalone_tests/lazy_imports.py | grep -q ok",
             "standalone_tests/lazy_imports.py",
+            True,
+        ),
+        # Only the executed script counts; the tokens after it are that script's
+        # own argv. `--suffix v1` must not tether the whole tests/v1 subtree.
+        (
+            (
+                "python3 features/tensorize_vllm_model.py --model facebook/opt-125m "
+                "serialize --serialized-directory /tmp/ --suffix v1"
+            ),
+            "v1/test_scheduler.py",
+            False,
+        ),
+        (
+            (
+                "python3 features/tensorize_vllm_model.py --model facebook/opt-125m "
+                "serialize --serialized-directory /tmp/ --suffix v1"
+            ),
+            "features/tensorize_vllm_model.py",
+            True,
+        ),
+        # A script named by an absolute `$VAR` path still resolves.
+        (
+            'python3 -m pytest -s -x "${GIT_ROOT}/tests/v1/e2e/test_x.py"',
+            "v1/e2e/test_x.py",
             True,
         ),
     ],
@@ -422,6 +482,34 @@ def test_amd_mirror_only_command_is_collected(tmp_path, monkeypatch):
     assert is_tethered("kernels/test_amd_only.py", selections)
 
 
+def test_shell_script_continuation_vars_and_nesting(tmp_path, monkeypatch):
+    """The v1 P/D integration scripts name their test through a `\\`-continued
+    line, a literal shell var, and a nested `bash "$SCRIPT"`. Each indirection
+    has to be followed or the check falsely reports the test untethered."""
+    scripts = tmp_path / "tests" / "v1" / "kv_connector" / "nixl_integration"
+    scripts.mkdir(parents=True)
+    (scripts / "inner.sh").write_text(
+        "python3 -m pytest -s -v \\\n"
+        '  "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_inner.py"\n'
+    )
+    (scripts / "sweep.sh").write_text(
+        'SCRIPT="v1/kv_connector/nixl_integration/inner.sh"\n'
+        'IMPORT_CANARY="v1/kv_connector/nixl_integration/test_canary.py"\n'
+        'python3 -m pytest -s -x "${IMPORT_CANARY}"\n'
+        'if ! env FOO=1 bash "${SCRIPT}"; then exit 1; fi\n'
+    )
+    monkeypatch.setattr(checker, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(checker, "TESTS_DIR", tmp_path / "tests")
+
+    selections = _parse_command("bash v1/kv_connector/nixl_integration/sweep.sh")
+    assert any(
+        s.runs("v1/kv_connector/nixl_integration/test_inner.py") for s in selections
+    )
+    assert any(
+        s.runs("v1/kv_connector/nixl_integration/test_canary.py") for s in selections
+    )
+
+
 def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):
     """Silently skipping a bad yaml would drop its coverage and report false
     untethered files, so it must fail loudly instead."""
@@ -466,6 +554,8 @@ def test_is_test_module(path, expected):
         ("'kernels/test_a.py'", "kernels/test_a.py"),
         ("kernels/test_a.py::test_one", "kernels/test_a.py"),
         ("kernels/", "kernels"),
+        ("${GIT_ROOT}/tests/kernels/test_a.py", "kernels/test_a.py"),
+        ("$GIT_ROOT/tests/kernels/test_a.py", "kernels/test_a.py"),
     ],
 )
 def test_normalize_test_path(raw, expected):
