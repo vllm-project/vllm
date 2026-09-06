@@ -494,11 +494,17 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
-            return (
-                current_platform.is_device_capability_family(100)
-                and supports_trtllm_attention(is_prefill=True)
-                and supports_trtllm_attention(is_prefill=False)
-            )
+            # SM100/SM103: NVFP4 KV cache is serviced by the trtllm-gen
+            # prefill/decode kernels (both phases required).
+            if current_platform.is_device_capability_family(100):
+                return supports_trtllm_attention(
+                    is_prefill=True
+                ) and supports_trtllm_attention(is_prefill=False)
+            # SM12x: NVFP4 KV cache is serviced by the FlashInfer XQA decode
+            # and native (FA2) prefill paths, which are JIT-compiled and need
+            # no TRTLLM cubins. The decode kernel (XQA vs native) is resolved
+            # at runtime the same way as FP8 KV cache.
+            return current_platform.is_device_capability_family(120)
         return super().supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
@@ -777,7 +783,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
             if self.is_kvcache_nvfp4:
-                if (
+                # SM100/SM103: NVFP4 KV cache is serviced by the trtllm-gen
+                # prefill/decode kernels, so both phases must be available.
+                # SM12x: NVFP4 KV cache is serviced by the FlashInfer XQA
+                # decode and native (FA2) prefill paths; no TRTLLM gate.
+                sm100_trtllm_gen_path = current_platform.is_device_capability_family(
+                    100
+                )
+                if sm100_trtllm_gen_path and (
                     force_use_trtllm_attention() is False
                     or not supports_trtllm_attention(is_prefill=True)
                     or not supports_trtllm_attention(is_prefill=False)
@@ -969,7 +982,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
         if cache_dtype.startswith("nvfp4"):
-            return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
+            # SM100/SM103 NVFP4 prefill/decode runs on trtllm-gen, which can
+            # consume FP8 queries. SM12x NVFP4 is serviced by the XQA decode
+            # and native FA2 prefill paths, which cannot consume FP8 queries.
+            if current_platform.is_device_capability_family(100):
+                return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
+            return self.model_config.dtype
         return self.kv_cache_spec.dtype
 
     @override  # type: ignore[misc]
@@ -1185,9 +1203,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         window_left=self.window_left,
                     )
                 else:
-                    # NVFP4 KV cache requires the trtllm-gen backend inside
-                    # the wrapper; fa2/fa3 do not support nvfp4.
-                    backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
+                    # SM100/SM103 NVFP4 KV cache is serviced by the
+                    # trtllm-gen backend inside the wrapper. On SM12x the
+                    # native (FA2) backend services NVFP4 KV cache.
+                    backend = (
+                        "trtllm-gen"
+                        if self.is_kvcache_nvfp4
+                        and current_platform.is_device_capability_family(100)
+                        else "auto"
+                    )
                     self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                         self._get_workspace_buffer(),
                         get_flashinfer_layout_string(self.kv_cache_layout),
@@ -1211,9 +1235,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr = None
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
-            # NVFP4 KV cache requires the trtllm-gen backend inside
-            # the wrapper; fa2/fa3 do not support nvfp4.
-            backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
+            # SM100/SM103 NVFP4 KV cache is serviced by the trtllm-gen
+            # backend inside the wrapper. On SM12x the native (FA2) backend
+            # services NVFP4 KV cache.
+            backend = (
+                "trtllm-gen"
+                if self.is_kvcache_nvfp4
+                and current_platform.is_device_capability_family(100)
+                else "auto"
+            )
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
@@ -2138,7 +2168,6 @@ class FlashInferImpl(AttentionImpl):
         use_dcp = self.dcp_world_size > 1
         if decode_with_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2482,7 +2511,12 @@ class FlashInferImpl(AttentionImpl):
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
-                        kv_cache=kv_cache_tuple,
+                        kv_cache=(
+                            nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
+                        ),
+                        kv_cache_sf=nvfp4_kv_block_scales
+                        if self.is_kvcache_nvfp4
+                        else None,
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
