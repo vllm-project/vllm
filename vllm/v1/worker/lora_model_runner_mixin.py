@@ -17,6 +17,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
+from vllm.lora.scale_inputs import LoRAScaleInputs
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
@@ -66,6 +67,7 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...],
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
+        lora_scales: LoRAScaleInputs | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
@@ -79,6 +81,9 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping,
             is_prefill=True,
             type=mapping_type,
+            request_scales=lora_scales.request_scales if lora_scales else None,
+            token_to_req=lora_scales.token_to_req if lora_scales else None,
+            sample_to_req=lora_scales.sample_to_req if lora_scales else None,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
@@ -99,11 +104,16 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = (
+        lora_scales: LoRAScaleInputs | None
+        prompt_lora_mapping, token_lora_mapping, lora_requests, lora_scales = (
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
+            prompt_lora_mapping,
+            token_lora_mapping,
+            lora_requests,
+            lora_scales,
+            mapping_type,
         )
 
     @contextmanager
@@ -240,10 +250,26 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, effective_num_loras + 1)
             }
 
+            # Dummy/capture runs must exercise the *same* kernel variant the
+            # real requests will use. APPLY_REQUEST_SCALE is a tl.constexpr, so
+            # a capture taken without scales bakes the scale-free kernel into
+            # the cudagraph and every later replay ignores lora_scale. Feed an
+            # all-ones scale here: numerically a no-op, but it selects the
+            # scale-aware variant.
+            dummy_scales = None
+            if lora_config.enable_per_request_lora_scale:
+                req_idx = np.arange(num_reqs, dtype=np.int32)
+                dummy_scales = LoRAScaleInputs(
+                    request_scales=(1.0,) * num_reqs,
+                    token_to_req=tuple(req_idx.repeat(num_scheduled_tokens).tolist()),
+                    sample_to_req=tuple(req_idx.repeat(num_sampled_tokens).tolist()),
+                )
+
             self._set_active_loras(
                 tuple(sample_lora_mapping),
                 tuple(token_lora_mapping),
                 lora_requests,
+                dummy_scales,
                 mapping_type,
             )
 

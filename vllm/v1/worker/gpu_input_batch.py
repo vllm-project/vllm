@@ -10,6 +10,7 @@ import torch
 
 from vllm.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
+from vllm.lora.scale_inputs import LoRAScaleInputs, make_lora_scale_inputs
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -258,6 +259,11 @@ class InputBatch:
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
+        # Per-request LoRA strength, persistent-batch style: one float per
+        # request slot, indexed the same way as request_lora_mapping. Two
+        # requests can share a lora id here and still differ in strength.
+        # 1.0 means "just the adapter's own alpha/r", i.e. stock behavior.
+        self.request_lora_scale = np.ones((self.max_num_reqs,), dtype=np.float32)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -490,11 +496,13 @@ class InputBatch:
                 self.lora_id_to_request_ids[lora_id] = set()
 
             self.request_lora_mapping[req_index] = lora_id
+            self.request_lora_scale[req_index] = request.lora_request.lora_scale
             self.lora_id_to_request_ids[lora_id].add(request.req_id)
             self.lora_id_to_lora_request[lora_id] = request.lora_request
         else:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
+            self.request_lora_scale[req_index] = 1.0
 
         return req_index
 
@@ -554,6 +562,7 @@ class InputBatch:
                 del self.lora_id_to_request_ids[lora_id]
                 del self.lora_id_to_lora_request[lora_id]
             self.request_lora_mapping[req_index] = 0
+        self.request_lora_scale[req_index] = 1.0
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
@@ -653,6 +662,10 @@ class InputBatch:
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] = (
             self.request_lora_mapping[i2],
             self.request_lora_mapping[i1],
+        )
+        self.request_lora_scale[i1], self.request_lora_scale[i2] = (
+            self.request_lora_scale[i2],
+            self.request_lora_scale[i1],
         )
 
         if self.is_pooling_model:
@@ -784,6 +797,9 @@ class InputBatch:
             self.block_table.move_row(last_req_index, empty_index)
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index
+            ]
+            self.request_lora_scale[empty_index] = self.request_lora_scale[
                 last_req_index
             ]
 
@@ -1002,7 +1018,12 @@ class InputBatch:
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        set[LoRARequest],
+        LoRAScaleInputs | None,
+    ]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
@@ -1013,6 +1034,9 @@ class InputBatch:
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
                where, token_lora_mapping[i] is the LoRA id to use for ith token.
             3. lora_requests: Set of relevant LoRA requests.
+            4. lora_scales: Per-request LoRA strengths plus the token/sample to
+               request index maps, or None if every request in the batch uses
+               the adapter's default strength.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
@@ -1023,7 +1047,18 @@ class InputBatch:
             self.lora_id_to_lora_request.values()
         )
 
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        lora_scales = make_lora_scale_inputs(
+            self.request_lora_scale[: self.num_reqs],
+            num_scheduled_tokens,
+            num_sampled_tokens,
+        )
+
+        return (
+            prompt_lora_mapping,
+            token_lora_mapping,
+            active_lora_requests,
+            lora_scales,
+        )
 
     def set_async_sampled_token_ids(
         self,

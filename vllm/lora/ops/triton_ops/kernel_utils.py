@@ -131,6 +131,9 @@ def do_expand_kernel(
     # out ptr strides
     output_d0_stride,
     output_d1_stride,
+    # per-request lora scaling
+    request_scales_ptr,
+    token_to_req_ptr,
     # constants
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -141,6 +144,7 @@ def do_expand_kernel(
     CAST_TYPE: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
     USE_GDC: tl.constexpr,
+    APPLY_REQUEST_SCALE: tl.constexpr,
 ):
     """
     Given an array of integers that identifies the rows of A, ram,
@@ -211,6 +215,17 @@ def do_expand_kernel(
         USE_GDC,
         base_k=0,
     )
+
+    # Apply the per-request LoRA strength. This is the only place the dynamic
+    # scale enters: `ram` already identifies the token rows this CTA owns, so
+    # a gather through token_to_req -> request_scales gives each row its own
+    # lambda. Folding it in here (rather than in shrink) keeps it out of the
+    # fp32 split-K accumulation path and applies it exactly once per token,
+    # whatever the slice/rank layout.
+    if APPLY_REQUEST_SCALE:
+        req_idx = tl.load(token_to_req_ptr + ram)
+        row_scale = tl.load(request_scales_ptr + req_idx)
+        accumulator = accumulator * row_scale[:, None]
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
     if SLICE_NUM == 1:

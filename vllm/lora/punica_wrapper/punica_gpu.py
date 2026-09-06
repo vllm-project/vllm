@@ -11,6 +11,7 @@ from typing import final
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
@@ -28,6 +29,8 @@ if HAS_TRITON:
 from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
+
+logger = init_logger(__name__)
 
 
 @final
@@ -49,6 +52,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+        # Per-request LoRA scaling: allocate the [max_num_reqs] scale buffer
+        # and the token -> request map only when the feature is on, so the
+        # default path allocates and launches exactly as before.
+        self.enable_per_request_lora_scale = getattr(
+            self.lora_config, "enable_per_request_lora_scale", False
+        )
+        scale_num_reqs = max_batches if self.enable_per_request_lora_scale else None
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -60,6 +70,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_num_batched_tokens,
             device=device,
             captured_lora_counts=captured_lora_counts,
+            max_num_reqs=scale_num_reqs,
         )
 
         # When speculative decoding is enabled, max_num_samples is
@@ -71,7 +82,75 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_num_batched_tokens,
             device=device,
             captured_lora_counts=captured_lora_counts,
+            max_num_reqs=scale_num_reqs,
         )
+
+        # Set for the duration of a step when the current batch actually
+        # carries non-default scales; lets the kernels skip the extra gather
+        # entirely on batches that don't use the feature.
+        self._request_scales_active = False
+
+    def _update_request_scales(self, mapping: LoRAMapping) -> None:
+        """Stage this step's per-request LoRA scales onto the GPU buffers."""
+        self._request_scales_active = False
+        if not self.enable_per_request_lora_scale:
+            if mapping.has_request_scales:
+                logger.warning_once(
+                    "A request specified a non-default LoRARequest.lora_scale, "
+                    "but the engine was not started with "
+                    "--enable-per-request-lora-scale. The scale is being "
+                    "ignored."
+                )
+            return
+
+        # Once the feature is on, the scale path stays on for every step. The
+        # kernel variant is picked by a tl.constexpr and gets baked into the
+        # cudagraph at capture time, so a step that silently dropped to the
+        # scale-free path would replay a graph that still reads these buffers
+        # while nothing refreshed them -- tokens would then pick up whatever
+        # request the previous step had left behind.
+        if not mapping.has_request_scales:
+            # An all-ones table makes the gather a no-op regardless of what
+            # token_to_req still holds from the previous step.
+            self.token_mapping_meta.request_scales.fill_(1.0)
+            self.prompt_mapping_meta.request_scales.fill_(1.0)
+            self._request_scales_active = True
+            return
+
+        assert mapping.request_scales is not None
+        assert mapping.token_to_req is not None
+
+        request_scales = torch.tensor(
+            mapping.request_scales, dtype=torch.float32, device="cpu"
+        )
+        token_to_req = torch.tensor(
+            mapping.token_to_req, dtype=torch.int32, device="cpu"
+        )
+        self.token_mapping_meta.prepare_request_scales(request_scales, token_to_req)
+
+        # The logits path indexes by sampled token, not by scheduled token, so
+        # it needs its own token -> request map. Fall back to identity when the
+        # caller didn't supply one (one sample per request).
+        if mapping.sample_to_req is not None:
+            sample_to_req = torch.tensor(
+                mapping.sample_to_req, dtype=torch.int32, device="cpu"
+            )
+        else:
+            sample_to_req = torch.arange(
+                len(mapping.prompt_mapping), dtype=torch.int32, device="cpu"
+            )
+        self.prompt_mapping_meta.prepare_request_scales(request_scales, sample_to_req)
+
+        self._request_scales_active = True
+
+    def _scale_args(self, meta: "LoRAKernelMeta") -> dict:
+        """kwargs to forward the per-request scale into a lora_expand call."""
+        if not self._request_scales_active:
+            return {}
+        return {
+            "request_scales": meta.request_scales,
+            "token_to_req": meta.token_to_req,
+        }
 
     def update_metadata(
         self,
@@ -89,6 +168,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+            self._update_request_scales(mapping)
 
     def add_shrink(
         self,
@@ -167,6 +247,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             offset_start=offset_start,
             add_inputs=add_inputs,
+            **self._scale_args(self.token_mapping_meta),
         )
 
         y = y.view_as(y_org)
@@ -201,6 +282,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             offset_start=0,
             add_inputs=add_inputs,
+            **self._scale_args(self.token_mapping_meta),
         )
 
     def add_lora_linear(
@@ -324,6 +406,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 buffer.size(0), self.lora_config.specialize_active_lora
             ),
             add_inputs=True,
+            **self._scale_args(self.prompt_mapping_meta),
         )
         y = y.view_as(y_org)
 
@@ -462,6 +545,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
+        if self._request_scales_active:
+            logger.warning_once(
+                "Per-request LoRA scaling is not applied to fused-MoE LoRA "
+                "layers; those layers use the adapter's default strength."
+            )
         fused_moe_lora(
             y,
             x,

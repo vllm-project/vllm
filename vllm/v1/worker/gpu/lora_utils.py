@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from vllm.lora.request import LoRARequest
+from vllm.lora.scale_inputs import LoRAScaleInputs, make_lora_scale_inputs
 from vllm.lora.utils import get_captured_lora_counts
 
 if TYPE_CHECKING:
@@ -77,6 +78,10 @@ class LoraState:
     def __init__(self, max_num_reqs: int):
         self.lora_ids = np.zeros(max_num_reqs, dtype=np.int32)
         self.lora_ids.fill(NO_LORA_ID)
+        # Per-request LoRA strength, held as persistent batch state alongside
+        # lora_ids. Requests sharing one adapter can differ here, so a distinct
+        # strength costs no adapter slot. 1.0 == the adapter's own alpha/r.
+        self.lora_scales = np.ones(max_num_reqs, dtype=np.float32)
         # req_id -> lora_request
         self.lora_requests: dict[str, LoRARequest] = {}
 
@@ -86,8 +91,10 @@ class LoraState:
         if lora_request is not None:
             self.lora_requests[req_id] = lora_request
             self.lora_ids[req_index] = lora_request.lora_int_id
+            self.lora_scales[req_index] = lora_request.lora_scale
         else:
             self.lora_ids[req_index] = NO_LORA_ID
+            self.lora_scales[req_index] = 1.0
 
     def remove_request(self, req_id: str) -> None:
         self.lora_requests.pop(req_id, None)
@@ -97,12 +104,29 @@ class LoraState:
         req_ids: list[str],
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        set[LoRARequest],
+        LoRAScaleInputs | None,
+    ]:
         lora_ids = self.lora_ids[idx_mapping]
         prompt_lora_mapping = tuple(lora_ids)
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        # One sampled token per request on this path, so the sample->request
+        # map is the identity that make_lora_scale_inputs derives from ones.
+        lora_scales = make_lora_scale_inputs(
+            self.lora_scales[idx_mapping],
+            num_scheduled_tokens,
+            np.ones(len(idx_mapping), dtype=np.int32),
+        )
+        return (
+            prompt_lora_mapping,
+            token_lora_mapping,
+            active_lora_requests,
+            lora_scales,
+        )
 
     def get_activate_loras(self, req_ids: list[str]) -> set[LoRARequest]:
         active_lora_requests: set[LoRARequest] = set()

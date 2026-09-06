@@ -46,12 +46,30 @@ class LoRAKernelMeta:
     # Empty list means no specialization (use actual count).
     captured_lora_counts: list[int] = field(default_factory=list)
 
+    # ---- Per-request LoRA scaling (optional) ----------------------------
+    # Only allocated when the engine is started with
+    # `--enable-per-request-lora-scale`. Two requests in the same batch may
+    # share a LoRA adapter (same lora id, same A/B weights) while asking for
+    # different strengths. Following the persistent-batch pattern used by
+    # SamplingStates, the scale is kept as [max_num_reqs] per-request state
+    # and combined with a [max_num_tokens] token -> request index map, rather
+    # than materializing a per-token copy of the scale.
+    #
+    #   effective_scale(token) = base_scale * request_scales[token_to_req[token]]
+    #
+    # token_lora_mapping decides *which* adapter a token uses;
+    # request_scales decides *how strongly* it is applied. The two are
+    # orthogonal, so a single adapter slot serves any number of scales.
+    request_scales: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
+
     @staticmethod
     def make(
         max_loras: int,
         max_num_tokens: int,
         device: torch.device | str,
         captured_lora_counts: list[int] | None = None,
+        max_num_reqs: int | None = None,
     ) -> "LoRAKernelMeta":
         token_lora_mapping = torch.empty(
             max_num_tokens, dtype=torch.int32, device=device
@@ -85,6 +103,16 @@ class LoRAKernelMeta:
             [max_loras + 1], dtype=torch.int32, device="cpu"
         )
 
+        request_scales = None
+        token_to_req = None
+        if max_num_reqs is not None:
+            # Persistent per-request scale buffer. Defaults to 1.0 so any slot
+            # that is never written behaves exactly like stock vLLM.
+            request_scales = torch.ones(
+                max_num_reqs, dtype=torch.float32, device=device
+            )
+            token_to_req = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
+
         return LoRAKernelMeta(
             token_lora_mapping=token_lora_mapping,
             token_indices_sorted_by_lora_ids=token_indices_sorted_by_lora_ids,
@@ -97,7 +125,40 @@ class LoRAKernelMeta:
             captured_lora_counts=sorted(captured_lora_counts)
             if captured_lora_counts
             else [],
+            request_scales=request_scales,
+            token_to_req=token_to_req,
         )
+
+    @property
+    def has_request_scales(self) -> bool:
+        return self.request_scales is not None
+
+    def prepare_request_scales(
+        self,
+        request_scales: torch.Tensor,
+        token_to_req: torch.Tensor,
+    ) -> None:
+        """
+        Stage the per-request LoRA scales for the current forward pass.
+
+        Args:
+            request_scales: float32 CPU tensor of shape [num_reqs] holding
+                each request's scale multiplier.
+            token_to_req: int32 CPU tensor of shape [num_tokens] mapping every
+                token to the index of the request it belongs to.
+        """
+        assert self.request_scales is not None
+        assert self.token_to_req is not None
+
+        num_reqs = request_scales.size(0)
+        num_tokens = token_to_req.size(0)
+        assert num_reqs <= self.request_scales.size(0)
+        assert num_tokens <= self.token_to_req.size(0)
+
+        self.request_scales[:num_reqs].copy_(request_scales, non_blocking=True)
+        # Slots beyond num_reqs keep whatever they had; token_to_req never
+        # points at them, so they are unreachable this step.
+        self.token_to_req[:num_tokens].copy_(token_to_req, non_blocking=True)
 
     def _reset(self):
         self.active_lora_ids.fill_(-1)
