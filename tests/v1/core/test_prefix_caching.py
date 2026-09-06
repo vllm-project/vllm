@@ -4389,6 +4389,41 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
 
 
+@pytest.mark.skip_global_cleanup
+def test_swa_reachable_block_mask_final_partial_segment():
+    """Only a final SWA horizon makes its incomplete segment tail reachable."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    start_block = 243
+    end_block = 250
+
+    def reachable_blocks(
+        final_segment_end_block: int, *, use_eagle: bool = False
+    ) -> set[int]:
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=start_block,
+            end_block=end_block,
+            alignment_tokens=36,
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            final_segment_end_block=final_segment_end_block,
+        )
+        assert mask is not None
+        return {start_block + i for i, reachable in enumerate(mask) if reachable}
+
+    assert reachable_blocks(300) == {248, 249}
+    assert reachable_blocks(250) == {246, 247, 248, 249}
+    assert reachable_blocks(300, use_eagle=True) == {243, 248, 249}
+    assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single

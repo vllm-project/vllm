@@ -508,6 +508,7 @@ class SingleTypeKVCacheManager(ABC):
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
+        final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -516,6 +517,10 @@ class SingleTypeKVCacheManager(ABC):
         blocks that can never serve a hit at any alignment-aligned prefix length.
         ``reachable_boundaries`` are token positions whose reachable tail must be
         retained; the base (dense) policy ignores them.
+        ``final_segment_end_block`` is the exclusive end of the request's final
+        segment. It may be later than ``end_block`` while prefill is still in
+        progress. Non-EAGLE sparse managers may keep its reachable tail. The
+        base policy already keeps every block, so it ignores this value.
         """
         return None
 
@@ -1033,6 +1038,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
+        final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1078,6 +1084,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             for i in range(start_block, end_block):
                 if i >= shift and (i - shift) % per_segment >= per_segment - need:
                     mask[i - start_block] = True
+
+            if final_segment_end_block is not None and not use_eagle:
+                final_segment_size = final_segment_end_block % per_segment
+                if final_segment_size:
+                    final_segment_start = final_segment_end_block - final_segment_size
+                    final_tail_start = max(
+                        final_segment_start, final_segment_end_block - need
+                    )
+                    final_tail_end = min(end_block, final_segment_end_block)
+                    for i in range(max(start_block, final_tail_start), final_tail_end):
+                        mask[i - start_block] = True
 
         # (2) Reachable-boundary tails: the replay boundary (``num_prompt - 1``,
         # capped by ``get_computed_blocks``) and any shared-prefix junction. Both
@@ -1513,6 +1530,7 @@ class MambaManager(SingleTypeKVCacheManager):
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
+        final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
