@@ -20,6 +20,7 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MM_PARSER_MAP,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
@@ -57,6 +58,13 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+# Content part types that carry text rather than multimodal data.
+_TEXT_CONTENT_PART_TYPES = frozenset(
+    {"text", "input_text", "output_text", "refusal", "thinking", "tool_reference"}
+)
+# Keys that identify a multimodal content part written without a ``type``.
+_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -449,6 +457,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "prompt string produced by chat templating. In streaming mode it "
             "is sent only on the first chunk. This is useful for inspecting "
             "exactly what was fed into the model."
+        ),
+    )
+    prompt_token_ids: list[Annotated[int, Field(ge=0)]] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Pre-tokenized prompt. When set, chat-template rendering and "
+            "tokenization of ``messages`` are skipped and these token IDs are "
+            "used as the prompt, still subject to the model's context length "
+            "and to ``truncate_prompt_tokens``. ``messages`` is still required "
+            "and is used for tool and reasoning parser configuration and for "
+            "the response role. This lets a routing layer that already applies "
+            "the chat template and tokenizes the prompt (e.g. for "
+            "prefix-cache-aware routing) avoid tokenizing twice. Because the "
+            "IDs bypass the server's chat template, they are not supported "
+            "together with non-text message content or ``echo``, and no "
+            "``prompt_text`` is returned."
         ),
     )
 
@@ -1005,6 +1030,83 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_prompt_token_ids(cls, data):
+        """Validate a pre-tokenized prompt against the rest of the request.
+
+        A pre-tokenized prompt skips rendering, so anything derived from the
+        rendered prompt is unavailable: non-text parts of ``messages`` would
+        never reach the multimodal processor, and ``echo`` has no prompt text
+        to echo. Both spellings are checked, the field and the older
+        ``kv_transfer_params`` key. Runs before validation because the media
+        keys of a content part written without a ``type`` do not survive it.
+        """
+        if not isinstance(data, dict):
+            return data
+        prompt_token_ids = data.get("prompt_token_ids")
+        kv_transfer_params = data.get("kv_transfer_params")
+        kv_ids = (
+            kv_transfer_params.get("prompt_token_ids")
+            if isinstance(kv_transfer_params, dict)
+            else None
+        )
+        if prompt_token_ids is None and kv_ids is None:
+            return data
+
+        if (
+            isinstance(kv_ids, list | tuple)
+            and isinstance(prompt_token_ids, list | tuple)
+            and list(kv_ids) != list(prompt_token_ids)
+        ):
+            raise VLLMValidationError(
+                "`prompt_token_ids` and `kv_transfer_params['prompt_token_ids']` "
+                "must match when both are set.",
+                parameter="prompt_token_ids",
+            )
+
+        if data.get("echo"):
+            raise VLLMValidationError(
+                "`echo` is not supported with `prompt_token_ids` because the "
+                "prompt is not rendered from `messages`.",
+                parameter="echo",
+            )
+
+        messages = data.get("messages")
+        if isinstance(messages, list) and not messages:
+            raise VLLMValidationError(
+                "`messages` must not be empty when `prompt_token_ids` is set.",
+                parameter="messages",
+            )
+
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            parts = [content] if isinstance(content, dict) else content
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                # A media key identifies a part whatever its 'type' says,
+                # mirroring _parse_chat_message_content_mm_part.
+                non_text = next(
+                    (key for key in _MEDIA_CONTENT_PART_KEYS if key in part), None
+                )
+                if non_text is None:
+                    part_type = part.get("type")
+                    if part_type is None or part_type in _TEXT_CONTENT_PART_TYPES:
+                        # Carries no media: the ids are authoritative anyway.
+                        continue
+                    non_text = part_type
+                raise VLLMValidationError(
+                    "`prompt_token_ids` is not supported together with non-text "
+                    f"message content (found a {non_text!r} part).",
+                    parameter="prompt_token_ids",
+                )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_system_message_content_type(cls, data):
         """Warn if system messages contain non-text content.
 
@@ -1143,6 +1245,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",
                 parameter="logprob_token_ids",
+            )
+        kv_transfer_params = data.get("kv_transfer_params")
+        if data.get("prompt_token_ids") is not None or (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support `prompt_token_ids`: one "
+                "pre-tokenized prompt cannot serve several conversations.",
+                parameter="prompt_token_ids",
             )
         response_format = data.get("response_format")
         if response_format is not None:

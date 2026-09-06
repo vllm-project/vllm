@@ -247,3 +247,34 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
     assert delta_token_ids
+
+
+@pytest.mark.asyncio
+async def test_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
+    """A top-level ``prompt_token_ids`` is used verbatim, skipping tokenize.
+
+    Mirrors the kv_transfer_params round trip above, using the public field.
+    """
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={"return_token_ids": True},
+    )
+    ids = baseline.prompt_token_ids
+    assert ids
+
+    reused = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=DECODE_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={"prompt_token_ids": ids, "return_token_ids": True},
+    )
+
+    # The engine saw the supplied ids, not the request's own messages.
+    assert reused.prompt_token_ids == ids
+    assert reused.usage.prompt_tokens == len(ids)
+    # text-out: the response is still a detokenized chat message.
+    assert reused.choices[0].message.content

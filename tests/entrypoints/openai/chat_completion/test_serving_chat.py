@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai import OpenAI
+from pydantic import ValidationError
 
 from tests.entrypoints.openai.utils import (
     accumulate_streaming_response,
@@ -591,6 +592,15 @@ def _build_online_renderer(
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
     )
+
+
+def _build_mock_engine() -> MagicMock:
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    return mock_engine
 
 
 def _build_serving_chat(
@@ -2445,3 +2455,256 @@ def test_make_request_with_harmony_reuses_kv_transfer_prompt_token_ids():
     assert engine_input["prompt_token_ids"] == [10, 20, 30]
     # The reuse key is consumed and other kv_transfer_params are preserved.
     assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_make_request_with_harmony_uses_prompt_token_ids():
+    """The Harmony reuse branch also honors the public ``prompt_token_ids``."""
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+    assert online_renderer.use_harmony
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        prompt_token_ids=[10, 20, 30],
+    )
+    conversation, engine_inputs = online_renderer._make_request_with_harmony(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+
+
+def test_make_request_with_harmony_validates_prompt_token_ids():
+    """The Harmony reuse branch applies the same length check as the HF path."""
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        prompt_token_ids=list(range(95)),
+        max_tokens=10,
+    )
+    with pytest.raises(VLLMValidationError):
+        online_renderer._make_request_with_harmony(request)
+
+
+PROMPT_TOKEN_IDS_MESSAGES = [{"role": "user", "content": "what is 1+1?"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_prompt_token_ids_skip_rendering():
+    """``prompt_token_ids`` is used verbatim; ``messages`` is not rendered."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        prompt_token_ids=[10, 20, 30],
+        cache_salt="test_salt",
+        max_tokens=1,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+    assert engine_inputs[0]["cache_salt"] == "test_salt"
+
+
+@pytest.mark.asyncio
+async def test_chat_prompt_token_ids_length_validation():
+    """Supplied ids go through the same length checks as tokenized prompts."""
+    mock_engine = _build_mock_engine()
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # max_model_len is 100: the default max_tokens is derived from the ids.
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        prompt_token_ids=list(range(90)),
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(request)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        prompt_token_ids=list(range(95)),
+        max_tokens=10,
+    )
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(request)
+
+
+@pytest.mark.asyncio
+async def test_chat_prompt_token_ids_truncation():
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        prompt_token_ids=[1, 2, 3, 4],
+        truncate_prompt_tokens=2,
+        truncation_side="right",
+        max_tokens=1,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert engine_inputs[0]["prompt_token_ids"] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_chat_prompt_token_ids_kv_transfer_alias():
+    """The legacy kv_transfer_params channel keeps working and must agree."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        prompt_token_ids=[10, 20, 30],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+        max_tokens=1,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+    with pytest.raises(VLLMValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=PROMPT_TOKEN_IDS_MESSAGES,
+            prompt_token_ids=[10, 20, 30],
+            kv_transfer_params={"prompt_token_ids": [1, 2, 3]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_are_validated():
+    """Ids forwarded in kv_transfer_params get the same checks as the field."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=PROMPT_TOKEN_IDS_MESSAGES,
+        kv_transfer_params={"prompt_token_ids": list(range(95))},
+        max_tokens=10,
+    )
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.render_chat_request(request)
+
+
+@pytest.mark.parametrize("prompt_token_ids", [[], [-1]])
+def test_chat_prompt_token_ids_rejects_invalid_ids(prompt_token_ids):
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=PROMPT_TOKEN_IDS_MESSAGES,
+            prompt_token_ids=prompt_token_ids,
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [
+            {"type": "text", "text": "what is in this image?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ],
+        # A part written without a "type" is identified by its media key.
+        [{"image_url": "https://example.com/a.png"}],
+        [{"input_audio": {"data": "", "format": "wav"}}],
+        # A media key counts even when the part claims to be text, which is
+        # how chat_utils reads a part carrying a "uuid".
+        [
+            {
+                "type": "text",
+                "text": "look",
+                "uuid": "u1",
+                "image_url": "https://example.com/a.png",
+            }
+        ],
+    ],
+)
+def test_chat_prompt_token_ids_rejects_multimodal_content(content):
+    with pytest.raises(VLLMValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": content}],
+            prompt_token_ids=[10, 20, 30],
+        )
+
+
+def test_chat_kv_transfer_prompt_token_ids_rejects_multimodal_content():
+    """The older kv_transfer_params spelling gets the same checks."""
+    with pytest.raises(VLLMValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/a.png"},
+                        }
+                    ],
+                }
+            ],
+            kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+        )
+
+
+def test_chat_prompt_token_ids_allows_text_only_parts():
+    """Text-bearing part types are not multimodal and must be accepted."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "let me think"},
+                    {"type": "refusal", "refusal": "no"},
+                ],
+            },
+            {"role": "user", "content": "plain string"},
+        ],
+        prompt_token_ids=[10, 20, 30],
+    )
+    assert request.prompt_token_ids == [10, 20, 30]
+
+
+def test_chat_prompt_token_ids_rejects_echo_and_empty_messages():
+    with pytest.raises(VLLMValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=PROMPT_TOKEN_IDS_MESSAGES,
+            prompt_token_ids=[10, 20, 30],
+            echo=True,
+        )
+
+    with pytest.raises(VLLMValidationError):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[],
+            prompt_token_ids=[10, 20, 30],
+        )

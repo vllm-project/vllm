@@ -56,10 +56,10 @@ Now supports 9 types of connectors:
 
 In disaggregated serving, the prefill and decode stages both render the chat prompt from `messages` and tokenize it. Because the prefill stage has already produced the token ids, the decode stage can reuse them and skip its own templating and tokenization. The output is otherwise identical to a normal chat completion: it is detokenized to text, and tool and reasoning parsing, streaming, and structured output constraints all still apply.
 
-The token ids are passed to the decode stage through `kv_transfer_params`, the dict already attached to the decode request to coordinate the transfer:
+The token ids are passed to the decode stage with the `prompt_token_ids` request field:
 
 1. Send the prefill request with `return_token_ids` enabled, and read `prompt_token_ids` from the response.
-2. Set `kv_transfer_params["prompt_token_ids"]` to those ids on the decode request. `messages` is still required, but its content is not tokenized when the ids are present.
+2. Set `prompt_token_ids` to those ids on the decode request. `messages` is still required, but its content is not tokenized when the ids are present.
 
 ```python
 prefill = client.chat.completions.create(
@@ -73,9 +73,13 @@ decode = client.chat.completions.create(
     model=model,
     messages=messages,
     stream=True,
-    extra_body={"kv_transfer_params": {"do_remote_prefill": True, "prompt_token_ids": ids}},
+    extra_body={"prompt_token_ids": ids, "kv_transfer_params": {"do_remote_prefill": True}},
 )
 ```
+
+Setting `kv_transfer_params["prompt_token_ids"]` instead is still accepted for compatibility with existing proxies. If both are set they must contain the same ids.
+
+Either spelling is validated the same way. The ids are checked against the model's context length and are truncated when `truncate_prompt_tokens` is set, exactly as a prompt tokenized by the server would be, so an over-long prompt is rejected rather than silently reducing the number of output tokens. Because the prompt is no longer rendered from `messages`, a request that also carries non-text message content or sets `echo` is rejected instead of silently dropping them.
 
 ## Development
 
