@@ -1915,8 +1915,13 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostWriteStager",
         return_value=stager,
     ) as stager_factory:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
         assert worker._maybe_init_host_stager("remote-host") is None
         stager_factory.assert_not_called()
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+        assert worker._maybe_init_host_stager("local-host") is None
+        stager_factory.assert_not_called()
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
         assert worker._maybe_init_host_stager("local-host") is stager
         stager_factory.assert_called_once()
 
@@ -2530,7 +2535,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called()
+        mock_exec.shutdown.assert_called_with(wait=False)
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()

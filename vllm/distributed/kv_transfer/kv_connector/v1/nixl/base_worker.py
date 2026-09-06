@@ -2844,7 +2844,10 @@ class NixlBaseConnectorWorker:
         host_buffers: list[torch.Tensor],
     ) -> HostWriteStager | None:
         """Enable device staging for same-host reads into host buffers."""
-        if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
+        if (
+            not current_platform.is_cuda()
+            or remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        ):
             return None
         if self._host_stager is not None or self._host_stager_init_attempted:
             return self._host_stager
