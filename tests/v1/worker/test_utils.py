@@ -46,8 +46,9 @@ def test_is_residual_scattered_for_sp_clamps_threshold():
         scheduler_config=SimpleNamespace(max_num_batched_tokens=1024),
     )
 
-    assert not is_residual_scattered_for_sp(vllm_config, 512)
-    assert is_residual_scattered_for_sp(vllm_config, 1024)
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True):
+        assert not is_residual_scattered_for_sp(vllm_config, 512)
+        assert is_residual_scattered_for_sp(vllm_config, 1024)
 
 
 def test_is_residual_scattered_for_sp_skips_unsupported_sp_moe():
