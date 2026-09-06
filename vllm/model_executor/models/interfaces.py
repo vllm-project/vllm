@@ -90,6 +90,16 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int, int],
         tuple[int, int, int],
     ]
+    # Mamba2 exact replay: (conv, ssm) plus the partial-chunk buffers
+    # (x, dt, B, C), see MambaStateShapeCalculator.append_exact_replay_buffers.
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]
 )
 
 

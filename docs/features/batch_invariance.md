@@ -147,8 +147,10 @@ Requirements and current limitations: `--mamba-ssm-cache-dtype float32`,
 `--no-enable-prefix-caching`, `--enforce-eager`, the Triton mamba backend,
 tensor- and pipeline-parallel size 1, no speculative decoding, no async
 scheduling, and not together with `--use-replayssm`. Only models that declare
-support (`Mamba2ForCausalLM`) accept the option; other configurations fail at
-startup.
+support (`Mamba2ForCausalLM`, `GraniteMoeHybridForCausalLM`) accept the
+option; other configurations fail at startup. In a hybrid model the attention
+layers keep using their own batch-invariant kernels; the option only changes
+the Mamba2 layers.
 
 Costs: each decode step runs the chunked-scan kernels over the current partial
 chunk instead of the single-token update, and the per-layer mamba state grows
@@ -173,6 +175,7 @@ Batch invariance has been tested and verified on the following models:
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`
 - **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
+- **Mamba2 with `--mamba-exact-replay`**: `AntonV/mamba2-130m-hf`, `ibm-granite/granite-4.0-h-350m` (Mamba2 + attention hybrid, including scheduler preemption)
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 

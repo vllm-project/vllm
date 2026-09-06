@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    MambaStateShapes,
     SupportsMambaExactReplay,
     SupportsMambaPrefixCaching,
 )
@@ -197,7 +198,7 @@ class Mamba2ForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:

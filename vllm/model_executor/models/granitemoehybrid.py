@@ -41,7 +41,9 @@ from .granitemoeshared import GraniteMoeSharedMLP
 from .interfaces import (
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     SupportsLoRA,
+    SupportsMambaExactReplay,
     SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
@@ -592,6 +594,7 @@ class GraniteMoeHybridForCausalLM(
     IsHybrid,
     SupportsQuant,
     SupportsMambaPrefixCaching,
+    SupportsMambaExactReplay,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -612,18 +615,23 @@ class GraniteMoeHybridForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
+    ) -> tuple[torch.dtype, ...]:
+        base_dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+        if vllm_config.cache_config.mamba_exact_replay:
+            return MambaStateDtypeCalculator.append_exact_replay_buffers(
+                base_dtypes, vllm_config.model_config.dtype
+            )
+        return base_dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -638,7 +646,7 @@ class GraniteMoeHybridForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_expand * hf_config.hidden_size
 
-        return MambaStateShapeCalculator.mamba2_state_shape(
+        base_shapes = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.mamba_n_groups,
@@ -647,6 +655,16 @@ class GraniteMoeHybridForCausalLM(
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
         )
+        if vllm_config.cache_config.mamba_exact_replay:
+            chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+            assert chunk_size is not None
+            return MambaStateShapeCalculator.append_exact_replay_buffers(
+                base_shapes,
+                hf_config.mamba_n_groups,
+                parallel_config.tensor_parallel_size,
+                chunk_size,
+            )
+        return base_shapes
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:

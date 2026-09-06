@@ -171,8 +171,9 @@ def test_registry_supports_replayssm(model_arch, supported):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        # Exact replay is opt-in per model; only Mamba2ForCausalLM sets the flag.
+        # Exact replay is opt-in per model.
         ("Mamba2ForCausalLM", True),
+        ("GraniteMoeHybridForCausalLM", True),
         ("NemotronHForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],

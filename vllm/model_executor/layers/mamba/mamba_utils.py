@@ -252,11 +252,18 @@ class MambaStateShapeCalculator:
     @classmethod
     def append_exact_replay_buffers(
         cls,
-        base_shapes: tuple[tuple[int, ...], ...],
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         n_groups: int,
         tp_world_size: int,
         chunk_size: int,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]:
         """Append the exact-replay partial-chunk buffer shapes ``(x, dt, B, C)``
         to a base ``(conv, ssm)`` tuple. Buffers are token-major so that a prefix
         of one slot's buffer is directly in the SSD kernels' varlen layout.
