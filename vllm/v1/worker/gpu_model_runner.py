@@ -7249,6 +7249,23 @@ class GPUModelRunner(
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
+    def _config_for_kv_group(self, kv_cache_group: KVCacheGroupSpec) -> VllmConfig:
+        """The config a KV group's cudagraph support must be judged against.
+
+        Draft-side groups take the draft model's config: the target's
+        model_config would hand the target's head counts into the group's
+        arithmetic (see get_cudagraph_support), which is wrong whenever the
+        two models' head ratios differ.
+        """
+        draft_config = (
+            self.speculative_config.draft_model_config
+            if self.speculative_config is not None
+            else None
+        )
+        if kv_cache_group.is_eagle_group and draft_config is not None:
+            return replace(self.vllm_config, model_config=draft_config)
+        return self.vllm_config
+
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
@@ -7271,7 +7288,8 @@ class GPUModelRunner(
                 builder_cls = attn_backend.get_builder_cls()
 
                 cg_support = builder_cls.get_cudagraph_support(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
+                    self._config_for_kv_group(kv_cache_group),
+                    kv_cache_group.kv_cache_spec,
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support

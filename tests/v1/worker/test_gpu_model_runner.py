@@ -14,9 +14,11 @@ import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    DeviceConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -1823,3 +1825,56 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_config_for_kv_group_uses_draft_heads_for_eagle_groups():
+    """Draft-side KV groups must be judged on the draft model's head counts.
+
+    Regression for #55581: get_cudagraph_support divides by the group's
+    num_kv_heads, so handing it the target model's config silently loses all
+    CUDA graphs whenever target and draft head ratios differ.
+    """
+    target_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
+    draft_config = ModelConfig(
+        model="hf-internal-testing/tiny-random-LlamaForCausalLM",
+        dtype="float16",
+        seed=42,
+    )
+    spec_config = SpeculativeConfig(
+        method="eagle",
+        model="hf-internal-testing/tiny-random-LlamaForCausalLM",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        draft_model_config=draft_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    vllm_config = VllmConfig(
+        model_config=target_config,
+        speculative_config=spec_config,
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+    attn_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    eagle_group = KVCacheGroupSpec(
+        layer_names=["draft.0"], kv_cache_spec=attn_spec, is_eagle_group=True
+    )
+    target_group = KVCacheGroupSpec(
+        layer_names=["layer.0"], kv_cache_spec=attn_spec, is_eagle_group=False
+    )
+
+    runner = SimpleNamespace(vllm_config=vllm_config, speculative_config=spec_config)
+
+    # SpeculativeConfig.__post_init__ normalizes draft_model_config into a fresh
+    # ModelConfig, so assert on which model the resolved config belongs to.
+    eagle_cfg = GPUModelRunner._config_for_kv_group(runner, eagle_group)
+    target_cfg = GPUModelRunner._config_for_kv_group(runner, target_group)
+    assert (
+        eagle_cfg.model_config.model
+        == "hf-internal-testing/tiny-random-LlamaForCausalLM"
+    )
+    assert target_cfg.model_config.model == "facebook/opt-125m"
