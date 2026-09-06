@@ -6516,6 +6516,8 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
 def test_priority_scheduling_preemption_victim_least_preempted():
     """Test that under KV block pressure, the scheduler selects the
     least preempted running request as victim, and that preempted requests
@@ -6624,3 +6626,52 @@ def test_priority_queue_starvation_cap():
 
     assert req_3.sort_key[1] == -3
     assert req_10.sort_key[1] == -3
+
+
+def test_priority_queue_equal_arrival_time_tiebreak():
+    """Verify queue admission ordering when arrival times are identical."""
+    queue = PriorityRequestQueue()
+
+    # Preempted request pops ahead of fresh request with identical arrival time
+    req_fresh = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        req_ids=["fresh"],
+    )[0]
+
+    req_preempted = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        req_ids=["preempted"],
+    )[0]
+    req_preempted.num_preemptions = 1
+    req_preempted.status = RequestStatus.PREEMPTED
+
+    queue.add_request(req_fresh)
+    queue.prepend_request(req_preempted)
+
+    assert queue.pop_request().request_id == "preempted"
+    assert queue.pop_request().request_id == "fresh"
+
+    # Both requests have identical priority, preemptions, and arrival time:
+    # request_id breaks the tie deterministically
+    req_a = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        req_ids=["req_a"],
+    )[0]
+    req_b = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        req_ids=["req_b"],
+    )[0]
+
+    queue.add_request(req_b)
+    queue.add_request(req_a)
+
+    assert queue.pop_request().request_id == "req_a"
+    assert queue.pop_request().request_id == "req_b"
