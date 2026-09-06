@@ -710,15 +710,26 @@ class HYV4ToolExtractor:
                     break
 
                 name_start = start_idx + len(self.tool_call_start_token)
-                name_end = arg_idx if arg_idx != -1 else end_idx
+                # Both are searched from start_idx, so a buffered delta that
+                # holds a complete argument-less call followed by a call with
+                # arguments has arg_idx pointing into the second call. The name
+                # ends at whichever tag comes first.
+                name_end = min(i for i in (arg_idx, end_idx) if i != -1)
 
                 tool_name = cur_text[name_start:name_end].strip()
+                if not tool_name:
+                    # Mirror the strict non-streaming guard: a tool call with
+                    # no function name is never emitted, since the client would
+                    # try to dispatch it. Skip the malformed call once its
+                    # closing tag has arrived.
+                    if end_idx == -1:
+                        self._buffer = cur_text[start_idx:]
+                        break
+                    self._buffer = cur_text[end_idx + len(self.tool_call_end_token) :]
+                    continue
                 self._streaming_tool_name = tool_name
 
-                if arg_idx != -1:
-                    self._buffer = cur_text[arg_idx:]
-                else:
-                    self._buffer = cur_text[end_idx:]
+                self._buffer = cur_text[name_end:]
 
                 # Increment tool_id and mark that a name chunk should be emitted
                 self.current_tool_id += 1
