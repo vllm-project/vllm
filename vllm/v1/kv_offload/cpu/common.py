@@ -27,9 +27,12 @@ class CPUCacheTierInfo:
     # Page-aligned bytes per chunk. With num_chunks this is the tier's exact
     # size in bytes, the only capacity valid for every model shape.
     kv_bytes_per_chunk: int
-    # KV tokens resident when the tier is full, or None when a slot count does
-    # not convert to a token count. See CPUOffloadingSpec._build_tier_info.
-    capacity_tokens: int | None
+    # KV tokens the tier can serve when it is full and every request reaches
+    # max_model_len. The largest value the capacity takes, because a longer
+    # request spreads the fixed per-request chunks (one Mamba state, one sliding
+    # window) over more tokens. None when max_model_len is not known.
+    # See _capacity_tokens_at_max_len.
+    capacity_tokens_at_max_len: int | None
 
     def as_labelvalues(self) -> tuple[str, ...]:
         """Render label values in CPU_TIER_INFO_LABELS order."""

@@ -653,7 +653,7 @@ def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
         num_chunks=4096,
         blocks_per_chunk=2,
         kv_bytes_per_chunk=262144,
-        capacity_tokens=None,
+        capacity_tokens_at_max_len=None,
     )
     prom_metrics = OffloadPromMetrics(
         vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
@@ -683,7 +683,7 @@ def test_prom_metrics_pairs_cpu_tier_info_labels_with_their_values():
         "num_chunks": "4096",
         "blocks_per_chunk": "2",
         "kv_bytes_per_chunk": "262144",
-        "capacity_tokens": "None",
+        "capacity_tokens_at_max_len": "None",
     }
 
 

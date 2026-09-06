@@ -165,6 +165,16 @@ def _mla_spec(
     )
 
 
+def _swa_spec(sliding_window: int = 128) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
 _HIDDEN_STATE_KWARGS: dict[str, Any] = {
     "block_size": 16,
     "num_kv_heads": 1,
@@ -452,16 +462,13 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
 
 
 @pytest.mark.parametrize(
-    "kv_cache_spec,holds_tokens",
+    "kv_cache_spec,window_chunks",
     [
-        (_full_attention_spec(), True),
-        (_mla_spec(), True),
-        (_MAMBA_SPEC, False),
-        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), False),
-        (
-            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"mla": _mla_spec()}),
-            True,
-        ),
+        (_full_attention_spec(), None),
+        (_mla_spec(), None),
+        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), None),
+        (_MAMBA_SPEC, 1),
+        (_swa_spec(), 8),
         (
             UniformTypeKVCacheSpecs(
                 block_size=16,
@@ -470,19 +477,27 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
                     "hidden": HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS),
                 },
             ),
-            False,
+            None,
+        ),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={"swa0": _swa_spec(), "swa1": _swa_spec()},
+            ),
+            8,
         ),
     ],
 )
-def test_blocks_hold_tokens_only_when_every_layer_holds_tokens(
-    kv_cache_spec: KVCacheSpec, holds_tokens: bool
+def test_group_carries_the_chunks_the_tier_keeps_per_request(
+    kv_cache_spec: KVCacheSpec, window_chunks: int | None
 ):
-    """A block count converts to a token count only for token-holding blocks.
+    """The group reports how far back its attention reaches, counted in chunks.
 
-    A Mamba block holds one recurrent state and a hidden-state block holds
-    activations, so multiplying either by tokens_per_block would report a
-    capacity the tier cannot hold. UniformTypeKVCacheSpecs wraps one spec per
-    layer, so a single non-token layer disqualifies the whole group.
+    A capacity estimate needs that bound: a windowed or recurrent group keeps a
+    fixed number of chunks however long the request grows, while an unbounded
+    group keeps one for every chunk of the request. A worker-side group hands
+    over an aggregate of its layers, which must resolve to the same bound as the
+    single layer it wraps.
     """
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
@@ -492,7 +507,7 @@ def test_blocks_hold_tokens_only_when_every_layer_holds_tokens(
 
     offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
 
-    assert offloading_config.groups[0].blocks_hold_tokens is holds_tokens
+    assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
 
 
 def test_preserves_data_parallel_config():
@@ -778,13 +793,7 @@ def test_parallelism_agnostic_for_single_full_attention_group():
     assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
 
 
-_SWA_SPEC = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=4,
-    head_size=128,
-    dtype=torch.float32,
-    sliding_window=128,
-)
+_SWA_SPEC = _swa_spec()
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,

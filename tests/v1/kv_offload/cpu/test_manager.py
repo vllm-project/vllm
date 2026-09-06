@@ -260,7 +260,7 @@ def test_cpu_manager_reports_tier_info_as_info_gauge():
         num_chunks=4,
         blocks_per_chunk=2,
         kv_bytes_per_chunk=16384,
-        capacity_tokens=128,
+        capacity_tokens_at_max_len=128,
     )
     manager = make_cpu_manager(num_blocks=4, tier_info=tier_info)
 
@@ -270,14 +270,14 @@ def test_cpu_manager_reports_tier_info_as_info_gauge():
 
 
 def test_cpu_manager_renders_unknown_token_capacity_as_none():
-    """capacity_tokens=None must survive as a label, not crash or vanish."""
+    """An unknown capacity must survive as a label, not crash or vanish."""
     manager = make_cpu_manager(
         num_blocks=4,
         tier_info=CPUCacheTierInfo(
             num_chunks=4,
             blocks_per_chunk=1,
             kv_bytes_per_chunk=16384,
-            capacity_tokens=None,
+            capacity_tokens_at_max_len=None,
         ),
     )
 

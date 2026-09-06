@@ -42,6 +42,7 @@ def _make_offloading_config(
     groups: tuple[OffloadingGroupConfig, ...] | None = None,
     tokens_per_hash: int = 16,
     blocks_per_chunk: int = 1,
+    max_model_len: int = 4096,
     rank: int = 0,
     world_size: int = 1,
     tp_size: int | None = None,
@@ -70,7 +71,9 @@ def _make_offloading_config(
         enable_kv_cache_events=False,
         extra_config=normalized_extra_config,
         engine_id="test-engine",
-        model=OffloadingModelConfig(name="test-model", dtype="float16"),
+        model=OffloadingModelConfig(
+            name="test-model", dtype="float16", max_model_len=max_model_len
+        ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
             blocks_per_chunk=blocks_per_chunk,
@@ -170,7 +173,7 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
 
 @pytest.mark.parametrize("blocks_per_chunk", [1, 2, 4])
 def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
-    """capacity_tokens is the tier's slot count expressed in KV tokens.
+    """One uncapped group makes the capacity the slot count in KV tokens.
 
     A slot holds blocks_per_chunk blocks of tokens_per_block tokens each, so
     dropping either factor understates the tier.
@@ -181,16 +184,12 @@ def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         blocks_per_chunk=blocks_per_chunk,
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block, ("layer",), blocks_hold_tokens=True
-            ),
-        ),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks == 12 // blocks_per_chunk
-    assert spec.tier_info.capacity_tokens == (
+    assert spec.tier_info.capacity_tokens_at_max_len == (
         spec.num_blocks * blocks_per_chunk * tokens_per_block
     )
 
@@ -210,16 +209,14 @@ def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         world_size=world_size,
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block, ("layer",), blocks_hold_tokens=True
-            ),
-        ),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks == 12 // world_size
-    assert spec.tier_info.capacity_tokens == spec.num_blocks * tokens_per_block
+    assert (
+        spec.tier_info.capacity_tokens_at_max_len == spec.num_blocks * tokens_per_block
+    )
 
 
 def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
@@ -238,16 +235,12 @@ def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
         worker_kv_bytes_per_block=alignment,
         world_size=4,
         replicated_layout=True,
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block, ("layer",), blocks_hold_tokens=True
-            ),
-        ),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks == 12
-    assert spec.tier_info.capacity_tokens == 12 * tokens_per_block
+    assert spec.tier_info.capacity_tokens_at_max_len == 12 * tokens_per_block
 
 
 def test_cpu_spec_tier_info_mirrors_spec_sizing():
@@ -269,59 +262,48 @@ def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
     """A tier sized to nothing holds zero tokens; that is known, not unknown."""
     spec = _create_spec(
         worker_kv_bytes_per_block=0,
-        groups=(OffloadingGroupConfig(16, ("layer",), blocks_hold_tokens=True),),
+        groups=(OffloadingGroupConfig(16, ("layer",)),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks == 0
-    assert spec.tier_info.capacity_tokens == 0
+    assert spec.tier_info.capacity_tokens_at_max_len == 0
 
 
-def test_cpu_spec_tier_info_no_token_capacity_for_stateful_blocks():
-    """Blocks that do not hold tokens cannot be converted to a token count."""
-    spec = _create_spec(
-        groups=(OffloadingGroupConfig(16, ("layer",), blocks_hold_tokens=False),),
-    )
-
-    assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
-    assert spec.tier_info.capacity_tokens is None
-
-
-def test_cpu_spec_tier_info_no_token_capacity_for_an_unclassified_group():
-    """An unclassified group fails closed: no capacity rather than a guess."""
-    spec = _create_spec(groups=(OffloadingGroupConfig(16, ("layer",)),))
-
-    assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
-    assert spec.tier_info.capacity_tokens is None
-
-
-def test_cpu_spec_tier_info_no_token_capacity_for_multiple_groups():
-    """A slot holds one group's chunk, so a slot count is in token*group units.
-
-    Converting it needs an assumption about how slots divide across groups,
-    which the workload decides rather than the configuration.
-    """
-    spec = _create_spec(
+def test_cpu_spec_tier_info_capacity_shrinks_when_a_second_group_shares_slots():
+    """Two groups take two chunks for one request, so the capacity halves."""
+    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",)),))
+    two_groups = _create_spec(
         groups=(
-            OffloadingGroupConfig(16, ("full_layer",), blocks_hold_tokens=True),
-            OffloadingGroupConfig(16, ("swa_layer",), blocks_hold_tokens=True),
+            OffloadingGroupConfig(16, ("full_layer",)),
+            OffloadingGroupConfig(16, ("swa_layer",)),
         ),
     )
 
-    assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_blocks > 0
-    assert spec.tier_info.capacity_tokens is None
+    assert isinstance(one_group, CPUOffloadingSpec)
+    assert isinstance(two_groups, CPUOffloadingSpec)
+    assert two_groups.num_blocks == one_group.num_blocks
+    assert two_groups.tier_info.capacity_tokens_at_max_len == (
+        one_group.tier_info.capacity_tokens_at_max_len // 2
+    )
 
 
 def test_cpu_spec_tier_info_no_token_capacity_without_a_kv_cache_group():
-    """A model with no KV cache has no group whose tokens_per_block to apply."""
+    """A model with no KV cache has no group whose chunk size to apply."""
     spec = _create_spec(groups=())
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_blocks > 0
-    assert spec.tier_info.capacity_tokens is None
+    assert spec.tier_info.capacity_tokens_at_max_len is None
+
+
+def test_cpu_spec_tier_info_no_token_capacity_without_max_model_len():
+    """The capacity holds at max_model_len, so an unknown length gives None."""
+    spec = _create_spec(max_model_len=0)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks > 0
+    assert spec.tier_info.capacity_tokens_at_max_len is None
 
 
 def test_tiering_spec_aligns_row_size():
