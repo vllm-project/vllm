@@ -207,7 +207,7 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
   // Check for strides and alignment
   STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
-  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
+  STD_TORCH_CHECK(a.stride(0) % 16 == 0 && c.stride(0) % 16 == 0 &&
                   b.stride(1) % 16 == 0);  // 16 Byte Alignment
 
   if (bias) {
@@ -396,7 +396,7 @@ void cutlass_scaled_mm_azp(torch::stable::Tensor& c,
   // Check for strides and alignment
   STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
-  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
+  STD_TORCH_CHECK(a.stride(0) % 16 == 0 && c.stride(0) % 16 == 0 &&
                   b.stride(1) % 16 == 0);  // 16 Byte Alignment
   STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 

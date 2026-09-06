@@ -572,23 +572,53 @@ def test_cutlass_int8_azp(
         )
 
 
-# Test working with a subset of A and B
-def test_cutlass_subset():
-    big_m, big_n, big_k = 1024, 1024, 1024
-    m, n, k = 512, 512, 512
+@pytest.mark.parametrize("padded_tensor", ["a", "b", "out"])
+@pytest.mark.parametrize("input_dtype", ["int8", "fp8"])
+@pytest.mark.parametrize("m", [32, 512])
+def test_cutlass_strided_subsets(padded_tensor: str, input_dtype: str, m: int):
+    if input_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("FP8 is not supported on this GPU type.")
 
-    whole_a = to_int8(torch.randn((big_m, big_k), device="cuda") * 5)
-    whole_b = to_int8(torch.randn((big_n, big_k), device="cuda").t() * 5)
-    a = whole_a[0:m, 0:k]
-    b = whole_b[0:k, 0:n]
+    big_m, big_n, big_k = 1024, 1024, 1024
+    n, k = 512, 512
+
+    quantize = to_fp8 if input_dtype == "fp8" else to_int8
+    whole_a = quantize(torch.randn((big_m, big_k), device="cuda") * 5)
+    whole_b = quantize(torch.randn((big_n, big_k), device="cuda").t() * 5)
+    a = whole_a[0:m, 0:k].contiguous() if padded_tensor != "a" else whole_a[0:m, 0:k]
+    b = (
+        whole_b[0:k, 0:n].t().contiguous().t()
+        if padded_tensor != "b"
+        else whole_b[0:k, 0:n]
+    )
 
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
+    if padded_tensor == "out":
+        whole_out = torch.empty((m, big_n), device="cuda", dtype=torch.bfloat16)
+        out = whole_out[0:m, 0:n]
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+    else:
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
 
-    torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+    if input_dtype == "fp8":
+        torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
+    else:
+        torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+def test_cutlass_rejects_misaligned_a_leading_stride():
+    m = n = k = 512
+    whole_a = to_int8(torch.randn((m, k + 1), device="cuda") * 5)
+    a = whole_a[:, :k]
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(RuntimeError):
+        ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16)
 
 
 # Test to make sure cuda graphs work
