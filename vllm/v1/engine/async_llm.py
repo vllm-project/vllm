@@ -947,7 +947,7 @@ class AsyncLLM(EngineClient):
 
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False
-    ) -> None:
+    ) -> list[str]:
         """Abort RequestId in OutputProcessor and EngineCore."""
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
@@ -957,6 +957,7 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
+        return all_request_ids
 
     async def notify_kv_transfer_request_rejected(
         self,

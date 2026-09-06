@@ -527,6 +527,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
                 reasoning_ended=True if request._grammar_from_parser else None,
+                raw_request=raw_request,
             )
             generators.append(generator)
 
@@ -649,6 +650,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        raw_request: Request | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
@@ -658,6 +660,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
+            self._track_engine_request(raw_request, request_id, sub_request_id)
 
             self._log_inputs(
                 sub_request_id,

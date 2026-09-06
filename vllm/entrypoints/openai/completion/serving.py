@@ -181,6 +181,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 )
 
             request_id_item = f"{request_id}-{i}"
+            self._track_engine_request(raw_request, request_id, request_id_item)
 
             self._log_inputs(
                 request_id_item,

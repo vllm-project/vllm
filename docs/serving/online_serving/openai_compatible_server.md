@@ -33,6 +33,7 @@ We currently support the following OpenAI APIs:
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
 - [Translation API](./speech_to_text.md#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
+- [Request Cancellation API](#request-cancellation-api) (`/v1/requests/{request_id}/cancel`, `/v1/requests/{request_id}`, `/v1/requests/cancel`)
 
 ## Completions API
 
@@ -73,6 +74,33 @@ To call the server, in your preferred text editor, create a script that uses an 
     By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
     To disable this behavior, please pass `--generation-config vllm` when launching the server.
+
+## Request Cancellation API
+
+Clients normally cancel an in-flight request by closing the HTTP connection. That is not
+always possible for gateways, orchestrators and agent frameworks, which issue requests on
+behalf of someone else and may need to cancel one out of band. For those cases vLLM exposes:
+
+| Endpoint | Description |
+| --- | --- |
+| `POST /v1/requests/{request_id}/cancel` | Cancel a single in-flight request. Returns 404 if it is not active. |
+| `DELETE /v1/requests/{request_id}` | RESTful alias for the above. |
+| `POST /v1/requests/cancel` | Cancel several requests, given a `{"request_ids": [...]}` body. |
+
+These endpoints sit under `/v1`, so `--api-key` guards them like any other inference route.
+
+!!! warning
+    Cancellation is scoped to a single API server process, which only tracks the requests
+    it served itself. A cancel that lands on a different process than the original request
+    returns 404. This affects two common deployments:
+
+    - `--api-server-count` greater than `1`. It defaults to the local data parallel size,
+      so any data parallel deployment is affected unless you set it explicitly.
+    - Several vLLM replicas behind a load balancer or gateway.
+
+    In both cases, route the cancel to the same replica and process that accepted the
+    request, for example by having the gateway pin a session, before relying on these
+    endpoints.
 
 ## Extra Parameters
 
