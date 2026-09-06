@@ -591,7 +591,19 @@ def resolve_chat_template_content_format(
             "You can set `--chat-template-content-format` to override this.",
             detected_format,
         )
-    elif given_format != detected_format:
+        return detected_format
+
+    if given_format != detected_format:
+        if given_format == "openai" and detected_format == "string":
+            logger.warning_once(
+                "You specified `--chat-template-content-format openai` "
+                "but the chat template expects plain string content. "
+                "Falling back to 'string' to prevent request failures. "
+                "If our automatic detection is incorrect, please consider "
+                "opening a GitHub issue so that we can improve it: "
+                "https://github.com/vllm-project/vllm/issues/new/choose",
+            )
+            return detected_format
         logger.warning_once(
             "You specified `--chat-template-content-format %s` "
             "which is different from the detected format '%s'. "
@@ -602,7 +614,7 @@ def resolve_chat_template_content_format(
             detected_format,
         )
 
-    return detected_format if given_format == "auto" else given_format
+    return given_format
 
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
