@@ -100,7 +100,7 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
             ),
         ),
     },
-    "hopper": {
+    "hopper_nvl": {
         (12288, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
@@ -268,7 +268,9 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     if capability.major == 10:
         return "blackwell"
     if capability.major == 9:
-        return "hopper"
+        if torch.cuda.is_available() and "NVL" in torch.cuda.get_device_name():
+            return "hopper_nvl"
+        return None
     if capability.major == 8 and capability.minor == 9:
         return "ada"
     return None
