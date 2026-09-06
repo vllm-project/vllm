@@ -99,6 +99,9 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
+    skip_early_mm_lookup: bool = False
+    """Skip early UUID-based multi-modal cache lookups."""
+
     return_assistant_tokens_mask: bool = False
     """Request a per-token assistant mask from apply_chat_template."""
 
@@ -136,6 +139,7 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
+            skip_early_mm_lookup=self.skip_early_mm_lookup,
             return_assistant_tokens_mask=self.return_assistant_tokens_mask,
             tool_choice=self.tool_choice,
             response_format=self.response_format,

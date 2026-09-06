@@ -240,6 +240,10 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    skip_early_mm_lookup: bool = Field(
+        default=False,
+        description="Skip early UUID-based multi-modal cache lookups.",
+    )
     priority: int = Field(
         default=0,
         ge=_INT64_MIN,
@@ -348,6 +352,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            skip_early_mm_lookup=self.skip_early_mm_lookup,
             tool_choice=self.tool_choice if self.tools else None,
         )
 

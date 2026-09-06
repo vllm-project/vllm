@@ -992,7 +992,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
             mm_processor_cache=self.mm_processor_cache,
-            skip_mm_cache=skip_mm_cache,
+            skip_early_mm_lookup=(params.skip_early_mm_lookup or skip_mm_cache),
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -1130,7 +1130,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
             mm_processor_cache=self.mm_processor_cache,
-            skip_mm_cache=skip_mm_cache,
+            skip_early_mm_lookup=(params.skip_early_mm_lookup or skip_mm_cache),
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

@@ -68,16 +68,23 @@ def test_text_only_model_mm_data_maps_to_bad_request():
 
 
 @pytest.mark.parametrize(
-    ("modality", "media"),
+    ("modality", "media", "skip_early_mm_lookup"),
     [
-        pytest.param("image", cherry_pil_image, id="image"),
-        pytest.param("video", baby_reading_np_ndarrays, id="video"),
+        pytest.param("image", cherry_pil_image, False, id="image"),
+        pytest.param("video", baby_reading_np_ndarrays, False, id="video"),
+        pytest.param(
+            "video",
+            baby_reading_np_ndarrays,
+            True,
+            id="video-skip-early-mm-lookup",
+        ),
     ],
 )
 def test_cached_uuid_skips_url_loading(
     monkeypatch: pytest.MonkeyPatch,
     modality: str,
     media: object,
+    skip_early_mm_lookup: bool,
 ):
     monkeypatch.setenv("VLLM_EARLY_UUID_LOOKUPS", "1")
     renderer = _build_renderer()
@@ -100,13 +107,14 @@ def test_cached_uuid_skips_url_loading(
         }
     ]
 
-    _, first_prompts = renderer.render_chat([messages], ChatParams())
-    _, second_prompts = renderer.render_chat([messages], ChatParams())
+    params = ChatParams(skip_early_mm_lookup=skip_early_mm_lookup)
+    _, first_prompts = renderer.render_chat([messages], params)
+    _, second_prompts = renderer.render_chat([messages], params)
 
     first_input = first_prompts[0]
     second_input = second_prompts[0]
     assert first_input["mm_hashes"] == second_input["mm_hashes"]
-    assert fetch_media.call_count == 1
+    assert fetch_media.call_count == (2 if skip_early_mm_lookup else 1)
 
 
 def test_multi_modal_uuids_length_mismatch_raises():

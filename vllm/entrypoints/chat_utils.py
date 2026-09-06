@@ -562,14 +562,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         model_config: ModelConfig,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
-        skip_mm_cache: bool = False,
+        skip_early_mm_lookup: bool = False,
     ):
         super().__init__()
 
         self._model_config = model_config
         self._media_io_kwargs = media_io_kwargs
         self._mm_processor_cache = mm_processor_cache
-        self._skip_mm_cache = skip_mm_cache
+        self._skip_early_mm_lookup = skip_early_mm_lookup
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -624,7 +624,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         cache = self._mm_processor_cache
         if not (
             envs.VLLM_EARLY_UUID_LOOKUPS
-            and not self._skip_mm_cache
+            and not self._skip_early_mm_lookup
             and uuid is not None
             and cache is not None
         ):
@@ -2178,7 +2178,7 @@ def parse_chat_messages(
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
     mm_processor_cache: BaseMultiModalProcessorCache | None = None,
-    skip_mm_cache: bool = False,
+    skip_early_mm_lookup: bool = False,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -2189,7 +2189,7 @@ def parse_chat_messages(
         model_config,
         media_io_kwargs=media_io_kwargs,
         mm_processor_cache=mm_processor_cache,
-        skip_mm_cache=skip_mm_cache,
+        skip_early_mm_lookup=skip_early_mm_lookup,
     )
 
     for msg in messages:
@@ -2221,7 +2221,7 @@ async def parse_chat_messages_async(
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
     mm_processor_cache: BaseMultiModalProcessorCache | None = None,
-    skip_mm_cache: bool = False,
+    skip_early_mm_lookup: bool = False,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -2232,7 +2232,7 @@ async def parse_chat_messages_async(
         model_config,
         media_io_kwargs=media_io_kwargs,
         mm_processor_cache=mm_processor_cache,
-        skip_mm_cache=skip_mm_cache,
+        skip_early_mm_lookup=skip_early_mm_lookup,
     )
 
     for msg in messages:
