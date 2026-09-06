@@ -642,7 +642,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("block_stride_rows", [None, 12])
+@pytest.mark.parametrize("block_stride_rows", [None, 12, 99, 492])
 def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_stride_rows: int | None,
 ):

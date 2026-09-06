@@ -104,6 +104,12 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
 
+For ordinary V3.2 sparse MLA and indexer caches with native 64-token blocks,
+`VLLM_KV_CACHE_LAYOUT=BLHNC` enables shared block-outermost storage. The allocator
+aligns the total block stride to every segment's physical row width, adding
+bounded tail padding and accounting for it in KV capacity. Individual page sizes
+and sparse row-index units are unchanged. Padding depends on the cache inventory.
+
 ### Quantized KV cache
 
 [Quantized KV cache](quantization/quantized_kvcache.md) (e.g., FP8) requires both P and D instances to use the **same** `cache_dtype`. Mismatched cache dtypes will fail the compatibility hash check during handshake.

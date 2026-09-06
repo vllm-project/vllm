@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
@@ -1287,6 +1288,52 @@ def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
             kv_cache_groups=[KVCacheGroupSpec(["layer2"], ref_kv_cache_spec)],
         ),
     ]
+
+
+@pytest.mark.parametrize("override", [None, 11])
+def test_aligned_sparse_mla_capacity_and_pp_replanning(override):
+    """Every worker must retain the same block count after aligned re-planning."""
+    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
+    config.cache_config.block_size = 64
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.cache_config.num_gpu_blocks_override = override
+    workers = [
+        {
+            f"stage{stage}.{name}": MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=width,
+                dtype=torch.uint8,
+                block_stride_alignment_bytes=width,
+            )
+            for name, width in [("mla", 656), ("indexer", 132)]
+        }
+        for stage in range(2)
+    ]
+    stride = 64944  # ceil(64 * (656 + 132) / lcm(656, 132)) * lcm(656, 132)
+    configs = get_kv_cache_configs(config, workers, [11 * stride, 20 * stride])
+    for cache in configs:
+        assert cache.num_blocks == 11
+        assert {t.size for t in cache.kv_cache_tensors} == {11 * stride}
+        assert {t.block_stride for t in cache.kv_cache_tensors} == {stride}
+        from vllm.v1.worker.utils import allocate_kv_cache
+
+        views = allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLHNC)
+        storage = next(iter(views.values())).untyped_storage()
+        assert storage.nbytes() == cache.num_blocks * stride
+        assert all(
+            v.untyped_storage().data_ptr() == storage.data_ptr() for v in views.values()
+        )
+    config.model_config.original_max_model_len = -1
+    config.model_config.max_model_len = 2048
+    get_kv_cache_configs(config, workers, [11 * stride, 20 * stride])
+    assert config.model_config.max_model_len == 10 * 64
+    # Twelve blocks cover only eleven usable blocks once the null block is reserved.
+    config.cache_config.num_gpu_blocks_override = None
+    config.model_config.original_max_model_len = None
+    config.model_config.max_model_len = 12 * 64
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(config, workers, [12 * stride, 20 * stride])
 
 
 def test_project_kv_cache_groups_to_worker():

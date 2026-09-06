@@ -978,7 +978,7 @@ def check_enough_kv_cache_memory(
         # of the specs since grouping may unify them in-place.
         groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
         check_memory = (
-            available_memory - _pool_bytes_per_block(groups)
+            available_memory - _pool_bytes_per_block(groups, vllm_config)
             if groups
             else available_memory
         )
@@ -1080,14 +1080,18 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec], vllm_config: VllmConfig | None = None
+) -> int:
     """
     Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
+    layout_name = vllm_config.cache_config.kv_cache_layout if vllm_config else None
+    layout = KVCacheLayout[layout_name] if layout_name is not None else None
+    return _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1557,8 +1561,9 @@ def _get_per_layer_spec(
 
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    layout: KVCacheLayout | None = None,
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return the largest group's bytes per block, including packed tail padding."""
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
         return len(mla_names) * mla_page + len(idx_names) * idx_page
@@ -1571,6 +1576,16 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
+    if layout is not None and layout.is_block_outermost:
+        alignment = math.lcm(
+            *(
+                spec.block_stride_alignment_bytes or 1
+                for group in kv_cache_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+                if isinstance(spec, MLAAttentionSpec)
+            )
+        )
+        bytes_per_block = cdiv(bytes_per_block, alignment) * alignment
     return bytes_per_block
 
 
@@ -1701,7 +1716,7 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
@@ -2359,7 +2374,7 @@ def _max_memory_usage_bytes_from_groups(
             total_blocks += 1
         return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
 
-    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _pool_bytes_per_block(kv_cache_groups, vllm_config)
     total_blocks = 0
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
@@ -2608,7 +2623,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(groups, vllm_config)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2621,7 +2636,7 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem - _pool_bytes_per_block(groups, vllm_config) if groups else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2665,7 +2680,9 @@ def get_kv_cache_configs(
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config,
+            groups,
+            min_num_blocks * _pool_bytes_per_block(groups, vllm_config),
         )
 
     return kv_cache_configs

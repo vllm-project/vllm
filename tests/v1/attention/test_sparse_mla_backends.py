@@ -327,7 +327,9 @@ def _quantize_dequantize_nvfp4_ds_mla(
     ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
 )
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize(
+    "block_size,kv_layout", [(32, "LBNHC"), (64, "LBNHC"), (64, "BLHNC")]
+)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
@@ -337,9 +339,11 @@ def test_sparse_backend_decode_correctness(
     kv_cache_dtype,
     tensor_parallel_size,
     block_size,
+    kv_layout,
     workspace_init,
     q_scale: float,
     k_scale: float,
+    record_property,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
@@ -605,10 +609,59 @@ def test_sparse_backend_decode_correctness(
         device=device,
         num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
-        randomize_blocks=False,
+        randomize_blocks=kv_layout == "BLHNC",
         kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
+
+    if kv_layout == "BLHNC":
+        from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+        from vllm.v1.kv_cache_interface import (
+            KVCacheGroupSpec,
+            KVCacheLayout,
+            MLAAttentionSpec,
+            UniformTypeKVCacheSpecs,
+        )
+        from vllm.v1.worker.utils import allocate_kv_cache
+
+        row_bytes = kv_cache.shape[-1] * kv_cache.element_size()
+        specs = {
+            "mla": MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=kv_cache.shape[-1],
+                dtype=kv_cache.dtype,
+                block_stride_alignment_bytes=row_bytes,
+            ),
+            "indexer": MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                block_stride_alignment_bytes=132,
+            ),
+        }
+        group = KVCacheGroupSpec(
+            list(specs),
+            UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
+        )
+        vllm_config.cache_config.kv_cache_layout = kv_layout
+        vllm_config.cache_config.num_gpu_blocks_override = kv_cache.shape[0]
+        packed_config = get_kv_cache_config_from_groups(vllm_config, [group], 0)
+        views = allocate_kv_cache(
+            packed_config, device, KVCacheLayout.BLHNC, [block_size]
+        )
+        views["mla"].copy_(kv_cache)
+        kv_cache = views["mla"]
+        views["indexer"].fill_(91)
+        stride = packed_config.kv_cache_tensors[0].block_stride
+        content = sum(spec.page_size_bytes for spec in specs.values())
+        raw = torch.empty(0, dtype=torch.uint8, device=device).set_(
+            kv_cache.untyped_storage(), 0, (packed_config.num_blocks * stride,), (1,)
+        )
+        tail = raw.view(packed_config.num_blocks, stride)[:, content:]
+        assert tail.numel() > 0
+        tail.fill_(0xA5)
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
@@ -705,6 +758,53 @@ def test_sparse_backend_decode_correctness(
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
     assert torch.isfinite(backend_output).all()
+    record_property(
+        "max_absolute_error", (backend_output - sdpa_reference).abs().max().item()
+    )
+    rtol, atol = (0.065, 0.05) if kv_cache_dtype.startswith("fp8") else (0.01, 0.01)
+    error = (backend_output.float() - sdpa_reference.float()).abs()
+    record_property(
+        "max_tolerance_ratio",
+        (error / (atol + rtol * sdpa_reference.float().abs())).max().item(),
+    )
+
+    if kv_layout == "BLHNC":
+        assert (tail == 0xA5).all()
+        assert (views["indexer"] == 91).all()
+        # Changing bytes outside this layer must not influence sparse reads.
+        eager_output = backend_output.clone()
+        tail.fill_(0x5A)
+        with torch.inference_mode():
+            mock_layer.forward_impl(
+                query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
+            )
+        torch.testing.assert_close(out_buffer, eager_output, rtol=0, atol=0)
+        assert (tail == 0x5A).all()
+        assert (views["indexer"] == 91).all()
+
+        # One representative batch per backend/format also exercises capture
+        # and replay after all JIT compilation has completed outside capture.
+        if batch_name == "mixed_small" and tensor_parallel_size == 2 and q_scale == 1:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream), torch.inference_mode():
+                for _ in range(2):
+                    mock_layer.forward_impl(
+                        query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
+                    )
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph), torch.inference_mode():
+                mock_layer.forward_impl(
+                    query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
+                )
+            for sentinel in (0xA5, 0x5A):
+                tail.fill_(sentinel)
+                graph.replay()
+                torch.testing.assert_close(out_buffer, eager_output, rtol=0, atol=0)
+                assert (tail == sentinel).all()
+                assert (views["indexer"] == 91).all()
+            record_property("cuda_graph_replays", 2)
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance

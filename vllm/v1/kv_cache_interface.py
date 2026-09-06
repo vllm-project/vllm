@@ -10,7 +10,7 @@ from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
-from math import prod
+from math import lcm, prod
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
@@ -554,6 +554,10 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
+    block_stride_alignment_bytes: int | None = None
+    """Packed blocks must start a whole number of rows apart for row indexing.
+    Unlike page padding, this aligns only the total block-outermost stride.
+    """
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
@@ -567,6 +571,11 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     def __post_init__(self):
         super().__post_init__()
+        if (
+            self.block_stride_alignment_bytes is not None
+            and self.block_stride_alignment_bytes <= 0
+        ):
+            raise ValueError("block_stride_alignment_bytes must be positive")
         _apply_alignment_padding(self)
 
     @classmethod
@@ -598,6 +607,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            block_stride_alignment_bytes=(
+                lcm(*(spec.block_stride_alignment_bytes or 1 for spec in specs))
+                if any(spec.block_stride_alignment_bytes is not None for spec in specs)
+                else None
+            ),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             storage_block_size=storage_block_size_set.pop(),

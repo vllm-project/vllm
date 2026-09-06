@@ -1292,10 +1292,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 **common_kwargs,
                 sliding_window=self.sliding_window,
             )
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             **common_kwargs,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
+        if self.attn_backend.is_sparse():
+            spec = replace(
+                spec, block_stride_alignment_bytes=spec.state_content_size_bytes
+            )
+        return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)

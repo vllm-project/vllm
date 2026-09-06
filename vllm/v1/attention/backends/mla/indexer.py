@@ -228,6 +228,15 @@ def split_indexer_prefill_chunks(
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.LHBNC,
+            KVCacheLayout.BLHNC,
+        )
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         return True
 
