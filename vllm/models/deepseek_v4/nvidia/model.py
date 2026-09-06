@@ -1218,9 +1218,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         post_mix: torch.Tensor | None = None,
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        capture_previous_aux: bool = False,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
         attn_norm_weight = self.attn_norm.weight.data
         attn_norm_eps = self.attn_norm.variance_epsilon
+        previous_aux: torch.Tensor | None = None
         if residual is None:
             # Run standalone mhc_pre on first layer
             if x.dim() == 2:
@@ -1273,6 +1282,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
+            if capture_previous_aux:
+                # Previous layer's post; next layer still needs the full
+                # residual for MHC pre. Aux consumers only need the mean.
+                previous_aux = residual.mean(dim=1)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -1303,7 +1316,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
 
         x = self.ffn(x, input_ids)
-        return x, residual, post_mix, res_mix
+        return x, residual, post_mix, res_mix, previous_aux
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
@@ -1456,38 +1469,53 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         residual, post_mix, res_mix = None, None, None
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-        aux_hidden_states: list[torch.Tensor] = []
-        final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+        aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual, post_mix, res_mix = layer(
+            (
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                previous_aux,
+            ) = layer(
                 hidden_states,
                 positions,
                 input_ids,
                 post_mix,
                 res_mix,
                 residual,
+                capture_previous_aux=idx in self.aux_hidden_state_layers,
             )
-            if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
+            if previous_aux is not None:
+                # idx is the one-based id of the previous layer (same as
+                # dspark_target_layer_ids[i] + 1).
+                if self.use_sequence_parallel:
+                    previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
+                aux_hidden_by_layer[idx] = previous_aux
+        if layer is not None:
+            if self.end_layer in self.aux_hidden_state_layers:
+                # Final post is still required in full by hc_head.
+                final_aux_recon = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
-                aux_hidden_state = aux_recon.mean(dim=1)
-                if self.use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
-                final_aux_recon = aux_recon
-        if layer is not None:
-            # Reuse if the last layer was captured as an aux hidden state
-            if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
+                final_aux = final_aux_recon.mean(dim=1)
+                if self.use_sequence_parallel:
+                    final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+                aux_hidden_by_layer[self.end_layer] = final_aux
             else:
                 hidden_states = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
+
+        aux_hidden_states = [
+            aux_hidden_by_layer[layer_id]
+            for layer_id in self.aux_hidden_state_layers
+            if layer_id in aux_hidden_by_layer
+        ]
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1500,7 +1528,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
-        if self._mtp_hidden_buffer is not None:
+        # Traditional MTP / no-aux only. DSpark consumes aux hidden states.
+        # On the last PP rank aux may also arrive from other ranks via
+        # remote_aux, which is only merged below; check it here as well.
+        if (
+            self._mtp_hidden_buffer is not None
+            and not (remote_aux or aux_hidden_states)
+        ):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 

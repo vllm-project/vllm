@@ -296,6 +296,12 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     )
 
     torch.testing.assert_close(residual, residual_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        residual.mean(dim=1),
+        residual_ref.mean(dim=1),
+        atol=1e-2,
+        rtol=1e-2,
+    )
     torch.testing.assert_close(post_mix, post_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(res_mix, res_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
@@ -640,3 +646,84 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     assert layer.hc_attn_fn_broadcast is buffer
     expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
+
+
+def test_deepseek_v4_capture_previous_aux(monkeypatch):
+    """capture_previous_aux returns the mean of the attn-side fused post.
+
+    Regression guard for the aux extraction point: the 5th return value is
+    mean(dim=1) of the residual produced by the *first* fused post/pre of
+    this layer (which reconstructs the previous layer's post), and it stays
+    None without the flag. CPU-only (fused post is stubbed).
+    """
+    torch.manual_seed(20260828)
+    import vllm.models.deepseek_v4.nvidia.model as m
+
+    def _fake_fused_post(x, residual, post_mix, res_mix, *args, **kwargs):
+        return residual + 1.0, post_mix, res_mix, x
+
+    monkeypatch.setattr(m, "mhc_fused_post_pre_tilelang", _fake_fused_post)
+
+    class _StubAttn(nn.Module):
+
+        def forward(self, positions, x, kv):
+            return x
+
+    class _StubFfn(nn.Module):
+
+        def forward(self, x, input_ids):
+            return x
+
+    class _StubNorm(nn.Module):
+
+        def __init__(self, h: int):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(h, dtype=torch.bfloat16))
+            self.variance_epsilon = 1e-6
+
+    t, hc, h = 5, 2, 8
+    layer = _make_mhc_decoder_layer(hc_mult=hc, hidden_size=h)
+    layer.use_sequence_parallel = False
+    layer.rms_norm_eps = 1e-6
+    layer.hc_eps = 1e-6
+    layer.hc_sinkhorn_iters = 2
+    layer.hc_post_alpha = 2.0
+    layer.hc_attn_scale = nn.Parameter(torch.randn(1))
+    layer.hc_attn_base = nn.Parameter(torch.randn(hc))
+    layer.hc_ffn_fn = nn.Parameter(torch.randn(1, hc * h))
+    layer.hc_ffn_scale = nn.Parameter(torch.randn(1))
+    layer.hc_ffn_base = nn.Parameter(torch.randn(hc))
+    layer.attn = _StubAttn()
+    layer.ffn = _StubFfn()
+    layer.attn_norm = _StubNorm(h)
+    layer.ffn_norm = _StubNorm(h)
+
+    x = torch.randn(t, hc, h, dtype=torch.bfloat16)
+    residual = torch.randn(t, hc, h, dtype=torch.bfloat16)
+    post_mix = torch.randn(t, hc, h, dtype=torch.bfloat16)
+    res_mix = torch.randn(t, 1, dtype=torch.bfloat16)
+    positions = torch.arange(t)
+    input_ids = torch.arange(t)
+
+    out = layer.forward(
+        x,
+        positions,
+        input_ids,
+        post_mix,
+        res_mix,
+        residual,
+        capture_previous_aux=True,
+    )
+    assert len(out) == 5
+    assert torch.equal(out[4], (residual + 1.0).mean(dim=1))
+
+    out = layer.forward(
+        x,
+        positions,
+        input_ids,
+        post_mix,
+        res_mix,
+        residual,
+        capture_previous_aux=False,
+    )
+    assert out[4] is None
