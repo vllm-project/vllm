@@ -181,7 +181,7 @@ repos:
     name: Check new tests are wired into Buildkite CI
     language: python
     entry: python tools/pre_commit/check_test_tethering.py
-    files: ^(tests/.*\.py|\.buildkite/test_areas/.*\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
+    files: ^(tests/.*\.py|\.buildkite/(test_areas|hardware_tests|intel_jobs)/.*\.yaml|\.buildkite/(test-amd|ci_config[^/]*)\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
     additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch

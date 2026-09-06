@@ -485,6 +485,34 @@ def test_missing_test_amd_yaml_is_not_fatal(tmp_path, monkeypatch):
     assert load_selections() == []
 
 
+def test_job_dirs_come_from_ci_config(tmp_path, monkeypatch):
+    """The pipeline directories are whatever `.buildkite/ci_config*.yaml` lists
+    under `job_dirs:` - so a test wired only into e.g. `hardware_tests/` counts,
+    and an unreadable config falls back to `test_areas/` alone."""
+    mod = checker
+    bk = tmp_path / ".buildkite"
+    (bk / "test_areas").mkdir(parents=True)
+    (bk / "hardware_tests").mkdir()
+    (bk / "ci_config.yaml").write_text("job_dirs:\n  - .buildkite/hardware_tests\n")
+    (bk / "ci_config_broken.yaml").write_text("job_dirs: [oops\n")  # ignored
+    (bk / "hardware_tests" / "cpu.yaml").write_text(
+        textwrap.dedent(
+            """
+            steps:
+            - label: "CPU"
+              commands:
+              - pytest -v -s v1/e2e/test_cpu_thing.py
+            """
+        )
+    )
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "TEST_AREAS_DIR", bk / "test_areas")
+    monkeypatch.setattr(mod, "TEST_AMD_YAML", tmp_path / "no-amd.yaml")
+
+    assert (bk / "hardware_tests") in checker._pipeline_job_dirs()
+    assert is_tethered("v1/e2e/test_cpu_thing.py", load_selections())
+
+
 def test_step_level_ignore_is_honored(tmp_path, monkeypatch):
     selections = _write_area(
         tmp_path,
