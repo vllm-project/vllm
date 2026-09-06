@@ -887,6 +887,7 @@ class TestFixArgTypes:
                     "type": "object",
                     "properties": {
                         "value": {"type": "integer"},
+                        "labels": {"type": "array", "items": {"type": "string"}},
                         "payload": {
                             "type": "object",
                             "properties": {"kept": {"type": "integer"}},
@@ -896,6 +897,7 @@ class TestFixArgTypes:
                         {
                             "properties": {
                                 "value": {"type": "number"},
+                                "labels": {"items": {"type": ["string", "integer"]}},
                                 "payload": {
                                     "properties": {"count": {"type": "integer"}}
                                 },
@@ -907,10 +909,13 @@ class TestFixArgTypes:
         )
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types(
-            '{"value": "1.5", "payload": {"kept": "1", "count": "42"}}', "f"
+            '{"value": "1.5", "labels": ["42"], '
+            '"payload": {"kept": "1", "count": "42"}}',
+            "f",
         )
         assert json.loads(result) == {
             "value": "1.5",
+            "labels": ["42"],
             "payload": {"kept": 1, "count": 42},
         }
 
@@ -931,7 +936,8 @@ class TestFixArgTypes:
             {
                 "nums": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": "number"},
+                    "allOf": [{"allOf": [{"items": {"type": "integer"}}]}],
                 },
             },
         )

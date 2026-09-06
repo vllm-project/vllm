@@ -260,8 +260,18 @@ class ParserEngine(Parser):
             return ParserEngine._coerce_dict(value, get_schema_properties(schema))
 
         if isinstance(value, list):
-            items_schema = schema.get("items")
-            if isinstance(items_schema, dict):
+            item_schemas = []
+            pending = [schema]
+            while pending:
+                member = pending.pop()
+                if not isinstance(member, dict):
+                    continue
+                if isinstance(items := member.get("items"), dict):
+                    item_schemas.append(items)
+                if isinstance(all_of := member.get("allOf"), list):
+                    pending.extend(all_of)
+            if item_schemas:
+                items_schema = {"allOf": item_schemas}
                 changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
