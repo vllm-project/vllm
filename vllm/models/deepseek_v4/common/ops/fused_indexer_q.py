@@ -34,6 +34,50 @@ def _hadamard_rotate(x, N: tl.constexpr):
 
 
 @triton.jit
+def _rope_hadamard_full(
+    x,
+    cos_sin_ptr,
+    cos_sin_stride,
+    pos,
+    HEAD_DIM: tl.constexpr,
+    ROT_DIM: tl.constexpr,
+    ROTATE: tl.constexpr = True,
+):
+    """Full-width GPT-J RoPE (nope pairs masked to identity) with pinned FMA
+    contraction, a bf16 roundtrip matching the unfused reference numerics,
+    and — when ROTATE — the Hadamard rotation. Returns the full-width fp32
+    vector. Shared by all four indexer quant kernels (Q fp8/mxfp4, K
+    fp8/mxfp4) so the RoPE/roundtrip/rotation semantics stay bit-identical.
+    """
+    HALF_ROT: tl.constexpr = ROT_DIM // 2
+    NOPE_PAIRS: tl.constexpr = (HEAD_DIM - ROT_DIM) // 2
+    pairs = tl.reshape(x, (HEAD_DIM // 2, 2))
+    ev, od = tl.split(pairs)  # [HEAD_DIM // 2] fp32 each
+    pidx = tl.arange(0, HEAD_DIM // 2)
+    is_rope = pidx >= NOPE_PAIRS
+    cs_i = tl.maximum(pidx - NOPE_PAIRS, 0)
+    row_ptr = cos_sin_ptr + pos * cos_sin_stride
+    cos_v = tl.load(row_ptr + cs_i, mask=is_rope, other=1.0).to(tl.float32)
+    sin_v = tl.load(row_ptr + HALF_ROT + cs_i, mask=is_rope, other=0.0).to(tl.float32)
+    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
+    # the unfused rotary_embedding flow on every platform.
+    new_ev = tl.fma(ev, cos_v, -(od * sin_v))
+    new_od = tl.fma(od, cos_v, ev * sin_v)
+    x_rope = tl.interleave(new_ev, new_od)  # [HEAD_DIM] fp32
+    # Match reference numerics: fp32 → bf16 → fp32 before rotation/quant.
+    # Post-interleave; equivalent to roundtripping the halves since the
+    # interleave is a permutation and the roundtrip is elementwise.
+    x_rope = x_rope.to(tl.bfloat16).to(tl.float32)
+    if ROTATE:
+        # Hadamard rotation (reference rotate_activation) after RoPE, before
+        # quantization.
+        tl.static_assert(HEAD_DIM == 128)
+        tl.static_assert(ROT_DIM == 64)
+        x_rope = _hadamard_rotate(x_rope, HEAD_DIM)
+    return x_rope
+
+
+@triton.jit
 def _get_cos_sin(
     cos_sin_cache_ptr,
     cos_sin_cache_stride,
@@ -130,32 +174,19 @@ def _fused_indexer_q_rope_quant_kernel(
 
     pos = tl.load(pos_ptr + tok_idx)
     base_ptr = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
-    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
-    # the unfused rotary_embedding flow on every platform.
     if HADAMARD:
         # Full-width flow: rope with the nope region masked to identity,
         # bf16 roundtrip, Hadamard rotation, full-width ue8m0 FP8 quant.
-        tl.static_assert(INDEX_Q_HEAD_DIM == 128)
-        tl.static_assert(INDEX_Q_ROT_DIM == 64)
         full_idx = tl.arange(0, INDEX_Q_HEAD_DIM)
         x_full = tl.load(base_ptr + full_idx).to(tl.float32)
-        pairs = tl.reshape(x_full, (INDEX_Q_HEAD_DIM // 2, 2))
-        ev, od = tl.split(pairs)  # [64] fp32 each
-        pidx = tl.arange(0, INDEX_Q_HEAD_DIM // 2)
-        NOPE_PAIRS: tl.constexpr = INDEX_Q_NOPE_DIM // 2
-        is_rope = pidx >= NOPE_PAIRS
-        cs_i = tl.maximum(pidx - NOPE_PAIRS, 0)
-        row_ptr = index_q_cos_sin_ptr + pos * index_q_cos_sin_stride
-        cos_v = tl.load(row_ptr + cs_i, mask=is_rope, other=1.0).to(tl.float32)
-        sin_v = tl.load(
-            row_ptr + INDEX_Q_HALF_ROT_DIM + cs_i, mask=is_rope, other=0.0
-        ).to(tl.float32)
-        new_ev = tl.fma(ev, cos_v, -(od * sin_v))
-        new_od = tl.fma(od, cos_v, ev * sin_v)
-        x_rope = tl.interleave(new_ev, new_od)  # [128] fp32
-        # Match reference numerics: fp32 → bf16 → fp32 before rotation/quant.
-        x_rope = x_rope.to(tl.bfloat16).to(tl.float32)
-        x_h = _hadamard_rotate(x_rope, INDEX_Q_HEAD_DIM)
+        x_h = _rope_hadamard_full(
+            x_full,
+            index_q_cos_sin_ptr,
+            index_q_cos_sin_stride,
+            pos,
+            INDEX_Q_HEAD_DIM,
+            INDEX_Q_ROT_DIM,
+        )
         amax = tl.max(tl.abs(x_h))
     else:
         # Interleaved (GPT-J) RoPE on dims [NOPE_DIM, HEAD_DIM):
@@ -170,6 +201,8 @@ def _fused_indexer_q_rope_quant_kernel(
         rot_base = base_ptr + INDEX_Q_NOPE_DIM
         x_even = tl.load(rot_base + half_offset * 2).to(tl.float32)
         x_odd = tl.load(rot_base + half_offset * 2 + 1).to(tl.float32)
+        # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction
+        # of the unfused rotary_embedding flow on every platform.
         r_even = tl.fma(x_even, cos, -(x_odd * sin))
         r_odd = tl.fma(x_odd, cos, x_even * sin)
         # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0
@@ -287,27 +320,16 @@ def _fused_indexer_q_rope_mxfp4_kernel(
     if HADAMARD:
         # Full-width flow: GPT-J RoPE (nope masked to identity) → bf16
         # roundtrip → Hadamard rotation → per-32-block MXFP4 quant.
-        tl.static_assert(INDEX_Q_HEAD_DIM == 128)
-        tl.static_assert(INDEX_Q_ROT_DIM == 64)
         full_idx = tl.arange(0, INDEX_Q_HEAD_DIM)
         x_full = tl.load(q_base + full_idx).to(tl.float32)
-        pairs = tl.reshape(x_full, (INDEX_Q_HEAD_DIM // 2, 2))
-        ev, od = tl.split(pairs)  # [64] fp32 each
-        pidx = tl.arange(0, INDEX_Q_HEAD_DIM // 2)
-        NOPE_PAIRS: tl.constexpr = INDEX_Q_NOPE_DIM // 2
-        is_rope = pidx >= NOPE_PAIRS
-        cs_i = tl.maximum(pidx - NOPE_PAIRS, 0)
-        row_ptr = index_q_cos_sin_ptr + pos * index_q_cos_sin_stride
-        cos_v = tl.load(row_ptr + cs_i, mask=is_rope, other=1.0).to(tl.float32)
-        sin_v = tl.load(
-            row_ptr + INDEX_Q_HALF_ROT_DIM + cs_i, mask=is_rope, other=0.0
-        ).to(tl.float32)
-        # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction
-        # of the unfused rotary_embedding flow on every platform.
-        new_ev = tl.fma(ev, cos_v, -(od * sin_v)).to(tl.bfloat16).to(tl.float32)
-        new_od = tl.fma(od, cos_v, ev * sin_v).to(tl.bfloat16).to(tl.float32)
-        x_rope = tl.interleave(new_ev, new_od)  # [128] fp32
-        x_h = _hadamard_rotate(x_rope, INDEX_Q_HEAD_DIM)
+        x_h = _rope_hadamard_full(
+            x_full,
+            index_q_cos_sin_ptr,
+            index_q_cos_sin_stride,
+            pos,
+            INDEX_Q_HEAD_DIM,
+            INDEX_Q_ROT_DIM,
+        )
         # Per-block MXFP4 quant on the rotated vector, vectorized over the
         # blocks: each block of MXFP4_BLOCK consecutive elements is
         # HALF_BLOCK (even, odd) pairs.

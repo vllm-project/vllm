@@ -32,7 +32,7 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
-from .fused_indexer_q import _fp32x2_to_fp4x2, _hadamard_rotate
+from .fused_indexer_q import _fp32x2_to_fp4x2, _rope_hadamard_full
 
 
 def compress_norm_rope_store_triton(
@@ -805,31 +805,18 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         + kv_pos_in_block * SCALE_DIM
     )
 
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    # ── Register-based GPT-J forward RoPE in fp32 ─────────────────────
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)  # each [NUM_PAIRS] fp32
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
+    # ── Register-based GPT-J forward RoPE in fp32, bf16 roundtrip, and
+    # (when HADAMARD) the Hadamard rotation ────────────────────────────
     compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
-    # the unfused rotary_embedding flow on every platform.
-    new_even = tl.fma(even, cos_v, -(odd * sin_v))
-    new_odd = tl.fma(odd, cos_v, even * sin_v)
-    result = tl.interleave(new_even, new_odd)  # fp32
+    result_bf16 = _rope_hadamard_full(
+        normed,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        compressed_pos,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        HADAMARD,
+    )
 
     # ── FP8 UE8M0 quant: single block, flat reduction ────────────────
     tl.static_assert(
@@ -838,12 +825,6 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
 
-    result_bf16 = result.to(tl.bfloat16).to(tl.float32)
-    if HADAMARD:
-        # Hadamard rotation (reference rotate_activation) after RoPE, before
-        # quantization.
-        tl.static_assert(TRITON_BLOCK_SIZE == HEAD_SIZE)
-        result_bf16 = _hadamard_rotate(result_bf16, HEAD_SIZE)
     absmax = tl.max(tl.abs(result_bf16), axis=0)  # scalar
     absmax = tl.maximum(absmax, 1e-4)
     raw_scale = absmax * INV_FP8_MAX
@@ -995,45 +976,21 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
         + kv_pos_in_block * SCALE_DIM
     )
 
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    # ── Register-based GPT-J forward RoPE in fp32 ─────────────────────
-    # We keep the even/odd halves (no tl.interleave afterwards) because the
-    # MXFP4 per-block absmax / pack naturally operates on (even, odd) pairs.
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)  # each [NUM_PAIRS] fp32
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
+    # ── Register-based GPT-J forward RoPE in fp32, bf16 roundtrip, and
+    # (when HADAMARD) the Hadamard rotation; split back into even/odd
+    # halves because the MXFP4 per-block absmax / pack below naturally
+    # operates on (even, odd) pairs. ───────────────────────────────────
     compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
-    # the unfused rotary_embedding flow on every platform.
-    new_even = tl.fma(even, cos_v, -(odd * sin_v))
-    new_odd = tl.fma(odd, cos_v, even * sin_v)
-
-    # bf16 roundtrip for parity with reference / Q-side kernel numerics.
-    new_even = new_even.to(tl.bfloat16).to(tl.float32)
-    new_odd = new_odd.to(tl.bfloat16).to(tl.float32)
-
-    if HADAMARD:
-        # Hadamard rotation (reference rotate_activation) after RoPE, before
-        # per-block quant. Rotation mixes all dims, so it must precede the
-        # (N_BLOCKS, HALF_BLOCK) tiling below.
-        x_full = tl.interleave(new_even, new_odd)  # [HEAD_SIZE] fp32
-        x_rot = _hadamard_rotate(x_full, HEAD_SIZE)
-        x_rot2d = tl.reshape(x_rot, (NUM_PAIRS, 2))
-        new_even, new_odd = tl.split(x_rot2d)
+    x_full = _rope_hadamard_full(
+        normed,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        compressed_pos,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        HADAMARD,
+    )
+    new_even, new_odd = tl.split(tl.reshape(x_full, (HEAD_SIZE // 2, 2)))
 
     # ── MXFP4 quant: tile even/odd halves into (N_BLOCKS, HALF_BLOCK) ──
     # Each MXFP4 block of QUANT_BLOCK elements = HALF_BLOCK consecutive pairs,
