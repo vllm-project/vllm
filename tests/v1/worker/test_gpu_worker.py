@@ -231,6 +231,9 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     ],
 )
 def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
+    """Ensure compilation warmup runs before memory profiling when
+    torch.compile is active, and is skipped in eager mode.
+    """
     worker = _plan_worker()
     worker.vllm_config.compilation_config = SimpleNamespace(
         mode=mode,
@@ -255,6 +258,7 @@ def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
 
     @contextmanager
     def mock_mem_profiling(*args, **kwargs):
+        """Yield the mock memory profiling result."""
         yield mock_profile_result
 
     with (
