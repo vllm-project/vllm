@@ -11,7 +11,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
-from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
+from vllm.utils.flashinfer import (
+    flashinfer_jit_unsupported_reason,
+    has_flashinfer,
+    has_flashinfer_cutedsl,
+)
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -29,6 +33,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "requires >=sm_100 (Blackwell)"
         if not has_flashinfer():
             return False, "requires FlashInfer"
+        if (reason := flashinfer_jit_unsupported_reason()) is not None:
+            return False, f"cannot JIT-compile FlashInfer for this GPU: {reason}"
         return True, None
 
     @classmethod

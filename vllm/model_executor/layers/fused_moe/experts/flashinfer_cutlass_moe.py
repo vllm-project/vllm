@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
+    flashinfer_jit_unsupported_reason,
     has_flashinfer_cutlass_fused_moe,
 )
 
@@ -137,6 +138,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 or p.is_device_capability_family(120)
             )
             and has_flashinfer_cutlass_fused_moe()
+            and flashinfer_jit_unsupported_reason() is None
         )
 
     @staticmethod

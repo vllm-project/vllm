@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import itertools
 import os
 import shutil
 from collections.abc import Callable
@@ -82,6 +83,95 @@ def has_flashinfer() -> bool:
         )
         return False
     return True
+
+
+def _cuda_arch_minor(minor: str) -> int | None:
+    """Parse the numeric part of a FlashInfer arch minor such as ``"0f"``."""
+    digits = "".join(itertools.takewhile(str.isdigit, str(minor)))
+    return int(digits) if digits else None
+
+
+@functools.cache
+def flashinfer_jit_unsupported_reason() -> str | None:
+    """Return why FlashInfer cannot JIT-compile for the current GPU, or None.
+
+    FlashInfer swallows arch-detection errors while building its compilation
+    context (e.g. SM 12.x with a CUDA toolkit older than 12.9), leaving the
+    current GPU out of its target set. Every nvcc JIT build then fails at
+    first use, with "FlashInfer requires GPUs with sm75 or higher" or "No
+    supported CUDA architectures found for major versions [12]", which kills
+    engine startup whenever a FlashInfer-backed kernel was auto-selected.
+    Kernel selection gates call this to skip FlashInfer instead.
+    """
+    if not current_platform.is_cuda():
+        return None
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    try:
+        from flashinfer.jit.core import current_compilation_context
+    except ImportError:
+        return None
+    except Exception as e:
+        # e.g. a malformed FLASHINFER_CUDA_ARCH_LIST raises ValueError while
+        # FlashInfer builds its compilation context at import time.
+        return f"importing flashinfer.jit.core failed: {e}"
+    targets = getattr(current_compilation_context, "TARGET_CUDA_ARCHS", None)
+    if targets is None:
+        return None
+    if any(
+        major == capability.major and _cuda_arch_minor(minor) == capability.minor
+        for major, minor in targets
+    ):
+        return None
+    reason = (
+        f"sm_{capability.major}{capability.minor} is not among FlashInfer's "
+        "target architectures"
+    )
+    try:
+        # Re-derive the error FlashInfer swallowed while building its
+        # compilation context, e.g. "SM 12.x requires CUDA >= 12.9".
+        from flashinfer.compilation_context import CompilationContext
+
+        CompilationContext._normalize_cuda_arch(capability.major, capability.minor)
+    except RuntimeError as e:
+        reason = str(e)
+    except Exception:
+        pass
+    logger.warning_once(
+        "FlashInfer cannot JIT-compile kernels for this GPU: %s. "
+        "FlashInfer-backed kernels will not be auto-selected.",
+        reason,
+    )
+    return reason
+
+
+@functools.cache
+def flashinfer_b12x_unsupported_reason() -> str | None:
+    """Return why FlashInfer's b12x kernels cannot run here, or None.
+
+    FlashInfer's b12x (SM 12.x CuTe-DSL) GEMM and MoE backends refuse to run
+    below CUDA 13, but they only check at call time, so a b12x kernel picked
+    at selection kills engine startup on an older local toolkit. Mirrors the
+    ``get_cuda_version().major < 13`` check FlashInfer applies.
+    """
+    if not current_platform.is_cuda():
+        return None
+    try:
+        from flashinfer.jit.cpp_ext import get_cuda_version
+
+        cuda_version = get_cuda_version()
+    except ImportError:
+        return None
+    except Exception as e:
+        return f"cannot determine the CUDA toolkit version: {e}"
+    if cuda_version.major >= 13:
+        return None
+    reason = (
+        f"FlashInfer b12x kernels require CUDA >= 13 (local toolkit {cuda_version})"
+    )
+    logger.warning_once("%s; b12x kernels will not be auto-selected.", reason)
+    return reason
 
 
 @functools.cache
@@ -1250,6 +1340,8 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_jit_unsupported_reason",
+    "flashinfer_b12x_unsupported_reason",
     "flashinfer_bf16_mm",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
