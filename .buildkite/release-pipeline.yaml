@@ -1103,6 +1103,15 @@ steps:
 
   - block: "Publish release images to DockerHub"
     key: block-publish-release-images
+    fields:
+      - select: "Also publish the experimental CUDA 13.0 amd64 zstd image?"
+        key: publish-zstd-image
+        default: "false"
+        options:
+          - label: "No, publish normal images only"
+            value: "false"
+          - label: "Yes, also publish the zstd image"
+            value: "true"
     depends_on:
       - create-multi-arch-manifest
       - create-multi-arch-manifest-cuda-12-9
