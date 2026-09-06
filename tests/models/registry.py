@@ -465,11 +465,19 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "NCPOlmo3ForCausalLM": _HfExamplesInfo(
-        "",
+        "ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1",
         enforce_eager=True,
         enable_prefix_caching=False,
         trust_remote_code=True,
-        is_available_online=False,
+        revision="0951a3e888629b8ebe02791f6a9044582f8c4169",
+        use_original_num_layers=True,
+        # Preserve the encoder/decoder/HLM split while keeping dummy init small.
+        hf_overrides={
+            "num_layers": 2,
+            "conceptlm_encoder_layers": 1,
+            "conceptlm_decoder_layers": 1,
+            "conceptlm_special_layers": 1,
+        },
     ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(

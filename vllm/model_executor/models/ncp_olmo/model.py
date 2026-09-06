@@ -43,6 +43,19 @@ _HLMAdvance = tuple[
 ]
 
 
+def _chunk_mean(values: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    """Pool token chunks and restore the activation dtype.
+
+    Batch-invariant mode accumulates reductions in FP32. The HLM consumes model
+    activations, so pooling must return to the input dtype before LayerNorm and
+    QKV projections.
+    """
+
+    hidden_size = int(values.shape[-1])
+    pooled = values.reshape(-1, chunk_size, hidden_size).mean(dim=1)
+    return pooled.to(values.dtype)
+
+
 class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
     """Native NCP-OLMo model backed by vLLM paged token attention."""
 
@@ -166,23 +179,15 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
         num_completed = int(combined_final.shape[0]) // chunk_size
         completed_tokens = num_completed * chunk_size
         if num_completed:
-            encoder_chunks = (
-                combined_final[:completed_tokens]
-                .reshape(
-                    num_completed,
-                    chunk_size,
-                    self.backend_config.hidden_size,
-                )
-                .mean(dim=1)
+            encoder_chunks = _chunk_mean(
+                combined_final[:completed_tokens],
+                chunk_size,
             )
             layer_chunks = tuple(
-                values[:completed_tokens]
-                .reshape(
-                    num_completed,
+                _chunk_mean(
+                    values[:completed_tokens],
                     chunk_size,
-                    self.backend_config.hidden_size,
                 )
-                .mean(dim=1)
                 for values in combined_layers
             )
             if num_completed == 1:

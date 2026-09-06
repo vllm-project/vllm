@@ -13,10 +13,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.platforms import current_platform
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
@@ -29,6 +32,67 @@ from .token_tower import (
     _sliding_window,
 )
 from .weights import required_checkpoint_shards, resolve_checkpoint_weight
+
+
+def apply_ncp_layer_norm(
+    layer_norm: nn.LayerNorm,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """Apply mean-subtracting LayerNorm under vLLM batch invariance.
+
+    Batch-invariant mode overrides ``aten::mean`` so reductions accumulate in
+    FP32.  ``aten::native_layer_norm`` can then observe FP32 normalization
+    intermediates together with BF16 affine parameters and fail with a mixed
+    dtype error.  Keep the normalization in FP32 and restore the activation
+    dtype at the boundary, matching the mixed-precision LayerNorm contract.
+    """
+
+    if not envs.VLLM_BATCH_INVARIANT:
+        return layer_norm(hidden_states)
+
+    normalized_shape = tuple(layer_norm.normalized_shape)
+    if normalized_shape != tuple(hidden_states.shape[-len(normalized_shape) :]):
+        raise ValueError(
+            "NCP LayerNorm input shape does not match normalized_shape: "
+            f"{tuple(hidden_states.shape)} vs {normalized_shape}"
+        )
+    reduction_dims = tuple(
+        range(hidden_states.ndim - len(normalized_shape), hidden_states.ndim)
+    )
+    input_dtype = hidden_states.dtype
+    normalized = hidden_states.float()
+    mean = normalized.mean(dim=reduction_dims, keepdim=True)
+    centered = normalized - mean
+    variance = centered.square().mean(dim=reduction_dims, keepdim=True)
+    normalized = centered * torch.rsqrt(variance + layer_norm.eps)
+    if layer_norm.elementwise_affine:
+        if layer_norm.weight is not None:
+            normalized = normalized * layer_norm.weight.float()
+        if layer_norm.bias is not None:
+            normalized = normalized + layer_norm.bias.float()
+    return normalized.to(input_dtype)
+
+
+def apply_ncp_linear(
+    linear: nn.Linear,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """Apply native NCP route linears with vLLM's invariant GEMM.
+
+    vLLM's own parallel linear layers select ``linear_batch_invariant``
+    directly. NCP also has small checkpoint-native ``nn.Linear`` modules for
+    DD routes and VQ heads; on Hopper those modules otherwise keep the regular
+    cuBLASLt path because the global aten linear override is intentionally not
+    installed. Route them through the same invariant implementation explicitly.
+    """
+
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+        return linear_batch_invariant(
+            hidden_states,
+            linear.weight,
+            linear.bias,
+        )
+    return linear(hidden_states)
 
 
 def _causal_prefill_attention(
@@ -258,7 +322,10 @@ class ConceptLMDepthDD(nn.Module):
                 f"DD expected {self.static_a.numel()} history states, "
                 f"got shape {tuple(history_states.shape)}"
             )
-        route_weights = self.w2(F.gelu(self.w1(current_hidden)))
+        route_weights = apply_ncp_linear(
+            self.w2,
+            F.gelu(apply_ncp_linear(self.w1, current_hidden)),
+        )
         route_weights = route_weights + self.static_a
         if self.use_softmax:
             route_weights = route_weights.softmax(dim=-1)
@@ -328,7 +395,10 @@ class ConceptLMDiagResidualRoute(nn.Module):
                 f"residual route expected {self.w2.out_features} sources, "
                 f"got shape {tuple(normalized_sources.shape)}"
             )
-        weights = self.w2(F.gelu(self.w1(target_hidden))).softmax(dim=-1)
+        weights = apply_ncp_linear(
+            self.w2,
+            F.gelu(apply_ncp_linear(self.w1, target_hidden)),
+        ).softmax(dim=-1)
         source_mix = (weights.unsqueeze(-1) * normalized_sources).sum(dim=-2)
         residual_update = source_mix * self.residual_diag.to(source_mix.dtype)
         if residual_scale is not None:
@@ -1023,8 +1093,9 @@ class ConceptLMHighLevelBranch(nn.Module):
                 f"expected {self.backend_config.encoder_layers} encoder layers, "
                 f"got {len(encoder_layer_chunks)}"
             )
-        hidden_states = self.concept_vq_input_norm(
-            encoder_chunk.reshape(1, self.backend_config.hidden_size)
+        hidden_states = apply_ncp_layer_norm(
+            self.concept_vq_input_norm,
+            encoder_chunk.reshape(1, self.backend_config.hidden_size),
         )
         self._record_stage("hlm.input.0", hidden_states)
         encoder_sources = torch.stack(
@@ -1034,10 +1105,9 @@ class ConceptLMHighLevelBranch(nn.Module):
             ),
             dim=-2,
         )
-        encoder_sources = (
-            self.concept_predictor.concept_read_encoder_shared_source_norm(
-                encoder_sources
-            )
+        encoder_sources = apply_ncp_layer_norm(
+            self.concept_predictor.concept_read_encoder_shared_source_norm,
+            encoder_sources,
         )
         dd_history = hidden_states.new_empty(
             (
@@ -1078,7 +1148,10 @@ class ConceptLMHighLevelBranch(nn.Module):
         hidden_states = self.concept_predictor.hlm_block.final_layernorm(hidden_states)
         self._record_stage("hlm.final_norm", hidden_states)
         logits = torch.stack(
-            [head(hidden_states) for head in self.concept_predictor.prediction_heads],
+            [
+                apply_ncp_linear(head, hidden_states)
+                for head in self.concept_predictor.prediction_heads
+            ],
             dim=1,
         )
         codebook = self.concept_quantizer.stacked().to(logits.dtype)
@@ -1120,16 +1193,18 @@ class ConceptLMHighLevelBranch(nn.Module):
             raise ValueError("batched HLM requests must have the same concept position")
         concept_position = next(iter(concept_positions))
 
-        hidden_states = self.concept_vq_input_norm(encoder_chunks)
+        hidden_states = apply_ncp_layer_norm(
+            self.concept_vq_input_norm,
+            encoder_chunks,
+        )
         self._record_stage("hlm.input.0", hidden_states)
         encoder_sources = torch.stack(
             tuple(encoder_layer_chunks[:-1]),
             dim=-2,
         )
-        encoder_sources = (
-            self.concept_predictor.concept_read_encoder_shared_source_norm(
-                encoder_sources
-            )
+        encoder_sources = apply_ncp_layer_norm(
+            self.concept_predictor.concept_read_encoder_shared_source_norm,
+            encoder_sources,
         )
         dd_history = hidden_states.new_empty(
             (
@@ -1173,7 +1248,10 @@ class ConceptLMHighLevelBranch(nn.Module):
         hidden_states = self.concept_predictor.hlm_block.final_layernorm(hidden_states)
         self._record_stage("hlm.final_norm", hidden_states)
         logits = torch.stack(
-            [head(hidden_states) for head in self.concept_predictor.prediction_heads],
+            [
+                apply_ncp_linear(head, hidden_states)
+                for head in self.concept_predictor.prediction_heads
+            ],
             dim=1,
         )
         codebook = self.concept_quantizer.stacked().to(logits.dtype)
@@ -1208,16 +1286,18 @@ class ConceptLMHighLevelBranch(nn.Module):
         if any(int(source.shape[0]) != num_chunks for source in encoder_layer_chunks):
             raise ValueError("all HLM encoder sources must have the same batch length")
 
-        hidden_states = self.concept_vq_input_norm(encoder_chunks)
+        hidden_states = apply_ncp_layer_norm(
+            self.concept_vq_input_norm,
+            encoder_chunks,
+        )
         self._record_stage("hlm.input.0", hidden_states)
         encoder_sources = torch.stack(
             tuple(encoder_layer_chunks[:-1]),
             dim=-2,
         )
-        encoder_sources = (
-            self.concept_predictor.concept_read_encoder_shared_source_norm(
-                encoder_sources
-            )
+        encoder_sources = apply_ncp_layer_norm(
+            self.concept_predictor.concept_read_encoder_shared_source_norm,
+            encoder_sources,
         )
         dd_history = hidden_states.new_empty(
             (
@@ -1258,7 +1338,10 @@ class ConceptLMHighLevelBranch(nn.Module):
         hidden_states = self.concept_predictor.hlm_block.final_layernorm(hidden_states)
         self._record_stage("hlm.final_norm", hidden_states)
         logits = torch.stack(
-            [head(hidden_states) for head in self.concept_predictor.prediction_heads],
+            [
+                apply_ncp_linear(head, hidden_states)
+                for head in self.concept_predictor.prediction_heads
+            ],
             dim=1,
         )
         codebook = self.concept_quantizer.stacked().to(logits.dtype)

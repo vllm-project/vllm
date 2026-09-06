@@ -57,6 +57,36 @@ def test_segments_follow_v2_batch_order_across_chunked_prefill() -> None:
     assert [segment.position_start for segment in second_step] == [2, 3]
 
 
+def test_finished_slot_is_refilled_and_reordered_without_state_leakage() -> None:
+    """Exercise a continuous batch that finishes, refills, and reorders a slot."""
+
+    store = make_store()
+    store.add_request("long", computed_tokens=0)
+    store.add_request("short", computed_tokens=0)
+
+    first_step = store.resolve_segments(
+        make_input_batch(["long", "short"], [3, 1], [0, 0])
+    )
+    for segment in first_step:
+        store.commit(segment)
+    finished_state = store.states["short"]
+
+    store.remove_request("short")
+    store.add_request("replacement", computed_tokens=0)
+    refill_step = store.resolve_segments(
+        make_input_batch(["replacement", "long"], [2, 1], [0, 3])
+    )
+
+    assert "short" not in store.states
+    assert finished_state is not store.states["replacement"]
+    assert [segment.req_id for segment in refill_step] == ["replacement", "long"]
+    assert [segment.position_start for segment in refill_step] == [0, 3]
+    assert [(segment.flat_start, segment.flat_end) for segment in refill_step] == [
+        (0, 2),
+        (2, 3),
+    ]
+
+
 def test_remove_request_releases_state_and_requires_readmission() -> None:
     store = make_store()
     store.add_request("finished", computed_tokens=0)

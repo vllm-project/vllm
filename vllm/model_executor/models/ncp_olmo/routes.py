@@ -19,6 +19,7 @@ from .hlm import (
     ConceptLMDiagResidualRoute,
     ConceptLMSelfCumsumDD,
     ConceptLMSelfDD,
+    apply_ncp_layer_norm,
 )
 from .weights import resolve_checkpoint_weight
 
@@ -37,7 +38,7 @@ class ConceptLMFinalConceptRoute(nn.Module):
         final_concept: torch.Tensor,
         scale: torch.Tensor,
     ) -> torch.Tensor:
-        update = self.concept_norm(final_concept)
+        update = apply_ncp_layer_norm(self.concept_norm, final_concept)
         update = update * self.final_diag.to(update.dtype)
         return hidden_states + update * scale.to(update.dtype)
 
@@ -56,7 +57,7 @@ class ConceptLMFinalConceptCumsumRoute(nn.Module):
         final_concept: torch.Tensor,
         scale: torch.Tensor,
     ) -> torch.Tensor:
-        update = self.concept_norm(final_concept)
+        update = apply_ncp_layer_norm(self.concept_norm, final_concept)
         update = update * self.final_beta.to(update.dtype)
         return hidden_states + update * scale.to(update.dtype)
 
@@ -219,9 +220,13 @@ class ConceptLMStage3Routes(nn.Module):
     ) -> torch.Tensor:
         """Apply the trained normed-add fusion."""
 
-        return self.fusion_tok_norm(encoder_hidden) + self.fusion_norm_alpha.to(
-            encoder_hidden.dtype
-        ) * self.fusion_hl_norm(predicted_concepts)
+        return apply_ncp_layer_norm(
+            self.fusion_tok_norm,
+            encoder_hidden,
+        ) + self.fusion_norm_alpha.to(encoder_hidden.dtype) * apply_ncp_layer_norm(
+            self.fusion_hl_norm,
+            predicted_concepts,
+        )
 
     def decoder_after_layer(
         self,
@@ -277,11 +282,13 @@ class ConceptLMStage3Routes(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Stack and normalize route sources once before all decoder layers."""
 
-        encoder_sources = self.decoder_read_encoder_shared_source_norm(
-            torch.stack(tuple(encoder_raw_layers), dim=-2)
+        encoder_sources = apply_ncp_layer_norm(
+            self.decoder_read_encoder_shared_source_norm,
+            torch.stack(tuple(encoder_raw_layers), dim=-2),
         )
-        concept_sources = self.decoder_read_concept_shared_source_norm(
-            torch.stack(tuple(concept_raw_layers), dim=-2)
+        concept_sources = apply_ncp_layer_norm(
+            self.decoder_read_concept_shared_source_norm,
+            torch.stack(tuple(concept_raw_layers), dim=-2),
         )
         return encoder_sources, concept_sources
 

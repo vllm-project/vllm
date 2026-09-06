@@ -18,6 +18,14 @@ Native Megatron/DCP state-dict keys and the historical
 Convert a training checkpoint into this standalone HF schema before loading it
 with vLLM.
 
+Public reference checkpoints are available for
+[Stage 1](https://huggingface.co/ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage1)
+and
+[Stage 2 v1](https://huggingface.co/ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1).
+The model-registry initialization test uses the Stage 2 v1 configuration with
+a contract-preserving layer-count override and vLLM's dummy loader; a separate
+dummy-weight checkpoint is not required.
+
 The loader maps those tensors into vLLM fused QKV and SwiGLU parameters. The
 weight-loading test checks every tensor in the NCP-OLMo Stage3 graph.
 
@@ -106,7 +114,8 @@ public small checkpoint and run:
 - model registry import and dummy-weight initialization
 - full pure-HF checkpoint loading
 - Hugging Face versus vLLM logprob and greedy-output parity
-- mixed-length continuous batching and request cleanup
+- mixed-length continuous batching with more queued requests than
+  `max_num_seqs`, in-flight slot refill/reordering, and request cleanup
 - chunked-prefill and preemption/recompute tests
 - GPU confirmation of the selected PagedAttention/FlashAttention backend
 - FlashInfer-sampler parity and mixed-backend parity on a sliding-window model
