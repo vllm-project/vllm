@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.platforms import current_platform
 
 MiB = 1024 * 1024
 
@@ -112,6 +113,8 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
 
 
 def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
+    if not current_platform.is_rocm():
+        return False
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_custom_all_reduce_enabled():
