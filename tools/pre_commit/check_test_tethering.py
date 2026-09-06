@@ -333,6 +333,15 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
     pytest / runner lines inside it. ``visited`` stops a script that (directly or
     otherwise) refers back to itself; nesting is one level deep in practice.
     """
+    interpreter = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+    if interpreter in ("bash", "sh"):
+        for token in tokens[1:]:
+            if not token.startswith("-"):
+                break  # reached the script operand; a later `-c` is *its* flag
+            if token == "-c":
+                # `bash -c '<code>' [$0] [args]` - the code is the `-c` string
+                # (the caller scans that); a trailing `.sh` is `$0`, not run.
+                return []
     script_arg = next((t for t in tokens if t.endswith(".sh")), None)
     if script_arg is None:
         return []
@@ -378,8 +387,8 @@ def _expand_vars(line: str, var_values: dict[str, str]) -> str:
         )
 
     # Splitting on `'`: even-indexed segments are outside single quotes, odd are
-    # inside. (A `'` inside double quotes is mis-split, but that only ever loses
-    # a substitution - the safe direction.)
+    # inside. (A `'` within double quotes splits wrongly, but that only ever
+    # drops a substitution - the safe direction.)
     parts = line.split("'")
     return "'".join(sub(p) if i % 2 == 0 else p for i, p in enumerate(parts))
 
@@ -411,6 +420,9 @@ def _effective_command_index(tokens: list[str]) -> int:
         elif token == "timeout" and i + 1 < len(tokens):
             i += 1
             while i < len(tokens) and tokens[i].startswith("-"):
+                # `-k` / `--kill-after` / `-s` / `--signal` take a value.
+                if tokens[i] in ("-k", "--kill-after", "-s", "--signal"):
+                    i += 1
                 i += 1
             i += 1  # the DURATION operand
         else:
@@ -513,19 +525,27 @@ _XARGS_VALUE_FLAGS = {
 }  # fmt: skip
 
 
-def _xargs_command(tokens: list[str]) -> str | None:
-    """The command ``xargs`` will exec, skipping its own options and their
-    values: ``xargs -0 -n1 -I{} pytest`` -> ``pytest``; ``xargs echo pytest``
-    -> ``echo``."""
-    it = iter(tokens)
-    for token in it:
-        if token in _XARGS_VALUE_FLAGS:
-            next(it, None)
-        elif token.startswith("-"):
-            continue
+def _xargs_command_tokens(tokens: list[str]) -> list[str]:
+    """The command (plus its args) that ``xargs`` will exec, with ``xargs``' own
+    options stripped: ``xargs -0 -n1 -I{} env FOO=1 pytest`` -> ``['env',
+    'FOO=1', 'pytest']``."""
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _XARGS_VALUE_FLAGS:
+            i += 2
+        elif tokens[i].startswith("-"):
+            i += 1
         else:
-            return token
-    return None
+            return tokens[i:]
+    return []
+
+
+def _runs_pytest(tokens: list[str]) -> bool:
+    """True if ``tokens`` is a command that executes ``pytest``, seeing through
+    ``env FOO=1`` / ``timeout`` / ``if !`` wrappers (``xargs echo pytest`` is
+    not - ``echo`` is what runs)."""
+    idx = _effective_command_index(tokens)
+    return idx < len(tokens) and tokens[idx] in PYTEST_COMMANDS
 
 
 def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> bool:
@@ -544,7 +564,7 @@ def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> 
     for sep, tokens in stages[find_index + 1 :]:
         if sep != "|":
             break
-        if tokens[:1] == ["xargs"] and _xargs_command(tokens[1:]) in PYTEST_COMMANDS:
+        if tokens[:1] == ["xargs"] and _runs_pytest(_xargs_command_tokens(tokens[1:])):
             return True
     return False
 
