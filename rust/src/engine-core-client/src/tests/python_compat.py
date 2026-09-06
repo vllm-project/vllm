@@ -47,6 +47,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
+    routed_experts_prompt_start: int = 0
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -135,6 +136,7 @@ request = EngineCoreRequest(
         stop_token_ids=[151643],
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
+        routed_experts_prompt_start=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,
@@ -351,7 +353,8 @@ inline_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -374,7 +377,8 @@ multipart_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -409,9 +413,14 @@ class EngineCoreReadyResponse:
     max_num_seqs: int
     max_num_batched_tokens: int
     instance_id: str
+    supports_lora: bool
+    max_loras: int
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -430,6 +439,11 @@ ready_response = EngineCoreReadyResponse(
     max_num_seqs=256,
     max_num_batched_tokens=8192,
     instance_id="test-instance",
+    supports_lora=True,
+    max_loras=8,
+    weight_transfer_backend="nccl",
+    enable_sleep_mode=True,
+    supports_draft_weight_updates=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -441,6 +455,32 @@ ready_response = EngineCoreReadyResponse(
         topic="kv",
     ),
 )
+
+nixl_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "post_duration": [0.001, 0.002],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [],
+    "num_failed_notifications": [],
+    "num_kv_expired_reqs": [1],
+}
+mooncake_stats = {
+    "load_get": [
+        {
+            "duration_seconds": 0.05,
+            "num_keys": 3,
+            "num_bytes": 1024,
+            "status": "ok",
+            "num_failed_keys": 0,
+        }
+    ]
+}
+multi_connector_stats = {
+    "NixlConnector": nixl_stats,
+    "MooncakeStoreConnector": mooncake_stats,
+    "UnsupportedConnector": {"sample_count": 1},
+}
 
 print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
@@ -461,4 +501,7 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(nixl_stats).hex())
+print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())

@@ -10,6 +10,32 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
+def _build_grammar_mapping(
+    req_ids: list[str],
+    grammar_req_ids: list[str],
+    cu_num_logits_np: np.ndarray,
+    num_draft_tokens_per_req: np.ndarray | None,
+    num_bonus_tokens: int,
+    mask_stride: int,
+) -> list[int]:
+    mapping: list[int] = []
+    req_id_to_idx = {req_id: i for i, req_id in enumerate(req_ids)}
+    for grammar_req_id in grammar_req_ids:
+        req_idx = req_id_to_idx[grammar_req_id]
+        if num_draft_tokens_per_req is None:
+            num_positions = int(
+                cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx]
+            )
+        else:
+            # Grammar masks follow the scheduled layout even when adaptive
+            # verification compacts the actual CPU logit offsets to bonus-only.
+            num_positions = int(num_draft_tokens_per_req[req_idx]) + num_bonus_tokens
+        mapping.extend(
+            req_idx * mask_stride + position for position in range(num_positions)
+        )
+    return mapping
+
+
 class StructuredOutputsWorker:
     def __init__(
         self,
@@ -17,6 +43,7 @@ class StructuredOutputsWorker:
         vocab_size: int,
         device: torch.device,
         mask_stride: int,
+        num_bonus_tokens: int,
     ):
         self.logits_indices = torch.zeros(
             max_num_logits, dtype=torch.int32, device=device
@@ -27,6 +54,7 @@ class StructuredOutputsWorker:
         self.device = device
         self.copy_stream = torch.cuda.Stream()
         self.mask_stride = mask_stride
+        self.num_bonus_tokens = num_bonus_tokens
 
     def apply_grammar_bitmask(
         self,
@@ -45,21 +73,17 @@ class StructuredOutputsWorker:
             )
 
         # Construct bitmask -> logits mapping
-        mapping: list[int] = []
-        req_ids = input_batch.req_ids
-        cu_num_logits = input_batch.cu_num_logits_np.tolist()
-        req_id_to_idx = {req_id: i for i, req_id in enumerate(req_ids)}
-        for grammar_req_id in grammar_req_ids:
-            req_idx = req_id_to_idx[grammar_req_id]
-            logits_start_idx = cu_num_logits[req_idx]
-            logits_end_idx = cu_num_logits[req_idx + 1]
-            # Key by (request, position) rather than absolute logit index:
-            # adaptive verification finalizes per-request logit offsets on
-            # device, so the kernel resolves them from the GPU cu_num_logits.
-            mapping.extend(
-                req_idx * self.mask_stride + position
-                for position in range(logits_end_idx - logits_start_idx)
-            )
+        # Key by (request, position) rather than absolute logit index:
+        # adaptive verification finalizes per-request logit offsets on
+        # device, so the kernel resolves them from the GPU cu_num_logits.
+        mapping = _build_grammar_mapping(
+            input_batch.req_ids,
+            grammar_req_ids,
+            input_batch.cu_num_logits_np,
+            input_batch.num_draft_tokens_per_req,
+            self.num_bonus_tokens,
+            self.mask_stride,
+        )
 
         # Asynchronously copy the mapping to GPU.
         with torch.cuda.stream(self.copy_stream):

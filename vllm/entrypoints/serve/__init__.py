@@ -5,7 +5,15 @@ from fastapi import FastAPI
 
 from vllm.logger import init_logger
 
+from .exception_handling.error_response import create_error_response
+
 logger = init_logger(__name__)
+
+__all__ = [
+    "create_error_response",
+    "register_vllm_serve_api_routers",
+    "register_vllm_dev_api_routers",
+]
 
 
 def register_vllm_serve_api_routers(app: FastAPI):
@@ -37,9 +45,6 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_checkpoint_router(app)
 
-    from vllm.entrypoints.serve.rpc.api_router import (
-        attach_router as attach_rpc_router,
-    )
 
 def register_vllm_dev_api_routers(app: FastAPI):
     logger.warning(

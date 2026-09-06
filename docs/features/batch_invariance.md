@@ -17,7 +17,29 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher.
+Batch invariance is supported on the following platforms:
+
+- NVIDIA GPUs with compute capability 8.0 or higher.
+- Intel XPUs with Triton support.
+
+### Attention Backend Selection for XPU
+
+On XPU, Triton Attention backend is required for batch invariance.
+Select this backend using Qwen/Qwen3-1.7B model as an example:
+
+```python
+llm = LLM(
+    model="Qwen/Qwen3-1.7B",
+    attention_config={"backend": "TRITON_ATTN"},
+)
+```
+
+Or via the CLI:
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
+    --attention-config.backend TRITON_ATTN
+```
 
 ## Enabling Batch Invariance
 
@@ -102,12 +124,16 @@ Batch invariance has been tested and verified on the following models:
 
 - **DeepSeek series**: `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-V3-0324`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`
 - **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`, `Qwen/Qwen3-4B-AWQ`, `Qwen/Qwen3-8B-AWQ`
+- **Qwen3-VL (Vision-Language)**: `Qwen/Qwen3-VL-2B-Instruct`, `Qwen/Qwen3-VL-4B-Instruct` (single image and video inputs)
 - **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Next-80B-A3B-Instruct`, `Qwen/Qwen3-30B-A3B-Thinking-2507-FP8`
 - **Qwen2.5**: `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`
 - **Llama 3**: Llama3.1 and 3.2 series, `meta-llama/Llama-3.2-3B-Instruct` for example
 - **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`
+- **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
+- **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
+- **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
