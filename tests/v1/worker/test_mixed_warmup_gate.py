@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 
@@ -28,3 +29,24 @@ def test_mixed_warmup_skipped_for_single_seq(max_num_reqs):
         )
         is False
     )
+
+
+@pytest.mark.parametrize("fail_warmup", [False, True])
+def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_warmup):
+    """Startup must warm fixed drafts before calibration and retain its manager."""
+    manager = SimpleNamespace(cost_tables=None)
+    runner = SimpleNamespace(adaptive_verification=manager)
+
+    def run_steps(model_runner, execute, sample):
+        assert model_runner.adaptive_verification is None
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
+
+    monkeypatch.setattr(warmup, "_warmup_kernels", run_steps)
+    if fail_warmup:
+        with pytest.raises(RuntimeError, match="warmup failed"):
+            warmup.warmup_kernels(runner, _fail, _fail)
+    else:
+        warmup.warmup_kernels(runner, _fail, _fail)
+    assert runner.adaptive_verification is manager
+    assert manager.cost_tables is None

@@ -220,6 +220,21 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
+    # Adaptive costs are calibrated during capture, after this warmup. Exercise
+    # fixed draft counts here, then restore the manager for capture and serving.
+    adaptive_verification = model_runner.adaptive_verification
+    model_runner.adaptive_verification = None
+    try:
+        _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+    finally:
+        model_runner.adaptive_verification = adaptive_verification
+
+
+def _warmup_kernels(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
 
