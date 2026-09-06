@@ -130,6 +130,38 @@ def test_auto_discovered_protected_routes_require_auth(task_routes):
         )
 
 
+CONTROL_PLANE_PATHS = (
+    "/abort_requests",
+    "/detokenize",
+    "/is_scaling_elastic_ep",
+    "/scale_elastic_ep",
+    "/start_profile",
+    "/stop_profile",
+    "/tokenize",
+)
+
+
+def test_control_plane_routes_require_auth():
+    """Stateful control-plane endpoints are mounted at the top level
+    (outside the /v1, /v2, /inference, /cohere prefixes) but must still
+    be authenticated when an API key is configured."""
+    mock_routes = [(path, ["POST"]) for path in CONTROL_PLANE_PATHS]
+    app = _create_app_with_mock_routes(mock_routes)
+    client = TestClient(app)
+
+    for path in CONTROL_PLANE_PATHS:
+        assert path.startswith(GUARDED_PREFIX), f"{path} must be guarded"
+
+        resp = client.post(path)
+        assert resp.status_code == 401, f"POST {path} should reject missing token"
+
+        resp = client.post(path, headers={"Authorization": "Bearer wrong"})
+        assert resp.status_code == 401, f"POST {path} should reject invalid token"
+
+        resp = client.post(path, headers={"Authorization": "Bearer valid-token"})
+        assert resp.status_code == 200, f"POST {path} should accept valid token"
+
+
 def test_auto_discovered_unprotected_routes_no_auth(task_routes):
     """For every auto-discovered route that does NOT start with a guarded
     prefix, verify that no authentication is required."""

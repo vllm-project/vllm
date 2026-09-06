@@ -8,7 +8,26 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
+# Paths that require authentication when an API key is configured.
+# Besides the OpenAI-compatible API prefixes, this also covers stateful
+# control-plane endpoints that are mounted outside those prefixes
+# (/tokenize, /scale_elastic_ep, /abort_requests, /start_profile, ...).
+# They mutate or introspect engine state, so they must not be reachable
+# unauthenticated while the rest of the API is behind --api-key.
+# Note: "/tokenize" also covers the /tokenizer_info endpoint.
+GUARDED_PREFIX = (
+    "/v1",
+    "/v2",
+    "/inference",
+    "/cohere",
+    "/abort_requests",
+    "/detokenize",
+    "/is_scaling_elastic_ep",
+    "/scale_elastic_ep",
+    "/start_profile",
+    "/stop_profile",
+    "/tokenize",
+)
 
 
 class AuthenticationMiddleware:
