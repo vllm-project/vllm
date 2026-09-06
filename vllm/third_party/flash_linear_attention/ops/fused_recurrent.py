@@ -263,6 +263,9 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     h0,
     ht,
     ssm_state_indices,
+    block_table,
+    read_anchor,
+    write_anchor,
     scale,
     stride_mixed_qkv_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
@@ -270,6 +273,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
+    stride_block_table_seq: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -278,6 +282,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    HAS_TABLE: tl.constexpr,
     SPLIT_BATCH_HEAD_GRID: tl.constexpr,
 ):
     if SPLIT_BATCH_HEAD_GRID:
@@ -293,7 +298,15 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
 
-    state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
+    if HAS_TABLE:
+        # Derive the write slot in-kernel from the block table:
+        # block_table[i_n, write_anchor[i_n]].
+        o_w = tl.load(write_anchor + i_n).to(tl.int64)
+        state_idx = tl.load(block_table + i_n * stride_block_table_seq + o_w).to(
+            tl.int64
+        )
+    else:
+        state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
     # Skip if state index is invalid (NULL_BLOCK_ID=0)
@@ -302,7 +315,19 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
         tl.store(p_o, zero, mask=mask_v)
         return
 
-    p_h0 = h0 + state_idx * stride_init_state_token
+    if HAS_TABLE:
+        # Read slot (last computed block): block_table[i_n, read_anchor[i_n]].
+        # Same block as the write slot within a mamba block; differs at a
+        # block-boundary crossing, where the state migrates to the fresh
+        # block.
+        o_r = tl.load(read_anchor + i_n).to(tl.int64)
+        read_idx = tl.load(block_table + i_n * stride_block_table_seq + o_r).to(
+            tl.int64
+        )
+    else:
+        read_idx = state_idx
+
+    p_h0 = h0 + read_idx * stride_init_state_token
     p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
@@ -349,9 +374,21 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     scale: float,
     initial_state: torch.Tensor,
     out: torch.Tensor,
-    ssm_state_indices: torch.Tensor,
+    ssm_state_indices: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    read_anchor: torch.Tensor | None = None,
+    write_anchor: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single-token packed decode.
+
+    State slots are given either as per-seq ``ssm_state_indices`` (in-place
+    read/write at that slot) or, exclusively, as ``block_table`` (2D, per-seq
+    rows) plus per-seq ``read_anchor`` / ``write_anchor``: the kernel then
+    derives read slot ``block_table[i, read_anchor[i]]`` and write slot
+    ``block_table[i, write_anchor[i]]`` in-kernel — equivalent to host-side
+    ``block_table.gather(1, anchor.unsqueeze(1)).squeeze(1)`` tensors.
+    """
     if mixed_qkv.ndim != 2:
         raise ValueError(
             f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
@@ -368,7 +405,22 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError("`A_log`/`dt_bias` must be 1D tensors.")
     if A_log.stride(0) != 1 or dt_bias.stride(0) != 1:
         raise ValueError("`A_log`/`dt_bias` must be contiguous.")
-    if ssm_state_indices.ndim != 1:
+    if (ssm_state_indices is None) == (block_table is None):
+        raise ValueError(
+            "Exactly one of `ssm_state_indices` and `block_table` must be provided."
+        )
+    if block_table is not None:
+        if read_anchor is None or write_anchor is None:
+            raise ValueError(
+                "`read_anchor` and `write_anchor` are required with `block_table`."
+            )
+        if block_table.ndim != 2 or block_table.stride(-1) != 1:
+            raise ValueError(
+                "`block_table` must be 2D and contiguous in the last dim."
+            )
+        if read_anchor.ndim != 1 or write_anchor.ndim != 1:
+            raise ValueError("`read_anchor`/`write_anchor` must be 1D tensors.")
+    elif ssm_state_indices.ndim != 1:
         raise ValueError(
             f"`ssm_state_indices` must be 1D for packed decode (got ndim={ssm_state_indices.ndim})."
         )
@@ -376,6 +428,11 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError("`out` must be contiguous.")
 
     dev = mixed_qkv.device
+    index_tensors = (
+        (ssm_state_indices,)
+        if ssm_state_indices is not None
+        else (block_table, read_anchor, write_anchor)
+    )
     if (
         a.device != dev
         or b.device != dev
@@ -383,7 +440,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         or dt_bias.device != dev
         or initial_state.device != dev
         or out.device != dev
-        or ssm_state_indices.device != dev
+        or any(t.device != dev for t in index_tensors)
     ):
         raise ValueError("All inputs must be on the same device.")
 
@@ -393,9 +450,19 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             "Mismatched batch sizes: "
             f"mixed_qkv.shape[0]={B}, a.shape[0]={a.shape[0]}, b.shape[0]={b.shape[0]}."
         )
-    if ssm_state_indices.shape[0] != B:
+    if ssm_state_indices is not None and ssm_state_indices.shape[0] != B:
         raise ValueError(
             f"`ssm_state_indices` must have shape [B] (got {tuple(ssm_state_indices.shape)}; expected ({B},))."
+        )
+    if block_table is not None and (
+        block_table.shape[0] != B
+        or read_anchor.shape[0] != B
+        or write_anchor.shape[0] != B
+    ):
+        raise ValueError(
+            "`block_table`/`read_anchor`/`write_anchor` must have B="
+            f"{B} rows (got {block_table.shape[0]}, {read_anchor.shape[0]}, "
+            f"{write_anchor.shape[0]})."
         )
 
     if initial_state.ndim != 4:
@@ -447,7 +514,10 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     stride_b_tok = b.stride(0)
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = initial_state.stride(0)
-    stride_indices_seq = ssm_state_indices.stride(0)
+    stride_indices_seq = (
+        ssm_state_indices.stride(0) if ssm_state_indices is not None else 0
+    )
+    stride_block_table_seq = block_table.stride(0) if block_table is not None else 0
 
     NV = triton.cdiv(V, BV)
     # CUDA limits grid Y/Z dimensions to 65535.
@@ -463,6 +533,9 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         h0=initial_state,
         ht=initial_state,
         ssm_state_indices=ssm_state_indices,
+        block_table=block_table,
+        read_anchor=read_anchor,
+        write_anchor=write_anchor,
         scale=scale,
         stride_mixed_qkv_tok=stride_mixed_qkv_tok,
         stride_a_tok=stride_a_tok,
@@ -470,6 +543,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
+        stride_block_table_seq=stride_block_table_seq,
         H=H,
         HV=HV,
         K=K,
@@ -478,6 +552,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        HAS_TABLE=block_table is not None,
         SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         num_warps=num_warps,
         num_stages=num_stages,

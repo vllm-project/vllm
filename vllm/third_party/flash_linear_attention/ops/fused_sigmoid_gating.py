@@ -16,8 +16,10 @@ from vllm.triton_utils import tl, triton
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None
+        or args["block_table"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "HAS_TABLE": lambda args: args["block_table"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -36,7 +38,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     ht,
     cu_seqlens,
     ssm_state_indices,
+    ssm_state_indices_output,
     num_accepted_tokens,
+    block_table,
+    read_anchor,
+    write_anchor,
     scale,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
@@ -51,12 +57,15 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
+    stride_indices_output_seq: tl.constexpr,
+    stride_block_table_seq: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    HAS_TABLE: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -107,9 +116,17 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             else:
                 i_t = 0
             # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+            if HAS_TABLE:
+                # Derive the read slot in-kernel from the block table:
+                # block_table[i_n, read_anchor[i_n] + i_t].
+                o_r = tl.load(read_anchor + i_n).to(tl.int64)
+                state_idx = tl.load(
+                    block_table + i_n * stride_block_table_seq + o_r + i_t
+                ).to(tl.int64)
+            else:
+                state_idx = tl.load(
+                    ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -156,9 +173,17 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
-            final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
-            ).to(tl.int64)
+            if HAS_TABLE:
+                # Derive the write slot in-kernel from the block table:
+                # block_table[i_n, write_anchor[i_n] + i_t].
+                o_w = tl.load(write_anchor + i_n).to(tl.int64)
+                final_state_idx = tl.load(
+                    block_table + i_n * stride_block_table_seq + o_w + i_t
+                ).to(tl.int64)
+            else:
+                final_state_idx = tl.load(
+                    ssm_state_indices_output + i_n * stride_indices_output_seq + i_t
+                ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
                 p_ht = ht + final_state_idx * stride_final_state_token
@@ -193,7 +218,11 @@ def fused_sigmoid_gating_delta_rule_update(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    ssm_state_indices_output: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    read_anchor: torch.Tensor | None = None,
+    write_anchor: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
 ):
@@ -201,6 +230,14 @@ def fused_sigmoid_gating_delta_rule_update(
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    When ``block_table`` (2D, per-seq rows) plus per-seq ``read_anchor`` /
+    ``write_anchor`` are given instead of ``ssm_state_indices``, the kernel
+    derives its own state slots in-kernel: read slot
+    ``block_table[i, read_anchor[i] + i_t]`` (with ``i_t`` selected by
+    ``num_accepted_tokens`` in spec mode) and write slot
+    ``block_table[i, write_anchor[i] + i_t]`` per token — equivalent to the
+    host-side ``block_table.gather(1, anchor.unsqueeze(1) + arange(T))``.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -231,12 +268,45 @@ def fused_sigmoid_gating_delta_rule_update(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
+    # The kernel indexes both 2-D index tensors with an implicit token stride of
+    # 1 (`... + i_n * stride_seq + i_t`), so a non-contiguous last dim (e.g. a
+    # transposed/strided view) would silently read wrong offsets. Normalize to
+    # contiguous here — a no-op on the current (gather-produced, contiguous)
+    # all-mode spec path, a safety net otherwise.
+    if ssm_state_indices is not None and ssm_state_indices.stride(-1) != 1:
+        ssm_state_indices = ssm_state_indices.contiguous()
+    if (ssm_state_indices_output is not None
+            and ssm_state_indices_output.stride(-1) != 1):
+        ssm_state_indices_output = ssm_state_indices_output.contiguous()
+
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    # all-mode dual-anchor: write the final state via a separate output index tensor
+    # while reading h0 via ssm_state_indices. Defaults to in-place (output == input).
+    if ssm_state_indices_output is None:
+        ssm_state_indices_output = ssm_state_indices
+    stride_indices_output_seq = (
+        ssm_state_indices_output.stride(0)
+        if ssm_state_indices_output is not None
+        else 1
+    )
+
+    # Direct-block-table mode: the kernel derives its own read/write slots
+    # from block_table + per-seq anchors (no host-gathered index tensors).
+    if block_table is not None:
+        assert ssm_state_indices is None and ssm_state_indices_output is None, (
+            "block_table and ssm_state_indices are mutually exclusive"
+        )
+        assert read_anchor is not None and write_anchor is not None
+        assert block_table.stride(-1) == 1
+        stride_block_table_seq = block_table.stride(0)
+    else:
+        stride_block_table_seq = 0
 
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
@@ -254,7 +324,11 @@ def fused_sigmoid_gating_delta_rule_update(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
+        ssm_state_indices_output=ssm_state_indices_output,
         num_accepted_tokens=num_accepted_tokens,
+        block_table=block_table,
+        read_anchor=read_anchor,
+        write_anchor=write_anchor,
         scale=scale,
         N=N,
         T=T,
@@ -269,6 +343,8 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        stride_indices_output_seq=stride_indices_output_seq,
+        stride_block_table_seq=stride_block_table_seq,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,

@@ -41,6 +41,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    prev_last_scheduled_idx: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -64,7 +65,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             ),
         ):
             return {}
-        return {
+        extra_kwargs: dict[str, Any] = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -72,6 +73,14 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        if self.prev_last_scheduled_idx is not None and isinstance(
+            attn_metadata_builder,
+            (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+        ):
+            extra_kwargs["prev_last_scheduled_idx"] = self.prev_last_scheduled_idx[
+                :num_reqs
+            ]
+        return extra_kwargs
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -97,6 +106,10 @@ class MambaHybridModelState(DefaultModelState):
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
+        self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
+        self._mamba_group_ids: list[int] = []
+        self._mamba_spec: MambaSpec | None = None
+        self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -107,15 +120,39 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
-            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
-            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+        # All-mode spec decode: per-request tracking of the block index the
+        # running SSM state was written to on the previous step, so the next
+        # step's in-place writes stay anchored when accepted drafts leave the
+        # sequence at a non-block-aligned position (the V1
+        # postprocess_mamba_all / preprocess_mamba_all_specdec pair). Kept
+        # GPU-resident to preserve the no-CPU-sync step. -1 = untracked (the
+        # builders fall back to the last computed block).
+        self._mamba_prev_last_scheduled_idx_gpu: torch.Tensor | None = None
+        self._mamba_prev_last_scheduled_idx_staged: torch.Tensor | None = None
+        # Consume-once marker: the staged buffer is only meaningful for the
+        # batch whose preprocess_state filled it. Dummy runs skip
+        # preprocess_state, so without this they would read the previous real
+        # batch's anchors in the wrong row order.
+        self._mamba_prev_anchor_staged_valid = False
+        if (
+            self.cache_config.mamba_cache_mode == "all"
+            and vllm_config.num_speculative_tokens > 0
+        ):
+            self._mamba_prev_last_scheduled_idx_gpu = torch.full(
+                (self.max_num_reqs,), -1, dtype=torch.int32, device=self.device
+            )
+            self._mamba_prev_last_scheduled_idx_staged = torch.full(
+                (self.max_num_reqs,), -1, dtype=torch.int32, device=self.device
+            )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
+        if self._mamba_prev_last_scheduled_idx_gpu is not None:
+            # New/resumed requests start untracked; the builders use the
+            # last-computed-block fallback on their first step.
+            self._mamba_prev_last_scheduled_idx_gpu[req_index].fill_(-1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             self._mamba_state_idx_gpu[req_index].fill_(
@@ -187,16 +224,36 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        """Migrate each request's mamba state across block boundaries before the
-        forward (V1 align semantics, done on GPU). Runs on real batches only
-        (dummy DP/profiling runs skip preprocess_state), and before
-        ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
-        is visible to the forward kernels.
+        """Per-step mamba state bookkeeping before the forward, on GPU. Runs on
+        real batches only (dummy DP/profiling runs skip preprocess_state), and
+        before ``prepare_attn`` gathers ``num_accepted_tokens``.
+
+        Align mode: migrate each request's mamba state across block boundaries
+        (V1 align semantics), so the boundary reset is visible to the forward
+        kernels.
+
+        All mode + spec decode: stage the previous step's write anchors in
+        batch order for ``prepare_attn``, then record this step's anchor (the
+        block holding the last scheduled token) for rows running a full decode
+        window; all other scheduled rows become untracked (-1). Mirrors the V1
+        ``postprocess_mamba_all`` / ``preprocess_mamba_all_specdec`` pair.
         """
-        if not self._align_mode:
-            return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
+            return
+        if self._mamba_prev_last_scheduled_idx_gpu is not None:
+            _, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+            _track_mamba_all_write_anchor_kernel[(num_reqs,)](
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                input_batch.seq_lens,
+                self._mamba_prev_last_scheduled_idx_gpu,
+                self._mamba_prev_last_scheduled_idx_staged,
+                FULL_DECODE_LEN=1 + self.vllm_config.num_speculative_tokens,
+                MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            )
+            self._mamba_prev_anchor_staged_valid = True
+        if not self._align_mode:
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
@@ -265,11 +322,29 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
+        prev_last_scheduled_idx = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
             ]
+
+            if self._mamba_prev_last_scheduled_idx_staged is not None:
+                # Staged in batch order by preprocess_state; padded rows are
+                # untracked (-1) so the builders take their fallback anchor.
+                # Consumed at most once per staging: batches that skipped
+                # preprocess_state (dummy runs) get all -1 instead of another
+                # batch's rows.
+                prev_last_scheduled_idx = (
+                    self._mamba_prev_last_scheduled_idx_staged.new_full((num_reqs,), -1)
+                )
+                if self._mamba_prev_anchor_staged_valid:
+                    self._mamba_prev_anchor_staged_valid = False
+                    prev_last_scheduled_idx[: input_batch.num_reqs] = (
+                        self._mamba_prev_last_scheduled_idx_staged[
+                            : input_batch.num_reqs
+                        ]
+                    )
 
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel rather than a raw zero draft count.
@@ -309,6 +384,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            prev_last_scheduled_idx=prev_last_scheduled_idx,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -390,6 +466,30 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
+
+
+@triton.jit
+def _track_mamba_all_write_anchor_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx
+    query_start_loc_ptr,  # [num_reqs + 1]
+    seq_lens_ptr,  # [num_reqs] num_computed (pre-step) + num_scheduled
+    prev_anchor_ptr,  # [max_num_reqs] persistent write-anchor tracking
+    staged_prev_ptr,  # [num_reqs] out: previous step's anchors, batch order
+    FULL_DECODE_LEN: tl.constexpr,  # 1 + num_spec_tokens
+    MAMBA_BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    tl.store(staged_prev_ptr + row, tl.load(prev_anchor_ptr + req_state_idx))
+    num_query = tl.load(query_start_loc_ptr + row + 1) - tl.load(
+        query_start_loc_ptr + row
+    )
+    seq_len = tl.load(seq_lens_ptr + row)
+    anchor = tl.maximum((seq_len - 1) // MAMBA_BLOCK_SIZE, 0)
+    tl.store(
+        prev_anchor_ptr + req_state_idx,
+        tl.where(num_query == FULL_DECODE_LEN, anchor, -1),
+    )
 
 
 @triton.jit
