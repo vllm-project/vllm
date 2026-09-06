@@ -158,7 +158,8 @@ class NixlTransport(DataTransport):
     ) -> int | None:
         """Submit a WRITE transfer to *peer_id*.
 
-        Returns a transfer ID, or None if the peer is not registered.
+        Returns a transfer ID, or None if the peer is not registered or
+        submission fails.
         The ID is returned via poll() when the transfer completes or fails.
         """
         remote_dlist = self._remote_dlists.get(peer_id)
@@ -177,14 +178,27 @@ class NixlTransport(DataTransport):
             peer_id,
             len(local_idxs),
         )
-        handle = self._agent.make_prepped_xfer(
-            "WRITE",
-            self._local_dlist,
-            np.asarray(local_idxs, dtype=np.int32),
-            remote_dlist,
-            np.asarray(remote_idxs, dtype=np.int32),
-        )
-        self._agent.transfer(handle)
+        handle = None
+        try:
+            handle = self._agent.make_prepped_xfer(
+                "WRITE",
+                self._local_dlist,
+                np.asarray(local_idxs, dtype=np.int32),
+                remote_dlist,
+                np.asarray(remote_idxs, dtype=np.int32),
+            )
+            self._agent.transfer(handle)
+        except Exception as exc:
+            logger.warning(
+                "NixlTransport %s: write_blocks failed for peer=%s: %s",
+                self._agent_name,
+                peer_id,
+                exc,
+                exc_info=True,
+            )
+            if handle is not None:
+                self._release_handles([handle])
+            return None
         transfer_id = next(self._next_id)
         self._inflight[transfer_id] = _Inflight(peer_id, handle)
         return transfer_id
