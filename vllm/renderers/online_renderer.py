@@ -178,6 +178,17 @@ class OnlineRenderer:
             tool_dicts = None
         else:
             tool_dicts = [tool.model_dump() for tool in request.tools]
+            if tool_parser is not None and getattr(
+                tool_parser, "reorder_tool_schema_required_first", False
+            ):
+                from vllm.tool_parsers.utils import (
+                    reorder_properties_required_first,
+                )
+
+                for tool_dict in tool_dicts:
+                    params = tool_dict.get("function", {}).get("parameters")
+                    if params is not None:
+                        reorder_properties_required_first(params)
 
         if not self.use_harmony:
             # Common case.

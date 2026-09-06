@@ -1050,6 +1050,45 @@ def extract_types_from_schema(schema: Any) -> list[str]:
     return list(types) if types else ["string"]
 
 
+def reorder_properties_required_first(schema: Any) -> Any:
+    """Reorder an object schema's ``properties`` so that fields declared in
+    ``required`` come first (in ``required`` declaration order), followed by
+    optional fields in their original order. Recurses into nested schemas.
+
+    Property order is not semantically meaningful for JSON Schema
+    validation, but chat templates render schemas verbatim into the prompt
+    and models tend to emit arguments in the rendered order; putting
+    required fields first makes the model commit to them before it starts
+    on bulky optional fields (which it may otherwise never return from).
+
+    May mutate and return *schema*; only call it on per-request copies.
+    """
+    if isinstance(schema, list):
+        return [reorder_properties_required_first(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    for key in ("properties", "$defs", "definitions"):
+        if isinstance(sub := schema.get(key), dict):
+            schema[key] = {
+                k: reorder_properties_required_first(v) for k, v in sub.items()
+            }
+    for key in ("items", "additionalProperties", "contains"):
+        if isinstance(sub := schema.get(key), (dict, list)):
+            schema[key] = reorder_properties_required_first(sub)
+    for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        if isinstance(sub := schema.get(key), list):
+            schema[key] = [reorder_properties_required_first(s) for s in sub]
+
+    props = schema.get("properties")
+    required = schema.get("required")
+    if isinstance(props, dict) and isinstance(required, list) and required:
+        ordered = {k: props[k] for k in required if k in props}
+        ordered.update((k, v) for k, v in props.items() if k not in ordered)
+        schema["properties"] = ordered
+    return schema
+
+
 _TYPE_ALIASES: dict[str, str] = {
     "str": "string",
     "text": "string",

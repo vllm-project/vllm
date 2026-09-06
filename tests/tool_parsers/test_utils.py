@@ -3,6 +3,7 @@
 
 import ast
 import json
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,7 @@ from vllm.tool_parsers.utils import (
     make_valid_python,
     normalize_leading_zero_ints,
     rename_reserved_kwargs,
+    reorder_properties_required_first,
     restore_reserved_kwarg_names,
 )
 
@@ -764,3 +766,64 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class TestReorderPropertiesRequiredFirst:
+    def test_required_first_in_declaration_order(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string"},
+                "choices": {"type": "array"},
+                "prompt": {"type": "string"},
+            },
+            "required": ["prompt", "tag"],
+        }
+        reorder_properties_required_first(schema)
+        assert list(schema["properties"]) == ["prompt", "tag", "choices"]
+
+    def test_recurses_into_array_items(self):
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {"type": "string"},
+                            "title": {"type": "string"},
+                        },
+                        "required": ["title", "detail"],
+                    },
+                }
+            },
+            "required": ["items"],
+        }
+        reorder_properties_required_first(schema)
+        nested = schema["properties"]["items"]["items"]
+        assert list(nested["properties"]) == ["title", "detail"]
+
+    def test_no_required_keeps_order(self):
+        schema = {
+            "type": "object",
+            "properties": {"b": {"type": "string"}, "a": {"type": "string"}},
+        }
+        reorder_properties_required_first(schema)
+        assert list(schema["properties"]) == ["b", "a"]
+
+    def test_required_entry_missing_from_properties_is_skipped(self):
+        schema = {
+            "type": "object",
+            "properties": {"b": {"type": "string"}, "a": {"type": "string"}},
+            "required": ["missing", "a"],
+        }
+        reorder_properties_required_first(schema)
+        assert list(schema["properties"]) == ["a", "b"]
+
+    def test_non_dict_schemas_pass_through(self):
+        assert reorder_properties_required_first(None) is None
+        assert reorder_properties_required_first(True) is True
+        assert reorder_properties_required_first([{"type": "string"}]) == [
+            {"type": "string"}
+        ]
