@@ -790,6 +790,8 @@ CacheLayout check_cache_rows(const torch::stable::Tensor& t, const char* name,
     STD_TORCH_CHECK(t.is_contiguous(), name, " must have contiguous rows");
     return {t.size(0), 1, row_bytes};
   }
+  STD_TORCH_CHECK(t.stride(-1) == 1, name,
+                  " innermost row dimension must be contiguous");
   STD_TORCH_CHECK(t.stride(1) * t.element_size() == row_bytes, name,
                   " rows must be contiguous within each block");
   return {t.size(0) * t.size(1), static_cast<int32_t>(t.size(1)),
@@ -926,6 +928,8 @@ void hisparse_resolve_residency(
       "lru_slots must be contiguous with one row per request state");
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
+  STD_TORCH_CHECK(hot_cache.stride(-1) == 1,
+                  "hot-cache innermost row dimension must be contiguous");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
   STD_TORCH_CHECK(row_value_bytes > 0 || row_bytes % 16 == 0,
                   "non-split KV rows must be 16-byte aligned");
@@ -1206,6 +1210,8 @@ void hisparse_gather_plan(
 
   STD_TORCH_CHECK(hot_cache.dim() == 2 || hot_cache.dim() == 3,
                   "hot_cache must be a 2D staging buffer or paged 3D cache");
+  STD_TORCH_CHECK(hot_cache.stride(-1) == 1,
+                  "hot-cache innermost row dimension must be contiguous");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
   STD_TORCH_CHECK(row_value_bytes > 0 || row_bytes % 16 == 0,
                   "non-split KV rows must be 16-byte aligned");
@@ -1316,6 +1322,8 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
       "compact miss plan must be matching contiguous int32 CUDA tensors");
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
+  STD_TORCH_CHECK(hot_cache.stride(-1) == 1,
+                  "hot-cache innermost row dimension must be contiguous");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
   STD_TORCH_CHECK(row_value_bytes > 0 || row_bytes % 16 == 0,
                   "non-split KV rows must be 16-byte aligned");
@@ -1380,6 +1388,8 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
   const int64_t row_bytes = src_cache.size(-1) * src_cache.element_size();
   STD_TORCH_CHECK(src_cache.dim() == 2 || src_cache.dim() == 3,
                   "src_cache must be 2D or paged 3D");
+  STD_TORCH_CHECK(src_cache.stride(-1) == 1,
+                  "src-cache innermost row dimension must be contiguous");
   const int32_t src_block_size =
       src_cache.dim() == 3 ? static_cast<int32_t>(src_cache.size(1)) : 1;
   const int64_t src_rows = src_cache.size(0) * src_block_size;
