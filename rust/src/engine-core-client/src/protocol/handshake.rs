@@ -107,6 +107,9 @@ pub struct EngineCoreReadyResponse {
     /// Full-attention block size in tokens after initialization, or unavailable.
     #[serde(default)]
     pub effective_attention_block_size: Option<u64>,
+    /// Whether the engine was started with speculative decoding enabled.
+    #[serde(default)]
+    pub use_spec_decode: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

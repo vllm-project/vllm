@@ -1763,6 +1763,7 @@ class EngineCoreProc(EngineCore):
                 if self.vllm_config.weight_transfer_config is not None
                 else False
             ),
+            use_spec_decode=self.use_spec_decode,
         )
 
     def process_input_sockets(

@@ -162,7 +162,15 @@ fn prepare_generative_scoring_request(
     ctx: ResolvedRequestContext,
     state: &AppState,
 ) -> Result<PreparedGenerativeScoringRequest, ApiError> {
-    validate_generative_scoring_request(&request, lora_resolution, state.chat.model_vocab_size())?;
+    let ready = state.chat.engine_core_client().ready_response();
+    let max_items = usize::try_from(ready.max_num_seqs).unwrap_or(usize::MAX);
+    validate_generative_scoring_request(
+        &request,
+        lora_resolution,
+        state.chat.model_vocab_size(),
+        max_items,
+        ready.use_spec_decode,
+    )?;
 
     let request_id = format!("generative-scoring-{}", ctx.request_id);
     let response_model = lora_resolution
@@ -227,6 +235,8 @@ fn validate_generative_scoring_request(
     request: &GenerativeScoringRequest,
     lora_resolution: &LoraModelResolution,
     model_vocab_size: usize,
+    max_items: usize,
+    use_spec_decode: bool,
 ) -> Result<(), ApiError> {
     if let Some(model) = request.model.as_ref()
         && !lora_resolution.model_names.iter().any(|name| name == model)
@@ -243,6 +253,19 @@ fn validate_generative_scoring_request(
 
     if request.items.is_empty() {
         bail_invalid_request!(param = "items", "items must contain at least one item.");
+    }
+
+    if request.items.len() > max_items {
+        bail_invalid_request!(
+            param = "items",
+            "items must contain at most {max_items} items for this server."
+        );
+    }
+
+    if use_spec_decode {
+        bail_invalid_request!(
+            "Generative scoring is not supported when speculative decoding is enabled."
+        );
     }
 
     let invalid_token_ids: Vec<_> = request
@@ -268,6 +291,13 @@ impl GenerativeScoringItems {
         match self {
             Self::Text(items) => items.is_empty(),
             Self::TokenIds(items) => items.is_empty(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Text(items) => items.len(),
+            Self::TokenIds(items) => items.len(),
         }
     }
 }
@@ -516,19 +546,37 @@ mod tests {
             model: Some("missing".to_string()),
             ..base_request()
         };
-        assert!(validate_generative_scoring_request(&wrong_model, &served, 100).is_err());
+        assert!(
+            validate_generative_scoring_request(&wrong_model, &served, 100, 256, false).is_err()
+        );
 
         let empty_labels = GenerativeScoringRequest {
             label_token_ids: Vec::new(),
             ..base_request()
         };
-        assert!(validate_generative_scoring_request(&empty_labels, &served, 100).is_err());
+        assert!(
+            validate_generative_scoring_request(&empty_labels, &served, 100, 256, false).is_err()
+        );
 
         let out_of_vocab = GenerativeScoringRequest {
             label_token_ids: vec![99, 100],
             ..base_request()
         };
-        assert!(validate_generative_scoring_request(&out_of_vocab, &served, 100).is_err());
+        assert!(
+            validate_generative_scoring_request(&out_of_vocab, &served, 100, 256, false).is_err()
+        );
+
+        let too_many_items = GenerativeScoringRequest {
+            items: GenerativeScoringItems::Text(vec!["one".to_string(), "two".to_string()]),
+            ..base_request()
+        };
+        assert!(
+            validate_generative_scoring_request(&too_many_items, &served, 100, 1, false).is_err()
+        );
+
+        assert!(
+            validate_generative_scoring_request(&base_request(), &served, 100, 256, true).is_err()
+        );
     }
 
     #[test]

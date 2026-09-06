@@ -470,6 +470,7 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    use_spec_decode: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -494,6 +495,7 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
+    use_spec_decode=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
