@@ -284,6 +284,12 @@ def test_option_and_token_handling(command, test_file, expected):
             "kernels/test_a.py",
             True,
         ),
+        # `xargs env FOO=1 pytest` - xargs runs `env`, which runs pytest.
+        (
+            "find kernels -name 'test_*.py' | xargs env FOO=1 pytest",
+            "kernels/test_a.py",
+            True,
+        ),
     ],
 )
 def test_find_pipelines(command, test_file, expected):
@@ -315,6 +321,13 @@ def test_find_pipeline_parses_as_find_selection():
         ),
         (
             "python standalone_tests/lazy_imports.py",
+            "standalone_tests/lazy_imports.py",
+            True,
+        ),
+        # `timeout -k <grace> <dur>` wrapping a runner: the grace value must not
+        # be consumed as the duration (which would hide `python`).
+        (
+            "timeout -k 5s 30s python standalone_tests/lazy_imports.py",
             "standalone_tests/lazy_imports.py",
             True,
         ),
@@ -542,6 +555,24 @@ def test_shell_script_continuation_vars_and_nesting(tmp_path, monkeypatch):
     assert tethered("v1/kv_connector/nixl_integration/test_canary.py")
     # single-quoted `'$VAR'` is NOT expanded by the shell, so not tethered:
     assert not tethered("v1/kv_connector/nixl_integration/test_not_run.py")
+
+
+def test_bash_dash_c_does_not_follow_a_script_operand(tmp_path, monkeypatch):
+    """`bash -c '<code>' foo.sh` runs the `-c` string; `foo.sh` is `$0` and is
+    never executed, so its contents must not count as coverage."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "decoy.sh").write_text("pytest -v -s lora/test_decoy.py\n")
+    monkeypatch.setattr(checker, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(checker, "TESTS_DIR", tmp_path / "tests")
+
+    with_c = _parse_command("bash -c 'echo hi' tests/decoy.sh")
+    assert not any(s.runs("lora/test_decoy.py") for s in with_c)
+    # ...but a plain `bash tests/decoy.sh` still follows it.
+    plain = _parse_command("bash tests/decoy.sh")
+    assert any(s.runs("lora/test_decoy.py") for s in plain)
+    # ...and a `-c` that is the *script's* own flag (not bash's) is not `bash -c`.
+    script_flag = _parse_command("bash tests/decoy.sh -c models.txt")
+    assert any(s.runs("lora/test_decoy.py") for s in script_flag)
 
 
 def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):
