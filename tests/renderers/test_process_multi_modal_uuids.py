@@ -79,6 +79,7 @@ def test_cached_uuid_skips_url_loading(
     modality: str,
     media: object,
 ):
+    monkeypatch.setenv("VLLM_EARLY_UUID_LOOKUPS", "1")
     renderer = _build_renderer()
     media_url = f"https://example.com/test.{modality}"
     media_uuid = f"test-{modality}-uuid"

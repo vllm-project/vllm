@@ -949,10 +949,26 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    @override
+    def _render_messages_for_chat(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return self.render_messages(
+            messages,
+            params,
+            skip_mm_cache=skip_mm_cache,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -975,6 +991,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            mm_processor_cache=self.mm_processor_cache,
+            skip_mm_cache=skip_mm_cache,
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -1069,10 +1087,26 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         return conversation, prompt
 
+    @override
+    async def _render_messages_for_chat_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return await self.render_messages_async(
+            messages,
+            params,
+            skip_mm_cache=skip_mm_cache,
+        )
+
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1095,6 +1129,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            mm_processor_cache=self.mm_processor_cache,
+            skip_mm_cache=skip_mm_cache,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

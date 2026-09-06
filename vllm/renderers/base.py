@@ -519,6 +519,25 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params)
 
+    # Helpers to enable passing skip_mm_cache to the renderer in some subclasses (e.g. HfRenderer).
+    def _render_messages_for_chat(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list["ConversationMessage"], DictPrompt]:
+        return self.render_messages(messages, params)
+
+    async def _render_messages_for_chat_async(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list["ConversationMessage"], DictPrompt]:
+        return await self.render_messages_async(messages, params)
+
     # Step 2: Tokenize prompts if necessary
     def _can_produce_offsets(self) -> bool:
         """Whether this renderer's tokenizer can emit char-level offsets.
@@ -1170,7 +1189,11 @@ class BaseRenderer(ABC, Generic[_T]):
             tok_params = self.default_chat_tok_params
 
         rendered = [
-            self.render_messages(conversation, chat_params)
+            self._render_messages_for_chat(
+                conversation,
+                chat_params,
+                skip_mm_cache=skip_mm_cache,
+            )
             for conversation in conversations
         ]
 
@@ -1208,7 +1231,11 @@ class BaseRenderer(ABC, Generic[_T]):
             tok_params = self.default_chat_tok_params
 
         rendered = [
-            self.render_messages_async(conversation, chat_params)
+            self._render_messages_for_chat_async(
+                conversation,
+                chat_params,
+                skip_mm_cache=skip_mm_cache,
+            )
             for conversation in conversations
         ]
 
