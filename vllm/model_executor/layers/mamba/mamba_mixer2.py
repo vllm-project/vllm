@@ -135,12 +135,18 @@ class Mixer2RMSNormGated(CustomOp):
 
         if self.n_groups == 1:
             if self.tp_size > 1:
-                # Compute local sum and then reduce to obtain global sum
-                local_sums = x.pow(2).sum(dim=-1, keepdim=True)
-                global_sums = tensor_model_parallel_all_reduce(local_sums)
-                # Calculate the variance
-                count = self.tp_size * x.shape[-1]
-                variance = global_sums / count
+                if envs.VLLM_BATCH_INVARIANT:
+                    # BI overrides mean, not sum. Average equal-width shards
+                    # so replay and decode use the same local reduction tree.
+                    local_means = x.pow(2).mean(dim=-1, keepdim=True)
+                    variance = (
+                        tensor_model_parallel_all_reduce(local_means) / self.tp_size
+                    )
+                else:
+                    local_sums = x.pow(2).sum(dim=-1, keepdim=True)
+                    global_sums = tensor_model_parallel_all_reduce(local_sums)
+                    count = self.tp_size * x.shape[-1]
+                    variance = global_sums / count
 
             else:
                 variance = x.pow(2).mean(-1, keepdim=True)

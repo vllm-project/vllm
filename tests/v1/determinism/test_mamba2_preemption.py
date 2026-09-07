@@ -10,7 +10,9 @@ import os
 import struct
 
 import pytest
+import torch
 
+from tests.utils import multi_gpu_marks
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
@@ -136,3 +138,89 @@ def test_mamba2_mixed_repeated_preemption(vllm_runner, monkeypatch, enforce_eage
             assert sorted(finals) == [0, 1, 2]
             for k in range(3):
                 assert finals[k] == baseline[k], (repeat, k)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "compiled"])
+@pytest.mark.parametrize("async_scheduling", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "tensor_parallel_size",
+    [1, pytest.param(2, marks=multi_gpu_marks(num_gpus=2))],
+    ids=["tp1", "tp2"],
+)
+def test_mamba2_kv_pressure_preemption(
+    vllm_runner, monkeypatch, enforce_eager, async_scheduling, tensor_parallel_size
+):
+    """Real allocation failures must preserve tokens and logprob bits on recovery."""
+    if torch.cuda.device_count() < tensor_parallel_size:
+        pytest.skip("Not enough GPUs for tensor parallelism")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    model = os.getenv("VLLM_TEST_MODEL", "ibm-granite/granite-4.0-h-350m")
+    with vllm_runner(
+        model,
+        dtype="bfloat16",
+        enforce_eager=enforce_eager,
+        max_model_len=1024,
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        mamba_ssm_cache_dtype="auto",
+        gpu_memory_utilization=0.25,
+        # Four initial requests fit, but extending attention KV past the first
+        # page exhausts the pool. Do not mock allocation or call the reset API.
+        num_gpu_blocks_override=33,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=0,
+        async_scheduling=async_scheduling,
+    ) as runner:
+        llm = runner.get_llm()
+        engine = llm.llm_engine
+        scheduler = engine.engine_core.engine_core.scheduler
+        vocab = engine.vllm_config.model_config.get_vocab_size()
+        prompts = [
+            TokensPrompt(
+                prompt_token_ids=[
+                    1 + (911 * 131 + i * 17 + k * 101) % (vocab - 1)
+                    for i in range(257 + k * 17)
+                ]
+            )
+            for k in range(4)
+        ]
+        params = SamplingParams(
+            temperature=0, max_tokens=160, ignore_eos=True, logprobs=5, seed=42
+        )
+        baseline = [
+            _signature(llm.generate([prompt], params, use_tqdm=False)[0])
+            for prompt in prompts
+        ]
+        history_preemptions = []
+        original_preempt = scheduler._preempt_request
+
+        def observe_preempt(request, *args, **kwargs):
+            history_preemptions.append(request.num_output_tokens)
+            return original_preempt(request, *args, **kwargs)
+
+        monkeypatch.setattr(scheduler, "_preempt_request", observe_preempt)
+        for repeat in range(2):
+            history_preemptions.clear()
+            for k, prompt in enumerate(prompts):
+                engine.add_request(f"pressure-{repeat}-{k}", prompt, params)
+            finals = {}
+            for _ in range(1000):
+                if not engine.has_unfinished_requests():
+                    break
+                for output in engine.step():
+                    if output.finished:
+                        finals[output.request_id] = _signature(output)
+            else:
+                pytest.fail("KV-pressure recovery made no bounded progress")
+            assert any(n > 1 for n in history_preemptions), (
+                "Test never preempted a request with generated history"
+            )
+            assert len(finals) == len(prompts)
+            for k in range(len(prompts)):
+                assert finals[f"pressure-{repeat}-{k}"] == baseline[k], (repeat, k)
