@@ -121,10 +121,12 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 // Every single-CTA row goes through `det_select_row`: a radix select that
 // rescans the row for each of the four key bytes (no candidate buffers, so no
 // truncation and an exact pivot), then one index-ordered block scan that emits
-// all elements above the pivot and the lowest-index `fin` elements equal to it,
-// then sorts the row ascending. Cost: five reads of the row + one in-block
-// sort of <= 2048 ints. Rows longer than RADIX_THRESHOLD take the multi-CTA
-// path, whose emission is ordered by per-CTA prefixes.
+// all elements above the pivot and the lowest-index `fin` elements equal to it.
+// Both groups come out in ascending index order, so the row is two sorted runs
+// and one merge finishes it. Cost: at most five reads of the row (fewer when a
+// radix pass can be skipped) + one merge pass over <= 2048 ints. Rows longer
+// than RADIX_THRESHOLD take the multi-CTA path, whose emission is ordered by
+// per-CTA prefixes and merges the same way.
 // ============================================================================
 __device__ __forceinline__ uint32_t det_next_pow2(uint32_t n) {
   uint32_t p = 1;
@@ -132,36 +134,13 @@ __device__ __forceinline__ uint32_t det_next_pow2(uint32_t n) {
   return p;
 }
 template <int N_THREADS>
-__device__ __forceinline__ void det_block_sort_asc(int* data, int n, int cap) {
-  for (int i = threadIdx.x + n; i < cap; i += N_THREADS) data[i] = 0x7FFFFFFF;
-  __syncthreads();
-  for (int k = 2; k <= cap; k <<= 1) {
-    for (int j = k >> 1; j > 0; j >>= 1) {
-      for (int i = threadIdx.x; i < cap; i += N_THREADS) {
-        const int ixj = i ^ j;
-        if (ixj > i) {
-          const int a = data[i], b = data[ixj];
-          const bool up = ((i & k) == 0);
-          if ((a > b) == up) {
-            data[i] = b;
-            data[ixj] = a;
-          }
-        }
-      }
-      __syncthreads();
-    }
-  }
-}
-// Merge two ascending runs, [0, a) and [a, k), of `row` in place through
-// `scratch`. det_select_row's emission already writes both the `> pivot` group
-// and the `== pivot` group in ascending index order, so the row is two sorted
-// runs and a full sort is not needed. Values are row indices and therefore
-// distinct, so a lower-bound rank is exact and the result is bit-identical to
-// sorting. One pass over k with a binary search, instead of the
-// log2(next_pow2(k)) * (log2+1) / 2 sync-separated bitonic stages.
-template <int N_THREADS>
 __device__ __forceinline__ void det_merge_runs(int32_t* row, int k, int a,
                                                int* scratch) {
+  // One of the runs is empty, so the row is already a single ascending run and
+  // there is nothing to interleave. `a` is uniform across the CTA, so this
+  // returns for all threads together. Hit whenever the radix early-exit fires
+  // (fin == 0, hence a == k) and on the all-equal / pivot-tie cases (a == 0).
+  if (a <= 0 || a >= k) return;
   for (int i = threadIdx.x; i < k; i += N_THREADS) scratch[i] = row[i];
   __syncthreads();
   const int b = k - a;
@@ -193,20 +172,10 @@ __device__ __forceinline__ void det_merge_runs(int32_t* row, int k, int a,
   }
   __syncthreads();
 }
-template <int N_THREADS>
-__device__ __forceinline__ void det_sort_row(int32_t* row, int k,
-                                             int* scratch) {
-  const int cap = static_cast<int>(det_next_pow2(static_cast<uint32_t>(k)));
-  for (int i = threadIdx.x; i < k; i += N_THREADS) scratch[i] = row[i];
-  __syncthreads();
-  det_block_sort_asc<N_THREADS>(scratch, k, cap);
-  for (int i = threadIdx.x; i < k; i += N_THREADS) row[i] = scratch[i];
-  __syncthreads();
-}
 // Deterministic single-CTA top-k of one row (n > TopK).
 // Shared memory layout (bytes): [0,1024) hist, [1024,2048) hist2 (suffix
 // scratch), [2048, +scan) BlockScan storage, then next_pow2(TopK) ints of
-// sort scratch, then — when `smem_bytes` allows — the row's ordered keys
+// merge scratch, then — when `smem_bytes` allows — the row's ordered keys
 // (4*n bytes), so passes 1..3 and the emission read shared memory and the
 // row is fetched from global memory exactly once. Otherwise every pass
 // rescans global memory (still deterministic, just slower).
@@ -1087,8 +1056,9 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
   // -- Stage 3: Collect top-k indices --
   // Publish this CTA's counts; slots come from a prefix over CTAs, never
-  // from a global arrival counter. > pivot first (any order, the
-  // row is sorted at the end), == pivot lowest-index-first across the group.
+  // from a global arrival counter. Both groups are ranked by index within the
+  // CTA and ordered across CTAs by chunk, so `> pivot` and `== pivot` each come
+  // out as one ascending run and CTA 0 merges them.
   uint32_t my_eq_count = 0;
   for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
     if (shared_ordered[i] == ordered_pivot) my_eq_count++;
@@ -1268,7 +1238,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
           }
         } else {
           // Single-CTA rows: rescanning select (exact pivot, index-ranked
-          // ties, sorted row).
+          // ties, two ascending runs merged).
           det_select_row<TopK, kThreadsPerBlock>(
               row_input, static_cast<int>(seq_len), row_output, smem_raw,
               params.det_smem_bytes);

@@ -1418,6 +1418,34 @@ def test_persistent_topk_all_equal(num_rows: int, seq_len: int) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_rows", [1, 64])
+@pytest.mark.parametrize("seq_len", [8192, 40000])
+@pytest.mark.parametrize("top_k", [512, 2048])
+def test_persistent_topk_exact_bin_boundary(
+    num_rows: int, seq_len: int, top_k: int
+) -> None:
+    """Exactly top_k elements carry one value and the rest a lower one, so the
+    histogram bin at the threshold holds exactly the number of slots still
+    unfilled. That is the condition the radix select uses to stop before its
+    last passes, and it also leaves the output as a single ascending run rather
+    than two. The answer is the top_k positions, in ascending order."""
+    torch.set_default_device("cuda:0")
+    gen = torch.Generator(device="cuda").manual_seed(seq_len + top_k + num_rows)
+    logits = torch.zeros(num_rows, seq_len, device="cuda")
+    pos = torch.stack(
+        [
+            torch.randperm(seq_len, generator=gen, device="cuda")[:top_k]
+            for _ in range(num_rows)
+        ]
+    )
+    logits.scatter_(1, pos, 1.0)
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    expect = torch.sort(pos.to(torch.int32), dim=1).values
+    for _ in range(6):
+        assert torch.equal(_run_persistent_topk(logits, lengths, top_k), expect)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("seq_len", [8192, 40000])
 @pytest.mark.parametrize("num_ties", [2047, 2048, 2049, 4096, 4097, 16384, 16385])
 def test_persistent_topk_pivot_ties(seq_len: int, num_ties: int) -> None:
