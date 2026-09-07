@@ -5,13 +5,20 @@
 // activation dtype (half or __hip_bfloat16). Adapted from exllamav2's 4-bit
 // kernel (csrc/quantization/gptq/q_gemm.cu) with the following changes:
 //
-//   1. Direct write to the T-typed output via packed CAS-loop on a 64-bit
-//      word (atomic_add_pk4_{f16,bf16}). gfx11 has no native
-//      v_global_atomic_pk_add_{f16,bf16}, so the kernel emulates one with
-//      global_atomic_cmpswap_b64. This avoids the M*N*4-byte FP32 scratch
-//      buffer + memset + cast-pass that an fp32-accumulator design would
-//      need; the caller passes a zero-initialised T-typed output tensor
-//      and every block atomically adds its partial sum into it.
+//   1. Deterministic split-K epilogue. K is split across gridDim.z blocks;
+//      each block stores its FP32 block partial to a scratch tensor, and a
+//      separate pass reduces the z-slices in fixed ascending order with a
+//      single final cast to T (see launch_gemm_q4_deterministic). When
+//      gridDim.z == 1 each output element has exactly one writer and the
+//      kernel stores the rounded accumulator directly — no scratch, no
+//      reduce pass, no atomics.
+//      (Legacy design, pre-#54706: a packed CAS-loop atomic add on a 64-bit
+//      word emulating v_global_atomic_pk_add_{f16,bf16}, which gfx11 lacks.
+//      It narrowed every split partial to bf16/fp16 BEFORE accumulation, so
+//      the execution-dependent CAS completion order changed the rounded
+//      result for identical inputs. The CAS epilogue is kept below the
+//      partials branch for A/B comparison only; it requires a pre-zeroed
+//      output tensor.)
 //
 //   2. The bf16 path uses a dedicated bit-trick that avoids the fp16-only
 //      "upper nibble * 16" trick, which would overflow the 7-bit bf16
@@ -20,7 +27,8 @@
 //   3. Wave32 geometry sized for high CU saturation: THREADS_X=256
 //      (8 waves per block) and BLOCK_KN_SIZE=256, with each thread
 //      computing 4 N output columns. gridDim.z = K / BLOCK_KN_SIZE
-//      splits K and the output is atomically accumulated. fp16 uses
+//      splits K; the epilogue stores FP32 partials for the fixed-order
+//      reduce (see item 1). fp16 uses
 //      v_dot2_f32_f16 (__builtin_amdgcn_fdot2) for the inner dot;
 //      bf16 widens to fp32 (no v_pk_fma_bf16 on gfx11) and accumulates
 //      with v_fma_f32. M_COUNT ∈ {1,2,4,8} is selected at launch
@@ -174,13 +182,12 @@ __forceinline__ __device__ float dot22_8_f(float (&dq)[8],
 // Packed atomic-add via CAS-loop on a 64-bit word (4 fp16/bf16 lanes per CAS).
 // RDNA3 (gfx11) does NOT have native v_global_atomic_pk_add_f16 / _bf16 (those
 // landed on gfx940 / gfx1250 respectively), so this lowers to
-// global_atomic_cmpswap_b64 plus retry. We use this in the kernel epilogue to
-// write 4 output columns per row in a single atomic operation — half the
-// atomic instruction count and half the contention vs two 32-bit CAS calls.
-//
-// Writing directly to fp16/bf16 (instead of through an FP32 scratch buffer +
-// cast pass) saves M*N*4 bytes of allocation, the memset, and the epilogue
-// cast pass that an fp32-accumulator design would need.
+// global_atomic_cmpswap_b64 plus retry. This is the LEGACY (pre-#54706)
+// epilogue: the caller must pre-zero the output, and every split block
+// atomically adds its low-precision partial into it. Because the addition
+// happens in bf16/fp16 AFTER narrowing, the result depends on CAS completion
+// order — the nondeterminism PR #54706 fixes. Kept for A/B comparison with
+// the deterministic path; the shipped dispatch never selects it.
 //
 // 64-bit alignment: the kernel writes at `out + n` where n = offset_n + t*4
 // (always multiple of 4), and partition_weight_shape[1] is required to be a
@@ -588,11 +595,24 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     k += 32;  // 4 weight words * 8 nibbles = 32 K elements
   }
 
-  // Pack the 4 FP32 partial sums into 2 packed pairs and atomically add all
-  // four lanes in a single 64-bit CAS write directly to the T-typed output
-  // (caller pre-zeros it). On gfx11 the packed atomic is a CAS-loop, but with
-  // a single b64 op we halve the atomic instruction count vs two b32 CAS
-  // calls, AND save the FP32 buffer + memset + cast pass entirely.
+  // ---- Epilogue: three store modes, selected by launch shape ----
+  //
+  // partials != nullptr: deterministic split-K. Plain FP32 stores to
+  //   partials[(blockIdx.z * size_m + m) * size_n + n]
+  // (one writer per in-range slot; threads with n >= size_n returned before
+  // the epilogue and rows past size_m are skipped — exactly the slots the
+  // fixed-order reduce pass never reads). n is a multiple of 4 and
+  // size_n % 8 == 0, so the 4-lane store never crosses the right edge.
+  //
+  // partials == nullptr && gridDim.z == 1: single split block per output
+  //   element — direct store of the rounded accumulator. No scratch, no
+  //   reduce, no atomics; c may be left uninitialized (torch::empty).
+  //
+  // partials == nullptr && gridDim.z > 1: LEGACY pre-#54706 CAS epilogue
+  //   (A/B control only; never selected by launch_gemm_q4_deterministic).
+  //   Adds the narrowed 4-lane partial into c with one 64-bit CAS per 4
+  //   columns; REQUIRES a pre-zeroed output because the CAS adds into
+  //   whatever is already there.
   #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
     if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
@@ -606,6 +626,27 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
       continue;
     }
     T* out = c + (offset_m + m) * size_n + n;
+    if (gridDim.z == 1) {
+      // Single writer per element: round once and store the packed 4 lanes
+      // (8-byte aligned, see the note above) in one go.
+      if constexpr (std::is_same<T, half>::value) {
+        half2 packed[2] = {
+            __halves2half2(__float2half_rn(block_c[m][0]),
+                           __float2half_rn(block_c[m][1])),
+            __halves2half2(__float2half_rn(block_c[m][2]),
+                           __float2half_rn(block_c[m][3]))};
+        __builtin_memcpy(out, packed, sizeof(packed));
+      } else {
+        bf162_t packed[2];
+        packed[0].x = __float2bfloat16(block_c[m][0]);
+        packed[0].y = __float2bfloat16(block_c[m][1]);
+        packed[1].x = __float2bfloat16(block_c[m][2]);
+        packed[1].y = __float2bfloat16(block_c[m][3]);
+        __builtin_memcpy(out, packed, sizeof(packed));
+      }
+      continue;
+    }
+    // Legacy CAS-atomic epilogue: see the store-mode comment above.
     if constexpr (std::is_same<T, half>::value) {
       half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
                                  __float2half_rn(block_c[m][1]));
@@ -727,7 +768,9 @@ __global__ void reduce_partials_rdna3(const float* __restrict__ partials,
 //   scratch_bytes = z_count * TILE_M * size_n * 4
 // is independent of the caller's M (the scalar domain is M < 64, so a single
 // tile covers it). The PyTorch caching allocator (including its CUDA-graph
-// capture pool) owns scratch reuse and lifetime.
+// capture pool) owns scratch reuse and lifetime. When z_count == 1 the
+// kernel's direct-store epilogue (gridDim.z == 1) is already deterministic,
+// so the scratch allocation and the reduce pass are skipped entirely.
 template <typename T>
 void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
@@ -736,6 +779,12 @@ void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
                                   cudaStream_t stream) {
   constexpr int TILE_M = 64;  // single tile covers the scalar domain
   const int z_count = (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE;
+  if (z_count == 1) {
+    launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c, size_m,
+                   size_n, size_k, groups, use_v2_format,
+                   /*partials=*/nullptr, stream);
+    return;
+  }
   at::Tensor partials = at::empty(
       {z_count, std::min(TILE_M, size_m), size_n},
       at::TensorOptions().dtype(at::kFloat).device(
@@ -811,11 +860,17 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(b_scales.size(0) == groups,
               "b_scales must have same group count as qzeros");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales last dim must be N");
-  TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
+  TORCH_CHECK(size_n % 8 == 0,
+              "N must be a multiple of 8 (packed qzeros layout: 8 4-bit zero "
+              "points per uint32 along N; also keeps the 4-column epilogue "
+              "store in bounds)");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   // The deterministic epilogue writes every output element exactly once
-  // (reduce pass below), so c needs no zero-initialization.
+  // (reduce pass below — or the direct store when z_count == 1), so c needs
+  // no zero-initialization. This is a one-way door: the legacy CAS epilogue
+  // (see the kernel's store-mode comment) ADDS into c and would require
+  // torch::zeros here if it were ever re-selected.
   at::Tensor c = torch::empty({size_m, size_n}, opts);
 
   // Deterministic split-K: FP32 partials + fixed-order reduction (see
