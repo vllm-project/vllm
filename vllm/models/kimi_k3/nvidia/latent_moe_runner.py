@@ -132,7 +132,14 @@ class LatentMoERunner(MoERunner):
                     else 0
                 ),
                 dtype=norm.weight.dtype,
-                device=norm.weight.device,
+                device=(
+                    # Under meta-device init (weight cache IPC loader) the norm
+                    # weight has no real device yet; the tail op is a pure
+                    # compute kernel that lives on this rank's TP device.
+                    current_platform.current_device()
+                    if norm.weight.device.type == "meta"
+                    else norm.weight.device
+                ),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op

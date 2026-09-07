@@ -91,6 +91,12 @@ IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
     None: lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,
     "modelopt_fp4": lambda _quant_config: True,
+    # Kimi-K3 routed experts (mxfp4-pack): the MegaMoE experts keep their packed
+    # weights and scales as plain parameters and defer the DeepGEMM transform to
+    # forward(), so the exported tensors are complete. Any other mxfp4 method
+    # that repacks or drops parameters still fails closed at the engine's
+    # supports_pre_processed_weights guard.
+    "mxfp4": lambda _quant_config: True,
 }
 
 

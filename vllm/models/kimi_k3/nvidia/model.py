@@ -88,6 +88,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.model_executor.utils import is_weight_cache_export_mode
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -381,6 +382,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         if self._transformed_l1_weights is not None:
             return
 
+        # Weight cache IPC engine: the daemon already ran the DeepGEMM transform
+        # and shared the results as buffers. Reuse them zero-copy and drop the
+        # raw packed params so the loader does not allocate empty placeholders.
+        if getattr(self, "_mega_l1_packed", None) is not None:
+            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
+            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
+            self._drop_raw_mega_weights()
+            return
+
         self._check_runtime_supported()
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -406,6 +416,19 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 activation=self.activation,
             )
         )
+        # Loaded by the weight cache daemon: expose the transformed tensors as
+        # buffers so the engine maps them over IPC instead of recomputing them
+        # (recomputing would double the resident MoE weight memory).
+        if is_weight_cache_export_mode():
+            l1_packed, l1_scale = self._transformed_l1_weights
+            l2_packed, l2_scale = self._transformed_l2_weights
+            self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
+            self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
+            self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
+            self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
+        self._drop_raw_mega_weights()
+
+    def _drop_raw_mega_weights(self) -> None:
         self.w13_weight = None
         self.w13_weight_scale = None
         self.w2_weight = None
@@ -1701,6 +1724,12 @@ class KimiLinearForCausalLM(
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def process_weights_after_loading(self) -> None:
+        # Weight cache IPC path skips load_weights(), so drive the MegaMoE
+        # finalize here (invoked by the generic post-load hook) to assemble the
+        # shared transformed weights before any meta placeholders are allocated.
+        self.model.finalize_mega_moe_weights()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights)
@@ -1788,7 +1817,13 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if self._maybe_ignore_quant_config(quant_config) is not None:
+            # Under meta-device init (the weight cache IPC loader) the tower
+            # tensors are mapped/materialized by the loader afterwards, so
+            # moving them to a real device here would fail on meta storage.
+            tower_on_meta = any(p.is_meta for p in self.vision_tower.parameters())
+            if tower_on_meta:
+                pass
+            elif self._maybe_ignore_quant_config(quant_config) is not None:
                 self.vision_tower = self.vision_tower.to(device=self.device)
             else:
                 self.vision_tower = self.vision_tower.to(
@@ -1828,9 +1863,12 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            self.mm_projector = self.mm_projector.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            # Skip the device move under meta-device init (weight cache IPC
+            # loader); the loader maps/materializes these tensors afterwards.
+            if not any(p.is_meta for p in self.mm_projector.parameters()):
+                self.mm_projector = self.mm_projector.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
         self.quant_config = quant_config
         with self._mark_language_model(vllm_config):
@@ -2153,3 +2191,6 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
