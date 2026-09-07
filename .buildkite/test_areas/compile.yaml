@@ -56,6 +56,7 @@ steps:
   - tests/compile/passes/test_silu_mul_quant_fusion.py
   - tests/compile/passes/distributed/test_fusion_all_reduce.py
   - tests/compile/fullgraph/test_full_graph.py
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   commands:
     # b200 runners are limited, so we limit the tests to the minimum set only supported on Blackwell
     - nvidia-smi

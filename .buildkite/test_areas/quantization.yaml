@@ -62,5 +62,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   commands:
     - pytest -v -s models/quantization
