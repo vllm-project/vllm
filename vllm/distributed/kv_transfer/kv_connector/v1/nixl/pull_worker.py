@@ -532,6 +532,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Notify-only recvs must stay unreported (scheduler asserts).
             if awaiting_kvs:
                 self._recving_transfers.setdefault(request_id, [])
+            # Empty recvs that never registered a transfer (abort-before-
+            # schedule notify-only) must not stay in _recving_metadata: no
+            # handle will complete, and reporting them via get_finished
+            # trips the scheduler assert on a request it is not holding.
+            if request_id not in self._recving_transfers:
+                self._recving_metadata.pop(request_id, None)
             return True
 
         if not read_spec.block_ids_by_region:

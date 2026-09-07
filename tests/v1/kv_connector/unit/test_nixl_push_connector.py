@@ -44,6 +44,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
@@ -649,6 +652,79 @@ class TestPushWriterStartLoadKv:
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
+    def test_start_load_kv_empty_recv_does_not_persist_metadata(self):
+        """Abort-before-schedule empty recvs must not stay in
+        _recving_metadata: no WRITE will complete, so get_finished would
+        never pop them, and reporting them as finished_recving would trip
+        the scheduler assert on a request it is not holding."""
+        w = _StubWriterWorker.fresh()
+        w._send_heartbeats = lambda metadata: None
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
+
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_recv(
+            "req-abort",
+            [],
+            {
+                "remote_block_ids": (),
+                "remote_engine_id": "prefill-engine",
+                "remote_request_id": "prefill-req-abort",
+                "remote_host": "10.0.0.1",
+                "remote_port": 5601,
+            },
+        )
+        w.start_load_kv(meta)
+
+        assert "req-abort" not in w._recving_metadata
+        assert "req-abort" not in w._recving_transfers
+
+    def test_start_load_kv_repeated_empty_recvs_do_not_grow_metadata(self):
+        """Sequential empty recvs must not accumulate worker metadata."""
+        w = _StubWriterWorker.fresh()
+        w._send_heartbeats = lambda metadata: None
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
+
+        for i in range(8):
+            meta = NixlConnectorMetadata()
+            meta.add_new_req_to_recv(
+                f"req-{i}",
+                [],
+                {
+                    "remote_block_ids": (),
+                    "remote_engine_id": "prefill-engine",
+                    "remote_request_id": f"prefill-req-{i}",
+                    "remote_host": "10.0.0.1",
+                    "remote_port": 5601,
+                },
+            )
+            w.start_load_kv(meta)
+
+        assert w._recving_metadata == {}
+        assert dict(w._recving_transfers) == {}
+
+    def test_start_load_kv_nonempty_recv_still_tracks_metadata(self):
+        """A real D-side recv with local blocks is still tracked until the
+        producer WRITE completes."""
+        w = _StubWriterWorker.fresh()
+        w._send_heartbeats = lambda metadata: None
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
+
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_recv(
+            "req-live",
+            ([1, 2],),
+            {
+                "remote_block_ids": (),
+                "remote_engine_id": "prefill-engine",
+                "remote_request_id": "prefill-req-live",
+                "remote_host": "10.0.0.1",
+                "remote_port": 5601,
+            },
+        )
+        w.start_load_kv(meta)
+
+        assert "req-live" in w._recving_metadata
+
     @pytest.mark.parametrize("sharded", [False, True])
     def test_noncanonical_pcp_rank_only_pushes_distinct_shards(self, sharded):
         w = _StubWriterWorker.fresh()
@@ -1178,6 +1254,29 @@ class TestPushSchedulerNegative:
         assert "req-empty" not in sched._finished_request_blocks
         assert "req-empty" not in sched._newly_finished_push_blocks
         assert "req-empty" not in sched._reqs_need_send
+
+    def test_request_finished_aborted_remote_prefill_enqueues_empty_recv(
+        self,
+    ):
+        """A D-side request aborted before alloc still enqueues an empty recv
+        so the worker can release the prefiller, and consumes do_remote_prefill
+        so the recv is not re-issued."""
+        from vllm.v1.request import RequestStatus
+
+        sched = make_nixl_push_scheduler()
+        request = _make_request(request_id="req-abort")
+        request.status = RequestStatus.FINISHED_ABORTED
+
+        delay, ret = sched.request_finished(request, ([],))
+
+        assert delay is False
+        assert ret is None
+        assert "req-abort" in sched._reqs_need_recv
+        _, block_ids, _, awaiting_kvs = sched._reqs_need_recv["req-abort"]
+        assert not awaiting_kvs
+        assert block_ids == []
+        assert request.kv_transfer_params["do_remote_prefill"] is False
+        assert request.kv_transfer_params["remote_block_ids"] == ()
 
     def test_update_connector_output_unknown_request_is_noop(self):
         """Idempotent cleanup: clearing a request that was never staged
@@ -2144,3 +2243,69 @@ def test_push_handshake_rejects_different_block_sizes(
 
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
         worker._validate_remote_parallel_config(metadata)
+
+
+def _stub_pull_worker() -> NixlPullConnectorWorker:
+    """Minimal pull worker for the empty-recv notify path."""
+    w = object.__new__(NixlPullConnectorWorker)
+    w.transfer_topo = MagicMock()
+    remote_info = MagicMock()
+    remote_info.remote_block_size = 16
+    w.transfer_topo.get_engine_info.return_value = remote_info
+    w.transfer_topo.block_size_ratio.return_value = 1
+    w._remote_agents = {"eng": {(0, 0): "agent"}}
+    w.nixl_wrapper = MagicMock()
+    w.xfer_stats = MagicMock()
+    w._recving_transfers = {}
+    w._recving_metadata = {}
+    return w
+
+
+class TestPullEmptyRecv:
+    def test_empty_recv_drops_metadata_without_registering_transfer(self):
+        """Notify-only empty recvs must not stay in _recving_metadata.
+
+        No transfer handle is registered, so get_finished would never pop
+        them, and reporting them as done_recving would trip the scheduler
+        assert on a request it is not holding.
+        """
+        w = _stub_pull_worker()
+        w._recving_metadata["req"] = MagicMock()
+
+        w._read_blocks(
+            read_spec=ReadSpec(remote_rank=0, local_block_ids=(), remote_block_ids=()),
+            dst_engine_id="eng",
+            request_id="req",
+            remote_request_id="prefill-req",
+            local_xfer_side_handle=1,
+            local_dram_handle=None,
+            remote_xfer_side_handle=1,
+            expected_consumers=1,
+            awaiting_kvs=False,
+        )
+
+        w.nixl_wrapper.send_notif.assert_called_once()
+        assert "req" not in w._recving_metadata
+        assert "req" not in w._recving_transfers
+
+    def test_empty_recv_keeps_metadata_when_transfer_already_registered(self):
+        """A seeded empty transfer list (prefix-hit / DCP) still needs
+        metadata until get_finished reports the request."""
+        w = _stub_pull_worker()
+        w._recving_metadata["req"] = MagicMock()
+        w._recving_transfers["req"] = []
+
+        w._read_blocks(
+            read_spec=ReadSpec(remote_rank=0, local_block_ids=(), remote_block_ids=()),
+            dst_engine_id="eng",
+            request_id="req",
+            remote_request_id="prefill-req",
+            local_xfer_side_handle=1,
+            local_dram_handle=None,
+            remote_xfer_side_handle=1,
+            expected_consumers=1,
+            awaiting_kvs=False,
+        )
+
+        assert "req" in w._recving_metadata
+        assert w._recving_transfers["req"] == []
