@@ -11,17 +11,17 @@ MODELS = [
     (
         GenerateModelInfo("Qwen/Qwen2-VL-2B-Instruct", hf_ppl=9.810060501098633),
         28,
-        None,
+        {},
     ),
     (
         GenerateModelInfo("Qwen/Qwen2.5-VL-3B-Instruct", hf_ppl=22.17719078063965),
         28,
-        None,
+        {},
     ),
     (
         GenerateModelInfo("Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172),
         32,
-        None,
+        {},
     ),
     (
         GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),
