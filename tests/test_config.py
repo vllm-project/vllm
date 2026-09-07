@@ -396,9 +396,15 @@ def make_cudagraph_config(monkeypatch):
         ("DeepseekV4ForCausalLM", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
         ("GlmMoeDsaForCausalLM", True, False),
+        ("Qwen4ExpForCausalLM", False, True),
+        ("Qwen4ExpForCausalLM", True, False),
+        ("Qwen4ExpForConditionalGeneration", False, True),
+        ("Qwen4ExpForConditionalGeneration", True, False),
+        ("Qwen4ExpMTP", False, True),
+        ("Qwen4ExpMTP", True, False),
     ],
 )
-def test_dsa_breakable_cudagraph_platform_default(
+def test_breakable_cudagraph_platform_default(
     make_cudagraph_config, architecture, is_rocm, expected
 ):
     config = make_cudagraph_config(
@@ -603,6 +609,37 @@ def test_noncompiled_cudagraph_fallback_validates_explicit_modes(
     assert not breakable_enabled
     assert config.compilation_config.mode == compile_mode
     assert config.compilation_config.cudagraph_mode == expected_graph
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP"],
+)
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize(
+    "graph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE]
+)
+def test_rocm_qwen_preserves_compiled_piecewise_cudagraphs(
+    make_cudagraph_config, architecture, use_v2, graph_mode
+):
+    config = make_cudagraph_config(
+        architecture,
+        use_v2=use_v2,
+        compilation_mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=graph_mode,
+    )
+
+    breakable_enabled = VllmConfig._maybe_enable_breakable_cudagraph(config)
+    assert not breakable_enabled
+    assert config._piecewise_cudagraph_provider_available(
+        breakable_cudagraph_enabled=breakable_enabled
+    )
+    VllmConfig._normalize_unavailable_piecewise_cudagraphs(
+        config, breakable_cudagraph_enabled=breakable_enabled
+    )
+
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.cudagraph_mode == graph_mode
 
 
 @pytest.mark.parametrize(
