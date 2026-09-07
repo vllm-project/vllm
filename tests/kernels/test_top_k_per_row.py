@@ -1461,8 +1461,10 @@ def test_persistent_topk_degenerate_lengths(bad_len: int) -> None:
     assert torch.equal(
         out[3], torch.full((top_k,), -1, dtype=torch.int32, device="cuda")
     )
-    ref = _exact_topk_reference(logits, lengths, top_k)
-    assert torch.equal(out[0], ref[0])
+    # Every other row must still be exact: a degenerate row must not perturb the
+    # rows that share its launch.
+    ref = _exact_topk_reference(logits, lengths.clamp(0, seq_len), top_k)
+    assert torch.equal(out, ref)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")

@@ -342,10 +342,6 @@ void persistent_topk(const torch::stable::Tensor& logits,
 
   const int64_t num_rows = logits.size(0);
 
-  // Nothing to do, and the geometry below divides by quantities derived from
-  // the row count.
-  if (num_rows == 0) return;
-
   // Assumptions the kernel makes and used to take on trust.
   STD_TORCH_CHECK(logits.stride(1) == 1,
                   "logits must be row-contiguous (stride(1) == 1), got ",
@@ -369,6 +365,11 @@ void persistent_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(
       k == 512 || k == 1024 || k == 2048,
       "persistent_topk supports k=512, k=1024, or k=2048, got k=", k);
+
+  // Nothing to do, and the geometry below divides by quantities derived from
+  // the row count. Checked last so an empty batch still validates the contract
+  // rather than accepting calls a non-empty one would reject.
+  if (num_rows == 0) return;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       logits.get_device_index());
