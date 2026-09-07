@@ -750,14 +750,17 @@ def test_check_cgroup_memory_available_warns_on_low_headroom(monkeypatch):
 
     log_info.assert_not_called()
     log_warning.assert_called_once_with(
-        "Low cgroup memory headroom for %s: %.0f MiB required, %.0f MiB "
-        "available under the %.0f MiB limit (%.0f MiB current usage). "
-        "Increase the container memory limit or reduce the allocation size.",
+        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
+        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
+        "after allocation based on current usage; %s.",
         "mmap",
         600.0,
         512.0,
-        1024.0,
         512.0,
+        1024.0,
+        -88.0,
+        "current headroom is below the requested allocation; allocation "
+        "will still be attempted because cgroup usage may be reclaimable",
     )
 
 
@@ -768,20 +771,25 @@ def test_check_cgroup_memory_available_logs_preflight(monkeypatch):
         lambda: (1 << 30, 512 << 20),
     )
 
-    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
+    with (
+        mock.patch.object(cpu_resource_utils.logger, "info") as log_info,
+        mock.patch.object(cpu_resource_utils.logger, "warning") as log_warning,
+    ):
         check_cgroup_memory_available(256 << 20, "mmap")
 
     log_info.assert_called_once_with(
-        "Cgroup memory preflight passed for %s: %.0f MiB required, %.0f MiB "
-        "current usage, %.0f MiB available under %.0f MiB limit, %.0f MiB "
-        "estimated remaining after allocation.",
+        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
+        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
+        "after allocation based on current usage; %s.",
         "mmap",
         256.0,
         512.0,
         512.0,
         1024.0,
         256.0,
+        "current headroom meets the requested allocation",
     )
+    log_warning.assert_not_called()
 
 
 def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
