@@ -69,6 +69,7 @@ class VllmCuTeDSLJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         launch_spec: CuTeDSLLaunchSpec[CompileKeyT],
         _inputs: Mapping[str, Any],
     ) -> Any:
+        # (compile_key, args), optionally followed by output and epilogue.
         compile_key, launch_args = launch_spec[:2]
         executor = self._get_or_compile(compile_key)
         result = executor(*launch_args)
