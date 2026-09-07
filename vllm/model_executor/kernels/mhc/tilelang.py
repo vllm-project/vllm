@@ -282,7 +282,8 @@ def mhc_pre_tilelang(
         hc_sinkhorn_eps: sinkhorn epsilon
         hc_post_mult_value: post-mix multiplier value
         sinkhorn_repeat: number of sinkhorn iterations
-        n_splits: split-k factor;
+        n_splits: retained for the shared MHC operator API; the active GEMM
+            backend selects its split factor internally.
         norm_weight: optional RMSNorm weight, shape (hidden_size,), dtype
             torch.bfloat16. When provided, RMSNorm is fused into the
             layer_input write path of the big_fuse kernel.
@@ -426,6 +427,7 @@ def mhc_pre_broadcast_tilelang(
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
+    # n_splits is retained for the shared API; split selection is internal.
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
@@ -552,6 +554,9 @@ def mhc_fused_post_pre_tilelang(
     RMSNorm'd activation (fused into the kernel); otherwise it is the
     raw pre-norm activation as before.
 
+    ``n_splits`` and ``tile_n`` are retained for the shared MHC operator API.
+    The TileLang path selects both values internally from the runtime shape.
+
     Returns:
         residual_cur: post-mapped residual, shape (..., hc_mult, hidden_size)
         post_mix_cur: shape (..., hc_mult, 1)
@@ -596,9 +601,6 @@ def mhc_fused_post_pre_tilelang(
             norm_weight = norm_weight.to(torch.bfloat16)
         if not norm_weight.is_contiguous():
             norm_weight = norm_weight.contiguous()
-
-    assert n_splits in (1, 2, 4, 8)
-    assert hidden_size % n_splits == 0
 
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]

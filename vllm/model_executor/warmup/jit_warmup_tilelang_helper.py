@@ -5,12 +5,24 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, MutableMapping
+from abc import abstractmethod
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from functools import wraps
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 import torch
+
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+
+CompileKeyT = TypeVar("CompileKeyT")
+# (kernel_args, launch_args), optionally followed by keywords and a result.
+TileLangLaunchSpec: TypeAlias = (
+    tuple[tuple[Any, ...], tuple[Any, ...]]
+    | tuple[tuple[Any, ...], tuple[Any, ...], Mapping[str, Any] | None]
+    | tuple[tuple[Any, ...], tuple[Any, ...], Mapping[str, Any] | None, Any]
+)
 
 
 @contextmanager
@@ -53,6 +65,15 @@ class TileLangWarmupTensor:
             stride *= size
         return tuple(reversed(strides))
 
+    def new_empty(
+        self,
+        shape: tuple[int, ...],
+        *,
+        dtype: torch.dtype | None = None,
+        device: Any = None,
+    ) -> TileLangWarmupTensor:
+        return TileLangWarmupTensor(dtype or self.dtype, shape)
+
 
 def make_tilelang_warmup_tensor(
     dtype: torch.dtype,
@@ -89,3 +110,63 @@ def compile_tilelang(jit_impl: Any, *args: Any, **kwargs: Any) -> None:
 
     key, _ = parse_args(*args, **_tilelang_call_kwargs(kwargs))
     cache[key] = compiled
+
+
+class VllmTileLangJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
+    """TileLang owner whose runtime launch specification is reused for warmup."""
+
+    kernel: ClassVar[Any]
+    _warming_key: CompileKeyT | None = None
+
+    @abstractmethod
+    def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
+        """Return runtime-shaped inputs that reproduce one compile key."""
+        raise NotImplementedError
+
+    def compile(self, compile_key: CompileKeyT) -> None:
+        self._warming_key = compile_key
+        try:
+            cast(Callable[..., Any], self)(**self.warmup_inputs(compile_key))
+        finally:
+            self._warming_key = None
+
+    def launch(
+        self,
+        jit_impl: Any,
+        args: tuple[Any, ...],
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> Any:
+        call_kwargs = dict(kwargs or {})
+        if self._warming_key is not None:
+            return compile_tilelang(jit_impl, *args, **call_kwargs)
+        return jit_impl(*args, **call_kwargs)
+
+
+def kernel_launcher(
+    call_fn: Callable[..., TileLangLaunchSpec],
+) -> Callable[..., Any]:
+    """Launch TileLang from declarative kernel and runtime argument tuples."""
+
+    @wraps(call_fn)
+    def wrapper(
+        self: VllmTileLangJitKernel[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        launch_spec = call_fn(self, *args, **kwargs)
+        kernel_args, launch_args = launch_spec[:2]
+        if self._warming_key is not None and kernel_args not in (
+            (),
+            (self._warming_key,),
+        ):
+            raise RuntimeError(
+                "TileLang warmup inputs produced a different compile key: "
+                f"expected {self._warming_key!r}, got kernel arguments "
+                f"{kernel_args!r}"
+            )
+        launch_kwargs = launch_spec[2] if len(launch_spec) > 2 else None
+        output = launch_spec[3] if len(launch_spec) > 3 else None
+        result = self.launch(self.kernel(*kernel_args), launch_args, launch_kwargs)
+        return output if len(launch_spec) > 3 else result
+
+    return wrapper

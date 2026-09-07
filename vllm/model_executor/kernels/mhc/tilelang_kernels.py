@@ -10,13 +10,11 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-    zip_inputs,
-)
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
-    compile_tilelang,
+    TileLangLaunchSpec,
+    VllmTileLangJitKernel,
+    kernel_launcher,
     make_tilelang_warmup_tensor,
 )
 from vllm.platforms import current_platform
@@ -999,7 +997,7 @@ def hc_head_fuse_tilelang(
 
 
 class HcPrenormGemmTileLangKernel(
-    VllmJitKernel["HcPrenormGemmTileLangKernel.CompileKey"]
+    VllmTileLangJitKernel["HcPrenormGemmTileLangKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -1066,39 +1064,35 @@ class HcPrenormGemmTileLangKernel(
             n_out=n_out,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        num_tokens = 1
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        num_tokens = 128
+        if compile_key.use_block_m:
+            num_tokens = 1024
+        elif compile_key.n_thr == 1024:
+            num_tokens = 1
         hc_hidden_size = compile_key.hidden_size * compile_key.hc_mult
-        x = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hc_hidden_size)
-        fn = make_tilelang_warmup_tensor(
-            torch.float32, compile_key.n_out, hc_hidden_size
-        )
-        out = make_tilelang_warmup_tensor(
-            torch.float32,
-            compile_key.n_splits,
-            num_tokens,
-            compile_key.n_out,
-        )
-        sqrsum = make_tilelang_warmup_tensor(
-            torch.float32, compile_key.n_splits, num_tokens
-        )
-        kernel_arg = (
-            compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
-        )
-        compile_tilelang(
-            self.kernel(compile_key),
-            x,
-            fn,
-            out,
-            sqrsum,
-            compile_key.hidden_size,
-            compile_key.hc_mult,
-            compile_key.n_out,
-            compile_key.n_thr,
-            compile_key.tile_n,
-            kernel_arg,
+        return dict(
+            x=make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hc_hidden_size),
+            fn=make_tilelang_warmup_tensor(
+                torch.float32, compile_key.n_out, hc_hidden_size
+            ),
+            out=make_tilelang_warmup_tensor(
+                torch.float32,
+                compile_key.n_splits,
+                num_tokens,
+                compile_key.n_out,
+            ),
+            sqrsum=make_tilelang_warmup_tensor(
+                torch.float32, compile_key.n_splits, num_tokens
+            ),
+            hidden_size=compile_key.hidden_size,
+            hc_mult=compile_key.hc_mult,
+            tile_n=compile_key.tile_n,
+            n_thr=compile_key.n_thr,
+            n_splits=compile_key.n_splits,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         x: Any,
@@ -1110,7 +1104,7 @@ class HcPrenormGemmTileLangKernel(
         tile_n: int = 12,
         n_thr: int = 512,
         n_splits: int = 1,
-    ) -> Any:
+    ) -> TileLangLaunchSpec:
         assert out.shape[0] == n_splits
         assert sqrsum.shape[0] == n_splits
         assert x.shape[1] == hc_mult * hidden_size
@@ -1129,7 +1123,7 @@ class HcPrenormGemmTileLangKernel(
         kernel_arg = (
             compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
         )
-        return self.kernel(compile_key)(
+        return (compile_key,), (
             x,
             fn,
             out,
@@ -1144,7 +1138,7 @@ class HcPrenormGemmTileLangKernel(
 
 
 class MhcPreBigFuseTileLangKernel(
-    VllmJitKernel["MhcPreBigFuseTileLangKernel.CompileKey"]
+    VllmTileLangJitKernel["MhcPreBigFuseTileLangKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -1324,7 +1318,7 @@ class MhcPreBigFuseTileLangKernel(
             ),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         hc_mult3 = hc_mult * (2 + hc_mult)
@@ -1363,23 +1357,26 @@ class MhcPreBigFuseTileLangKernel(
             if compile_key.is_broadcast or compile_key.use_norm_weight
             else None
         )
-        compile_tilelang(
-            self.kernel(compile_key),
-            *self._kernel_args(
-                compile_key,
-                gemm_out_mul=gemm_out_mul,
-                gemm_out_sqrsum=gemm_out_sqrsum,
-                hc_scale=hc_scale,
-                hc_base=hc_base,
-                residual=residual,
-                residual_out=residual_out,
-                post_mix=post_mix,
-                comb_mix=comb_mix,
-                layer_input=layer_input,
-                norm_weight=norm_weight,
-            ),
+        return dict(
+            gemm_out_mul=gemm_out_mul,
+            gemm_out_sqrsum=gemm_out_sqrsum,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            residual=residual,
+            post_mix=post_mix,
+            comb_mix=comb_mix,
+            layer_input=layer_input,
+            rms_eps=compile_key.rms_eps,
+            hc_pre_eps=compile_key.hc_pre_eps,
+            hc_sinkhorn_eps=compile_key.hc_sinkhorn_eps,
+            hc_post_mult_value=compile_key.hc_post_mult_value,
+            sinkhorn_repeat=compile_key.sinkhorn_repeat,
+            residual_out=residual_out,
+            norm_weight=norm_weight,
+            norm_eps=compile_key.norm_eps,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         gemm_out_mul: Any,
@@ -1399,7 +1396,7 @@ class MhcPreBigFuseTileLangKernel(
         residual_out: Any | None = None,
         norm_weight: Any | None = None,
         norm_eps: float = 0.0,
-    ) -> Any:
+    ) -> TileLangLaunchSpec:
         is_broadcast = residual_out is not None
         use_norm_weight = norm_weight is not None
         n_splits = gemm_out_mul.shape[0]
@@ -1410,7 +1407,6 @@ class MhcPreBigFuseTileLangKernel(
         else:
             hc_mult = residual.shape[-2]
             hidden_size = residual.shape[-1]
-
         compile_key = self.dispatch(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
@@ -1425,8 +1421,9 @@ class MhcPreBigFuseTileLangKernel(
             norm_eps=norm_eps,
             broadcast_norm_eps=norm_eps,
         )
-        return self.kernel(compile_key)(
-            *self._kernel_args(
+        return (
+            (compile_key,),
+            self._kernel_args(
                 compile_key,
                 gemm_out_mul=gemm_out_mul,
                 gemm_out_sqrsum=gemm_out_sqrsum,
@@ -1438,11 +1435,11 @@ class MhcPreBigFuseTileLangKernel(
                 comb_mix=comb_mix,
                 layer_input=layer_input,
                 norm_weight=norm_weight,
-            )
+            ),
         )
 
 
-class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
+class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         hidden_size: int
@@ -1469,7 +1466,7 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
             hc_mult=hc_mult,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         num_tokens = 1
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
@@ -1486,17 +1483,17 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
         out = make_tilelang_warmup_tensor(
             torch.bfloat16, num_tokens, hc_mult, hidden_size
         )
-        compile_tilelang(
-            self.kernel(),
-            comb_mix,
-            residual,
-            post_mix,
-            layer_input,
-            out,
-            hc_mult,
-            hidden_size,
+        return dict(
+            comb_mix=comb_mix,
+            residual=residual,
+            post_mix=post_mix,
+            layer_input=layer_input,
+            out=out,
+            hc_mult=hc_mult,
+            hidden_size=hidden_size,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         comb_mix: Any,
@@ -1506,8 +1503,8 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
         out: Any,
         hc_mult: int,
         hidden_size: int,
-    ) -> Any:
-        return self.kernel()(
+    ) -> TileLangLaunchSpec:
+        return (), (
             comb_mix,
             residual,
             post_mix,
@@ -1518,7 +1515,9 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
         )
 
 
-class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"]):
+class MhcFusedTileLangKernel(
+    VllmTileLangJitKernel["MhcFusedTileLangKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         hidden_size: int
@@ -1562,8 +1561,8 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
             _when=lambda *, num_tokens: num_tokens <= 16,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        num_tokens = 1
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        num_tokens = 1 if compile_key.tile_n == 2 else 8
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         hc_mult3 = hc_mult * (2 + hc_mult)
@@ -1578,32 +1577,18 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
         weight_t = make_tilelang_warmup_tensor(
             torch.float32, hc_mult3, hc_mult, hidden_size
         )
-        yp_out = make_tilelang_warmup_tensor(
-            torch.float32, compile_key.n_splits, num_tokens, hc_mult3
-        )
-        rp_out = make_tilelang_warmup_tensor(
-            torch.float32, compile_key.n_splits, num_tokens
-        )
-        residual_out = make_tilelang_warmup_tensor(
-            torch.bfloat16, num_tokens, hc_mult, hidden_size
-        )
-        compile_tilelang(
-            self.kernel(),
-            comb_mix,
-            residual_in,
-            post_mix,
-            x_in,
-            weight_t,
-            yp_out,
-            rp_out,
-            residual_out,
-            hc_mult,
-            hidden_size,
-            hc_mult3,
-            tile_n=compile_key.tile_n,
-            split_k=compile_key.n_splits,
+        return dict(
+            comb_mix=comb_mix,
+            residual_in=residual_in,
+            post_mix=post_mix,
+            x_in=x_in,
+            weight_t=weight_t,
+            hc_mult=hc_mult,
+            hidden_size=hidden_size,
+            hc_mult3=hc_mult3,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         comb_mix: Any,
@@ -1614,46 +1599,40 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
         hc_mult: int,
         hidden_size: int,
         hc_mult3: int,
-    ) -> tuple[Any, Any, Any]:
+    ) -> TileLangLaunchSpec:
         num_tokens = residual_in.shape[0]
-        compile_key = self.dispatch(
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
+        tile_n = 2 if num_tokens < 8 else 3
+        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        yp_out = residual_in.new_empty(
+            (n_splits, num_tokens, hc_mult3), dtype=torch.float32
         )
-        yp_out = torch.empty(
-            compile_key.n_splits,
-            num_tokens,
-            hc_mult3,
-            dtype=torch.float32,
-            device=residual_in.device,
+        rp_out = residual_in.new_empty(
+            (n_splits, num_tokens), dtype=torch.float32
         )
-        rp_out = torch.empty(
-            compile_key.n_splits,
-            num_tokens,
-            dtype=torch.float32,
-            device=residual_in.device,
+        residual_out = residual_in.new_empty(residual_in.shape)
+        return (
+            (),
+            (
+                comb_mix,
+                residual_in,
+                post_mix,
+                x_in,
+                weight_t,
+                yp_out,
+                rp_out,
+                residual_out,
+                hc_mult,
+                hidden_size,
+                hc_mult3,
+            ),
+            dict(tile_n=tile_n, split_k=n_splits),
+            (yp_out, rp_out, residual_out),
         )
-        residual_out = torch.empty_like(residual_in)
-        self.kernel()(
-            comb_mix,
-            residual_in,
-            post_mix,
-            x_in,
-            weight_t,
-            yp_out,
-            rp_out,
-            residual_out,
-            hc_mult,
-            hidden_size,
-            hc_mult3,
-            tile_n=compile_key.tile_n,
-            split_k=compile_key.n_splits,
-        )
-        return yp_out, rp_out, residual_out
 
 
-class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.CompileKey"]):
+class HcHeadFusedTileLangKernel(
+    VllmTileLangJitKernel["HcHeadFusedTileLangKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         hidden_size: int
@@ -1695,7 +1674,7 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
             hc_eps=hc_eps,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         num_tokens = 1
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
@@ -1706,19 +1685,19 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
         hc_scale = make_tilelang_warmup_tensor(torch.float32, 1)
         hc_base = make_tilelang_warmup_tensor(torch.float32, hc_mult)
         out = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hidden_size)
-        compile_tilelang(
-            self.kernel(),
-            residual,
-            fn,
-            hc_scale,
-            hc_base,
-            out,
-            hidden_size,
-            compile_key.rms_eps,
-            compile_key.hc_eps,
-            hc_mult,
+        return dict(
+            residual=residual,
+            fn=fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            out=out,
+            hidden_size=hidden_size,
+            rms_eps=compile_key.rms_eps,
+            hc_eps=compile_key.hc_eps,
+            hc_mult=hc_mult,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         residual: Any,
@@ -1730,8 +1709,8 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
         rms_eps: float,
         hc_eps: float,
         hc_mult: int,
-    ) -> Any:
-        return self.kernel()(
+    ) -> TileLangLaunchSpec:
+        return (), (
             residual,
             fn,
             hc_scale,

@@ -403,6 +403,50 @@ class Glm5NextDecoderLayer(nn.Module):
             self.mhc_post_op = MHCPostOp()
             self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
 
+            if vllm_config.kernel_config.enable_jit_warmup:
+                from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                    _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                    _MHC_FUSED_TILELANG_KERNEL,
+                    _MHC_POST_TILELANG_KERNEL,
+                    _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+                )
+                from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+                include_pre_gemm_splits = is_deep_gemm_supported()
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                    use_norm_weight=True,
+                    include_pre_gemm_splits=include_pre_gemm_splits,
+                    include_broadcast_splits=False,
+                    rms_eps=float(self.rms_norm_eps),
+                    hc_pre_eps=float(self.hc_eps),
+                    hc_sinkhorn_eps=float(self.hc_eps),
+                    hc_post_mult_value=float(self.mhc_post_mult_value),
+                    sinkhorn_repeat=int(self.mhc_sinkhorn_iterations),
+                    norm_eps=(
+                        float(self.input_layernorm.variance_epsilon),
+                        float(self.post_attention_layernorm.variance_epsilon),
+                    ),
+                )
+                if not include_pre_gemm_splits:
+                    _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                        vllm_config,
+                        hidden_size=self.hidden_size,
+                        hc_mult=self.n,
+                        n_out=self.n * (2 + self.n),
+                    )
+                _MHC_POST_TILELANG_KERNEL.register_warmup(
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                )
+                _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                )
+
     def forward(
         self,
         positions: torch.Tensor,

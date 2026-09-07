@@ -12,10 +12,13 @@ if not current_platform.is_cuda_alike():
     pytest.skip("NVIDIA dispatch tests require CUDA", allow_module_level=True)
 
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+    HcHeadFusedTileLangKernel,
     HcPrenormGemmTileLangKernel,
     MhcFusedTileLangKernel,
+    MhcPostTileLangKernel,
     MhcPreBigFuseTileLangKernel,
 )
+from vllm.model_executor.warmup import jit_warmup_tilelang_helper
 
 
 @pytest.mark.parametrize(
@@ -131,3 +134,163 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
         n_splits=expected_n_splits,
         tile_n=expected_tile_n,
     )
+
+
+@pytest.mark.parametrize(
+    ("kernel", "compile_key"),
+    [
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=1024,
+                tile_n=4,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=True,
+                block_m=2,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=2,
+                use_norm_weight=True,
+                is_broadcast=False,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=1.0e-5,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=1,
+                use_norm_weight=False,
+                is_broadcast=False,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=0.0,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=2,
+                use_norm_weight=True,
+                is_broadcast=True,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=1.0e-5,
+            ),
+        ),
+        (
+            MhcPostTileLangKernel(),
+            MhcPostTileLangKernel.CompileKey(hidden_size=4096, hc_mult=4),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=3,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=8,
+                tile_n=2,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=8192,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=2,
+            ),
+        ),
+        (
+            HcHeadFusedTileLangKernel(),
+            HcHeadFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                rms_eps=1.0e-6,
+                hc_eps=2.0e-6,
+            ),
+        ),
+    ],
+)
+def test_tilelang_warmup_inputs_reproduce_compile_key(
+    monkeypatch: pytest.MonkeyPatch,
+    kernel: Any,
+    compile_key: Any,
+) -> None:
+    compiled: list[Any] = []
+    single_kernel = isinstance(
+        kernel,
+        (MhcPostTileLangKernel, MhcFusedTileLangKernel, HcHeadFusedTileLangKernel),
+    )
+    expected_kernel = kernel.kernel() if single_kernel else kernel.kernel(compile_key)
+    if single_kernel:
+        monkeypatch.setattr(
+            kernel,
+            "dispatch",
+            lambda **kwargs: pytest.fail("single-kernel launch must not dispatch"),
+        )
+    monkeypatch.setattr(
+        jit_warmup_tilelang_helper,
+        "compile_tilelang",
+        lambda jit_impl, *args, **kwargs: compiled.append(jit_impl),
+    )
+
+    kernel.compile(compile_key)
+
+    assert compiled == [expected_kernel]
