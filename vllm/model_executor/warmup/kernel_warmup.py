@@ -20,9 +20,6 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
-from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
-    fa4_cutedsl_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -34,12 +31,17 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
+)
+from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
+    spec_decode_rejection_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -146,6 +148,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    qwen_vl_triton_warmup(worker.model_runner)
+    mamba_triton_warmup(worker.model_runner)
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
@@ -162,7 +166,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        fa4_cutedsl_warmup(worker)
+        spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
