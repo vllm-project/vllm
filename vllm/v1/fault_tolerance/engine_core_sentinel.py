@@ -17,7 +17,6 @@ from torch.distributed.distributed_c10d import Backend, _get_default_timeout
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import (
-    get_cpu_distributed_timeout_or_none,
     init_gloo_process_group,
 )
 from vllm.logger import init_logger
@@ -241,9 +240,11 @@ class EngineCoreSentinel:
         num_clients: int,
     ) -> None:
         """Rebuild dp_store when the old store master was removed."""
-        timeout = get_cpu_distributed_timeout_or_none()
-        if timeout is None:
-            timeout = timedelta(seconds=self.engine_recovery_timeout_sec)
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            timeout = timedelta(seconds=timeout_seconds)
+        else:
+            timeout = _get_default_timeout(Backend.GLOO)
         engine = cast("DPEngineCoreProc", self.engine)
         engine.dp_store = TCPStore(
             host,
@@ -381,17 +382,20 @@ class EngineCoreSentinel:
             )[0],
         }
 
-        stateless_destroy_torch_distributed_process_group(engine.dp_group)
         prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
-        timeout = get_cpu_distributed_timeout_or_none()
-        if timeout is None:
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            timeout = timedelta(seconds=timeout_seconds)
+        else:
             timeout = _get_default_timeout(Backend.GLOO)
-        engine.dp_group = init_gloo_process_group(
+        new_group = init_gloo_process_group(
             prefix_store=prefix_store,
             group_rank=dense_rank,
             group_size=dense_size,
             timeout=timeout,
         )
+        stateless_destroy_torch_distributed_process_group(engine.dp_group)
+        engine.dp_group = new_group
         return worker_params
 
     def _coordinate_ports(
