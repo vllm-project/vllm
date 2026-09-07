@@ -147,6 +147,7 @@ class _StoredBlocks:
     event: BlockStored
     keys: tuple[_BlockKey, ...]
     active_keys: set[_BlockKey]
+    parent_key: _BlockKey | None
 
 
 class _KVCacheState:
@@ -158,6 +159,7 @@ class _KVCacheState:
         self._active_stores: dict[_BlockKey, int] = {}
         self._latest_stores: dict[_BlockKey, int] = {}
         self._keys_by_hash: dict[ExternalBlockHash, set[_BlockKey]] = {}
+        self._dependents: dict[_BlockKey, set[int]] = {}
 
     @staticmethod
     def _key(
@@ -180,7 +182,6 @@ class _KVCacheState:
                 self._store(event)
             elif isinstance(event, BlockRemoved):
                 self._remove(event)
-        self._collect_unused_stores()
 
     def clear(self) -> None:
         self._next_store_id = 0
@@ -188,6 +189,7 @@ class _KVCacheState:
         self._active_stores.clear()
         self._latest_stores.clear()
         self._keys_by_hash.clear()
+        self._dependents.clear()
 
     def snapshot_events(
         self,
@@ -200,7 +202,7 @@ class _KVCacheState:
         for stored in ordered_stores:
             event = stored.event
             removed_hashes = [
-                key[0] for key in stored.keys if key not in stored.active_keys
+                key[0] for key in stored.keys if key not in self._active_stores
             ]
             if removed_hashes:
                 events.append(
@@ -228,17 +230,37 @@ class _KVCacheState:
         if not keys:
             return
 
+        replaced_store_ids = {
+            store_id
+            for key in keys
+            if (store_id := self._latest_stores.get(key)) is not None
+        }
         for key in keys:
-            self._deactivate(key)
+            self._deactivate(key, collect=False)
 
         store_id = self._next_store_id
         self._next_store_id += 1
-        stored = _StoredBlocks(event, keys, set(keys))
+        parent_key = (
+            self._key(
+                event.parent_block_hash,
+                event.medium,
+                event.group_idx,
+                event.locality,
+                event.ownership,
+            )
+            if event.parent_block_hash is not None
+            else None
+        )
+        stored = _StoredBlocks(event, keys, set(keys), parent_key)
         self._stores[store_id] = stored
         for key in keys:
             self._active_stores[key] = store_id
             self._latest_stores[key] = store_id
             self._keys_by_hash.setdefault(key[0], set()).add(key)
+        if parent_key is not None:
+            self._dependents.setdefault(parent_key, set()).add(store_id)
+        for replaced_store_id in replaced_store_ids:
+            self._collect_store(replaced_store_id)
 
     def _remove(self, event: BlockRemoved) -> None:
         for block_hash in event.block_hashes:
@@ -254,7 +276,7 @@ class _KVCacheState:
                     continue
                 self._deactivate(key)
 
-    def _deactivate(self, key: _BlockKey) -> None:
+    def _deactivate(self, key: _BlockKey, *, collect: bool = True) -> None:
         store_id = self._active_stores.pop(key, None)
         if store_id is None:
             return
@@ -266,37 +288,39 @@ class _KVCacheState:
 
         stored = self._stores[store_id]
         stored.active_keys.remove(key)
+        if collect:
+            self._collect_store(store_id)
 
     def _parent_store_id(self, stored: _StoredBlocks) -> int | None:
-        event = stored.event
-        if event.parent_block_hash is None:
+        if stored.parent_key is None:
             return None
-        parent_key = self._key(
-            event.parent_block_hash,
-            event.medium,
-            event.group_idx,
-            event.locality,
-            event.ownership,
-        )
-        return self._latest_stores.get(parent_key)
+        return self._latest_stores.get(stored.parent_key)
 
-    def _collect_unused_stores(self) -> None:
-        required = set(self._active_stores.values())
-        pending = list(required)
+    def _collect_store(self, store_id: int) -> None:
+        pending = [store_id]
         while pending:
             store_id = pending.pop()
-            parent_id = self._parent_store_id(self._stores[store_id])
-            if parent_id is not None and parent_id not in required:
-                required.add(parent_id)
-                pending.append(parent_id)
-
-        for store_id in tuple(self._stores):
-            if store_id in required:
+            stored = self._stores.get(store_id)
+            if stored is None or stored.active_keys:
                 continue
-            stored = self._stores.pop(store_id)
+            if any(
+                self._latest_stores.get(key) == store_id and self._dependents.get(key)
+                for key in stored.keys
+            ):
+                continue
+
+            del self._stores[store_id]
             for key in stored.keys:
                 if self._latest_stores.get(key) == store_id:
                     del self._latest_stores[key]
+            if stored.parent_key is not None:
+                dependents = self._dependents[stored.parent_key]
+                dependents.remove(store_id)
+                if not dependents:
+                    del self._dependents[stored.parent_key]
+                parent_id = self._latest_stores.get(stored.parent_key)
+                if parent_id is not None:
+                    pending.append(parent_id)
 
     def _ordered_stores(self) -> list[_StoredBlocks]:
         roots: deque[int] = deque()
