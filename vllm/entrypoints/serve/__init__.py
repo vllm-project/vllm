@@ -27,6 +27,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_lora_router(app)
 
+    from vllm.entrypoints.serve.kv_events.api_router import (
+        attach_router as attach_kv_events_router,
+    )
+
+    attach_kv_events_router(app)
+
     from vllm.entrypoints.serve.profile.api_router import (
         attach_router as attach_profile_router,
     )
