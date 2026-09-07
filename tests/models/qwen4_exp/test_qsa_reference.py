@@ -509,6 +509,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         use_fused_pre_indexer=False,
         index_n_heads=1,
         index_head_dim=64,
+        indexer_dtype=torch.bfloat16,
         q_layernorm=norm,
         k_layernorm=norm,
         rotary_emb=rope,
