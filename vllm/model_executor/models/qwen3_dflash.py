@@ -407,8 +407,11 @@ class DFlashQwen3Model(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-            ".gate_proj": (".gate_up_proj", 0),
-            ".up_proj": (".gate_up_proj", 1),
+            # Routed expert weights are handled separately by the MoE loader.
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_expert.gate_proj": (".shared_expert.gate_up_proj", 0),
+            ".shared_expert.up_proj": (".shared_expert.gate_up_proj", 1),
         },
     )
 
