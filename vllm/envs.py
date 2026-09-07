@@ -1094,7 +1094,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
-    # Default: 512 MB
+    # Default: 512 MiB. When unset on an integrated (unified-memory) GPU such as
+    # GB10 / DGX Spark the runtime uses 64 MiB instead (see
+    # vllm.v1.attention.backends.mla.indexer.sparse_indexer_max_logits_bytes).
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
     ),

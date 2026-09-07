@@ -9,7 +9,6 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
@@ -879,7 +878,11 @@ def rocm_aiter_sparse_attn_indexer(
         # (decode). Prefill logits are bounded by
         # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
         # split_indexer_prefill_chunks; decode logits are smaller.
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        from vllm.v1.attention.backends.mla.indexer import (
+            sparse_indexer_max_logits_bytes,
+        )
+
+        max_logits_elems = sparse_indexer_max_logits_bytes()
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
