@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cuteDSL low-latency router GEMM (dot-product + split-K)."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -57,15 +59,15 @@ def _can_precompile(a, b):
 
 def _gemm(a, b):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        _LL_BF16_GEMM_C1_PDL_KERNEL,
         _LL_BF16_GEMM_KERNEL,
     )
 
+    kernel = _LL_BF16_GEMM_C1_PDL_KERNEL if a.shape[0] == 1 else _LL_BF16_GEMM_KERNEL
     if _can_precompile(a, b):
-        compile_key = _LL_BF16_GEMM_KERNEL.dispatch(
-            M=a.shape[0], K=a.shape[1], N=b.shape[0]
-        )
-        _LL_BF16_GEMM_KERNEL.compile(compile_key)
-    return _LL_BF16_GEMM_KERNEL(a, b)
+        compile_key = kernel.dispatch(M=a.shape[0], K=a.shape[1], N=b.shape[0])
+        kernel.compile(compile_key)
+    return kernel(a, b)
 
 
 def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
@@ -81,8 +83,8 @@ def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
         calls.append(("c1_pdl", hidden_states.shape[0]))
         return hidden_states
 
-    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_kernel", default_kernel)
-    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_c1_pdl_kernel", c1_pdl_kernel)
+    monkeypatch.setattr(ll_bf16, "_LL_BF16_GEMM_KERNEL", default_kernel)
+    monkeypatch.setattr(ll_bf16, "_LL_BF16_GEMM_C1_PDL_KERNEL", c1_pdl_kernel)
     weight = torch.empty(4, 8, device="cuda", dtype=torch.bfloat16)
 
     ll_bf16.ll_bf16_gemm(torch.empty(1, 8, device="cuda", dtype=torch.bfloat16), weight)
@@ -572,12 +574,15 @@ def test_invalid_output_dtype():
 
 def test_cache_miss_compiles_and_caches_dotprod():
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import LLBf16Gemm
+    from vllm.platforms import current_platform
 
     torch.manual_seed(42)
     a = torch.randn(3, 64, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
     kernel = LLBf16Gemm()
-    compile_key = kernel.dispatch(M=3, K=64, N=17)
+    compile_key = kernel.dispatch(
+        M=3, K=64, N=17, use_pdl=current_platform.is_arch_support_pdl()
+    )
 
     kernel(a, b)
 
@@ -613,13 +618,14 @@ def test_warmup_keys_cover_router_compile_keys(monkeypatch):
         kernel.CompileKey(backend="dotprod", m=4, k=14400, bs=128),
         kernel.CompileKey(backend="splitk", split_k=8, num_stages=3),
     ]
-    assert (
-        kernel.get_warmup_keys(
-            shapes=((7168, 384), (14400, 256)),
-            m_values=range(1, 17),
-        )
-        == expected
+    warmed_keys = kernel.get_warmup_keys(
+        shapes=((7168, 384), (14400, 256)),
+        m_values=range(1, 17),
     )
+
+    assert set(warmed_keys) == {
+        replace(key, use_pdl=use_pdl) for key in expected for use_pdl in (False, True)
+    }
 
 
 if __name__ == "__main__":

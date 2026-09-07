@@ -18,7 +18,7 @@ from typing import Any
 import cutlass
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import BFloat16, Float32, Int32, Int64, Uint32, cute
+from cutlass import BFloat16, Float32, Int32, Int64, Uint32, const_expr, cute
 from cutlass._mlir.dialects import llvm
 from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -26,17 +26,20 @@ from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
+    kernel_launcher,
 )
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -95,7 +98,7 @@ def _decompose_fp32x2_to_3xbf16x2(
     )
 
 
-class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"]):
+class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.CompileKey"]):
     block_m = 128
     block_k = 64
     num_stages = 2
@@ -105,6 +108,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
     class CompileKey:
         bn: int
         k: int
+        use_pdl: bool
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -113,6 +117,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         BK = BF16x3RouterGemmKernel.block_k
         num_stages_value = BF16x3RouterGemmKernel.num_stages
         num_warps = BF16x3RouterGemmKernel.num_warps
+        use_pdl = compile_key.use_pdl
         cta_tile = (BN, BM, BK)
 
         @cute.jit
@@ -190,7 +195,8 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
                 cpasync.prefetch_descriptor(X_tma.atom)
                 cpasync.prefetch_descriptor(W_tma.atom)
             cute.arch.sync_threads()
-            cute.arch.griddepcontrol_wait()
+            if const_expr(use_pdl):
+                cute.arch.griddepcontrol_wait()
 
             if warp_id == 9:
                 # TMA warp
@@ -321,7 +327,8 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
                 cute.arch.barrier(barrier_id=BAR_EPI, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
 
-                cute.arch.griddepcontrol_launch_dependents()
+                if const_expr(use_pdl):
+                    cute.arch.griddepcontrol_launch_dependents()
 
                 WIDTH = 8
                 for i in cutlass.range_constexpr(BN // WIDTH):
@@ -367,7 +374,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
                 grid=(grid_m, grid_n, split_k),
                 block=(num_warps * 32, 1, 1),
                 stream=stream,
-                use_pdl=True,
+                use_pdl=use_pdl,
             )
 
         return host_entrypoint
@@ -377,11 +384,12 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         *,
         num_tokens: int,
         K: int,
+        use_pdl: bool,
     ) -> CompileKey:
         # next power of 2 within 8 and 128
         raw_BN = triton.next_power_of_2(num_tokens)
         BN = 8 if raw_BN < 8 else 128 if raw_BN > 128 else raw_BN
-        return self.CompileKey(bn=BN, k=K)
+        return self.CompileKey(bn=BN, k=K, use_pdl=use_pdl)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         if not vllm_config.kernel_config.enable_bf16x3_router_gemm:
@@ -396,55 +404,53 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         return self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             K=K,
+            use_pdl=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         N = cute.sym_int()
         M = cute.sym_int()
         SPLIT_K = cute.sym_int()
-        X = make_fake_tensor(BFloat16, (N, compile_key.k), divisibility=8)
-        W = make_fake_tensor(Float32, (M, compile_key.k), divisibility=4)
-        out = make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=1)
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
-            X,
-            W,
-            out,
+        return (
+            make_fake_tensor(BFloat16, (N, compile_key.k), divisibility=8),
+            make_fake_tensor(Float32, (M, compile_key.k), divisibility=4),
+            make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=1),
             Int32(1),
         )
 
-    def __call__(self, X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    @kernel_launcher
+    def __call__(
+        self, X: torch.Tensor, W: torch.Tensor
+    ) -> CuTeDSLLaunchSpec[CompileKey]:
         N, K = X.shape
         M, _ = W.shape
         num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
-        compile_key = self.dispatch(num_tokens=N, K=K)
+        compile_key = self.dispatch(
+            num_tokens=N, K=K, use_pdl=current_platform.is_arch_support_pdl()
+        )
 
         k_tiles = math_utils.cdiv(K, self.block_k)
         grid_m = math_utils.cdiv(M, self.block_m)
         grid_n = math_utils.cdiv(N, compile_key.bn)
-        base_ctas = grid_m * grid_n
-        split_k = min(k_tiles, max(1, num_sms // base_ctas))
-
-        compiled = self._get_or_compile(
-            compile_key,
-            runtime_context={
-                "X_shape": tuple(X.shape),
-                "W_shape": tuple(W.shape),
-                "split_k": split_k,
-            },
+        split_k = min(k_tiles, max(1, num_sms // (grid_m * grid_n)))
+        partials = X.new_empty(split_k, N, M, dtype=torch.float32)
+        out = (
+            partials.squeeze(0)
+            if split_k == 1
+            else X.new_empty(N, M, dtype=torch.float32)
         )
 
-        partials = X.new_empty(split_k, N, M, dtype=torch.float32)
-        compiled(X, W, partials, split_k)
-        if split_k == 1:
-            return partials.squeeze(0)
+        def epilogue() -> torch.Tensor:
+            if split_k > 1:
+                _BF16X3_SPLITK_REDUCE_KERNEL(partials, out)
+            return out
 
-        out = X.new_empty(N, M, dtype=torch.float32)
-        _BF16X3_SPLITK_REDUCE_KERNEL(partials, out)
-        return out
+        return (
+            compile_key,
+            (X, W, partials, split_k),
+            out,
+            epilogue,
+        )
 
 
 class BF16x3SplitKReduceKernel(
@@ -453,10 +459,13 @@ class BF16x3SplitKReduceKernel(
     @dataclass(frozen=True)
     class CompileKey:
         m: int
+        n: int
+        split_stride: int
+        k_splits: int
         bn: int
         bm: int
         bs: int
-        use_pdl: bool
+        launch_pdl: bool
 
     @staticmethod
     @triton.jit
@@ -470,7 +479,7 @@ class BF16x3SplitKReduceKernel(
         BN: tl.constexpr,
         BM: tl.constexpr,
         BS: tl.constexpr,
-        USE_PDL: tl.constexpr,
+        launch_pdl: tl.constexpr,
     ):
         pid_n = tl.program_id(0)
         pid_m = tl.program_id(1)
@@ -478,7 +487,7 @@ class BF16x3SplitKReduceKernel(
         offs_m = pid_m * BM + tl.arange(0, BM)
         offs_s = tl.arange(0, BS)
 
-        if USE_PDL:
+        if launch_pdl:
             tl.extra.cuda.gdc_wait()
             tl.extra.cuda.gdc_launch_dependents()
 
@@ -504,15 +513,33 @@ class BF16x3SplitKReduceKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        N: int,
         M: int,
         split_k: int,
-        USE_PDL: bool,
+        launch_pdl: bool,
     ) -> CompileKey:
-        BS = 1 << (split_k - 1).bit_length()
+        BS = 2 ** (split_k - 1).bit_length()
         raw_BN = 32 // BS
         BN = 1 if BS >= 8 else 16 if raw_BN > 16 else raw_BN
         BM = 32 if BS >= 64 else 256 if BS >= 8 else 32
-        return self.CompileKey(m=M, bn=BN, bm=BM, bs=BS, use_pdl=USE_PDL)
+        # Keep the representative in the same BS bucket and Triton scalar class.
+        k_splits = (
+            1
+            if split_k == 1
+            else ((BS // 2 // 16) + 1) * 16
+            if split_k % 16 == 0
+            else BS // 2 + 1
+        )
+        return self.CompileKey(
+            m=M,
+            n=triton_scalar_specialization_rep(N),
+            split_stride=triton_scalar_specialization_rep(N * M),
+            k_splits=k_splits,
+            bn=BN,
+            bm=BM,
+            bs=BS,
+            launch_pdl=launch_pdl,
+        )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         if not vllm_config.kernel_config.enable_bf16x3_router_gemm:
@@ -520,48 +547,64 @@ class BF16x3SplitKReduceKernel(
         M = vllm_config.model_config.hf_config.n_routed_experts
         K = vllm_config.model_config.hf_config.hidden_size
         max_split_k = math_utils.cdiv(K, 64)
-        if M <= 0 or max_split_k <= 0:
+        max_tokens = min(vllm_config.scheduler_config.max_num_batched_tokens, 16)
+        if M <= 0 or max_split_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
+            N=WarmupIntRange(1, max_tokens + 1),
             M=M,
             split_k=WarmupIntRange(1, max_split_k + 1),
-            USE_PDL=True,
+            launch_pdl=(False, True),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         return dict(
             partials=TritonWarmupTensor(
                 torch.float32,
-                shape=(compile_key.bs, compile_key.bn, compile_key.m),
+                shape=(compile_key.k_splits, compile_key.n, compile_key.m),
                 strides=(
-                    triton_scalar_specialization_rep(compile_key.m),
+                    compile_key.split_stride,
                     compile_key.m,
                     1,
                 ),
             ),
             out=TritonWarmupTensor(
                 torch.float32,
-                shape=(compile_key.bn, compile_key.m),
+                shape=(compile_key.n, compile_key.m),
             ),
+            launch_pdl=compile_key.launch_pdl,
         )
 
     @kernel_launcher
-    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> LaunchSpec:
+    def __call__(
+        self,
+        partials: torch.Tensor,
+        out: torch.Tensor,
+        launch_pdl: bool | None = None,
+    ) -> LaunchSpec:
         split_k, N, M = partials.shape
-        split_stride = partials.stride(0)
-        compile_key = self.dispatch(M=M, split_k=split_k, USE_PDL=True)
-        grid = (triton.cdiv(N, compile_key.bn), triton.cdiv(M, compile_key.bm))
+        if launch_pdl is None:
+            launch_pdl = current_platform.is_arch_support_pdl()
+        compile_key = self.dispatch(
+            N=N,
+            M=M,
+            split_k=split_k,
+            launch_pdl=launch_pdl,
+        )
+        grid = (
+            triton.cdiv(N, compile_key.bn),
+            triton.cdiv(M, compile_key.bm),
+        )
         return grid, dict(
             N=N,
             M=M,
-            split_stride=split_stride,
+            split_stride=partials.stride(0),
             k_splits=split_k,
             BN=compile_key.bn,
             BM=compile_key.bm,
             BS=compile_key.bs,
-            USE_PDL=compile_key.use_pdl,
             num_warps=4,
-            launch_pdl=True,
+            launch_pdl=compile_key.launch_pdl,
         )
 
 

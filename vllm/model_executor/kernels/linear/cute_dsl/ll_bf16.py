@@ -112,12 +112,6 @@ def _cute():
     return _cute_ctx
 
 
-def _use_pdl() -> bool:
-    from vllm.platforms import current_platform
-
-    return current_platform.is_arch_support_pdl()
-
-
 class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
     # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
@@ -133,6 +127,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         bs: int = 0
         split_k: int = 0
         num_stages: int = 0
+        use_pdl: bool = False
         prefetch_pdl_weights: bool = False
 
     @staticmethod
@@ -146,7 +141,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
                 num_stages=compile_key.num_stages,
                 num_dma_warps=4,
                 split_k=compile_key.split_k,
-                use_pdl=_use_pdl(),
+                use_pdl=compile_key.use_pdl,
             )
 
         from ._ll_bf16_dotprod import LLBf16Dotprod
@@ -154,12 +149,12 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return LLBf16Dotprod(
             k=compile_key.k,
             bs=compile_key.bs,
-            use_pdl=_use_pdl(),
+            use_pdl=compile_key.use_pdl,
             prefetch_pdl_weights=compile_key.prefetch_pdl_weights,
         )
 
     def dispatch(  # type: ignore[override]
-        self, *, M: int, K: int, N: int
+        self, *, M: int, K: int, N: int, use_pdl: bool = False
     ) -> CompileKey:
         tuned_configs = _arch_tuned_configs()
         is_dotprod = M <= _DEFAULT_DOTPROD_MAX_M or K < 2048
@@ -174,6 +169,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             bs=bs if is_dotprod else 0,
             split_k=0 if is_dotprod else splitk_config[0],
             num_stages=0 if is_dotprod else splitk_config[1],
+            use_pdl=use_pdl,
             prefetch_pdl_weights=(self.prefetch_pdl_weights if is_dotprod else False),
         )
 
@@ -191,6 +187,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(*shape_rows),
             M=m_options,
+            use_pdl=(False, True),
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -301,7 +298,11 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
 
         M, K = hidden_states.shape
         N = router_weight.shape[0]
-        compile_key = self.dispatch(M=M, K=K, N=N)
+        from vllm.platforms import current_platform
+
+        compile_key = self.dispatch(
+            M=M, K=K, N=N, use_pdl=current_platform.is_arch_support_pdl()
+        )
         runtime_context = {"M": M, "K": K, "N": N}
         compiled = self._get_or_compile(
             compile_key,
