@@ -662,7 +662,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -680,7 +680,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             post = None
             comb = None
 
-        full_num_tokens = positions.shape[0]
+        # Token count before sequence-parallel sharding; positions may be
+        # (3, num_tokens) under M-RoPE, so take it from the hidden states.
+        full_num_tokens = hidden_states.shape[0]
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
@@ -705,7 +707,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             # PP is gated off for GLM-5.3-Flash (no make_empty_intermediate_tensors),
-            # so this branch is not exercised. post/comb are the deferred
+            # so this branch is not exercised. Auxiliary hidden states are not
+            # relayed across PP ranks either (supports_aux_hidden_states_over_pp
+            # stays False, so the runner rejects EAGLE-3 / DFlash with PP > 1). post/comb are the deferred
             # hc_post state of this rank's last mHC layer; a future PP path
             # would need to propagate them, but for now they are dropped (the
             # receiving rank's first layer would fall back to standalone pre).
@@ -970,7 +974,7 @@ class Glm5NextForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
