@@ -115,7 +115,9 @@ def _multi_region(
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
-            unlink_owner=rank == 0,
+            # These workers intentionally construct without a barrier.  The
+            # owner must therefore be assigned by the last opener, not rank 0.
+            unlink_owner=False,
         )
         for rank in range(num_workers)
     ]
@@ -147,7 +149,7 @@ def _race_construct(
                 rank=rank,
                 kv_bytes_per_chunk=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
-                unlink_owner=rank == 0,
+                unlink_owner=False,
             )
         except Exception as e:
             errors.append(e)
@@ -182,7 +184,7 @@ def _mp_race_construct_and_write(
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
-            unlink_owner=rank == 0,
+            unlink_owner=False,
         )
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
@@ -719,7 +721,7 @@ def test_multiprocess_race_construct_and_write(iid):
 
 
 def test_cleanup_unlink_owner_removes_file(iid):
-    """cleanup() on the local owner closes resources and removes the file."""
+    """An owner without a barrier removes the file during initialization."""
     r = _make_region(iid)
     path = r.mmap_path
     fd = r.fd
@@ -735,7 +737,7 @@ def test_cleanup_unlink_owner_removes_file(iid):
 
 def test_cleanup_non_owner_leaves_file(iid):
     """A non-owner must close local resources without removing the file."""
-    r0 = _make_region(iid, unlink_owner=True)
+    r0 = _make_region(iid, unlink_owner=False)
     r1 = _make_region(iid, unlink_owner=False)
     path = r0.mmap_path
     fd1 = r1.fd
@@ -752,16 +754,15 @@ def test_cleanup_non_owner_leaves_file(iid):
         _cleanup_file(path)
 
 
-def test_joiner_owner_cleans_up_after_initializer_exits(iid):
-    """A joiner owner must unlink after the initializer releases its resources."""
+def test_joiner_owner_unlinks_without_barrier(iid):
+    """An owner without a barrier unlinks after mapping the shared file."""
     creator = _make_region(iid, unlink_owner=False)
     owner = _make_region(iid, unlink_owner=True)
     path = creator.mmap_path
     try:
         creator.cleanup()
-        assert os.path.exists(path)
-        owner.cleanup()
         assert not os.path.exists(path)
+        owner.cleanup()
     finally:
         creator.cleanup()
         owner.cleanup()

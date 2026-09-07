@@ -77,10 +77,10 @@ class SharedOffloadRegion:
     then mmap()s the full file. The O_EXCL winner removes the path only when
     initialization fails.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap. When a barrier is
-    given, the caller-selected unlink owner removes the path once the barrier
-    releases. Without a barrier, that owner removes the path during cleanup.
-    Mappings taken before the unlink stay valid.
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap. The caller-selected
+    unlink owner removes the path after the optional barrier; without a
+    barrier, it removes the path as soon as its mapping is ready. Mappings
+    taken before the unlink stay valid.
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
@@ -197,10 +197,16 @@ class SharedOffloadRegion:
                 self.mmap_obj = None
                 self.fd = None
                 raise
-            if self._is_unlink_owner:
-                os.unlink(self.mmap_path)
-                self._is_unlink_owner = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
+
+        # The owner is responsible for removing the name regardless of
+        # whether this region participates in a barrier.  With a barrier,
+        # unlink only after rendezvous; without one, this is safe once this
+        # process has mapped the file (for example, the tiering scheduler is
+        # the last participant to open it).
+        if self._is_unlink_owner:
+            os.unlink(self.mmap_path)
+            self._is_unlink_owner = False
+            logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
