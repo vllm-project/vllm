@@ -335,6 +335,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.get_state_dtype()[1],
                 ),
                 ((workspace_size,), torch.uint8),
+                # Output buffer for steps that also carry spec-decode tokens:
+                # the non-spec tokens are then scattered by non_spec_token_indx.
+                (
+                    (1, max_tokens, self.local_num_heads, self.head_dim),
+                    vllm_config.model_config.dtype,
+                ),
             )
 
     def _flashkda_prefill(
@@ -346,18 +352,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        out: torch.Tensor,
-    ) -> torch.Tensor:
+        out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
         and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
         bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
         matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
-        attention output into ``out`` and returns the final states."""
+        attention output into ``out`` (a workspace buffer when ``None``) and
+        returns ``(out, final_state)``."""
         assert self._flashkda_buffer_specs is not None
-        final_state, workspace = current_workspace_manager().get_simultaneous(
-            *self._flashkda_buffer_specs
+        final_state, workspace, workspace_out = (
+            current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)
         )
         final_state = final_state[: initial_state.shape[0]]
+        if out is None:
+            out = workspace_out[:, : q.shape[1]]
         # FlashKDA hardcodes dense q/k/v/g strides; beta may be row-strided.
         torch.ops._flashkda_C.fwd(
             q.contiguous(),
@@ -377,7 +386,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             None,
             None,
         )
-        return final_state
+        return out, final_state
 
     def forward(
         self,
@@ -630,11 +639,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state = gather_initial_states(
                 recurrent_state, non_spec_state_indices_tensor, has_initial_state
             )
-            if self.kda_prefill_backend == "flashkda" and not use_spec:
-                # Write straight into the layer output buffer (dense token
-                # order in a non-spec step); no merge copy below.
-                ns_out = core_attn_out[:, :num_actual_tokens]
-                last_recurrent_state = self._flashkda_prefill(
+            if self.kda_prefill_backend == "flashkda":
+                # Non-spec step: write straight into the layer output buffer
+                # (dense token order, no merge copy). Step with spec-decode
+                # tokens: write to the workspace buffer and scatter below.
+                ns_out = None if use_spec else core_attn_out[:, :num_actual_tokens]
+                core_attn_out_non_spec, last_recurrent_state = self._flashkda_prefill(
                     q=_rearr(q_ns),
                     k=_rearr(k_ns),
                     v=_rearr(v_ns),
@@ -644,7 +654,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     out=ns_out,
                 )
-                core_attn_out_non_spec = ns_out
             else:
                 (
                     core_attn_out_non_spec,
@@ -704,14 +713,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # --- merge spec / non-spec outputs back into token order ---
         if use_spec and core_attn_out_non_spec is not None:
             assert core_attn_out_spec is not None
-            merged = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
-            )
-            merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[0, :num_actual_tokens] = merged.squeeze(0)
+            core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
         elif use_spec:
             assert core_attn_out_spec is not None
             if spec_out is None:
