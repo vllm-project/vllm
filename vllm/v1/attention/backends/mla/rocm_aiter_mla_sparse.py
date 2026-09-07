@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -349,6 +349,11 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Global index conversion assumes contiguous pages within each layer.
+        return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC)
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -809,8 +814,26 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         mla_num_heads = base_mla_num_heads
         need_lse = self.sinks is not None
+        from vllm.platforms.rocm import on_gfx942
 
-        if _use_rocm_sparse_triton(
+        # Keep sink attention available for dtypes/head shapes without an
+        # AITER return-LSE kernel. Sink layers never need persistent metadata.
+        triton_sink_fallback = (
+            need_lse
+            and q.dtype == kv_c_and_k_pe_cache.dtype
+            and (
+                q.dtype == torch.float16
+                or (
+                    q.dtype == torch.bfloat16
+                    and (
+                        mla_num_heads > 128
+                        or (on_gfx942() and 32 < mla_num_heads <= 64)
+                    )
+                )
+            )
+        )
+
+        if triton_sink_fallback or _use_rocm_sparse_triton(
             kv_cache_dtype=self.kv_cache_dtype,
             head_size=q.shape[-1],
             kv_lora_rank=self.kv_lora_rank,
@@ -894,20 +917,6 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                         mla_num_heads, q, supported_heads
                     )
                     mla_num_heads = supported_heads
-        if (
-            need_lse
-            and q.dtype == torch.bfloat16
-            and kv_c_and_k_pe_cache.dtype == torch.bfloat16
-            and mla_num_heads == 64
-        ):
-            from vllm.platforms.rocm import on_gfx942
-
-            if on_gfx942():
-                raise ValueError(
-                    "ROCm AITER MLA attention sinks do not support BF16 "
-                    "query/KV with 64 padded local heads on gfx942; increase "
-                    "tensor_parallel_size"
-                )
         output = torch.empty(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
@@ -980,10 +989,20 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
 
         if self.sinks is not None:
             assert lse is not None
-            sink = self.sinks
-            sink_lse = torch.logaddexp(lse, sink)
+            # Empty ragged rows have only sink mass and no value contribution.
+            # AITER can return NaN output/LSE for those rows; do not multiply it
+            # by a zero normalization factor and propagate the NaN.
+            has_keys = (
+                attn_metadata.paged_kv_indptr[1:] > attn_metadata.paged_kv_indptr[:-1]
+            ).unsqueeze(-1)
+            lse = torch.where(has_keys, lse, float("-inf"))
+            sink_lse = torch.logaddexp(lse, self.sinks)
             sink_scale = torch.exp(lse - sink_lse)
-            output = (output.float() * sink_scale.unsqueeze(-1)).to(output.dtype)
+            output = torch.where(
+                has_keys.unsqueeze(-1),
+                output.float() * sink_scale.unsqueeze(-1),
+                0.0,
+            ).to(output.dtype)
             lse = sink_lse
 
         return output, lse
@@ -1009,6 +1028,8 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 q = self.q_concat_buffer[: ql_nope.shape[0]]
                 if q_pe.shape[-1] == 0:
                     q.copy_(ql_nope)
+                elif q.dtype == torch.float16:
+                    torch.cat((ql_nope, q_pe), dim=-1, out=q)
                 else:
                     ops.concat_mla_q(ql_nope, q_pe, q)
 

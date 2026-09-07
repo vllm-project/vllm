@@ -14,16 +14,9 @@ import torch
 from tests.kernels.utils import opcheck
 from vllm.platforms import current_platform
 
-_SKIP_NON_MI3XX = True
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_mi3xx
-
-    _SKIP_NON_MI3XX = not on_mi3xx()
-
-pytestmark = [
-    pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests"),
-    pytest.mark.skipif(_SKIP_NON_MI3XX, reason="MI300/MI350 ROCm only"),
-]
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
 
 Q_HEAD_DIM = 576  # kv_lora_rank + qk_rope_head_dim
 V_HEAD_DIM = 512  # kv_lora_rank
@@ -31,6 +24,10 @@ V_HEAD_DIM = 512  # kv_lora_rank
 
 def _require_aiter():
     from vllm._aiter_ops import is_aiter_found_and_supported
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() not in (3, 4):
+        pytest.skip("AITER MLA requires CDNA 3 or 4")
 
     if not is_aiter_found_and_supported():
         pytest.skip("aiter is required on supported ROCm hardware for this test")
