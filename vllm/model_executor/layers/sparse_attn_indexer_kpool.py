@@ -9,7 +9,8 @@ import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -419,6 +420,24 @@ def sparse_attn_indexer_kpool(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
+        # The indexer projections and K cache are replicated across TP ranks,
+        # so long prefills otherwise recompute the same MQA logits/top-k four
+        # times.  Each query row is independent; score one contiguous shard
+        # per rank and exchange only the final token indices. KV gathers remain
+        # unconditional because continuation query chunks reuse their cache.
+        shard_sizes = getattr(prefill_metadata, "row_shard_sizes", None)
+        shard_start = shard_stop = 0
+        if shard_sizes is not None:
+            assert not current_platform.is_rocm()
+            forward_cudagraph_mode = getattr(
+                get_forward_context(), "cudagraph_runtime_mode", CUDAGraphMode.NONE
+            )
+            assert forward_cudagraph_mode != CUDAGraphMode.FULL
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
+            shard_stop = shard_start + shard_sizes[tp_rank]
+        num_prefill_tokens = attn_metadata_narrowed.num_prefill_tokens
+
         # Short sequences select every pool, so skip sparse scoring and fill
         # the top-k buffer with all causal token indices. The index-K cache was
         # already written above.
@@ -488,12 +507,22 @@ def sparse_attn_indexer_kpool(
                         chunk.cu_seq_lens,
                     )
 
-            q_slice = q_quant[chunk.token_start : chunk.token_end]
-            q_scale_slice = (
-                q_scale[chunk.token_start : chunk.token_end]
-                if q_scale is not None
-                else None
-            )
+            row_start, row_end = chunk.token_start, chunk.token_end
+            if shard_sizes is not None:
+                row_start = max(row_start, shard_start)
+                row_end = min(row_end, shard_stop)
+                if row_start >= row_end:
+                    continue
+                lo = row_start - chunk.token_start
+                hi = row_end - chunk.token_start
+                cu_seqlen_ks = chunk.cu_seqlen_ks[lo:hi]
+                cu_seqlen_ke = chunk.cu_seqlen_ke[lo:hi]
+            else:
+                cu_seqlen_ks = chunk.cu_seqlen_ks
+                cu_seqlen_ke = chunk.cu_seqlen_ke
+
+            q_slice = q_quant[row_start:row_end]
+            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
             # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
             # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
             if use_fp4_cache:
@@ -513,9 +542,9 @@ def sparse_attn_indexer_kpool(
                 logits = rocm_fp8_mqa_logits(
                     q_slice_cast,
                     (k_quant_cast, k_scale_cast),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                 )
             else:
                 from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
@@ -523,9 +552,9 @@ def sparse_attn_indexer_kpool(
                 logits = fp8_fp4_mqa_logits(
                     (q_slice_cast, q_scale_slice),
                     (k_quant_cast, k_scale_cast),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     clean_logits=False,
                 )
             num_rows = logits.shape[0]
@@ -540,15 +569,13 @@ def sparse_attn_indexer_kpool(
                 )
                 topk_dst = pool_topk
             else:
-                topk_dst = topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, :topk_tokens
-                ]
+                topk_dst = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
             if current_platform.is_xpu():
                 xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
                     logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     topk_dst,
                     num_rows,
                     logits.stride(0),
@@ -558,8 +585,8 @@ def sparse_attn_indexer_kpool(
             else:
                 torch.ops._C.top_k_per_row_prefill(
                     logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     topk_dst,
                     num_rows,
                     logits.stride(0),
@@ -573,10 +600,7 @@ def sparse_attn_indexer_kpool(
                     # Fused expand-pools + append-tail into one Triton kernel
                     # (replaces ~25 elementwise ops). seq_len is token-granular
                     # (pos+1); the kernel derives pool_len internally.
-                    q_seq = (
-                        positions[chunk.token_start : chunk.token_end].to(torch.int32)
-                        + 1
-                    )
+                    q_seq = positions[row_start:row_end].to(torch.int32) + 1
                     expanded = kpool_ops.expand_pools_and_append_tail(
                         pool_ids, q_seq, index_kpool
                     )
@@ -585,9 +609,30 @@ def sparse_attn_indexer_kpool(
                     expanded = kpool_ops.expand_pools_to_tokens(
                         pool_ids, valid, topk_tokens, index_kpool
                     )
-                topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, : expanded.shape[-1]
-                ] = expanded
+                topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
+
+        if shard_sizes is not None:
+            prefill_end = num_decode_tokens + num_prefill_tokens
+            # K-pool expansion appends the request's incomplete tail after the
+            # logical top-k history.  Those ``index_kpool - 1`` entries are
+            # part of the attention index and must be exchanged as well.
+            exchange_width = topk_tokens + (index_kpool - 1 if index_kpool > 1 else 0)
+            # Keep the contiguous local input alive until the NCCL operation's
+            # dependent copy has been enqueued.  In particular, PyNCCL's
+            # variable-size gather is asynchronous and the temporary created
+            # inline here could otherwise be released immediately after the
+            # collective call.
+            local_topk = topk_indices_buffer[
+                shard_start:shard_stop, :exchange_width
+            ].contiguous()
+            gathered_topk = get_tp_group().all_gatherv(
+                local_topk,
+                dim=0,
+                sizes=shard_sizes,
+            )
+            topk_indices_buffer[num_decode_tokens:prefill_end, :exchange_width] = (
+                gathered_topk
+            )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
