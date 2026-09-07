@@ -261,6 +261,20 @@ _TUNED_MATMUL_CONFIGS_FOR_DEVICE: dict[tuple[int, int], _MatmulShapeConfig] | No
 )
 _TUNED_MATMUL_CONFIGS_RESOLVED = False
 
+# When VLLM_BATCH_INVARIANT=1, kernel config selection is pinned to this bound
+# instead of the runtime M.  Async scheduling can include zombie requests that
+# inflate M by ±1, crossing m_bucket thresholds and changing Triton kernel
+# parameters (num_warps, BLOCK_SIZE_N, etc.), which alters the float32
+# accumulation order for every row and breaks bitwise reproducibility.
+# Pinning to max_num_seqs (a fixed config value) makes the selected config
+# independent of runtime batch size, eliminating the source of non-determinism.
+_config_max_num_seqs: int = 0
+
+
+def set_config_max_num_seqs(max_num_seqs: int) -> None:
+    global _config_max_num_seqs
+    _config_max_num_seqs = max_num_seqs
+
 
 def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | None:
     if capability is None:
@@ -312,11 +326,15 @@ def _get_matmul_config(
     shape_config = device_configs.get((N, K))
     if shape_config is None:
         return default
+    # When VLLM_BATCH_INVARIANT is active, use max_num_seqs as the lookup key
+    # instead of the runtime M so that async-scheduling zombie requests cannot
+    # change the selected config and alter float32 accumulation order.
     # Values above the tuned range reuse the largest bucket;
     # shape-wide BLOCK_K keeps this batch-invariant.
+    lookup_m = _config_max_num_seqs if _config_max_num_seqs > 0 else M
     m_config = shape_config.m_buckets[-1][1]
     for max_m, bucket_config in shape_config.m_buckets:
-        if max_m >= M:
+        if max_m >= lookup_m:
             m_config = bucket_config
             break
     return {

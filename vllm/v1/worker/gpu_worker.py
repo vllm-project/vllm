@@ -1489,7 +1489,7 @@ def init_worker_distributed_environment(
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
 
-    init_batch_invariance()
+    init_batch_invariance(vllm_config.scheduler_config.max_num_seqs)
     override_envs_for_eplb(
         parallel_config,
         moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),

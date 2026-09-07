@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_descriptor_matmul_config,
     _get_matmul_config,
+    set_config_max_num_seqs,
     resolve_tuned_matmul_configs,
 )
 from vllm.platforms import current_platform
@@ -1159,10 +1160,12 @@ def override_envs_for_invariance():
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 
-def init_batch_invariance():
+def init_batch_invariance(max_num_seqs: int = 0):
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
         resolve_tuned_matmul_configs()
+        if max_num_seqs > 0:
+            set_config_max_num_seqs(max_num_seqs)
         override_envs_for_invariance()
         enable_batch_invariant_mode()
 
