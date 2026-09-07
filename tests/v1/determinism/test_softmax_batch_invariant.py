@@ -12,6 +12,8 @@ import torch
 from utils import skip_unsupported
 
 from vllm.model_executor.determinism.batch_invariant import (
+    log_softmax,
+    softmax,
     softmax_batch_invariant,
 )
 from vllm.platforms import current_platform
@@ -33,10 +35,11 @@ def test_softmax_matches_torch(vocab_size: int, dtype: torch.dtype):
 
 
 @skip_unsupported
-def test_softmax_half_to_float():
-    """`half_to_float=True` (fp16 input, `dtype=torch.float32`) returns fp32."""
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_softmax_half_to_float(dtype: torch.dtype):
+    """`half_to_float=True` returns fp32 for half inputs."""
     torch.manual_seed(0)
-    x = torch.randn(8, 4096, dtype=torch.float16, device=DEVICE_TYPE) * 4
+    x = torch.randn(8, 4096, dtype=dtype, device=DEVICE_TYPE) * 4
 
     out = softmax_batch_invariant(x, -1, True)
 
@@ -78,3 +81,27 @@ def test_softmax_empty(shape: tuple[int, ...]):
     out = softmax_batch_invariant(x, -1, False)
 
     assert out.shape == x.shape and out.dtype == x.dtype
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dim", [-1, 0])
+@pytest.mark.parametrize("log", [False, True])
+def test_row_softmax_scalar(dim: int, log: bool):
+    x = torch.tensor(2.0, device=DEVICE_TYPE)
+    fn = log_softmax if log else softmax
+    torch_fn = torch.log_softmax if log else torch.softmax
+
+    out = fn(x, dim)
+
+    torch.testing.assert_close(out, torch_fn(x, dim))
+
+
+@skip_unsupported
+@pytest.mark.parametrize("shape", [(2, 3), (0, 3)])
+@pytest.mark.parametrize("log", [False, True])
+def test_row_softmax_invalid_negative_dim(shape: tuple[int, ...], log: bool):
+    x = torch.empty(shape, dtype=torch.float32, device=DEVICE_TYPE)
+    fn = log_softmax if log else softmax
+
+    with pytest.raises(IndexError, match="Dimension out of range"):
+        fn(x, -x.ndim - 1)

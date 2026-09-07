@@ -554,12 +554,21 @@ def _softmax_kernel(
 
 
 def _row_softmax(input: torch.Tensor, dim: int, log: bool) -> torch.Tensor:
+    input_ndim = max(input.ndim, 1)
+    if not -input_ndim <= dim < input_ndim:
+        raise IndexError(
+            f"Dimension out of range (expected to be in range of "
+            f"[-{input_ndim}, {input_ndim - 1}], but got {dim})"
+        )
+    dim %= input_ndim
+
+    if input.ndim == 0:
+        return _row_softmax(input.reshape(1), dim, log).reshape(())
+
     if input.numel() == 0:
         return torch.empty_like(input)
 
     last_dim = input.ndim - 1
-    if dim < 0:
-        dim += input.ndim
     if dim != last_dim:
         output = _row_softmax(input.movedim(dim, last_dim), last_dim, log)
         return output.movedim(last_dim, dim).contiguous()
