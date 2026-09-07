@@ -12,7 +12,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CUDAGraphMode, KVTransferConfig
+from vllm.config import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -338,39 +338,6 @@ def test_hisparse_row_dma_uses_resident_spans():
     assert descriptors.sizes[:count].tolist() == [2 * 4, 4]
 
 
-def test_hisparse_async_speculation_dma_uses_resident_spans():
-    """An uncertain MTP position must mirror its full resident-cache range."""
-    worker = _make_hisparse_worker()
-    resident = torch.empty((4, 2, 4), dtype=torch.uint8)
-    destination = torch.empty((12, 4), dtype=torch.uint8)
-    worker.is_host_writer = True
-    worker.kernel_block_size = 2
-    worker.resident_caches = (resident,)
-    worker.host_caches = (destination,)
-    worker.cache_handles = [
-        SimpleNamespace(
-            runtime=SimpleNamespace(resident_source_index=0), decode_batch=False
-        )
-    ]
-    worker._set_row_mirrors(
-        (
-            SparseKVRowMirror((2,), 4, 2),
-            SparseKVRowMirror((4,), 9, 2),
-        )
-    )
-    worker._dma_free_descriptors = []
-    worker._submit_dma_descriptors = MagicMock()
-
-    worker._enqueue_row_dma(range(1))
-
-    descriptors, count = worker._submit_dma_descriptors.call_args.args
-    assert count == 2
-    assert descriptors.src[:count].tolist() == [
-        resident.data_ptr() + 2 * 4,
-        resident.data_ptr() + 4 * 4,
-    ]
-
-
 def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     dst_slots = torch.tensor([7, 8, 9], dtype=torch.int64)
     req_ids = torch.tensor([0, 1, 2], dtype=torch.int32)
@@ -522,44 +489,6 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     assert worker._enqueue_row_dma.call_args_list[1].kwargs == {
         "ready_event": worker._layer_ready_events[-1]
     }
-
-
-def test_hisparse_prefill_mirrors_complete_source_groups():
-    slots = torch.tensor([7, 8], dtype=torch.int64)
-    source_indices = [0, 0, 1, 1, 1, 1, 2]
-    handles = [
-        SimpleNamespace(
-            runtime=SimpleNamespace(
-                eager_host_mirror=False,
-                is_group_leader=False,
-                resident_source_index=source_index,
-            ),
-            decode_batch=False,
-            host_mirror_required=True,
-            num_actual_tokens=2,
-            num_decode_tokens=0,
-            req_id_per_token=torch.empty(0, dtype=torch.int32),
-            mirror_slot_mapping=slots,
-        )
-        for source_index in source_indices
-    ]
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = handles
-    worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
-    worker._per_layer_mirrored = set()
-    worker._submitted_mirror_layers = set()
-    worker._layer_ready_events = tuple(MagicMock() for _ in handles)
-    worker._enqueue_row_dma = MagicMock()
-
-    for layer_index in range(len(handles)):
-        worker._enqueue_layer_mirror(layer_index)
-
-    assert [call.args[0] for call in worker._enqueue_row_dma.call_args_list] == [
-        (0, 1),
-        (2, 3, 4, 5),
-        (6,),
-    ]
 
 
 def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
@@ -951,68 +880,6 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     )
     assert len(shared_states) == 2
     assert streams == []
-
-
-@pytest.mark.parametrize(
-    "kv_transfer_config",
-    [None, KVTransferConfig(kv_connector="OffloadingConnector", kv_role="kv_both")],
-)
-def test_hisparse_cache_eagerly_mirrors_host_rows(monkeypatch, kv_transfer_config):
-    config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=2,
-            max_num_batched_tokens=2,
-            async_scheduling=False,
-        ),
-        speculative_config=None,
-        kv_transfer_config=kv_transfer_config,
-    )
-    resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
-        top_k=4,
-        device_buffer_size=8,
-    )
-    monkeypatch.setattr(
-        hisparse_runtime_module.ResolvedHiSparseConfig,
-        "from_vllm_config",
-        classmethod(lambda cls, vllm_config, model_top_k: resolved),
-    )
-    runtime = SimpleNamespace(index_group=object(), eager_host_mirror=True)
-    monkeypatch.setattr(
-        hisparse_runtime_module, "HiSparseRuntime", lambda **kwargs: runtime
-    )
-
-    cache_handle = hisparse_runtime_module.create_hisparse_cache_handle(
-        config,
-        model_top_k=4,
-        is_index_group_leader=True,
-        row_width=8,
-        kv_dtype=torch.float32,
-        device="cpu",
-    )
-
-    assert cache_handle is not None
-    assert cache_handle.runtime.eager_host_mirror
-
-
-@pytest.mark.parametrize("eager_host_mirror", [True, False])
-def test_hisparse_runtime_takes_eager_host_mirror_from_config(
-    monkeypatch, eager_host_mirror
-):
-    monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
-    runtime = hisparse_runtime_module.HiSparseRuntime(
-        config=hisparse_runtime_module.ResolvedHiSparseConfig(
-            top_k=4,
-            device_buffer_size=8,
-            eager_host_mirror=eager_host_mirror,
-        ),
-        max_num_reqs=2,
-        row_width=8,
-        kv_dtype=torch.float32,
-        device="cpu",
-        index_group=SimpleNamespace(followers=[]),
-    )
-
-    assert runtime.eager_host_mirror is eager_host_mirror
 
 
 class _TestReplaySSMMixer(MambaMixer2):

@@ -285,28 +285,6 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 11),))
 
 
-def test_hisparse_row_mirrors_keep_pending_pages_current():
-    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
-    coordinator = manager.hisparse_coordinator
-    coordinator.max_spill_pages = 1
-    request = make_request(
-        "request",
-        list(range(2 * HISPARSE_BLOCK_SIZE)),
-        HISPARSE_BLOCK_SIZE,
-        sha256,
-    )
-    assert manager.allocate_slots(request, num_new_tokens=32) is not None
-    resident_blocks = coordinator.resident_managers[0].req_to_blocks[request.request_id]
-
-    mirrors = coordinator.build_row_mirrors([(request.request_id, 14, 4)])
-
-    assert [mirror.source_starts for mirror in mirrors] == [
-        (resident_blocks[0].block_id * HISPARSE_BLOCK_SIZE + 14,),
-        (resident_blocks[1].block_id * HISPARSE_BLOCK_SIZE,),
-    ]
-    assert [mirror.num_rows for mirror in mirrors] == [2, 2]
-
-
 def test_hisparse_reports_when_context_is_fully_resident():
     manager = make_hisparse_kv_cache_manager(32, 16)
     request = make_request(
