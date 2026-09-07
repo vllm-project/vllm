@@ -306,3 +306,68 @@ def test_wmma_large_m_matches_fp32_reference(dist_init, dtype):
     outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1244,
                              dtype=dtype)
     _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+# ---------------------------------------------------------------------------
+# C. V7/V8 (128x64) no-split path: k_split == 1 -> direct store, no scratch,
+#    no reduce pass (partials == nullptr).
+# ---------------------------------------------------------------------------
+
+# The measured production-like shape from the W7900 benchmark campaign.
+# Routing arithmetic (see _assert_v7v8_no_split_routing): with (128, 64)
+# tiles, blocks_xy = ceil(25600/64) * ceil(512/128) = 400 * 4 = 1600 >=
+# 1500, so compute_wmma_k_split_mn returns 1. Smaller no-split shapes are
+# not practical: N would have to grow past ~24k at M=512 (or M past ~1k at
+# N=12k) to reach the 1500-block threshold, so this is effectively the
+# smallest production-realistic V7/V8 no-split shape.
+V7V8_NOSPLIT = (512, 25600, 6656)  # (M, N, K)
+
+
+def _compute_wmma_k_split_mn(m, n, k, m_tile, n_tile):
+    """Faithful replica of compute_wmma_k_split_mn (C++ heuristic)."""
+    blocks_xy = ((n + n_tile - 1) // n_tile) * ((m + m_tile - 1) // m_tile)
+    if blocks_xy >= 1500:
+        return 1
+    if blocks_xy * 2 >= 1500 and k >= 512 and k % 32 == 0:
+        return 2
+    if blocks_xy * 4 >= 1500 and k >= 1024 and k % 64 == 0:
+        return 4
+    if k >= 1024 and k % 64 == 0:
+        return 4
+    if k >= 512 and k % 32 == 0:
+        return 2
+    return 1
+
+
+def _assert_v7v8_no_split_routing(dtype, m, n, k):
+    """Assert the shape deterministically routes to the V7/V8 128x64
+    kernel with k_split == 1: WMMA dispatch (bf16 M>=16 / fp16 M>=64),
+    the M >= 128 non-act-order branch, and the no-split threshold."""
+    assert (dtype == torch.bfloat16 and m >= 16) or \
+           (dtype == torch.float16 and m >= 64), "not the WMMA path"
+    assert m >= 128, "below the V7/V8 (128x64) branch"
+    assert _compute_wmma_k_split_mn(m, n, k, 128, 64) == 1, \
+        "shape does not route to the k_split == 1 no-split path"
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_v7v8_no_split_bit_repeatable(dist_init, dtype):
+    """V7/V8 128x64_k32 with k_split == 1: single direct writer per output
+    cell — no FP32 scratch, no reduce pass."""
+    m, n, k = V7V8_NOSPLIT
+    _assert_v7v8_no_split_routing(dtype, m, n, k)
+    outs, _ = _outputs_and_ref(M=m, K=k, N=n, seed=1245,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_v7v8_no_split_matches_fp32_reference(dist_init, dtype):
+    """V7/V8 128x64_k32 no-split direct-store path vs the FP32 reference."""
+    m, n, k = V7V8_NOSPLIT
+    _assert_v7v8_no_split_routing(dtype, m, n, k)
+    outs, ref = _outputs_and_ref(M=m, K=k, N=n, seed=1246,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
