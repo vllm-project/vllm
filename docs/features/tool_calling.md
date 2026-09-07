@@ -401,8 +401,13 @@ Supported models:
 
 * `zai-org/GLM-4.7`
 * `zai-org/GLM-4.7-Flash`
+* `zai-org/GLM-5.x` (including `GLM-5.3-Flash`)
 
-Flags: `--tool-call-parser glm47`
+Flags: `--tool-call-parser glm47 --reasoning-parser glm45`
+
+Tool schemas are rendered into the prompt with required properties first, and strict-mode
+structural tags use that same order, so the grammar guarantees every required argument while
+the model keeps the key order it was shown.
 
 ### FunctionGemma Models (`functiongemma`)
 

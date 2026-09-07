@@ -4,13 +4,17 @@
 """Tests for the GLM-4.7 tool call parser."""
 
 import json
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
+import xgrammar as xgr
 from openai.types.responses import ResponseFunctionToolCall
+from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
@@ -266,3 +270,115 @@ class TestGlm47Streaming:
         ]
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
+
+
+def _preferences_tool(strict: bool | None) -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="collect_preferences",
+            strict=strict,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {"type": "string"},
+                                "choices": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "tag": {"type": "string"},
+                            },
+                            "required": ["prompt", "tag"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        ),
+    )
+
+
+def _json_schema_formats(node) -> list[dict]:
+    if isinstance(node, dict):
+        found = [node] if node.get("type") == "json_schema" else []
+        return found + [f for v in node.values() for f in _json_schema_formats(v)]
+    if isinstance(node, list):
+        return [f for v in node for f in _json_schema_formats(v)]
+    return []
+
+
+def _call(items: str, note: str | None = None) -> str:
+    args = f"<arg_key>items</arg_key><arg_value>{items}</arg_value>"
+    if note is not None:
+        args += f"<arg_key>note</arg_key><arg_value>{note}</arg_value>"
+    return f"<tool_call>collect_preferences{args}</tool_call>"
+
+
+class TestGlm47StructuralTag:
+    """Strict mode must enforce the same required-first key order the prompt
+    shows the model: the grammar then guarantees required arguments instead of
+    fighting the order the model was primed with."""
+
+    @staticmethod
+    def _tag(tool_choice, strict):
+        tools = [_preferences_tool(strict)]
+        parser = Glm47MoeModelToolParser(MagicMock(), tools=tools)
+        request = ChatCompletionRequest(messages=[], model="m", tools=tools)
+        request.tool_choice = tool_choice
+        tag = parser.get_structural_tag(request)
+        # The request keeps the client's schema order.
+        assert list(tools[0].function.parameters["properties"]) == ["note", "items"]
+        return tag
+
+    def test_auto_without_strict_is_unconstrained(self):
+        assert self._tag("auto", strict=None) is None
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "auto",
+            "required",
+            ChatCompletionNamedToolChoiceParam(
+                function=ChatCompletionNamedFunction(name="collect_preferences")
+            ),
+        ],
+    )
+    def test_embedded_schema_uses_required_first_order(self, tool_choice):
+        formats = _json_schema_formats(self._tag(tool_choice, strict=True).model_dump())
+        assert len(formats) == 1
+        schema = formats[0]["json_schema"]
+        assert list(schema["properties"]) == ["items", "note"]
+        assert list(schema["properties"]["items"]["items"]["properties"]) == [
+            "prompt",
+            "tag",
+            "choices",
+        ]
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            _call('[{"prompt": "q", "tag": "t", "choices": ["a"]}]'),
+            _call('[{"prompt": "q", "tag": "t"}]', note="n"),
+            _call("[]"),
+        ],
+    )
+    def test_grammar_accepts_required_first_output(self, output):
+        grammar = xgr.Grammar.from_structural_tag(self._tag("required", strict=True))
+        assert _is_grammar_accept_string(grammar, output, require_termination=False)
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            _call('[{"prompt": "q", "choices": ["a"]}]'),
+            "<tool_call>collect_preferences<arg_key>note</arg_key><arg_value>n"
+            "</arg_value></tool_call>",
+        ],
+    )
+    def test_grammar_rejects_missing_required_key(self, output):
+        grammar = xgr.Grammar.from_structural_tag(self._tag("required", strict=True))
+        assert not _is_grammar_accept_string(grammar, output, require_termination=False)

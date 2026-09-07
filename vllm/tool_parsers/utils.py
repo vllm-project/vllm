@@ -1089,6 +1089,24 @@ def reorder_properties_required_first(schema: Any) -> Any:
     return schema
 
 
+def reorder_tools_required_first(tools: list[Tool]) -> list[Tool]:
+    """Return copies of *tools* whose parameter schemas are reordered with
+    :func:`reorder_properties_required_first`. Non-function tools pass
+    through unchanged."""
+    reordered: list[Tool] = []
+    for tool in tools:
+        if isinstance(tool, ChatCompletionToolsParam):
+            tool = tool.model_copy(deep=True)
+            tool.function.parameters = reorder_properties_required_first(
+                tool.function.parameters
+            )
+        elif isinstance(tool, FunctionTool):
+            tool = tool.model_copy(deep=True)
+            tool.parameters = reorder_properties_required_first(tool.parameters)
+        reordered.append(tool)
+    return reordered
+
+
 _TYPE_ALIASES: dict[str, str] = {
     "str": "string",
     "text": "string",

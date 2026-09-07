@@ -30,7 +30,11 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
+from vllm.tool_parsers.utils import (
+    Tool,
+    get_json_schema_from_tools,
+    reorder_tools_required_first,
+)
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
 
@@ -59,6 +63,10 @@ class ToolParser:
     # xgrammar builtin structural tag model key. Subclasses set this when
     # their parsed tool-call syntax matches a builtin xgrammar format.
     structural_tag_model: str | None = None
+    # Render each tool's object schemas with required properties first, both
+    # in the prompt (OnlineRenderer) and in the structural tag, so the order
+    # the model is shown is the order the grammar enforces.
+    reorder_tool_schema_required_first: bool = False
     engine_based_streaming: bool = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -176,9 +184,12 @@ class ToolParser:
             return None
         from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
+        tools = request.tools
+        if self.reorder_tool_schema_required_first and tools:
+            tools = reorder_tools_required_first(tools)
         return get_model_structural_tag(
             model=self.structural_tag_model,
-            tools=request.tools,
+            tools=tools,
             tool_choice=request.tool_choice,
             reasoning=reasoning,
         )
