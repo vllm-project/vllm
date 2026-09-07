@@ -204,6 +204,8 @@ def _mp_barrier_construct_and_hold(
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
         )
+        # The constructor's barrier precedes the creator's unlink.
+        barrier.wait(30)
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = fill_value
         done_queue.put(
