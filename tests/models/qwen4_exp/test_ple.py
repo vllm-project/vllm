@@ -499,6 +499,17 @@ def _ngram_hash_params(device: torch.device, context_len: int) -> dict:
         ([4, 4], [0, 7], [[11, 12], [13, 14]], 20),
         ([4, 0, 3], [], [[11, 12], [13, 14], [15, 16]], 20),
         (
+            [3, 2, 0, 0],
+            [],
+            [
+                [11, 12],
+                [13, 14],
+                [_NGRAM_EOS_TOKEN_ID, _NGRAM_EOS_TOKEN_ID],
+                [_NGRAM_EOS_TOKEN_ID, _NGRAM_EOS_TOKEN_ID],
+            ],
+            20,
+        ),
+        (
             [1, 33, 2],
             [5, 32],
             [[_NGRAM_EOS_TOKEN_ID, 11], [12, 13], [14, _NGRAM_EOS_TOKEN_ID]],
@@ -528,6 +539,7 @@ def _ngram_hash_params(device: torch.device, context_len: int) -> dict:
         "bigram-only",
         "power-of-two",
         "empty-request",
+        "trailing-padded-requests",
         "three-requests",
         "six-requests",
         "four-gram",

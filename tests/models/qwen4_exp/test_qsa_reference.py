@@ -45,7 +45,6 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     indexer = SimpleNamespace(
         skip_topk=True,
         _metadata=lambda: (raw_metadata, compressed_metadata),
-        index_qk_proj=lambda hidden: (torch.zeros(2, 2), None),
         index_n_heads=1,
         index_kv_heads=1,
         index_head_dim=1,
@@ -80,7 +79,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
 
     actual = indexer_qsa.QSAIndexer.forward(
         indexer,
-        torch.zeros(2, 4),
+        torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
     )
@@ -444,6 +443,71 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     assert metadata.slot_mapping.tolist() == [-1] * 8
     assert metadata.visible_blocks.tolist() == [1, 1, 1, 2, 2, 2, 2, 3]
     assert metadata.k_work_metadata.tolist() == [[0, 0], [2, 0], [2, 1], [-1, -1]]
+
+
+@requires_qsa_kernels
+@pytest.mark.usefixtures("default_vllm_config")
+def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
+    """Padded projected Q/K rows must not affect either side cache."""
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    device = torch.device("cuda")
+    # Five tokens complete one compressed group and retain four keys in the ring.
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=5,
+        slot_mapping=torch.tensor([-1, 1, 2, 3, 0], device=device),
+        block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+        token_to_req=torch.zeros(5, dtype=torch.int32, device=device),
+        query_start_loc=torch.tensor([0, 5], dtype=torch.int32, device=device),
+        logical_positions=torch.arange(5, device=device),
+    )
+    compressed_metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([-1, -1, -1, 0, -1], device=device),
+    )
+    with torch.device(device):
+        rope = get_rope(
+            head_size=128,
+            max_position=32,
+            rope_parameters={"rope_type": "default", "partial_rotary_factor": 0.5},
+            dtype=torch.bfloat16,
+        )
+    raw_cache = torch.zeros((1, 4, 1, 64), dtype=torch.bfloat16, device=device)
+    compressed_cache = torch.zeros((1, 2, 1, 64), dtype=torch.bfloat16, device=device)
+    norm = SimpleNamespace(
+        weight=torch.zeros(64, dtype=torch.bfloat16, device=device),
+        variance_epsilon=1e-6,
+    )
+    indexer = SimpleNamespace(
+        _metadata=lambda: (raw_metadata, compressed_metadata),
+        skip_topk=True,
+        index_kv_heads=1,
+        use_fused_pre_indexer=False,
+        index_n_heads=1,
+        index_head_dim=64,
+        q_layernorm=norm,
+        k_layernorm=norm,
+        rotary_emb=rope,
+        compress_ratio=4,
+        raw_key_cache=SimpleNamespace(
+            kv_cache=raw_cache, key_cache=raw_cache, rope_position_cache=None
+        ),
+        compressed_key_cache=SimpleNamespace(kv_cache=compressed_cache),
+    )
+    keys = torch.arange(1, 6, dtype=torch.bfloat16, device=device)[:, None].expand(
+        5, 64
+    )
+    padded_keys = torch.full((8, 64), torch.nan, dtype=torch.bfloat16, device=device)
+    padded_keys[:5].copy_(keys)
+    indexer_qsa.QSAIndexer.forward(
+        indexer,
+        torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
+        torch.zeros(8, dtype=torch.long, device=device),
+        torch.full((5, 5), -1, dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
+    expected_compressed = torch.zeros_like(compressed_cache)
+    expected_compressed[0, 0] = 1
+    torch.testing.assert_close(compressed_cache, expected_compressed)
 
 
 @requires_qsa_kernels
