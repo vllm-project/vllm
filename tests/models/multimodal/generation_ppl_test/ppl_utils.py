@@ -100,7 +100,7 @@ def vqa_ppl_test(
             for token_data in token_datas[1:]:
                 assert token_data is not None
                 assert len(token_data) == 1
-                token_id , token_log_prob = next(iter(token_data.items()))
+                token_id, token_log_prob = next(iter(token_data.items()))
                 if token_id == image_token_id:
                     continue
                 token_log_probs.append(token_log_prob.logprob)
