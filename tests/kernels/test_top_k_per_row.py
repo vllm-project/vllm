@@ -1333,12 +1333,20 @@ def _exact_topk_reference(
 
 
 def _run_persistent_topk(
-    logits: torch.Tensor, lengths: torch.Tensor, top_k: int
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    top_k: int,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor:
     indices = torch.empty((logits.shape[0], top_k), dtype=torch.int32, device="cuda")
     workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device="cuda")
     torch.ops._C.persistent_topk(
-        logits, lengths, indices, workspace, top_k, logits.shape[1]
+        logits,
+        lengths,
+        indices,
+        workspace,
+        top_k,
+        logits.shape[1] if max_seq_len is None else max_seq_len,
     )
     torch.cuda.synchronize()
     return indices
@@ -1414,6 +1422,84 @@ def test_persistent_topk_all_equal(num_rows: int, seq_len: int) -> None:
         num_rows, top_k
     )
     for _ in range(20):
+        assert torch.equal(_run_persistent_topk(logits, lengths, top_k), expect)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_rows", [1, 8, 64])
+@pytest.mark.parametrize("seq_len", [16383, 16384, 16385])
+@pytest.mark.parametrize("top_k", [512, 2048])
+def test_persistent_topk_path_transition(
+    num_rows: int, seq_len: int, top_k: int
+) -> None:
+    """Either side of RADIX_THRESHOLD, where the row switches between the
+    single-CTA select and the cooperative multi-CTA path. Both must produce
+    the same exact answer."""
+    torch.set_default_device("cuda:0")
+    gen = torch.Generator(device="cuda").manual_seed(seq_len + top_k + num_rows)
+    logits = torch.randn(num_rows, seq_len, generator=gen, device="cuda")
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    ref = _exact_topk_reference(logits, lengths, top_k)
+    outs = [_run_persistent_topk(logits, lengths, top_k) for _ in range(4)]
+    for out in outs[1:]:
+        assert torch.equal(out, outs[0]), "persistent_topk is not reproducible"
+    assert torch.equal(outs[0], ref)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("bad_len", [0, -1])
+def test_persistent_topk_degenerate_lengths(bad_len: int) -> None:
+    """A row length of zero, or a negative one from a padded batch, must be
+    clamped rather than read out of bounds; those rows come back all -1."""
+    torch.set_default_device("cuda:0")
+    num_rows, seq_len, top_k = 8, 8192, 512
+    gen = torch.Generator(device="cuda").manual_seed(bad_len + 7)
+    logits = torch.randn(num_rows, seq_len, generator=gen, device="cuda")
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    lengths[3] = bad_len
+    out = _run_persistent_topk(logits, lengths, top_k)
+    assert torch.equal(
+        out[3], torch.full((top_k,), -1, dtype=torch.int32, device="cuda")
+    )
+    ref = _exact_topk_reference(logits, lengths, top_k)
+    assert torch.equal(out[0], ref[0])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_rows", [8, 64])
+def test_persistent_topk_padded_stride_wide(num_rows: int) -> None:
+    """A pitch far larger than the logical width: the geometry must follow the
+    active width, and a length beyond max_seq_len must not be trusted."""
+    torch.set_default_device("cuda:0")
+    stride, max_seq_len, top_k = 65536, 8192, 512
+    gen = torch.Generator(device="cuda").manual_seed(num_rows)
+    padded = torch.randn(num_rows, stride, generator=gen, device="cuda")
+    lengths = torch.full((num_rows,), max_seq_len, dtype=torch.int32, device="cuda")
+    lengths[0] = stride  # oversized on purpose: must clamp to max_seq_len
+    indices = _run_persistent_topk(padded, lengths, top_k, max_seq_len)
+    clamped = torch.full((num_rows,), max_seq_len, dtype=torch.int32, device="cuda")
+    ref = _exact_topk_reference(padded, clamped, top_k)
+    assert torch.equal(indices, ref)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_rows", [1, 8])
+@pytest.mark.parametrize("seq_len", [4096, 20000])
+def test_persistent_topk_signed_zero_ties_by_index(num_rows: int, seq_len: int) -> None:
+    """-0.0 and +0.0 are numerically equal, so the documented rule (value
+    descending, ties by index ascending) must return the first top_k indices.
+    Their bit patterns differ and the order-preserving transform would
+    otherwise rank every +0.0 above every -0.0."""
+    top_k = 512
+    torch.set_default_device("cuda:0")
+    logits = torch.zeros(num_rows, seq_len, device="cuda")
+    logits[:, ::2] = -0.0
+    logits[:, 1::2] = 0.0
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    expect = torch.arange(top_k, dtype=torch.int32, device="cuda").expand(
+        num_rows, top_k
+    )
+    for _ in range(6):
         assert torch.equal(_run_persistent_topk(logits, lengths, top_k), expect)
 
 
