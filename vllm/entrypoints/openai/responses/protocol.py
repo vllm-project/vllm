@@ -603,10 +603,18 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        """Promote input tools and validate tool choice against effective tools."""
         if not isinstance(data, dict):
             return data
 
         input_data = data.get("input")
+        if input_data is not None and not isinstance(input_data, (list, str, bytes)):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                pass
+            else:
+                data["input"] = input_data
         if isinstance(input_data, list):
             input_items = []
             additional_tools = []
