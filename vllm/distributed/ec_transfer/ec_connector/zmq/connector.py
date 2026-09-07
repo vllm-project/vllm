@@ -20,7 +20,10 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
     ECConnectorWorkerMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.utils import build_ec_items
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.distributed.ec_transfer.ec_connector.zmq.common import (
     ECZmqConnectorMetadata,
 )
@@ -48,8 +51,9 @@ class ECZmqConnector(ECConnectorBase):
             self.connector_worker = self._make_worker(vllm_config)
         elif role == ECConnectorRole.SCHEDULER:
             self.connector_scheduler = self._make_scheduler(vllm_config)
-            self._model_config = vllm_config.model_config
-            self._metadata_fields_cache: dict[str, set[str]] = {}
+            self._metadata_resolver = PlaceholderMetadataResolver(
+                vllm_config.model_config
+            )
         else:
             raise ValueError(f"Unknown ECConnectorRole: {role}")
 
@@ -144,8 +148,10 @@ class ECZmqConnector(ECConnectorBase):
         if self.connector_scheduler is None or not self.is_producer:
             return False, None
 
-        items = build_ec_items(request, self._model_config, self._metadata_fields_cache)
-        return False, {"ec_items": items} if items else None
+        items = collect_ec_item_metadata(
+            request.mm_features, self._metadata_resolver
+        )
+        return False, items or None
 
     # Shared.
     def shutdown(self) -> None:

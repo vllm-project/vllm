@@ -54,9 +54,9 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.logprobs.is_some();
-    let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
-    let mut sampling_params = request.sampling_params;
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -73,6 +73,7 @@ pub(super) fn prepare_generate_request(
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,

@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import safetensors.torch
+import safetensors
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -13,8 +13,8 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.utils import (
-    build_ec_items,
-    placeholder_metadata_fields,
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -54,8 +54,7 @@ class ECExampleConnector(ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
-        self._model_config = vllm_config.model_config
-        self._metadata_fields_cache: dict[str, set[str]] = {}
+        self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
             self._storage_path = transfer_config.get_from_extra_config(
@@ -171,12 +170,6 @@ class ECExampleConnector(ECConnectorBase):
         self._mm_datas_need_loads.clear()
         return meta
 
-    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
-        """Which processed keys this model needs published for `modality`."""
-        return placeholder_metadata_fields(
-            modality, self._model_config, self._metadata_fields_cache
-        )
-
     def request_finished(
         self,
         request: "Request",
@@ -192,10 +185,10 @@ class ECExampleConnector(ECConnectorBase):
         if not self.is_producer:
             return False, None
 
-        items = build_ec_items(request, self._model_config, self._metadata_fields_cache)
+        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
         if not items:
             return False, None
-        return False, {"ec_items": items}
+        return False, items
 
     # ==============================
     # Helper functions

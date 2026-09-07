@@ -7,78 +7,81 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.v1.request import Request
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
 
 logger = init_logger(__name__)
 
 
-def placeholder_metadata_fields(
-    modality: str, model_config: "ModelConfig", cache: dict[str, set[str]]
-) -> set[str]:
-    """Which processed keys this model needs published for `modality`.
+class PlaceholderMetadataResolver:
+    """Resolves which processed keys a model needs published per modality.
 
-    Read from `MultiModalDataParser.embedding_fields`, the same declaration
-    the consumer's parser requires, so the two cannot drift. An empty set
-    means the modality cannot be delivered out of band, and the consumer
-    will process the media itself.
-
-    Args:
-        modality: the modality to report fields for.
-        model_config: the producer's model config.
-        cache: per-connector memo of the answer, keyed by modality.
+    Reads `MultiModalDataParser.embedding_fields`, the same declaration the
+    consumer's parser requires, so the two cannot drift. An empty set means
+    the modality cannot be delivered out of band, and the consumer will
+    process the media itself.
     """
-    if modality in cache:
-        return cache[modality]
 
-    fields: set[str] = set()
-    try:
-        from vllm.multimodal import MULTIMODAL_REGISTRY
+    def __init__(self, model_config: "ModelConfig") -> None:
+        self._model_config = model_config
+        self._cache: dict[str, set[str]] = {}
 
-        info = MULTIMODAL_REGISTRY.create_processor(model_config).info
-        fields = info.data_parser.placeholder_metadata_fields(modality)
-    except Exception:
-        # Reporting nothing is a safe degradation: the consumer falls back to
-        # processing the media itself.
-        logger.warning(
-            "Could not determine the placeholder metadata fields for "
-            "modality %s; the consumer will preprocess the media itself.",
-            modality,
-            exc_info=True,
-        )
+    def fields_for(self, modality: str) -> set[str]:
+        if modality in self._cache:
+            return self._cache[modality]
 
-    cache[modality] = fields
-    return fields
+        fields: set[str] = set()
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
+            fields = info.data_parser.placeholder_metadata_fields(modality)
+        except Exception:
+            logger.warning(
+                "Could not determine the placeholder metadata fields for "
+                "modality %s; the consumer will preprocess the media itself.",
+                modality,
+                exc_info=True,
+            )
+
+        self._cache[modality] = fields
+        return fields
 
 
-def build_ec_items(
-    request: "Request", model_config: "ModelConfig", cache: dict[str, set[str]]
-) -> list[dict[str, Any]]:
-    """Report each item's cache key and grid so a consumer can skip the
-    image transform.
+def collect_ec_item_metadata(
+    mm_features: "list[MultiModalFeatureSpec]",
+    resolver: PlaceholderMetadataResolver,
+) -> dict[str, dict[str, Any]]:
+    """Build one `ec_transfer_params` entry per feature for `request_finished()`.
 
-    A consumer only needs the grid to size the prompt's placeholder range;
-    the embedding itself arrives through the connector. Reporting the grid
-    the producer actually computed keeps the two sides in agreement without
-    the caller re-deriving it from the raw media.
+    Keyed by mm_hash, each entry carries a `metadata` dict with whatever
+    placeholder fields `resolver` says this model needs published for its
+    modality, so a consumer can skip the image transform. `data` is None for
+    items served from the processor cache, in which case the metadata is
+    unavailable here and the consumer has to fall back to processing the
+    media itself. A connector that also has transfer coordinates to report
+    (e.g. NIXL peer_host/peer_port/size_bytes) merges those in alongside
+    `metadata`, not into it.
     """
-    items: list[dict[str, Any]] = []
-    for feature in request.mm_features:
-        metadata = {}
-        # `data` is None for items served from the processor cache, in which
-        # case the metadata is unavailable here and the consumer has to fall
-        # back to processing the media itself.
+    items: dict[str, dict[str, Any]] = {}
+    for feature in mm_features:
+        metadata: dict[str, Any] = {}
         if feature.data is not None:
-            wanted = placeholder_metadata_fields(feature.modality, model_config, cache)
-            metadata = {
-                key: value.tolist()
-                for key, value in feature.data.get_data().items()
-                if key in wanted and isinstance(value, torch.Tensor)
-            }
-        items.append({"mm_hash": feature.identifier, **metadata})
+            wanted = resolver.fields_for(feature.modality)
+            for key, value in feature.data.get_data().items():
+                if key not in wanted:
+                    continue
+                if isinstance(value, torch.Tensor):
+                    metadata[key] = value.tolist()
+                elif is_list_of(value, (int, float)):
+                    # Some metadata (e.g. Qwen3-VL video timestamps) is
+                    # produced as a plain list rather than a tensor.
+                    metadata[key] = value
+        items[feature.identifier] = {"metadata": metadata}
     return items
 
 

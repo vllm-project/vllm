@@ -20,7 +20,10 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
+from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
+    _flashkda_prefill,
+    _store_cache_checkpoints_kernel,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
@@ -40,6 +43,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 DEVICE = current_platform.device_type
 
@@ -54,6 +58,19 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
+
+
+def test_kda_warmup_skips_missing_metadata(monkeypatch):
+    monkeypatch.setattr(
+        nvidia_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={}),
+    )
+    layer = object.__new__(nvidia_kda.KimiK3DeltaAttention)
+    object.__setattr__(layer, "prefix", "language_model.model.layers.0.self_attn")
+    empty = torch.empty(0, device=DEVICE)
+
+    assert layer._forward(empty, empty, empty, empty, empty) is None
 
 
 def test_kda_recoverssm_config_state_layout():
@@ -878,13 +895,18 @@ def test_kda_recoverssm_verify_and_group_commit(
 
 
 @pytest.mark.parametrize(
-    ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm"),
+    ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm", "conv_layout"),
     [
-        (12, 1, -5.0, True),
-        (12, 4, None, False),
-        (24, 4, None, False),
-        (48, 1, -5.0, True),
-        (96, 1, -5.0, True),
+        (12, 1, -5.0, True, "SD"),
+        (12, 4, None, False, "SD"),
+        (24, 4, None, False, "SD"),
+        (48, 1, -5.0, True, "SD"),
+        (96, 1, -5.0, True, "SD"),
+        (12, 1, -5.0, True, "DS"),
+        (12, 4, None, False, "DS"),
+        (24, 4, None, False, "DS"),
+        (48, 1, -5.0, True, "DS"),
+        (96, 1, -5.0, True, "DS"),
     ],
 )
 @torch.inference_mode()
@@ -893,6 +915,7 @@ def test_fused_kda_decode_correctness(
     num_seqs: int,
     lower_bound: float | None,
     fuse_output_norm: bool,
+    conv_layout: str,
 ):
     D, W = 128, 4
     if not is_fused_kda_decode_supported(
@@ -904,7 +927,7 @@ def test_fused_kda_decode_correctness(
         conv_state_dtype=torch.bfloat16,
     ):
         pytest.skip("Fused KDA decode is not supported on this platform")
-    torch.manual_seed(967 + num_heads + num_seqs)
+    torch.manual_seed(967 + num_heads + num_seqs + (conv_layout == "DS"))
     dim = num_heads * D
     slots = num_seqs + 2
     packed_x_storage = torch.randn(
@@ -912,13 +935,25 @@ def test_fused_kda_decode_correctness(
     )
     packed_x = packed_x_storage[:, : 3 * dim]
     weight = 0.1 * torch.randn(3 * dim, W, dtype=torch.float32, device=DEVICE)
-    conv_seed = 0.1 * torch.randn(
-        slots,
-        W - 1,
-        3 * dim,
-        dtype=torch.bfloat16,
-        device=DEVICE,
-    ).transpose(1, 2)
+    if conv_layout == "DS":
+        # DS cache layout: per slot the taps are innermost
+        # (stride (W-1, 1)), matching VLLM_SSM_CONV_STATE_LAYOUT=DS.
+        conv_seed = 0.1 * torch.randn(
+            slots,
+            3 * dim,
+            W - 1,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+    else:
+        # SD cache layout: per slot the channels are innermost.
+        conv_seed = 0.1 * torch.randn(
+            slots,
+            W - 1,
+            3 * dim,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        ).transpose(1, 2)
     raw_g = torch.randn(
         1,
         num_seqs,
@@ -1000,7 +1035,11 @@ def test_fused_kda_decode_correctness(
     conv_actual = torch.as_strided(
         cache_storage.view(torch.bfloat16),
         size=(slots, 3 * dim, W - 1),
-        stride=(page_bytes // torch.bfloat16.itemsize, 1, 3 * dim),
+        stride=(
+            page_bytes // torch.bfloat16.itemsize,
+            (W - 1) if conv_layout == "DS" else 1,
+            1 if conv_layout == "DS" else 3 * dim,
+        ),
     )
     state_actual = torch.as_strided(
         cache_storage.view(torch.float32),
@@ -1042,6 +1081,56 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
         input_dtype=torch.bfloat16,
         conv_state_dtype=torch.bfloat16,
     )
+
+
+@torch.inference_mode()
+def test_flashkda_near_collinear_keys_remain_finite():
+    """Guard against unstable inversion of near-collinear key blocks."""
+    lower_bound = -5.0
+    if not is_flashkda_supported(128, torch.bfloat16, lower_bound):
+        pytest.skip("FlashKDA is not supported on this platform")
+
+    import vllm._flashkda_C  # noqa: F401
+
+    T, H, D = 16384, 1, 128
+    torch.manual_seed(0)
+    key = torch.randn(1, 1, H, D, dtype=torch.bfloat16, device=DEVICE)
+    qk = key.expand(1, T, H, D).contiguous()
+    value_block = torch.randn(1, 16, H, D, dtype=torch.bfloat16, device=DEVICE)
+    value = value_block.repeat(1, T // 16, 1, 1)
+    raw_gate = torch.full_like(qk, -12.0)
+    raw_beta = torch.full((1, T, H), 8.0, dtype=qk.dtype, device=DEVICE)
+    A_log = torch.zeros(H, dtype=torch.float32, device=DEVICE)
+    dt_bias = torch.zeros(H, D, dtype=torch.float32, device=DEVICE)
+    initial_state = torch.zeros(1, H, D, D, dtype=torch.float32, device=DEVICE)
+    final_state = torch.empty_like(initial_state)
+    output = torch.empty_like(value)
+    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=DEVICE)
+    workspace = torch.empty(
+        torch.ops._flashkda_C.get_workspace_size(T, H, 1),
+        dtype=torch.uint8,
+        device=DEVICE,
+    )
+
+    torch.ops._flashkda_C.fwd(
+        qk,
+        qk,
+        value,
+        raw_gate,
+        raw_beta,
+        D**-0.5,
+        output,
+        workspace,
+        A_log,
+        dt_bias,
+        lower_bound,
+        initial_state,
+        final_state,
+        cu_seqlens,
+    )
+
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(final_state).all()
 
 
 @torch.inference_mode()
@@ -1088,6 +1177,17 @@ def test_flashkda_correctness():
         expected_states.append(final_state)
     expected_out = torch.cat(expected_outputs, dim=1)
     expected_state = torch.cat(expected_states).transpose(-1, -2).contiguous()
+    _, expected_checkpoint = naive_recurrent_kda(
+        q_norm[:, :16],
+        k_norm[:, :16],
+        v[:, :16],
+        gate[:, :16],
+        beta[:, :16],
+        initial_state=initial_state[0:1].transpose(-1, -2),
+        output_final_state=True,
+    )
+    assert expected_checkpoint is not None
+    expected_checkpoint = expected_checkpoint.transpose(-1, -2).contiguous()
 
     actual_out = torch.empty_like(v)
     actual_state = torch.empty_like(initial_state)
@@ -1115,3 +1215,70 @@ def test_flashkda_correctness():
 
     assert_close("o", expected_out, actual_out, 0.01)
     assert_close("ht", expected_state, actual_state, 0.01)
+
+    checkpoint_out = torch.empty_like(v)
+    checkpoint_final_state = torch.empty_like(initial_state)
+    checkpoint_state = torch.empty_like(initial_state)
+    checkpoint_offsets = torch.tensor([16, 31], dtype=torch.int32, device=DEVICE)
+    _flashkda_prefill(
+        q=q,
+        k=k,
+        v=v,
+        g=raw_g,
+        beta=beta_logits,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        out=checkpoint_out,
+        final_state=checkpoint_final_state,
+        workspace=workspace,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
+    )
+
+    assert_close("checkpoint_o", expected_out, checkpoint_out, 0.01)
+    assert_close("checkpoint_ht", expected_state, checkpoint_final_state, 0.01)
+    assert_close("checkpoint", expected_checkpoint, checkpoint_state[:1], 0.01)
+
+    conv_state = torch.zeros(2, H * D, 3, dtype=q.dtype, device=DEVICE)
+    recurrent_storage = torch.zeros(2, H * D * D + 8, device=DEVICE)
+    recurrent_state = recurrent_storage[:, : H * D * D].view(2, H, D, D)
+    conv_input = q[0].flatten(1)
+    checkpoint_state_indices = torch.tensor(
+        [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
+    )
+    state_len = conv_state.shape[-1]
+    width = H * D
+    recurrent_row_size = checkpoint_state[0].numel()
+    block_size = 256
+    _store_cache_checkpoints_kernel[
+        (
+            checkpoint_state_indices.numel(),
+            (max(width * state_len, recurrent_row_size) + block_size - 1) // block_size,
+        )
+    ](
+        conv_input,
+        conv_state,
+        checkpoint_state,
+        recurrent_state,
+        cu_seqlens,
+        checkpoint_offsets,
+        checkpoint_state_indices,
+        conv_input.stride(0),
+        conv_input.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        checkpoint_state.stride(0),
+        recurrent_state.stride(0),
+        checkpoint_offsets.stride(0),
+        state_len,
+        width,
+        recurrent_row_size,
+        NULL_BLOCK_ID,
+        block_size,
+    )
+    torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
+    torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])

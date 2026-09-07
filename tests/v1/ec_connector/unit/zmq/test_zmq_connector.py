@@ -64,7 +64,10 @@ def test_a_producer_reports_its_items_in_the_response(make_connector, vllm_confi
     delay_free, params = connector.request_finished(_Request("mm0", "mm1"))
 
     assert delay_free is False
-    assert params == {"ec_items": [{"mm_hash": "mm0"}, {"mm_hash": "mm1"}]}
+    assert params == {
+        "mm0": {"metadata": {}},
+        "mm1": {"metadata": {}},
+    }
 
 
 def test_a_consumer_reports_nothing(make_connector, vllm_config):
