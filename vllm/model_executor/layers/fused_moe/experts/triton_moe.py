@@ -596,9 +596,9 @@ class TritonWNA16Experts(TritonExperts):
     ) -> bool:
         SUPPORTED_W = [
             kInt4Static,
+            kInt4StaticAsym,
             kInt8Static,
             kInt4Static32,
-            kInt4StaticAsym,
             kInt4Static32Asym,
             # other group sizes?
         ]
