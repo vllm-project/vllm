@@ -94,6 +94,9 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
     }
 )
 
@@ -2589,12 +2592,6 @@ class VllmConfig:
                 and speculative_config.method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
-
-            if (
-                speculative_config.method == "eagle3"
-                and self.parallel_config.pipeline_parallel_size > 1
-            ):
-                unsupported.append("EAGLE3 with pipeline parallelism")
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())

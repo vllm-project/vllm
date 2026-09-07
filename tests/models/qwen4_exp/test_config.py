@@ -147,9 +147,9 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state.uses_ngram_embedding = True
     model_state.ngram_context_len = 3
     model_state.ngram_eos_token_id = 99
-    model_state.ngram_context = torch.empty((4, 3), dtype=torch.int32)
+    model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
-    model_state.ple_query_start_loc = torch.empty(5, dtype=torch.int32)
+    model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
 
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -167,34 +167,57 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
         model_inputs = model_state.prepare_inputs(input_batch, req_states)
 
+    expected_query_start_loc = torch.full((9,), 3, dtype=torch.int32)
+    expected_query_start_loc[0] = 0
+    expected_query_start_loc[1] = 2
     torch.testing.assert_close(
-        model_inputs["query_start_loc"],
-        torch.tensor([0, 2, 3, 3], dtype=torch.int32),
+        model_inputs["query_start_loc"], expected_query_start_loc
     )
+    expected_context = torch.full((8, 3), 99, dtype=torch.int32)
+    expected_context[:2] = torch.tensor([[99, 99, 20], [1, 2, 3]])
+    torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
+
+    # Retain the views to detect reallocations as the request layout changes.
+    query_start_loc = model_inputs["query_start_loc"]
+    ngram_context = model_inputs["ngram_context"]
+    input_batch.num_reqs = 1
+    input_batch.num_reqs_after_padding = 1
+    input_batch.idx_mapping = torch.tensor([0])
+    input_batch.query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
+        model_inputs = model_state.prepare_inputs(input_batch, req_states)
+
+    expected_query_start_loc.fill_(3)
+    expected_query_start_loc[0] = 0
     torch.testing.assert_close(
-        model_inputs["ngram_context"],
-        torch.tensor([[99, 99, 20], [1, 2, 3], [99, 99, 99]], dtype=torch.int32),
+        model_inputs["query_start_loc"], expected_query_start_loc
     )
+    expected_context.fill_(99)
+    expected_context[0] = torch.tensor([1, 2, 3])
+    torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
+    assert model_inputs["query_start_loc"].data_ptr() == query_start_loc.data_ptr()
+    assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
 
 
 def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
     model_state.ngram_eos_token_id = 99
-    model_state.ngram_context = torch.empty((4, 3), dtype=torch.int32)
-    model_state.ple_query_start_loc = torch.empty(5, dtype=torch.int32)
+    model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
+    model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
 
     with patch.object(MambaHybridModelState, "prepare_dummy_inputs", return_value={}):
-        first = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=8)
+        first = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
+        # Dummy runs establish the addresses used during CUDA graph capture.
         query_start_loc_ptr = first["query_start_loc"].data_ptr()
         ngram_context_ptr = first["ngram_context"].data_ptr()
-        second = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=8)
+        second = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
 
+    expected_query_start_loc = torch.full((9,), 4, dtype=torch.int32)
+    expected_query_start_loc[:4] = torch.tensor([0, 1, 2, 4], dtype=torch.int32)
+    torch.testing.assert_close(second["query_start_loc"], expected_query_start_loc)
     torch.testing.assert_close(
-        second["query_start_loc"], torch.tensor([0, 2, 5, 8], dtype=torch.int32)
-    )
-    torch.testing.assert_close(
-        second["ngram_context"], torch.full((3, 3), 99, dtype=torch.int32)
+        second["ngram_context"], torch.full((8, 3), 99, dtype=torch.int32)
     )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
