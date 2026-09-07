@@ -14,7 +14,7 @@ import torch
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask

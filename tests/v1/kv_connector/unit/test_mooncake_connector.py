@@ -1215,8 +1215,9 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         worker.use_mla = True
         worker.transfer_topo.is_mla = True
 
-        # MLA cache tensor: shape[-2] is the block size.
-        mla_cache = torch.zeros((2, 16, 96), dtype=torch.float16)
+        # MLA cache tensor: shape[-2] is the block size and each block's
+        # byte stride matches the cache spec page size.
+        mla_cache = torch.zeros((2, 16, 512), dtype=torch.float16)
         # Eagle3/GQA-like cache tensor: shape[-2] is num_kv_heads, not block size.
         eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
         kv_caches = {

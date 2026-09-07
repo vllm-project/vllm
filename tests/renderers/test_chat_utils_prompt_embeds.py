@@ -27,6 +27,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
     _build_mixed_prompt_embeds,
@@ -575,3 +576,49 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     assert mask.count(False) == LEN_SYS + LEN_USR
     assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_SYS], t_sys)
     assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_USR], t_usr)
+
+
+def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
+    """`prompt_is_token_ids` must be truncated with `prompt_token_ids`.
+
+    The mask is positional: the engine pairs it element-wise with the prompt
+    tokens to decide which positions read a real token id and which read a row
+    of `prompt_embeds`. Truncating the prompt without truncating the mask
+    leaves the two describing different positions, so embed placeholders stop
+    being recognised as such.
+    """
+    hidden_size = 8
+    placeholder_token_id = 0
+    num_head, embed_len, num_tail = 10, 5, 5
+
+    token_ids = (
+        list(range(1, num_head + 1))
+        + [placeholder_token_id] * embed_len
+        + list(range(1, num_tail + 1))
+    )
+    tensors = [torch.randn(embed_len, hidden_size)]
+    positions = [(num_head, embed_len)]
+    embeds, mask = _build_mixed_prompt_embeds(token_ids, tensors, positions)
+
+    prompt = {
+        "prompt_token_ids": token_ids,
+        "prompt_embeds": embeds,
+        "prompt_is_token_ids": mask,
+    }
+    keep = 8
+    tok_params = TokenizeParams(
+        max_total_tokens=100,
+        truncate_prompt_tokens=keep,
+        truncation_side="left",
+    )
+
+    result = tok_params.apply_post_tokenization(None, prompt)
+
+    # Keeping the last 8 of 20 positions starts inside the embed span, so the
+    # first 3 surviving positions are embed rows and the rest are real tokens.
+    # Comparing contents rather than lengths is what pins the alignment: a
+    # mask reduced from the wrong side has the right length and still
+    # describes the wrong positions.
+    assert result["prompt_is_token_ids"] == [False] * 3 + [True] * num_tail
+    assert result["prompt_token_ids"] == token_ids[-keep:]
+    assert torch.equal(result["prompt_embeds"], embeds[-keep:])

@@ -25,6 +25,9 @@
 ARG CUDA_VERSION=13.0.3
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=24.04
+ARG INSTALL_RUBIN_PRERELEASE=false
+ARG TRITON_INSTALL_FROM_SOURCE_REPO=
+ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -94,6 +97,7 @@ ARG INSTALL_KV_CONNECTORS=false
 FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG TARGETPLATFORM
+ARG INSTALL_RUBIN_PRERELEASE
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG USE_SCCACHE
@@ -205,7 +209,13 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
+        [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
+        echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
+        exit 1; \
+    fi \
+    && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
     fi \
@@ -216,7 +226,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         printf 'cython<3.3\n' > /tmp/build-constraints.txt \
         && export UV_BUILD_CONSTRAINT=/tmp/build-constraints.txt; \
     fi \
-    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        echo "Installing Rubin prerelease requirements..." \
+        && /opt/venv/bin/python3 use_existing_torch.py --prefix \
+        && uv pip install --python /opt/venv/bin/python3 \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt \
+        && uv pip install --python /opt/venv/bin/python3 \
+            -r requirements/cuda.txt \
+        && uv pip install --python /opt/venv/bin/python3 \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
+    elif [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -229,6 +248,33 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# CUDA 13.4 Rubin images need a compatibility link for the prerelease
+# PyTorch wheel's libcurand.so.11 dependency. CUDA 13.5 must use its native
+# libcurand.so.11 instead.
+RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
+        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ln -sf "${CURAND_LIBRARY}" \
+                /usr/local/cuda/lib64/libcurand.so.11; \
+        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
+        else \
+            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+            exit 1; \
+        fi \
+        && printf '%s\n' \
+            /opt/venv/lib \
+            "/opt/venv/lib/python${PYTHON_VERSION}/site-packages/nvpl/lib" \
+            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
+        && ldconfig; \
+    fi
+
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
@@ -237,9 +283,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs) \
     && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}"
 
-# CUDA arch list used by torch
-# Explicitly set the list to avoid issues with torch 2.2
-# See https://github.com/pytorch/pytorch/pull/123243
+# CUDA arch list used by torch. Keep this explicit so GPU-less container builds
+# do not depend on PyTorch's changing common-architecture fallback.
 # From versions.json: .torch.cuda_arch_list
 # Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
 # converts global gencode flags into per-kernel arch lists. If a specific
@@ -258,7 +303,7 @@ ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 
 # Install native tools needed only for Rust builds.
-RUN dnf install -y --setopt=install_weak_deps=False make \
+RUN dnf install -y --setopt=install_weak_deps=False make perl-core \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -310,6 +355,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
 
+ARG INSTALL_RUBIN_PRERELEASE
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
@@ -330,7 +376,11 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        echo "Installing build requirements with Rubin prerelease PyTorch..." \
+        && python3 use_existing_torch.py --prefix \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt; \
+    elif [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
@@ -370,9 +420,10 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 # Use dummy version for csrc-build wheel (only .so files are extracted, version doesn't matter)
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
 
-# Use existing torch for nightly builds
+# Use existing torch for nightly and Rubin prerelease builds
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ] || \
+        [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         python3 use_existing_torch.py --prefix; \
     fi
 
@@ -424,7 +475,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Build DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
+ARG TARGETARCH
 ARG CUDA_VERSION
+ARG INSTALL_RUBIN_PRERELEASE
+ARG TRITON_INSTALL_FROM_SOURCE_REPO
+ARG TRITON_INSTALL_FROM_SOURCE_REVISION
+ARG max_jobs
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -441,6 +497,20 @@ ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        # The Rubin CUDA builder provides NCCL in its architecture-specific \
+        # toolkit directory rather than as a Python package. Give DeepEP a \
+        # stable prefix that also exists in the Ubuntu runtime image. \
+        NCCL_HEADER=$(find /usr/local/cuda/targets -name nccl.h -print -quit) \
+        && test -n "${NCCL_HEADER}" \
+        && NCCL_LIBRARY=$(find -H /usr/local/cuda/targets \
+            -name libnccl.so.2 -print -quit) \
+        && test -n "${NCCL_LIBRARY}" \
+        && ln -sf "${NCCL_HEADER}" /usr/include/nccl.h \
+        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
+        && export EP_NCCL_ROOT_DIR=/usr; \
+    fi && \
     CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
@@ -454,11 +524,56 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
+
+# Build Triton from source when a repository is configured. Triton 3.8 pins
+# ptxas-blackwell 13.3, which cannot assemble SM107. Rubin CUDA 13.4 and 13.5
+# builds use their SM107-capable system ptxas during the wheel build and at
+# runtime.
+COPY tools/build_triton_from_source.sh /tmp/build_triton_from_source.sh
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=cache,id=triton-source-${TARGETARCH},target=/root/.triton,sharing=locked \
+    --mount=type=cache,id=triton-source-ccache-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
+    set -eux; \
+    TRITON_WORKSPACE=/tmp/triton_from_source_workspace; \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] \
+        && [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
+        echo "Rubin prerelease builds require TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
+        exit 1; \
+    elif [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ] \
+        && [ -n "${TRITON_INSTALL_FROM_SOURCE_REVISION}" ]; then \
+        echo "TRITON_INSTALL_FROM_SOURCE_REVISION requires TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
+        exit 1; \
+    elif [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
+        dnf install -y --setopt=install_weak_deps=False zlib-devel; \
+        dnf clean all; \
+        rm -rf /var/cache/dnf; \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
+        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+            case "${CUDA_MAJOR_MINOR}" in \
+                13.4|13.5) \
+                    export TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas \
+                    ;; \
+                *) \
+                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+                    exit 1 \
+                    ;; \
+            esac; \
+        fi; \
+        TRITON_WORKSPACE="${TRITON_WORKSPACE}" \
+        MAX_JOBS="${max_jobs:-}" \
+            bash /tmp/build_triton_from_source.sh; \
+    else \
+        mkdir -p "${TRITON_WORKSPACE}/dist"; \
+        printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
+        (cd "${TRITON_WORKSPACE}/dist" \
+            && sha256sum build-state > wheel.sha256); \
+    fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 ARG TARGETPLATFORM
+ARG INSTALL_RUBIN_PRERELEASE
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -480,7 +595,11 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        echo "Installing build requirements with Rubin prerelease PyTorch..." \
+        && python3 use_existing_torch.py --prefix \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt; \
+    elif [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
@@ -514,10 +633,15 @@ ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 # Skip adding +precompiled suffix to version (preserves git-derived version)
 ENV VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX=1
 
-# Use existing torch for nightly builds
+# Use existing torch for nightly and Rubin prerelease builds
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ] || \
+        [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         python3 use_existing_torch.py --prefix; \
+    fi \
+    && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\])[[:space:]]*==/Id' \
+            requirements/cuda.txt; \
     fi
 
 # Build the vLLM wheel
@@ -607,12 +731,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # image with vLLM installed
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
+ARG INSTALL_RUBIN_PRERELEASE
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+
+# Keep the output image's CUDA metadata aligned with the selected toolkit.
+# This also normalizes prerelease base images with four-component metadata for
+# OCI runtimes that evaluate NVIDIA's CUDA driver requirement.
+ENV CUDA_VERSION=${CUDA_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
@@ -675,6 +805,34 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         # numactl CLI for NUMA binding at runtime
         numactl && \
     rm -rf /var/lib/apt/lists/*
+
+# Apply the CUDA 13.4-only libcurand compatibility link described in the build
+# stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
+# under its configured /usr prefix, while Ubuntu installs it in a multiarch
+# subdirectory.
+RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
+        && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.10 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ln -sf "${CURAND_LIBRARY}" \
+                /usr/local/cuda/lib64/libcurand.so.11; \
+        elif [ "${CUDA_MAJOR_MINOR}" = "13.5" ]; then \
+            CURAND_LIBRARY=$(find -H /usr/local/cuda -name libcurand.so.11 \
+                -print -quit) \
+            && test -n "${CURAND_LIBRARY}" \
+            && ! readlink -f "${CURAND_LIBRARY}" | grep -q 'libcurand\.so\.10'; \
+        else \
+            echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+            exit 1; \
+        fi \
+        && NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
+        && test -n "${NCCL_LIBRARY}" \
+        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
+        && ldconfig; \
+    fi
 
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
@@ -753,21 +911,44 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
+        [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
+        echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
+        exit 1; \
+    fi && \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
     fi && \
-    uv pip install --system -r /tmp/requirements-cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        uv pip install --system \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt \
+        && sed -Ei '/^[[:space:]]*(torch|torchvision|torchaudio)[[:space:]]*==/Id' \
+            /tmp/requirements-cuda.txt \
+        && uv pip install --system -r /tmp/requirements-cuda.txt \
+        && uv pip install --system \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt \
+        && printf '%s\n' \
+            "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/nvpl/lib" \
+            > /etc/ld.so.conf.d/vllm-rubin-python.conf \
+        && ldconfig; \
+    else \
+        uv pip install --system \
+            -r /tmp/requirements-cuda.txt \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.17
+ARG FLASHINFER_VERSION=0.6.18
 RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
+        uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+            --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -781,12 +962,18 @@ ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 RUN set -eux; \
-    case "${TARGETPLATFORM}" in \
-      linux/arm64) UUARCH="aarch64" ;; \
-      linux/amd64) UUARCH="x64" ;; \
-      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-    esac; \
-    /tmp/install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}" && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        # The Rubin CUDA image already provides GDRCopy. \
+        ldconfig -p | grep -q 'libgdrapi\.so'; \
+    else \
+        case "${TARGETPLATFORM}" in \
+          linux/arm64) UUARCH="aarch64" ;; \
+          linux/amd64) UUARCH="x64" ;; \
+          *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+        esac; \
+        /tmp/install_gdrcopy.sh \
+            "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
+    fi; \
     rm /tmp/install_gdrcopy.sh
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
@@ -994,6 +1181,8 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG INSTALL_RUBIN_PRERELEASE
+ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
 ARG VLLM_BUILD_COMMIT
 ARG VLLM_BUILD_PIPELINE
@@ -1044,6 +1233,50 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
 # here so the image does not override mooncake's own default.
+
+# Install Rubin prerelease dependencies when explicitly requested. Keep this
+# after the public vLLM and KV connector dependency pins installed above.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        echo "Installing Rubin prerelease requirements..." \
+        && uv pip install --system \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
+    fi
+
+# Install source-built Triton last so dependency resolution cannot restore the
+# previously installed version.
+COPY --from=extensions-build \
+    /tmp/triton_from_source_workspace/dist/wheel.sha256 \
+    /tmp/triton-source-wheel.sha256
+COPY tools/install_triton_from_source.sh /tmp/install_triton_from_source.sh
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,from=extensions-build,source=/tmp/triton_from_source_workspace/dist,target=/tmp/triton-source-dist,ro \
+    if [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
+        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
+        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+            case "${CUDA_MAJOR_MINOR}" in \
+                13.4|13.5) \
+                    TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+                    TRITON_EXPECTED_PTXAS_VERSION="${CUDA_MAJOR_MINOR}" \
+                        bash /tmp/install_triton_from_source.sh \
+                            /tmp/triton-source-dist \
+                            /tmp/triton-source-wheel.sha256 \
+                    ;; \
+                *) \
+                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
+                    exit 1 \
+                    ;; \
+            esac; \
+        else \
+            bash /tmp/install_triton_from_source.sh \
+                /tmp/triton-source-dist \
+                /tmp/triton-source-wheel.sha256; \
+        fi; \
+    fi \
+    && rm -f \
+        /tmp/install_triton_from_source.sh \
+        /tmp/triton-source-wheel.sha256
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

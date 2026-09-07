@@ -7,11 +7,9 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.api_router import models
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
