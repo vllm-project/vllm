@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_np_dp_group, get_np_group, get_tp_group
 from vllm.forward_context import DPMetadata, get_forward_context
@@ -935,10 +936,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
-        # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
-        # which dispatch only on the padded token count.
-        # torch.compile requires the splitting op to write graph-owned storage.
-        # Once compilation is removed, the op can return the IDs directly.
+        # Request-dependent IDs must be refreshed at each piecewise replay.
+        # The eager segment writes into graph-owned output storage.
         ngram_ids = input_ids.new_empty(
             (input_ids.numel(), self.ngram_heads), dtype=torch.long
         )
@@ -961,11 +960,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
             return embedding(hidden_states)
-        ngram_ids = self._compute_ngram_ids(
-            input_ids,
-            query_start_loc,
-            ngram_context,
-        )
+        ngram_ids = self._compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         return self.ngram_embedding(ngram_ids).flatten(-2)
 
     def start_prefetch(
@@ -1313,6 +1308,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 token_indices=non_spec_token_indices,
             )
 
+    # State routing consumes the current request metadata on every replay.
+    @eager_break_during_capture
     def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -1393,12 +1390,11 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
-        # State routing depends on runtime request metadata and remains outside
-        # the piecewise graph; short convolution accumulates into gated_output.
-        torch.ops.vllm.qwen4_exp_ple_short_conv(conv_input, gated_output, self.prefix)
+        self._short_conv(conv_input, gated_output)
         return gated_output
 
 
+@eager_break_during_capture
 def qwen4_exp_compute_ple_ngram_ids(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -1426,30 +1422,22 @@ def qwen4_exp_compute_ple_ngram_ids_fake(
     return
 
 
-def qwen4_exp_ple_short_conv(
-    inputs: torch.Tensor,
-    residual_output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer._short_conv(inputs, residual_output)
+direct_register_custom_op(
+    op_name="qwen4_exp_compute_ple_ngram_ids",
+    op_func=qwen4_exp_compute_ple_ngram_ids,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
+)
 
 
-def qwen4_exp_ple_short_conv_fake(
-    inputs: torch.Tensor,
-    residual_output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
+@eager_break_during_capture
 def qwen4_exp_ple_start_prefetch(
     hidden_states: torch.Tensor,
     ngram_ids: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    """Launch a PLE pinned-memory lookup outside the compiled graph body."""
+    """Refresh NP metadata and launch the pinned lookup on each replay."""
     layer = get_forward_context().no_compile_layers[layer_name]
     layer.ple_embedding.ngram_embedding._prefetch_impl(ngram_ids, output)
 
@@ -1463,18 +1451,16 @@ def qwen4_exp_ple_start_prefetch_fake(
     return
 
 
+@eager_break_during_capture
 def qwen4_exp_ple_finalize_prefetched(
     hidden_states: torch.Tensor,
     prefetch_output: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    """Finish a PLE lookup outside the compiled graph body."""
+    """Join the lookup stream and select current DP rows on each replay."""
     layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding.ngram_embedding._finalize_prefetch_impl(
-        prefetch_output,
-        output,
-    )
+    layer.ple_embedding.ngram_embedding._finalize_prefetch_impl(prefetch_output, output)
 
 
 def qwen4_exp_ple_finalize_prefetched_fake(
@@ -1486,12 +1472,13 @@ def qwen4_exp_ple_finalize_prefetched_fake(
     return
 
 
+@eager_break_during_capture
 def qwen4_exp_ple_fetch_np_embeddings(
     ngram_ids: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
-    """Run a resident NP lookup outside the compiled graph body."""
+    """Fetch resident NP rows into graph-owned storage on each replay."""
     layer = get_forward_context().no_compile_layers[layer_name]
     embeddings = layer.ple_embedding.ngram_embedding._fetch_np_embeddings_impl(
         ngram_ids
@@ -1506,21 +1493,6 @@ def qwen4_exp_ple_fetch_np_embeddings_fake(
 ) -> None:
     return
 
-
-direct_register_custom_op(
-    op_name="qwen4_exp_compute_ple_ngram_ids",
-    op_func=qwen4_exp_compute_ple_ngram_ids,
-    mutates_args=["output"],
-    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
-)
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_short_conv",
-    op_func=qwen4_exp_ple_short_conv,
-    mutates_args=["residual_output"],
-    fake_impl=qwen4_exp_ple_short_conv_fake,
-)
 
 direct_register_custom_op(
     op_name="qwen4_exp_ple_start_prefetch",

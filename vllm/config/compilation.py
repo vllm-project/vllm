@@ -772,6 +772,7 @@ class CompilationConfig:
         "vllm::qwen4_exp_ple_fetch_np_embeddings",
         "vllm::qwen4_exp_ple_start_prefetch",
         "vllm::qwen4_exp_ple_finalize_prefetched",
+        # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
         "vllm::linear_attention",
