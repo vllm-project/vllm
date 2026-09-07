@@ -287,18 +287,27 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
-        # FIXME: xgrammar drops propertyNames whenever patternProperties is
-        # present, and beside an additionalProperties value schema it discards
-        # that schema instead, so either way a constraint is lost without an
-        # error. Remove once these are fixed:
+        # FIXME: propertyNames conflicts with properties/patternProperties/
+        # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
         if (
             obj.get("type") == "object"
             and "propertyNames" in obj
             and (
-                "patternProperties" in obj
+                "properties" in obj
+                or "patternProperties" in obj
                 or isinstance(obj.get("additionalProperties"), dict)
+                or obj.get("unevaluatedProperties", True) is not True
             )
+        ):
+            return True
+
+        # FIXME: multiple patternProperties, or patternProperties alongside
+        # properties, conflict under xgrammar.
+        if (
+            obj.get("type") == "object"
+            and "patternProperties" in obj
+            and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
 
