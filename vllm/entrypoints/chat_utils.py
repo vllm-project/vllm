@@ -871,19 +871,30 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
+        # Fetch all modalities together. Each tracked item is already an
+        # independent awaitable, and the async connector offloads blocking
+        # decode work, so waiting for one modality before starting the next
+        # needlessly adds their latency.
+        # Keep the original group and item order when rebuilding the result.
+        item_groups = list(self._items_by_modality.items())
+        items = [item for _, group in item_groups for item in group]
+        results = await asyncio.gather(
+            *(item() for item in items), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                # Gathering with return_exceptions=True lets every task finish
+                # (or itself fail) before we raise, instead of abandoning
+                # still-in-flight fetches (real network/thread-pool work) the
+                # moment the first one fails.
+                raise result
+
         resolved_items_by_modality: dict[str, list[Any]] = {}
-        for modality, items in self._items_by_modality.items():
-            results = await asyncio.gather(
-                *(item() for item in items), return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, BaseException):
-                    # Gathering with return_exceptions=True lets every task in
-                    # this modality finish (or itself fail) before we raise,
-                    # instead of abandoning still-in-flight fetches (real
-                    # network/thread-pool work) the moment the first one fails.
-                    raise result
-            resolved_items_by_modality[modality] = results
+        result_idx = 0
+        for modality, group in item_groups:
+            next_result_idx = result_idx + len(group)
+            resolved_items_by_modality[modality] = results[result_idx:next_result_idx]
+            result_idx = next_result_idx
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
@@ -1435,10 +1446,11 @@ def validate_chat_template(chat_template: Path | str | None):
 
             builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
             if not builtin_template_path.exists():
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}"
+                    f"Tried: {chat_template} and {builtin_template_path}",
+                    parameter="chat_template",
                 )
 
     else:
@@ -1486,7 +1498,7 @@ def _load_chat_template(
                     f"Tried: {chat_template} and {builtin_template_path}. "
                     f"Reason: {e}"
                 )
-                raise ValueError(msg) from e
+                raise VLLMValidationError(msg, parameter="chat_template") from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
@@ -1564,7 +1576,8 @@ def _get_full_multimodal_text_prompt(
             logger.debug("Input prompt: %s", text_prompt)
             raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
-                "actual multimodal data items."
+                "actual multimodal data items.",
+                parameter="messages",
             )
 
         missing_placeholders.extend([placeholder] * placeholder_counts[placeholder])
@@ -1822,7 +1835,8 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
         raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-            )
+            ),
+            parameter="messages",
         )
 
 
