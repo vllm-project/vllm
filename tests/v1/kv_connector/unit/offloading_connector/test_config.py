@@ -153,12 +153,14 @@ def _mla_spec(
     block_size: int = 16,
     head_size: int = 512,
     dtype: torch.dtype = torch.float32,
+    tokens_per_state: int = 1,
 ) -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=head_size,
         dtype=dtype,
+        tokens_per_state=tokens_per_state,
     )
 
 
@@ -227,6 +229,26 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
             KVCacheGroupSpec(["mla_layer"], mla_spec),
         ],
     )
+
+
+def _mamba_spec() -> MambaSpec:
+    return MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+
+def _uniform_spec(spec_kind: str) -> UniformTypeKVCacheSpecs:
+    # DSA models merge their indexer and MLA layers into a UniformType group,
+    # a container rather than an AttentionSpec, but still sharded across DCP.
+    specs: dict[str, Any] = (
+        {"mla_layer": _mla_spec(), "indexer_layer": _mla_spec(head_size=128)}
+        if spec_kind == "attention"
+        else {"mamba_layer0": _mamba_spec(), "mamba_layer1": _mamba_spec()}
+    )
+    return UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
 
 
 def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
@@ -365,6 +387,61 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
             mamba_group.is_eagle_group,
         )
     ] == [1, 3]
+
+
+@pytest.mark.parametrize("dcp_size,expected", [(1, 16), (2, 32)])
+def test_dcp_scales_uniform_type_attention_group_blocks(dcp_size, expected):
+    config = _make_vllm_config(
+        tensor_parallel_size=2, decode_context_parallel_size=dcp_size
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=64,
+                layers=["mla_layer", "indexer_layer"],
+                layer_stride=32,
+                block_stride=8,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mla_layer", "indexer_layer"], _uniform_spec("attention"))
+        ],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert offloading_config.groups[0].tokens_per_block == expected
+    assert offloading_config.cache.tokens_per_hash == expected
+
+
+@pytest.mark.parametrize(
+    "spec_kind,expected",
+    [
+        ("attention", 32),
+        # Mamba state is replicated across DCP ranks, so a uniform group of
+        # Mamba layers keeps its span.
+        ("mamba", 16),
+    ],
+)
+def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
+    config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
+    config.speculative_config = None
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer0", "layer1"], _uniform_spec(spec_kind)),
+            KVCacheGroupSpec(["mamba_layer"], _mamba_spec()),
+        ],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        expected,
+        16,
+    )
 
 
 def test_preserves_data_parallel_config():
@@ -670,6 +747,15 @@ def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
     return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
 
 
+def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """GLM-5.2/DSv3.2-style wrapper: same-type layers whose specs differ."""
+    names = [f"l{i}" for i in range(len(specs))]
+    return KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
+    )
+
+
 @pytest.mark.parametrize(
     "kv_cache_groups",
     [
@@ -695,6 +781,17 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="mamba-hybrid",
         ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
+            True,
+            id="uniform-mla-wrapper",
+        ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            False,
+            id="uniform-uncertifiable-inner",
+        ),
+        pytest.param([], False, id="attention-free"),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):

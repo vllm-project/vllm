@@ -2121,21 +2121,19 @@ class EngineArgs:
             )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
-            world_size = (
-                self.data_parallel_size
-                * self.pipeline_parallel_size
-                * self.tensor_parallel_size
-            )
             world_size_within_dp = (
-                self.pipeline_parallel_size * self.tensor_parallel_size
+                self.pipeline_parallel_size
+                * self.tensor_parallel_size
+                * self.prefill_context_parallel_size
             )
+            world_size = self.data_parallel_size * world_size_within_dp
             if world_size % self.nnodes != 0:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
                     f"`--nnodes {self.nnodes}` must evenly divide the total "
                     f"world size ({world_size}). Adjust `--nnodes`, "
-                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
-                    "`--tensor-parallel-size`."
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, "
+                    "`--tensor-parallel-size`, or `--prefill-context-parallel-size`."
                 )
             if not 0 <= self.node_rank < self.nnodes:
                 raise ValueError(
@@ -2433,6 +2431,19 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

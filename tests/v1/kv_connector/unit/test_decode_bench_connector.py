@@ -22,18 +22,27 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
 from .utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
+    create_request,
     create_scheduler,
     create_vllm_config,
 )
@@ -235,6 +244,50 @@ def test_decode_bench_connector_fills_each_hma_group():
     assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
 
 
+def test_decode_bench_connector_zero_fills_circular_buffer_groups():
+    """Circular buffers are zeroed to preserve packed non-floating metadata."""
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["circular_layer"],
+                CircularBufferSpec(
+                    block_size=2,
+                    num_kv_heads=1,
+                    head_size=16,
+                    head_size_v=0,
+                    dtype=torch.bfloat16,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    circular_cache = torch.ones(num_gpu_blocks, 16, dtype=torch.bfloat16)
+    connector.register_kv_caches({"circular_layer": circular_cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([5],), 1)})
+    )
+
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    expected_circular = torch.ones_like(circular_cache)
+    expected_circular[5] = 0
+    assert torch.equal(circular_cache, expected_circular)
+
+
 def test_decode_bench_connector_uses_per_group_block_sizes():
     """Scheduler selects only the blocks covering each group's token span."""
     vllm_config = create_vllm_config(
@@ -274,6 +327,63 @@ def test_decode_bench_connector_uses_per_group_block_sizes():
     block_ids_per_group, num_tokens = metadata.reqs_to_fill["request"]
     assert block_ids_per_group == ([0, 1], [2])
     assert num_tokens == 17
+
+
+def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
+    """DCP scales full-attention blocks but not sliding-window blocks."""
+    block_size = 16
+    dcp_world_size = 2
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector="DecodeBenchConnector",
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    full_attention = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    sliding_window = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=2 * block_size,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["full_attention"], full_attention),
+                KVCacheGroupSpec(["sliding_window"], sliding_window),
+            ],
+        ),
+    )
+    num_external_tokens = block_size * dcp_world_size + 1
+    request = create_request(
+        request_id=1,
+        num_tokens=num_external_tokens + 1,
+        block_size=block_size,
+    )
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(block_id=i) for i in (1, 2, 3)],
+            [KVCacheBlock(block_id=i) for i in (5, 6, 7, 8)],
+        )
+    )
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill[request.request_id] == (
+        ([1, 2], [5, 6, 7]),
+        num_external_tokens,
+    )
 
 
 def test_decode_bench_connector_no_refill():

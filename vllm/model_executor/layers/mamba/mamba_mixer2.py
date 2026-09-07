@@ -69,6 +69,13 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 logger = init_logger(__name__)
 
+
+def _view_mtp_decode_tensor(
+    tensor: torch.Tensor, decode_batch: int, spec_query_len: int
+) -> torch.Tensor:
+    return tensor.view(decode_batch, spec_query_len, *tensor.shape[1:])
+
+
 # Added by the IBM Team, 2024
 
 
@@ -725,6 +732,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
+        use_spec_decode = self.num_spec > 0
         ring_start = prev_num_accepted = None
 
         attn_metadata: AttentionMetadata | None = None
@@ -1070,7 +1078,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # decode call still processes the full target + draft window.
                 max_query_len=(
                     1 + self.num_spec
-                    if self.use_replayssm and self.num_spec > 0
+                    if self.use_replayssm and use_spec_decode
                     else state_indices_tensor_d.size(-1)
                 ),
             )
@@ -1109,35 +1117,41 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     assert ring_start is not None
                     assert prev_num_accepted is not None
                     assert attn_metadata.replayssm_scratch is not None
-                    fi_x = hidden_states_d
-                    fi_dt = dt_d
-                    fi_B = B_d
-                    fi_C = C_d
-                    fi_out = preallocated_ssm_out_d
                     fi_cu_seqlens = query_start_loc_d
                     fi_max_seqlen = None
-                    if self.num_spec > 0:
+                    if use_spec_decode:
                         spec_query_len = 1 + self.num_spec
                         fi_max_seqlen = spec_query_len
                         assert replayssm_state_indices_d is not None
                         decode_batch = replayssm_state_indices_d.size(0)
                         if num_decode_tokens == decode_batch * spec_query_len:
-                            fi_shape = (decode_batch, spec_query_len)
-                            fi_x = fi_x.view(*fi_shape, *fi_x.shape[1:])
-                            fi_dt = fi_dt.view(*fi_shape, *fi_dt.shape[1:])
-                            fi_B = fi_B.view(*fi_shape, *fi_B.shape[1:])
-                            fi_C = fi_C.view(*fi_shape, *fi_C.shape[1:])
-                            fi_out = fi_out.view(*fi_shape, *fi_out.shape[1:])
+                            hidden_states_d = _view_mtp_decode_tensor(
+                                hidden_states_d, decode_batch, spec_query_len
+                            )
+                            dt_d = _view_mtp_decode_tensor(
+                                dt_d, decode_batch, spec_query_len
+                            )
+                            B_d = _view_mtp_decode_tensor(
+                                B_d, decode_batch, spec_query_len
+                            )
+                            C_d = _view_mtp_decode_tensor(
+                                C_d, decode_batch, spec_query_len
+                            )
+                            preallocated_ssm_out_d = _view_mtp_decode_tensor(
+                                preallocated_ssm_out_d,
+                                decode_batch,
+                                spec_query_len,
+                            )
                             fi_cu_seqlens = None
                             fi_max_seqlen = None
                     selective_state_update_replayssm_flashinfer(
                         ssm_state,
-                        fi_x,
-                        fi_dt,
+                        hidden_states_d,
+                        dt_d,
                         A_d,
-                        fi_B,
-                        fi_C,
-                        fi_out,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
                         x_cache,
                         B_cache,
                         dt_cache,

@@ -895,6 +895,7 @@ class KimiDecoderLayer(nn.Module):
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
+                    aux_stream=aux_stream,
                     run_gemm_rs_ar=run_gemm_rs_ar,
                 )
                 self._self_attn_writes_output = False

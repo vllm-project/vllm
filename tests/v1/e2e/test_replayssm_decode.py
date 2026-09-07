@@ -50,6 +50,16 @@ requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _use_v1_model_runner_by_default(monkeypatch):
+    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        envs.disable_envs_cache()
+        yield
+    envs.disable_envs_cache()
+
+
 def _check_replayssm_parity(
     vllm_runner,
     model_name,
@@ -57,55 +67,36 @@ def _check_replayssm_parity(
     tensor_parallel_size=1,
     mamba_backend: str = "triton",
     name_1: str = "replayssm",
-    require_v2: bool = False,
-    monkeypatch: pytest.MonkeyPatch | None = None,
+    expected_v2: bool | None = None,
 ):
-    def run() -> None:
-        # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
-        # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
-        # common-mode and only ReplaySSM varies.
-        common = dict(
-            max_model_len=1024,
-            trust_remote_code=True,
-            enable_prefix_caching=False,
-            mamba_cache_mode="none",
-            tensor_parallel_size=tensor_parallel_size,
-            mamba_backend=mamba_backend,
-        )
-        with vllm_runner(model_name, **common) as llm:
-            if require_v2:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
-            baseline = llm.generate_greedy_logprobs(
-                PROMPTS, max_tokens=32, num_logprobs=5
-            )
-        with vllm_runner(
-            model_name, use_replayssm=True, replayssm_buffer_len=16, **common
-        ) as llm:
-            if require_v2:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
-            replay = llm.generate_greedy_logprobs(
-                PROMPTS, max_tokens=32, num_logprobs=5
-            )
+    # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
+    # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
+    # common-mode and only ReplaySSM varies.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        tensor_parallel_size=tensor_parallel_size,
+        mamba_backend=mamba_backend,
+    )
+    with vllm_runner(model_name, **common) as llm:
+        if expected_v2 is not None:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
+        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(
+        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+    ) as llm:
+        if expected_v2 is not None:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
+        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
 
-        check_logprobs_close(
-            outputs_0_lst=baseline,
-            outputs_1_lst=replay,
-            name_0="baseline",
-            name_1=name_1,
-        )
-
-    if not require_v2:
-        run()
-        return
-
-    assert monkeypatch is not None
-    try:
-        with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-            envs.disable_envs_cache()
-            run()
-    finally:
-        envs.disable_envs_cache()
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline",
+        name_1=name_1,
+    )
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -121,28 +112,27 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_decode_matches_baseline_v2(
-    vllm_runner, model_name, monkeypatch
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_replayssm_flashinfer_decode_matches_baseline(
+    vllm_runner, model_name, monkeypatch, use_v2_model_runner
 ):
-    _check_replayssm_parity(
-        vllm_runner,
-        model_name,
-        mamba_backend="flashinfer",
-        name_1="replayssm_flashinfer_v2",
-        require_v2=True,
-        monkeypatch=monkeypatch,
-    )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+            envs.disable_envs_cache()
+            _check_replayssm_parity(
+                vllm_runner,
+                model_name,
+                mamba_backend="flashinfer",
+                name_1="replayssm_flashinfer",
+                expected_v2=use_v2_model_runner,
+            )
+    finally:
+        # The context restores the environment before the final cache reset.
+        envs.disable_envs_cache()
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_name):
     common = dict(
@@ -172,27 +162,29 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
     )
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
+@multi_gpu_test(num_gpus=2)
 @large_gpu_mark(min_gb=40)
-def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner):
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
+        tensor_parallel_size=2,
         disable_log_stats=False,
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
     )
     try:
         with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
             envs.disable_envs_cache()
             with vllm_runner(MAMBA2_MTP_MODEL, **common) as llm:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                assert (
+                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                    is use_v2_model_runner
+                )
                 baseline = llm.generate_greedy_logprobs(
                     PROMPTS, max_tokens=32, num_logprobs=5
                 )
@@ -202,7 +194,10 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
                 replayssm_buffer_len=16,
                 **common,
             ) as llm:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                assert (
+                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                    is use_v2_model_runner
+                )
                 replay = llm.generate_greedy_logprobs(
                     PROMPTS, max_tokens=32, num_logprobs=5
                 )
@@ -220,8 +215,8 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
     check_logprobs_close(
         outputs_0_lst=baseline,
         outputs_1_lst=replay,
-        name_0="baseline_mtp_v2",
-        name_1="replayssm_flashinfer_mtp_v2",
+        name_0=f"baseline_mtp_{'v2' if use_v2_model_runner else 'v1'}",
+        name_1=f"replayssm_flashinfer_mtp_{'v2' if use_v2_model_runner else 'v1'}",
     )
 
 

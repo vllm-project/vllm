@@ -556,7 +556,13 @@ def get_spec_layer_idx_from_weight_name(
         return None
     base = config.num_hidden_layers
     for i in range(n):
-        if weight_name.startswith((f"model.layers.{base + i}.", f"layers.{base + i}.")):
+        if weight_name.startswith(
+            (
+                f"model.layers.{base + i}.",
+                f"layers.{base + i}.",
+                f"model.language_model.layers.{base + i}.",
+            )
+        ):
             return base + i
     return None
 

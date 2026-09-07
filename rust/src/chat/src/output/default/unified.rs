@@ -13,7 +13,7 @@ use futures::{StreamExt as _, pin_mut};
 use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_parser::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
-use vllm_text::output::DecodedTextEvent;
+use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result;
 use crate::error::Error;
@@ -237,12 +237,15 @@ pub(crate) async fn unified_event_stream(
                 .await;
             }
             DecodedTextEvent::TextDelta {
-                delta,
-                token_ids,
-                logprobs,
+                decoded,
+                sampled:
+                    SampledDelta {
+                        token_ids,
+                        logprobs,
+                    },
                 finished,
             } => {
-                for next in state.process_delta(delta)? {
+                for next in state.process_delta(decoded.text)? {
                     y.yield_ok(next).await;
                 }
                 if logprobs.is_some() || !token_ids.is_empty() {
@@ -375,24 +378,22 @@ mod tests {
 
     fn decoded_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            delta: delta.to_string(),
-            token_ids: Vec::new(),
-            logprobs: None,
+            decoded: vllm_text::DecodedText::unattributed(delta),
+            sampled: vllm_text::SampledDelta::default(),
             finished: None,
         }
     }
 
     fn finished_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            delta: delta.to_string(),
-            token_ids: Vec::new(),
-            logprobs: None,
-            finished: Some(vllm_text::output::Finished {
+            decoded: vllm_text::DecodedText::unattributed(delta),
+            sampled: vllm_text::SampledDelta::default(),
+            finished: Some(Box::new(vllm_text::output::Finished {
                 usage: vllm_llm::TokenUsage::default(),
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-            }),
+            })),
         }
     }
 

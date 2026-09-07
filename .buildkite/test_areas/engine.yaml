@@ -95,6 +95,27 @@ steps:
       - tests/v1/e2e/general/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H100) ReplaySSM E2E"
+  device: h100
+  num_devices: 2
+  key: replayssm-e2e
+  timeout_in_minutes: 90
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - tests/v1/e2e/test_replayssm_decode.py
+    - vllm/config/cache.py
+    - vllm/config/vllm.py
+    - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/models/nemotron_h.py
+    - vllm/model_executor/warmup/replayssm_warmup.py
+    - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/worker/gpu_worker.py
+  commands:
+    - pytest -v -s v1/e2e/test_replayssm_decode.py
+
 - label: ":nvidia: (L4) V1 E2E"
   key: v1-e2e-2-gpus
   timeout_in_minutes: 25 # TODO: Fix timeout after we have more confidence in the test stability

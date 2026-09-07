@@ -324,6 +324,17 @@ class CacheConfig:
             self.user_specified_mamba_block_size = True
         return self
 
+    @field_validator("mamba_cache_mode", mode="after")
+    @classmethod
+    def _validate_mamba_cache_mode(cls, mode: MambaCacheMode) -> MambaCacheMode:
+        if mode == "all":
+            logger.warning_once(
+                "Mamba cache mode 'all' is deprecated and will be removed in an "
+                "upcoming release. If this is a problem, please open an issue "
+                "at https://github.com/vllm-project/vllm/issues."
+            )
+        return mode
+
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
