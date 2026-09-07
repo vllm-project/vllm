@@ -726,6 +726,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     assert captured["layer_config"] is layer_config
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test only exercises the CUDA Marlin path.",
+)
 @pytest.mark.parametrize("bits", [4, 8])
 def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
     """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
