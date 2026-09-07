@@ -3,7 +3,11 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.reasoning.utils import DeltaMessage, run_reasoning_extraction
+from tests.reasoning.utils import (
+    DeltaMessage,
+    as_tokenizer,
+    run_reasoning_extraction,
+)
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "granite"
@@ -134,7 +138,7 @@ def test_reasoning(
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer
+        as_tokenizer(tokenizer)
     )
 
     reasoning, content = run_reasoning_extraction(
@@ -323,7 +327,7 @@ def test_streaming_subcases(param_dict):
     delta_token_ids = tokenizer.encode(param_dict["delta_text"])
 
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer
+        as_tokenizer(tokenizer)
     )
 
     response = parser.extract_reasoning_streaming(
