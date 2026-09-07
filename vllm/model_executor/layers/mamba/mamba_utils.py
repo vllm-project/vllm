@@ -70,20 +70,22 @@ class MambaStateDtypeCalculator:
         conv_state_dtype, ssm_state_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
-        if mamba_ssm_cache_dtype != "auto" and ssm_state_dtype != torch.float32:
+        if ssm_state_dtype != torch.float32:
             activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
             if ssm_state_dtype != activation_dtype:
                 raise ValueError(
-                    f"mamba_ssm_cache_dtype={mamba_ssm_cache_dtype!r} is "
+                    f"Resolved Mamba1 SSM cache dtype {ssm_state_dtype!r} "
+                    f"(mamba_cache_dtype={mamba_cache_dtype!r}, "
+                    f"mamba_ssm_cache_dtype={mamba_ssm_cache_dtype!r}) is "
                     "incompatible with this model's activation dtype "
                     f"({activation_dtype!r}). The Mamba1 selective_scan CUDA "
                     "kernel only supports an SSM state dtype that is either "
                     "float32 or equal to the model's activation dtype; any "
                     "other combination crashes EngineCore on the first "
                     "request instead of failing to load. Set "
-                    "--mamba-ssm-cache-dtype to 'auto' or 'float32', or "
-                    "change --dtype so the model's activation dtype matches "
-                    f"{mamba_ssm_cache_dtype!r}."
+                    "--mamba-cache-dtype/--mamba-ssm-cache-dtype to 'auto' "
+                    "or 'float32', or change --dtype so the model's "
+                    f"activation dtype matches {ssm_state_dtype!r}."
                 )
         return conv_state_dtype, ssm_state_dtype
 

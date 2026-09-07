@@ -53,6 +53,16 @@ class TestMamba1StateDtype:
                 torch.bfloat16, "auto", "float16"
             )
 
+    def test_mismatched_mamba_cache_dtype_rejected_when_ssm_cache_auto(self):
+        """mamba_ssm_cache_dtype="auto" inherits its dtype from
+        mamba_cache_dtype (see _mamba_state_dtype), so a mismatched
+        mamba_cache_dtype must be rejected too, not just an explicit
+        mamba_ssm_cache_dtype."""
+        with pytest.raises(ValueError, match="mamba_cache_dtype"):
+            MambaStateDtypeCalculator.mamba1_state_dtype(
+                torch.float16, "bfloat16", "auto"
+            )
+
 
 def test_mamba2_state_dtype_does_not_apply_mamba1_kernel_restriction():
     """Mamba2 never calls selective_scan_fn (it uses
