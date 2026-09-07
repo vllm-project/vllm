@@ -75,7 +75,7 @@ def _run_prepare(
     block_table = torch.tensor([block_table_values], dtype=torch.int32, device=device)
 
     prepare_dflash_inputs(
-        input_buffers,
+        input_buffers,  # type: ignore[arg-type]
         query_slot_mapping,
         context_positions,
         context_slot_mapping,
@@ -84,7 +84,7 @@ def _run_prepare(
         sample_idx_mapping,
         temperature,
         seeds,
-        input_batch,
+        input_batch,  # type: ignore[arg-type]
         torch.tensor([1], dtype=torch.int32, device=device),
         torch.tensor([2], dtype=torch.int32, device=device),
         last_sampled,

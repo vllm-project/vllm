@@ -28,9 +28,9 @@ def test_dummy_inputs_scheduler_budget(
     model_config.max_model_len = max_model_len
     processor = MagicMock()
     processor.apply.return_value = {"prompt_token_ids": [7]}
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -38,7 +38,10 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
     result = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
-        model_config, {"image": 1}, processor=processor, **kwargs
+        model_config,
+        {"image": 1},
+        processor=processor,
+        scheduler_config=scheduler_config,
     )
     get_inputs = processor.dummy_inputs.get_dummy_processor_inputs
     assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
@@ -76,4 +79,4 @@ def test_create_processor_error_uses_served_model_name():
         ValueError,
         match="friendly-model-name is not a multimodal model",
     ):
-        MULTIMODAL_REGISTRY.create_processor(model_config)
+        MULTIMODAL_REGISTRY.create_processor(model_config)  # type: ignore[arg-type]

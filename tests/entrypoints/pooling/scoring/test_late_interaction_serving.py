@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
 from vllm.inputs import tokens_input
 from vllm.pooling_params import PoolingParams
 
@@ -21,8 +21,18 @@ def _make_context() -> PoolingServeContext:
         priorities=None,
         prompt_extras=None,
         engine_inputs=[
-            tokens_input(prompt_token_ids=[1]),
-            tokens_input(prompt_token_ids=[2]),
+            PoolingEngineInput(
+                prompts=tokens_input(prompt_token_ids=[1]),
+                params=PoolingParams(task="token_embed"),
+                lora_requests=None,
+                priorities=0,
+            ),
+            PoolingEngineInput(
+                prompts=tokens_input(prompt_token_ids=[2]),
+                params=PoolingParams(task="token_embed"),
+                lora_requests=None,
+                priorities=0,
+            ),
         ],
         n_queries=1,
     )
@@ -39,10 +49,13 @@ def _query_key(context: PoolingServeContext) -> str:
 
 
 @pytest.mark.asyncio
-async def test_colliding_request_ids_use_distinct_query_cache_keys():
+async def test_colliding_request_ids_use_distinct_query_cache_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
     serving = object.__new__(ServingScores)
-    serving._prepare_generators = AsyncMock()
-    serving._collect_batch = AsyncMock()
+    prepare_generators = AsyncMock()
+    monkeypatch.setattr(serving, "_prepare_generators", prepare_generators)
+    monkeypatch.setattr(serving, "_collect_batch", AsyncMock())
 
     first = _make_context()
     second = _make_context()
@@ -50,9 +63,7 @@ async def test_colliding_request_ids_use_distinct_query_cache_keys():
         await serving._flash_late_interaction_encode_queries(context)
         await serving._flash_late_interaction_encode_docs(context)
 
-    prepared_contexts = [
-        call.args[0] for call in serving._prepare_generators.await_args_list
-    ]
+    prepared_contexts = [call.args[0] for call in prepare_generators.await_args_list]
     first_query_key = _query_key(prepared_contexts[0])
     first_doc_key = _query_key(prepared_contexts[1])
     second_query_key = _query_key(prepared_contexts[2])

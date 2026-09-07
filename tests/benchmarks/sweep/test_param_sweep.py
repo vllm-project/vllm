@@ -115,7 +115,7 @@ class TestParameterSweep:
 
     def test_from_records_list(self):
         """Test creating ParameterSweep from a list of records."""
-        records = [
+        records: list[dict[str, object]] = [
             {"max_tokens": 100, "temperature": 0.7},
             {"max_tokens": 200, "temperature": 0.9},
         ]
@@ -126,7 +126,7 @@ class TestParameterSweep:
 
     def test_read_from_dict(self):
         """Test creating ParameterSweep from a dict format."""
-        data = {
+        data: dict[str, dict[str, object]] = {
             "experiment1": {"max_tokens": 100, "temperature": 0.7},
             "experiment2": {"max_tokens": 200, "temperature": 0.9},
         }
@@ -148,7 +148,7 @@ class TestParameterSweep:
 
     def test_read_json_list_format(self):
         """Test reading JSON file with list format."""
-        records = [
+        records: list[dict[str, object]] = [
             {"max_tokens": 100, "temperature": 0.7},
             {"max_tokens": 200, "temperature": 0.9},
         ]
@@ -167,7 +167,7 @@ class TestParameterSweep:
 
     def test_read_json_dict_format(self):
         """Test reading JSON file with dict format."""
-        data = {
+        data: dict[str, dict[str, object]] = {
             "experiment1": {"max_tokens": 100, "temperature": 0.7},
             "experiment2": {"max_tokens": 200, "temperature": 0.9},
         }
@@ -189,7 +189,7 @@ class TestParameterSweep:
     def test_unique_benchmark_names_validation(self):
         """Test that duplicate _benchmark_name values raise an error."""
         # Test with duplicate names in list format
-        records = [
+        records: list[dict[str, object]] = [
             {"_benchmark_name": "exp1", "max_tokens": 100},
             {"_benchmark_name": "exp1", "max_tokens": 200},
         ]
@@ -199,7 +199,7 @@ class TestParameterSweep:
 
     def test_unique_benchmark_names_multiple_duplicates(self):
         """Test validation with multiple duplicate names."""
-        records = [
+        records: list[dict[str, object]] = [
             {"_benchmark_name": "exp1", "max_tokens": 100},
             {"_benchmark_name": "exp1", "max_tokens": 200},
             {"_benchmark_name": "exp2", "max_tokens": 300},
@@ -211,7 +211,7 @@ class TestParameterSweep:
 
     def test_no_benchmark_names_allowed(self):
         """Test that records without _benchmark_name are allowed."""
-        records = [
+        records: list[dict[str, object]] = [
             {"max_tokens": 100, "temperature": 0.7},
             {"max_tokens": 200, "temperature": 0.9},
         ]
@@ -220,7 +220,7 @@ class TestParameterSweep:
 
     def test_mixed_benchmark_names_allowed(self):
         """Test that mixing records with and without _benchmark_name is allowed."""
-        records = [
+        records: list[dict[str, object]] = [
             {"_benchmark_name": "exp1", "max_tokens": 100},
             {"max_tokens": 200, "temperature": 0.9},
         ]

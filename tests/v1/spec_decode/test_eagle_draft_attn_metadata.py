@@ -91,7 +91,7 @@ def _run_build(
 
     with patch.object(base_speculator, "build_attn_metadata", fake_build_attn_metadata):
         EagleSpeculator._build_uniform_attn_metadata(
-            fake,  # type: ignore[arg-type]
+            fake,
             batch_desc=batch_desc,
             num_reqs=num_reqs,
             num_query_per_req=num_query_per_req,

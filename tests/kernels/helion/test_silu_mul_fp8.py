@@ -83,7 +83,7 @@ class TestSiluMulFp8ConfigPicker:
         assert selected_key == CaseKey({"intermediate": 4096, "numtokens": 256})
 
     def test_config_picker_no_configs(self):
-        config_keys: list[dict] = []
+        config_keys: list[CaseKey] = []
 
         input_tensor = torch.randn(32, 4096, dtype=torch.bfloat16, device="cuda")
         scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")

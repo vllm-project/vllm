@@ -7,6 +7,7 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, ClassificationRequestOutput, PoolingParams
+from vllm.inputs import PromptType
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
@@ -53,7 +54,8 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_list_prompts(llm: LLM):
-    outputs = llm.classify([prompt, prompt_token_ids], use_tqdm=False)
+    prompts: list[PromptType] = [prompt, prompt_token_ids]
+    outputs = llm.classify(prompts, use_tqdm=False)
     assert len(outputs) == 2
     for i in range(len(outputs)):
         assert isinstance(outputs[i], ClassificationRequestOutput)

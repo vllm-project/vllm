@@ -856,6 +856,7 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     }
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
+    assert isinstance(config, m.ModelOptMixedPrecisionConfig)
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
 
