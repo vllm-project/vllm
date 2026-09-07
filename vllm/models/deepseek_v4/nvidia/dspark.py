@@ -10,6 +10,7 @@ include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import regex as re
 import torch
@@ -114,6 +115,14 @@ class DSparkDeepseekV4Model(nn.Module):
             ]
         )
 
+        self._fused_wkv_attempted = False
+        self._fused_wkv_ready = False
+        self._fused_wkv_weight: torch.Tensor | None = None
+        self._fused_wkv_scale: torch.Tensor | None = None
+        self._fused_wkv_layer: SimpleNamespace | None = None
+        self._wkv_kernel = None
+        self._wkv_head_dim = 0
+
         # Heads: final norm + hc_head, and the Markov + confidence heads
         # Loaded from the "final" MTP layer weights (mtp.*) in the target checkpoint
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -154,6 +163,78 @@ class DSparkDeepseekV4Model(nn.Module):
         """
         return self.main_norm(self.main_proj(aux_hidden_states))
 
+    def _build_fused_wkv_buffer(self) -> bool:
+        """Build one block-FP8 KV-only projection across all draft layers."""
+        if self._fused_wkv_attempted:
+            return self._fused_wkv_ready
+        self._fused_wkv_attempted = True
+
+        first_attn = self.layers[0].attn
+        first_proj = first_attn.fused_wqa_wkv
+        quant_method = getattr(first_proj, "quant_method", None)
+        block_size = getattr(quant_method, "weight_block_size", None)
+        fp8_linear = getattr(quant_method, "fp8_linear", None)
+        q_lora_rank = first_attn.q_lora_rank
+        if (
+            quant_method is None
+            or fp8_linear is None
+            or block_size is None
+            or len(block_size) != 2
+            or block_size[0] <= 0
+            or block_size[1] <= 0
+            or q_lora_rank % block_size[0] != 0
+        ):
+            logger.info_once(
+                "DSpark fused WKV skipped: incompatible projection layout"
+            )
+            return False
+
+        block_rows, block_cols = block_size
+        weights: list[torch.Tensor] = []
+        scales: list[torch.Tensor] = []
+        for layer in self.layers:
+            attn = layer.attn
+            proj = attn.fused_wqa_wkv
+            weight = getattr(proj, "weight", None)
+            weight_scale_inv = getattr(proj, "weight_scale_inv", None)
+            if (
+                weight is None
+                or weight_scale_inv is None
+                or weight.ndim != 2
+                or weight_scale_inv.ndim != 2
+                or weight.shape[0] != q_lora_rank + attn.head_dim
+                or weight.shape[1] != self.hidden_size
+                or weight.shape[0] % block_rows != 0
+                or weight.shape[1] % block_cols != 0
+                or weight_scale_inv.shape
+                != (
+                    weight.shape[0] // block_rows,
+                    weight.shape[1] // block_cols,
+                )
+            ):
+                logger.info_once(
+                    "DSpark fused WKV skipped: layer weight/scale mismatch"
+                )
+                return False
+            weights.append(weight[q_lora_rank:])
+            scales.append(weight_scale_inv[q_lora_rank // block_rows :])
+
+        self._fused_wkv_weight = torch.cat(weights, dim=0)
+        self._fused_wkv_scale = torch.cat(scales, dim=0)
+        self._fused_wkv_layer = SimpleNamespace(
+            weight=self._fused_wkv_weight,
+            weight_scale_inv=self._fused_wkv_scale,
+        )
+        self._wkv_kernel = fp8_linear
+        self._wkv_head_dim = first_attn.head_dim
+        self._fused_wkv_ready = True
+        logger.info_once(
+            "DSpark fused WKV enabled: weight_shape=%s scale_shape=%s",
+            tuple(self._fused_wkv_weight.shape),
+            tuple(self._fused_wkv_scale.shape),
+        )
+        return True
+
     @torch.inference_mode()
     def precompute_and_store_context_kv(
         self,
@@ -173,18 +254,34 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
+        fused_wkv: torch.Tensor | None = None
+        if self._build_fused_wkv_buffer():
+            assert self._fused_wkv_weight is not None
+            assert self._fused_wkv_scale is not None
+            assert self._fused_wkv_layer is not None
+            assert self._wkv_kernel is not None
+            fused_wkv = self._wkv_kernel.apply_weights(
+                self._fused_wkv_layer, main_x, None
+            ).view(
+                main_x.shape[0],
+                self.num_dspark_layers,
+                self._wkv_head_dim,
+            )
+
         for i, layer in enumerate(self.layers):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
             attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
-            kv = attn.kv_norm(kv)
+            if fused_wkv is None:
+                qr_kv, _ = attn.fused_wqa_wkv(main_x)
+                kv = qr_kv[..., attn.q_lora_rank :]
+            else:
+                kv = fused_wkv[:, i, :]
             if slot_mapping is None:
                 continue
+            # kv stays un-normed; _insert_context_kv folds kv_norm into the
+            # uint8 fused insert kernel, or applies it internally otherwise.
             _insert_context_kv(attn, kv, context_positions, slot_mapping)
 
     def forward(
@@ -232,43 +329,71 @@ class DSparkDeepseekV4Model(nn.Module):
         return hidden_states
 
 
+_FUSED_KV_NORM_INSERT_OP = None
+
+
+def _fused_kv_norm_insert_op():
+    """Resolve the norm-fused KV-only insert op once (None if not built)."""
+    global _FUSED_KV_NORM_INSERT_OP
+    if _FUSED_KV_NORM_INSERT_OP is None:
+        _FUSED_KV_NORM_INSERT_OP = getattr(
+            torch.ops._C, "fused_deepseek_v4_kv_norm_rope_quant_insert", False
+        )
+    return _FUSED_KV_NORM_INSERT_OP or None
+
+
 def _insert_context_kv(
     attn: nn.Module,
     kv: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
+    """kv_norm + RoPE + quant + paged-cache insert of raw context KV.
 
-    Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
-    query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+    ``kv`` is the un-normed projection output. The fp8_ds_mla (uint8) path
+    folds kv_norm into the KV-only insert kernel when the fused op is built;
+    otherwise it norms externally and falls back to the plain KV-only op.
+    Other cache dtypes norm externally and reuse the Q+KV fused ops with a
+    dummy query.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
+    if cache_dtype == torch.uint8:
+        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
+        fused_norm_insert = _fused_kv_norm_insert_op()
+        if fused_norm_insert is not None:
+            fused_norm_insert(
+                kv,
+                attn.kv_norm.weight,
+                swa_2d,
+                slot_mapping,
+                positions,
+                cos_sin_cache,
+                attn.eps,
+                block_size,
+            )
+            return
+        kv = attn.kv_norm(kv)
+        torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
+            kv,
+            swa_2d,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            attn.eps,
+            block_size,
+        )
+        return
+    kv = attn.kv_norm(kv)
     n_ctx = kv.shape[0]
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
         device=kv.device,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-        )
-    elif cache_dtype == torch.bfloat16:
+    if cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             dummy_q,
@@ -281,7 +406,6 @@ def _insert_context_kv(
             block_size,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # TODO(ben): double-check if this is being dispatched correctly for FI backend
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
@@ -297,6 +421,7 @@ def _insert_context_kv(
             attn.eps,
             block_size,
         )
+
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):

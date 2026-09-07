@@ -843,3 +843,138 @@ def test_full_cache_bf16_matches_reference(
 
     torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+# ── KV-only insert (no dummy Q) vs the existing Q+KV dummy-Q path ───────────
+
+
+def _kv_only_op_available() -> bool:
+    return hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_quant_insert")
+
+
+def _kv_norm_fused_op_available() -> bool:
+    return hasattr(torch.ops._C, "fused_deepseek_v4_kv_norm_rope_quant_insert")
+
+
+@pytest.mark.skipif(
+    not _kv_only_op_available(), reason="KV-only DeepseekV4 insert op not built in"
+)
+@pytest.mark.parametrize("num_tokens", [1, 128, 512])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_kv_only_insert_matches_dummy_q_path(num_tokens: int, block_size: int):
+    """fused_deepseek_v4_kv_rope_quant_insert cache bytes match dummy-Q insert."""
+    torch.manual_seed(3)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(num_tokens + 16, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    k_dummy = torch.zeros(
+        num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    q_dummy = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
+    _ = _call_fused(
+        q_dummy, 64, kv, k_dummy, slot_mapping, positions, cos_sin_cache, eps,
+        block_size,
+    )
+
+    k_only = torch.zeros_like(k_dummy)
+    torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
+        kv, k_only, slot_mapping, positions, cos_sin_cache, eps, block_size
+    )
+    assert torch.equal(k_only, k_dummy)
+
+
+def rmsnorm_with_weight_fp32(
+    x: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+    xf = x.float()
+    variance = xf.pow(2).mean(dim=-1, keepdim=True)
+    return xf * torch.rsqrt(variance + eps) * weight.float()
+
+
+@pytest.mark.skipif(
+    not _kv_norm_fused_op_available(),
+    reason="norm-fused KV-only DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [1, 128, 512, 2048, 8192])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_kv_norm_fused_insert_matches_reference(
+    num_tokens: int, strided: bool, block_size: int
+):
+    """fused kv_norm+insert vs RMSNorm + plain KV-only insert."""
+    torch.manual_seed(7)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    max_pos = num_tokens + 16
+
+    if strided:
+        kv_full = torch.randn(num_tokens, 3, HEAD_DIM, dtype=dtype, device=device)
+        kv = kv_full[:, 1, :]
+        assert kv.stride(0) == 3 * HEAD_DIM and kv.stride(1) == 1
+    else:
+        kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+    weight = torch.empty(HEAD_DIM, dtype=dtype, device=device).uniform_(0.5, 1.5)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    kv_normed = torch.empty(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    torch.ops._C.rms_norm(kv_normed, kv, weight, eps)
+    k_cache_ref = torch.zeros(
+        num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
+        kv_normed, k_cache_ref, slot_mapping, positions, cos_sin_cache, eps,
+        block_size,
+    )
+
+    k_cache_fused = torch.zeros_like(k_cache_ref)
+    torch.ops._C.fused_deepseek_v4_kv_norm_rope_quant_insert(
+        kv, weight, k_cache_fused, slot_mapping, positions, cos_sin_cache, eps,
+        block_size,
+    )
+
+    rec_ref = _dequant_cache(k_cache_ref, num_tokens, num_blocks, block_size)
+    rec_fused = _dequant_cache(k_cache_fused, num_tokens, num_blocks, block_size)
+
+    scales_ref = _ue8m0_per_block_scales(
+        kv_normed[:, :NOPE_DIM].float(), QUANT_BLOCK
+    )
+    bound_ref = 16.0 * scales_ref.max(dim=1, keepdim=True).values
+    diff_ref = (rec_ref[:, :NOPE_DIM].float() - kv_normed[:, :NOPE_DIM].float()).abs()
+    assert bool((diff_ref <= bound_ref).all()), (
+        f"ref NoPE exceeds quant envelope: "
+        f"{diff_ref.max().item()} > {bound_ref.max().item()}"
+    )
+
+    kv_ref = rmsnorm_with_weight_fp32(kv, weight, eps).to(dtype).float()
+    scales_fused = _ue8m0_per_block_scales(kv_ref[:, :NOPE_DIM], QUANT_BLOCK)
+    bound_fused = 16.0 * scales_fused.max(dim=1, keepdim=True).values
+    diff_fused = (rec_fused[:, :NOPE_DIM].float() - kv_ref[:, :NOPE_DIM]).abs()
+    assert bool((diff_fused <= 2.0 * bound_fused + 0.02).all()), (
+        f"fused NoPE exceeds quant envelope: "
+        f"{diff_fused.max().item()} > {2.0 * bound_fused.max().item() + 0.02}"
+    )
+
+    max_ulp = int(
+        bf16_ulp_distance(rec_fused[:, NOPE_DIM:], rec_ref[:, NOPE_DIM:])
+        .max()
+        .item()
+    )
+    assert max_ulp <= 2, f"RoPE bf16 region differs by {max_ulp} ULP (>2)"
+
+    mismatch = int((k_cache_fused != k_cache_ref).sum().item())
+    mismatch_rate = mismatch / k_cache_ref.numel()
+    assert mismatch_rate < 0.01, (
+        f"cache byte mismatch rate {mismatch_rate:.4%} too high "
+        f"({mismatch}/{k_cache_ref.numel()})"
+    )
