@@ -231,16 +231,16 @@ def check_shm_free_space(
     *,
     allocation_name: str = "shared-memory allocation",
 ) -> None:
-    """Raise if SHM or the cgroup cannot fit a shared segment.
+    """Raise if SHM cannot fit a shared segment and log cgroup headroom.
 
     Args:
         required_bytes: Size of the shared-memory segment to be created.
         shm_path: Mount point backing POSIX shared memory; its filesystem
             check is skipped if absent.
-        allocation_name: Human-readable name used for cgroup errors.
+        allocation_name: Human-readable name used in errors and logs.
 
     Raises:
-        RuntimeError: If the SHM filesystem or cgroup has insufficient space.
+        RuntimeError: If the SHM filesystem has insufficient space.
     """
     if os.path.isdir(shm_path):
         free_bytes = shutil.disk_usage(shm_path).free
