@@ -323,8 +323,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # instead of failing backend selection.
             logger.info_once(
                 "kv_cache_dtype=fp8_ds_mla applies to DeepSeek-MLA layers only; "
-                "regular attention layers (e.g. %s) keep the model dtype.",
-                prefix,
+                "regular attention layers keep the model dtype."
             )
             kv_cache_dtype = "auto"
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
