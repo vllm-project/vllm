@@ -16,10 +16,12 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
 from transformers import CLIPVisionConfig
 
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.kernels.deepencoder_attention import (
+    deepencoder_rel_pos_attention,
+)
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -236,7 +238,7 @@ class Block(nn.Module):
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             use_rel_pos=use_rel_pos,
-            use_flex_attention=window_size == 0,
+            use_triton_attention=window_size == 0,
             rel_pos_zero_init=rel_pos_zero_init,
             input_size=input_size if window_size == 0 else (window_size, window_size),
         )
@@ -267,28 +269,6 @@ class Block(nn.Module):
         return x
 
 
-_flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
-
-
-def _flex_attention_with_decomposed_rel_pos(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    rel_h: torch.Tensor,
-    rel_w: torch.Tensor,
-    key_width: int,
-) -> torch.Tensor:
-    compact_h = rel_h.squeeze(-1)
-    compact_w = rel_w.squeeze(-2)
-
-    def score_mod(score, b, h, q_idx, kv_idx):
-        key_h = kv_idx // key_width
-        key_w = kv_idx % key_width
-        return score + compact_h[b, h, q_idx, key_h] + compact_w[b, h, q_idx, key_w]
-
-    return _flex_attention_compiled(q, k, v, score_mod=score_mod)
-
-
 # --8<-- [start:rel_pos_attention]
 @PluggableLayer.register("rel_pos_attention")
 class RelPosAttention(PluggableLayer):
@@ -302,7 +282,7 @@ class RelPosAttention(PluggableLayer):
         num_heads: int = 8,
         qkv_bias: bool = True,
         use_rel_pos: bool = False,
-        use_flex_attention: bool = False,
+        use_triton_attention: bool = False,
         rel_pos_zero_init: bool = True,
         input_size: tuple[int, int] | None = None,
     ) -> None:
@@ -311,8 +291,8 @@ class RelPosAttention(PluggableLayer):
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads.
             qkv_bias (bool):  If True, add a learnable bias to query, key, value.
-            use_flex_attention (bool): If True, fuse relative position bias with
-                FlexAttention on CUDA.
+            use_triton_attention (bool): If True, fuse relative position bias in
+                a Triton attention kernel on supported CUDA inputs.
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
@@ -326,7 +306,7 @@ class RelPosAttention(PluggableLayer):
         self.proj = nn.Linear(dim, dim)
 
         self.use_rel_pos = use_rel_pos
-        self.use_flex_attention = use_flex_attention
+        self.use_triton_attention = use_triton_attention
         if self.use_rel_pos:
             assert input_size is not None, (
                 "Input size must be provided if using relative positional encoding."
@@ -362,8 +342,24 @@ class RelPosAttention(PluggableLayer):
             rel_w = rel_w.view(
                 B, self.num_heads, rel_w.size(1), rel_w.size(2), rel_w.size(3)
             )
-            if self.use_flex_attention and current_platform.is_cuda() and q.is_cuda:
-                x = _flex_attention_with_decomposed_rel_pos(q, k, v, rel_h, rel_w, W)
+            use_triton = (
+                self.use_triton_attention
+                and current_platform.is_cuda()
+                and q.is_cuda
+                and q.dtype in (torch.float16, torch.bfloat16)
+                and q.size(-1) == 64
+            )
+            if use_triton:
+                x = deepencoder_rel_pos_attention(
+                    q,
+                    k,
+                    v,
+                    rel_h.squeeze(-1),
+                    rel_w.squeeze(-2),
+                    H,
+                    W,
+                    self.scale,
+                )
             else:
                 attn_bias = (rel_h + rel_w).view(
                     B,

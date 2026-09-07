@@ -14,15 +14,15 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
 
 import vllm
+from vllm.model_executor.kernels.deepencoder_attention import (
+    deepencoder_rel_pos_attention,
+)
 from vllm.model_executor.models.deepencoder import (
     RelPosAttention,
     add_decomposed_rel_pos,
 )
-
-flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 SHAPES = {
     "tiny": (1, 4, 4),
@@ -42,23 +42,25 @@ def dense_reference(
     return F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
 
 
-def flex_candidate(
+def triton_candidate(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     rel_h: torch.Tensor,
     rel_w: torch.Tensor,
-    key_width: int,
+    height: int,
+    width: int,
 ) -> torch.Tensor:
-    compact_h = rel_h.squeeze(-1)
-    compact_w = rel_w.squeeze(-2)
-
-    def score_mod(score, b, h, q_idx, kv_idx):
-        key_h = kv_idx // key_width
-        key_w = kv_idx % key_width
-        return score + compact_h[b, h, q_idx, key_h] + compact_w[b, h, q_idx, key_w]
-
-    return flex_attention_compiled(q, k, v, score_mod=score_mod)
+    return deepencoder_rel_pos_attention(
+        q,
+        k,
+        v,
+        rel_h.squeeze(-1),
+        rel_w.squeeze(-2),
+        height,
+        width,
+        q.size(-1) ** -0.5,
+    )
 
 
 def dense_layer_reference(layer: RelPosAttention, inputs: torch.Tensor) -> torch.Tensor:
@@ -206,11 +208,11 @@ def run_case(
     name: str, warmup: int, repeats: int, implementation: str
 ) -> dict[str, Any]:
     batch, height, width = SHAPES[name]
-    dtype = torch.float32 if name == "tiny" else torch.bfloat16
+    dtype = torch.bfloat16
     if implementation == "operator":
         q, k, v, rel_h, rel_w = make_inputs(batch, height, width, dtype)
         reference = lambda: dense_reference(q, k, v, rel_h, rel_w)
-        candidate = lambda: flex_candidate(q, k, v, rel_h, rel_w, width)
+        candidate = lambda: triton_candidate(q, k, v, rel_h, rel_w, height, width)
     else:
         torch.manual_seed(0)
         layer = (
@@ -218,7 +220,7 @@ def run_case(
                 dim=768,
                 num_heads=12,
                 use_rel_pos=True,
-                use_flex_attention=name == "global",
+                use_triton_attention=name == "global",
                 input_size=(height, width),
             )
             .cuda()
@@ -240,10 +242,10 @@ def run_case(
 
     expected = reference()
     torch.cuda.synchronize()
-    compile_start = time.perf_counter()
+    first_call_start = time.perf_counter()
     actual = candidate()
     torch.cuda.synchronize()
-    compile_seconds = time.perf_counter() - compile_start
+    first_call_seconds = time.perf_counter() - first_call_start
     correctness = errors(actual, expected)
 
     reference_samples = []
@@ -273,7 +275,7 @@ def run_case(
         "head_dim": 64,
         "dtype": str(dtype),
         "implementation": implementation,
-        "compile_plus_first_call_seconds": compile_seconds,
+        "first_call_seconds": first_call_seconds,
         "correctness": correctness,
         "reference_samples_ms": reference_samples,
         "candidate_samples_ms": candidate_samples,
@@ -289,11 +291,11 @@ def run_case(
 @torch.inference_mode()
 def run_memory_only(name: str, path: str, implementation: str) -> dict[str, Any]:
     batch, height, width = SHAPES[name]
-    dtype = torch.float32 if name == "tiny" else torch.bfloat16
+    dtype = torch.bfloat16
     if implementation == "operator":
         q, k, v, rel_h, rel_w = make_inputs(batch, height, width, dtype)
         reference = lambda: dense_reference(q, k, v, rel_h, rel_w)
-        candidate = lambda: flex_candidate(q, k, v, rel_h, rel_w, width)
+        candidate = lambda: triton_candidate(q, k, v, rel_h, rel_w, height, width)
     else:
         torch.manual_seed(0)
         layer = (
@@ -301,7 +303,7 @@ def run_memory_only(name: str, path: str, implementation: str) -> dict[str, Any]
                 dim=768,
                 num_heads=12,
                 use_rel_pos=True,
-                use_flex_attention=name == "global",
+                use_triton_attention=name == "global",
                 input_size=(height, width),
             )
             .cuda()
