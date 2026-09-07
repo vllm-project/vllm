@@ -471,6 +471,26 @@ def test_snapshot_scopes_removal_by_ownership():
     assert stores[0].ownership == "secondary"
 
 
+def test_snapshot_treats_none_ownership_as_primary():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([101], ownership="secondary"),
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            ),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+
+    assert len(stores) == 1
+    assert stores[0].ownership == "secondary"
+
+
 def test_snapshot_preserves_session_id():
     state = _KVCacheState()
     state.update([create_stored_event([101], session_id="session-1")])
