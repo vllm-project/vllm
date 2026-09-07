@@ -53,7 +53,6 @@ if not current_platform.is_cuda():
         allow_module_level=True,
     )
 
-import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as flashinfer_sparse_mod
 from vllm.model_executor.layers.attention.mla_attention import (
     _canonicalize_sparse_mla_kv_cache_dtype,
 )
@@ -147,10 +146,11 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     impl.bmm2_scale = None
     impl.is_nope_mla = True
     impl.need_to_return_lse_for_decode = False
-    monkeypatch.setattr(
-        flashinfer_sparse_mod,
-        "triton_convert_req_index_to_global_index",
-        lambda *args, **kwargs: (topk, torch.ones(1, dtype=torch.int32)),
+    impl.index_group = MagicMock()
+    impl.index_group_index = 0
+    impl.index_group.convert_logical_to_physical_topk.return_value = (
+        topk,
+        torch.ones(1, dtype=torch.int32),
     )
 
     import flashinfer.decode
