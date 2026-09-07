@@ -96,7 +96,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install vllm-gguf-plugin \>= 0.0.2 || true &&
+    'pip install vllm-gguf-plugin\>=0.0.2 || true &&
     cd tests &&
     pytest -v -s plugins_tests/gguf || true'
 - label: ':nvidia: (H200 MIG 18GB) BitsAndBytes Plugin'
@@ -123,7 +123,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install vllm-bnb-plugin \>= 0.0.1 || true &&
+    'pip install vllm-bnb-plugin\>=0.0.1 || true &&
     cd tests &&
     pytest -v -s plugins_tests/bitsandbytes -m not distributed || true'
 - label: ':nvidia: (L4) BitsAndBytes Plugin'
@@ -151,6 +151,6 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install vllm-bnb-plugin \>= 0.0.1 || true &&
+    'pip install vllm-bnb-plugin\>=0.0.1 || true &&
     cd tests &&
     pytest -v -s plugins_tests/bitsandbytes -m distributed(num_gpus=2) || true'
