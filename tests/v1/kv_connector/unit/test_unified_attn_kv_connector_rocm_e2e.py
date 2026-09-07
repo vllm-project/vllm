@@ -39,7 +39,11 @@ def test_unified_attn_with_decode_bench_connector(monkeypatch):
 
     outputs = llm.generate(
         PROMPTS,
-        SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS),
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=MAX_TOKENS,
+            ignore_eos=True,
+        ),
     )
 
     for output in outputs:
