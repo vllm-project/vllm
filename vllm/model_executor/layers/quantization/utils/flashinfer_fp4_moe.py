@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -66,9 +67,19 @@ def reorder_w1w3_to_w3w1(
     return weight, scale
 
 
+def flashinfer_cutedsl_weight_interleave() -> int:
+    """Physical w13 up/gate interleave the CuteDSL kernel expects.
+
+    SM100/SM103 take the swap-AB kernels, which need 16; SM107 has no swap-AB
+    variant and only accepts 64.
+    """
+    cap = current_platform.get_device_capability()
+    return 64 if cap is not None and cap.to_int() == 107 else 16
+
+
 def interleave_linear_and_gate(
     x: torch.Tensor,
-    group_size: int = 64,
+    group_size: int = 16,
     dim: int = -1,
 ) -> torch.Tensor:
     """Interleave gate and linear weight rows for CuteDSL wrapper."""
@@ -146,8 +157,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         )
 
         # Interleave up/gate rows for w13 weights and scales.
-        w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
-        w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+        interleave = flashinfer_cutedsl_weight_interleave()
+        w13 = interleave_linear_and_gate(w13, group_size=interleave, dim=1)
+        w13_scale = interleave_linear_and_gate(w13_scale, group_size=interleave, dim=1)
 
     w13_scale = swizzle_blockscale(w13_scale)
     w2_scale = swizzle_blockscale(w2_scale)
