@@ -129,7 +129,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=0.0,
         )
         if IS_FP8:
-            # e4m3 -> bf16 is exact; sm12x Triton cannot tl.dot fp8 operands.
+            # e4m3 -> bf16 is exact; the QK dot stays bf16 (fp8 QK measured
+            # slower here and less accurate on sm_120).
             keys = keys.to(tl.bfloat16)
         values = tl.load(
             v_cache_ptr
@@ -141,7 +142,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=0.0,
         )
         if IS_FP8:
-            values = values.to(tl.bfloat16)
+            # Dequant V to fp16, not bf16: P <= 1 (online softmax) so fp16 has
+            # the range, its wider mantissa is more accurate, and the fp8->fp16
+            # upcast with the fp16 PV dot measured faster than bf16 on sm_120.
+            values = values.to(tl.float16)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
         # caches the K dequant scale is already folded into score_scale above.
