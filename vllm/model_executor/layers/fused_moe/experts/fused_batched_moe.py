@@ -317,6 +317,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
+        output_dtype: torch.dtype
         e: int
         max_num_tokens: int
         n: int
@@ -475,6 +476,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
         launch_n: int,
         launch_k: int,
         dtype: torch.dtype,
+        output_dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
         group_n: int,
@@ -522,6 +524,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
         )
         return self.CompileKey(
             dtype=dtype,
+            output_dtype=output_dtype,
             e=num_experts,
             max_num_tokens=triton_scalar_specialization_rep(max_num_tokens),
             n=launch_n,
@@ -562,6 +565,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
                     launch_n=2 * intermediate_size,
                     launch_k=hidden_size,
                     dtype=model_dtype,
+                    output_dtype=model_dtype,
                     use_fp8_w8a8=False,
                     group_n=0,
                     group_k=0,
@@ -570,6 +574,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
                     launch_n=hidden_size,
                     launch_k=intermediate_size,
                     dtype=model_dtype,
+                    output_dtype=model_dtype,
                     use_fp8_w8a8=False,
                     group_n=0,
                     group_k=0,
@@ -578,6 +583,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
                     launch_n=2 * intermediate_size,
                     launch_k=hidden_size,
                     dtype=torch.float8_e4m3fn,
+                    output_dtype=model_dtype,
                     use_fp8_w8a8=True,
                     group_n=128,
                     group_k=128,
@@ -586,6 +592,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
                     launch_n=hidden_size,
                     launch_k=intermediate_size,
                     dtype=torch.float8_e4m3fn,
+                    output_dtype=model_dtype,
                     use_fp8_w8a8=True,
                     group_n=128,
                     group_k=128,
@@ -616,7 +623,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
             shape=(compile_key.e, compile_key.n, compile_key.k),
         )
         c_ptr = TritonWarmupTensor(
-            torch.bfloat16,
+            compile_key.output_dtype,
             shape=(compile_key.e, compile_key.max_num_tokens, compile_key.n),
         )
         scale_ptr = TritonWarmupTensor(
@@ -641,7 +648,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
             B_scale=b_scale_ptr
             if compile_key.use_fp8_w8a8 or compile_key.use_int8_w8a16
             else None,
-            B_zp=b_scale_ptr,
+            B_zp=None,
             stride_ae=compile_key.max_num_tokens * compile_key.k,
             stride_am=compile_key.k,
             stride_ak=1,
@@ -683,7 +690,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
         N: int,
         A_scale: torch.Tensor | None,
         B_scale: torch.Tensor | None,
-        B_zp: torch.Tensor,
+        B_zp: torch.Tensor | None,
         stride_ae: int,
         stride_am: int,
         stride_ak: int,
@@ -737,7 +744,7 @@ def invoke_moe_batched_triton_kernel(
     # Quantization data
     A_scale: torch.Tensor | None,
     B_scale: torch.Tensor | None,
-    B_zp: torch.Tensor,
+    B_zp: torch.Tensor | None,
     # Quantization schemes
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
