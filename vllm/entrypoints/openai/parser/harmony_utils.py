@@ -3,7 +3,7 @@
 
 import datetime
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from openai.types.responses.tool import Tool
 from openai_harmony import (
@@ -62,6 +62,39 @@ def is_function_recipient(
 
 def extract_function_from_recipient(recipient: str) -> str:
     return recipient.removeprefix("functions.")
+
+
+# Mirrors the ``phase`` field on the OpenAI SDK's assistant message types
+# (``ResponseOutputMessage``, ``EasyInputMessageParam``).
+MessagePhase: TypeAlias = Literal["commentary", "final_answer"]
+
+# Harmony channels that carry user-visible assistant text, mapped to the
+# Responses API ``phase`` label. Preambles (commentary with no recipient) are
+# intermediate commentary; the final channel holds the answer.
+# See: https://cookbook.openai.com/articles/openai-harmony
+_CHANNEL_TO_PHASE: dict[str, MessagePhase] = {
+    "commentary": "commentary",
+    "final": "final_answer",
+}
+_PHASE_TO_CHANNEL: dict[str, str] = {v: k for k, v in _CHANNEL_TO_PHASE.items()}
+
+
+def channel_to_phase(channel: str | None) -> MessagePhase | None:
+    """Map a Harmony channel to the Responses API assistant message phase."""
+    if channel is None:
+        return None
+    return _CHANNEL_TO_PHASE.get(channel)
+
+
+def phase_to_channel(phase: str | None, default: str) -> str:
+    """Map a Responses API phase back to a Harmony channel.
+
+    Falls back to *default* for absent or unrecognized phases, preserving
+    the caller's compatibility behavior.
+    """
+    if phase is None:
+        return default
+    return _PHASE_TO_CHANNEL.get(phase, default)
 
 
 REASONING_EFFORT = {

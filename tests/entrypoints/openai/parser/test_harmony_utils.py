@@ -9,12 +9,14 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    channel_to_phase,
     create_tool_definition,
     extract_function_from_recipient,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
     parse_chat_input_to_harmony_message,
+    phase_to_channel,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
@@ -248,6 +250,38 @@ class TestExtractFunctionFromRecipient:
     )
     def test_dotted_function_name_extraction(self, recipient, expected):
         assert extract_function_from_recipient(recipient) == expected
+
+
+class TestChannelPhaseMapping:
+    """Tests for the Harmony channel <-> Responses API phase mapping."""
+
+    @pytest.mark.parametrize(
+        "channel,expected",
+        [
+            ("commentary", "commentary"),
+            ("final", "final_answer"),
+            ("analysis", None),
+            (None, None),
+        ],
+    )
+    def test_channel_to_phase(self, channel, expected):
+        assert channel_to_phase(channel) == expected
+
+    @pytest.mark.parametrize(
+        "phase,expected",
+        [
+            ("commentary", "commentary"),
+            ("final_answer", "final"),
+        ],
+    )
+    def test_phase_to_channel(self, phase, expected):
+        assert phase_to_channel(phase, default="final") == expected
+
+    @pytest.mark.parametrize("phase", [None, "", "bogus"])
+    def test_unknown_phase_falls_back_to_default(self, phase):
+        """Defensive fallback so a malformed or future `phase` cannot drop an
+        assistant message onto an unintended channel."""
+        assert phase_to_channel(phase, default="final") == "final"
 
 
 class TestCommonParseInputToHarmonyMessage:
