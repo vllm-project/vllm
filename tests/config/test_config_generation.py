@@ -1,9 +1,80 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
+from vllm.config import vllm as vllm_config_module
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization.quark.utils import deep_compare
+from vllm.platforms import current_platform
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("draft_tp", "draft_max_len", "unsupported"),
+    [
+        (1, 2048, None),
+        (2, 2048, "distributed standalone drafting"),
+        (1, 1024, "standalone drafting with a shorter draft context"),
+    ],
+)
+def test_standalone_draft_runner_selection(
+    monkeypatch, draft_tp, draft_max_len, unsupported
+):
+    """Unsupported drafts fall back by default and explain forced-V2 failures."""
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda **kwargs: ())
+    config = object.__new__(VllmConfig)
+    config.compilation_config = CompilationConfig()
+    config.parallel_config = ParallelConfig()
+    config.cache_config = CacheConfig()
+    config.lora_config = None
+    config.model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            is_multimodal_model=False,
+            is_hybrid=False,
+            is_moe=False,
+            enable_prompt_embeds=False,
+            max_model_len=2048,
+            logits_processors=None,
+        ),
+    )
+    draft_model_config = SimpleNamespace(**vars(config.model_config))
+    draft_model_config.max_model_len = draft_max_len
+    draft_parallel_config = ParallelConfig()
+    draft_parallel_config.tensor_parallel_size = draft_tp
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="draft_model",
+            draft_parallel_config=draft_parallel_config,
+            draft_model_config=draft_model_config,
+            use_heterogeneous_vocab=False,
+            parallel_drafting=False,
+        ),
+    )
+
+    assert config.use_v2_model_runner is (unsupported is None)
+    if unsupported is None:
+        config._validate_v2_model_runner()
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        assert config.use_v2_model_runner
+        with pytest.raises(ValueError, match=unsupported):
+            config._validate_v2_model_runner()
 
 
 def test_cuda_empty_vs_unset_configs(monkeypatch: pytest.MonkeyPatch):

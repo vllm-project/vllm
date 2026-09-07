@@ -2574,6 +2574,38 @@ class VllmConfig:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")
+            elif speculative_config.method == "draft_model":
+                parallel = self.parallel_config
+                draft_parallel = speculative_config.draft_parallel_config
+                if (
+                    parallel.tensor_parallel_size != 1
+                    or parallel.pipeline_parallel_size != 1
+                    or parallel.data_parallel_size != 1
+                    or parallel.decode_context_parallel_size != 1
+                    or parallel.prefill_context_parallel_size != 1
+                    or draft_parallel.tensor_parallel_size != 1
+                ):
+                    unsupported.append("distributed standalone drafting")
+                if speculative_config.use_heterogeneous_vocab:
+                    unsupported.append(
+                        "standalone drafting with heterogeneous vocabularies"
+                    )
+                draft_config = speculative_config.draft_model_config
+                if any(
+                    config.is_multimodal_model or config.is_hybrid or config.is_moe
+                    for config in (model_config, draft_config)
+                ):
+                    unsupported.append(
+                        "standalone drafting with multimodal, hybrid, or MoE models"
+                    )
+                if model_config.enable_prompt_embeds or self.lora_config:
+                    unsupported.append(
+                        "standalone drafting with prompt embeddings or LoRA"
+                    )
+                if draft_config.max_model_len < model_config.max_model_len:
+                    unsupported.append(
+                        "standalone drafting with a shorter draft context"
+                    )
             elif speculative_config.method not in (
                 "eagle",
                 "eagle3",

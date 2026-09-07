@@ -99,6 +99,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        if self.method == "draft_model":
+            # Standalone prefill consumes the target's new token as well.
+            self.max_num_tokens += self.max_num_reqs
         self.max_model_len = vllm_config.model_config.max_model_len
         self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
@@ -112,7 +115,7 @@ class DraftModelSpeculator(BaseSpeculator):
         # that hook rather than hc_mult alone -- HY V4 runs iHC in its backbone
         # (hc_mult=4) but its MTP head consumes the collapsed states, so
         # widening it feeds propose() a 4x-too-wide buffer.
-        if _target_feeds_hc_residual(vllm_config):
+        if self.method != "draft_model" and _target_feeds_hc_residual(vllm_config):
             hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
             self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
