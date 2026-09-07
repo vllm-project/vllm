@@ -725,7 +725,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
 
 
 class QSAStateBackend(AttentionBackend):
-    """Key-only dummy backend for out-of-band BF16 QSA side-cache operations."""
+    """Key-only dummy backend for out-of-band QSA side-cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # fp8 entries allow the optional e4m3 compressed indexer cache.
@@ -860,7 +860,7 @@ class QSAKeyStateCache(_QSAStateCache):
 
 
 class QSACompressedKeyCache(_QSAStateCache):
-    """Normalized, group-first-RoPE BF16 key at one row per complete group."""
+    """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config

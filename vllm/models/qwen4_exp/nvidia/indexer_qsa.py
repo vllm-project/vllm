@@ -152,14 +152,14 @@ class QSAIndexer(nn.Module):
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
             "bf16"
         )
-        if self.indexer_kv_dtype in ("fp8", "fp8_e4m3"):
+        if self.indexer_kv_dtype == "fp8":
             indexer_dtype = torch.float8_e4m3fn
         elif self.indexer_kv_dtype == "bf16":
             indexer_dtype = torch.bfloat16
         else:
             raise NotImplementedError(
                 f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
-                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8'/'fp8_e4m3')."
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(

@@ -393,6 +393,30 @@ def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
     assert compressed_cache.kv_cache.data_ptr() == compressed_view.data_ptr()
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_qsa_compressed_cache_binds_its_spec_dtype(dtype: torch.dtype) -> None:
+    cache = qsa_cache.QSACompressedKeyCache(
+        head_size=64,
+        dtype=dtype,
+        cache_config=SimpleNamespace(block_size=32),
+        prefix=f"compressed.bind.{str(dtype).rsplit('.', 1)[-1]}",
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context={})
+        ),
+        compress_ratio=4,
+    )
+    spec = cache.get_kv_cache_spec(SimpleNamespace())
+    assert spec.dtype == dtype
+    assert spec.page_size_bytes == 32 // 4 * 64 * dtype.itemsize
+    view = torch.empty(2, 1, 8, 64, dtype=dtype)
+    cache.bind_kv_cache(view)
+    assert cache.kv_cache.dtype == dtype
+    assert cache.kv_cache.data_ptr() == view.data_ptr()
+    other = torch.bfloat16 if dtype != torch.bfloat16 else torch.float8_e4m3fn
+    with pytest.raises(ValueError, match="does not match"):
+        cache.bind_kv_cache(view.to(other))
+
+
 @pytest.mark.parametrize(
     ("compress_ratio", "num_spec", "expected"),
     [(4, 0, 4), (4, 1, 8), (4, 3, 8), (4, 4, 8), (4, 5, 12), (2, 3, 6)],
