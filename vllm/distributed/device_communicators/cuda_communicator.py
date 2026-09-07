@@ -729,8 +729,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if dim != 0:
             raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
-        pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None and not pynccl_comm.disabled
 
         # 'sizes' is not needed if all inputs in the same group have the same
         # shape
@@ -749,6 +747,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 outs = [aiter_comm.custom_all_gather(inp, dim=0) for inp in input_]
                 if all(o is not None for o in outs):
                     return outs
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None and not pynccl_comm.disabled
 
         # Symmetric memory is only used when all ranks have uniform sizes.
         # ncclCommWindowRegister is collective: asymmetric pool allocations
