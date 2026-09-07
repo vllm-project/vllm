@@ -22,7 +22,7 @@
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
-from typing import Annotated, Literal, Optional, TypeAlias, TypedDict
+from typing import Annotated, Literal, Optional, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -751,11 +751,6 @@ OpenPanguVLVideoInputs: TypeAlias = (
 )
 
 
-class OpenPanguVLMultiModalInputs(TypedDict, total=False):
-    image: OpenPanguVLImageInputs | None
-    video: OpenPanguVLVideoInputs | None
-
-
 class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
     def _get_prompt_updates(
         self,
@@ -1007,8 +1002,10 @@ class OpenPanguVLForConditionalGeneration(
 
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
-    ) -> OpenPanguVLMultiModalInputs:
-        mm_input_by_modality: OpenPanguVLMultiModalInputs = {}
+    ) -> dict[str, OpenPanguVLImageInputs | OpenPanguVLVideoInputs | None]:
+        mm_input_by_modality: dict[
+            str, OpenPanguVLImageInputs | OpenPanguVLVideoInputs | None
+        ] = {}
         for input_key in kwargs:
             if (
                 input_key in ("pixel_values", "image_embeds")
@@ -1036,7 +1033,7 @@ class OpenPanguVLForConditionalGeneration(
         for modality in mm_input_by_modality:
             if modality == "image":
                 image_input = mm_input_by_modality["image"]
-                assert image_input is not None
+                assert isinstance(image_input, OpenPanguVLImageInputs)
                 vision_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings = (
                     multimodal_embeddings
@@ -1045,7 +1042,7 @@ class OpenPanguVLForConditionalGeneration(
                 )
             if modality == "video":
                 video_input = mm_input_by_modality["video"]
-                assert video_input is not None
+                assert isinstance(video_input, OpenPanguVLVideoInputs)
                 video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings = (
                     multimodal_embeddings
