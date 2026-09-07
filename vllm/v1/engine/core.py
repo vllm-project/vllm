@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.watch_dog import get_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1054,6 +1055,8 @@ class EngineCoreProc(EngineCore):
         *,
         engine_index: int = 0,
     ):
+        """Initialize the engine core process with handshakes, I/O threads,
+        and watchdog setup."""
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
@@ -1147,6 +1150,11 @@ class EngineCoreProc(EngineCore):
                 daemon=True,
             )
             self.output_thread.start()
+
+            self._watchdog = get_watch_dog()
+            self._watchdog.set_name(f"engine_{self.engine_index}")
+            self._watchdog.set_logger(logger)
+            self._watchdog.start()
 
             # Don't complete handshake until DP coordinator ready message is
             # received.
@@ -1357,7 +1365,9 @@ class EngineCoreProc(EngineCore):
             signal_callback = SignalCallback(wakeup_engine)
 
             def signal_handler(signum, frame):
+                """Dump the watchdog stack and trigger shutdown on signal."""
                 signal_name = signal.Signals(signum).name
+                engine_core._watchdog.dump_stack(signal_name)
                 logger.info(
                     "[shutdown] EngineCore: trigger received signal=%s",
                     signal_name,
@@ -1461,9 +1471,12 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
-                req = self.input_queue.get(block=block)
+                req = self.input_queue.get(block=block, timeout=5)
                 self._handle_client_request(*req)
             except queue.Empty:
+                self._watchdog.feed()
+                if block:
+                    continue
                 break
             if not block:
                 break
@@ -1478,6 +1491,7 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
+        self._watchdog.feed()
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()

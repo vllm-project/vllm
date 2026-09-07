@@ -40,9 +40,10 @@ from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
+from vllm.utils.watch_dog import get_watch_dog
 
 logger = init_logger(__name__)
-
+_watchdog = get_watch_dog()
 
 SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
@@ -763,6 +764,10 @@ class MessageQueue:
         timeout: float | None = None,
         indefinite: bool = False,
     ):
+        """Yield the next unread block from shared memory, waiting (with
+        bounded rechecks) until the writer produces one. The watchdog is fed
+        while idle; raises RuntimeError("cancelled") if the queue shuts down.
+        """
         assert self._is_local_reader, "Only readers can acquire read"
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
@@ -792,6 +797,7 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
                     self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+                    _watchdog.feed()
 
                     if self.shutting_down:
                         raise RuntimeError("cancelled")
