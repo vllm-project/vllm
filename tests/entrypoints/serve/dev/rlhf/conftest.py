@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared HTTP helpers; coverage ownership is documented in __init__.py."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -21,7 +22,6 @@ import requests
 
 
 MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
-MOE_MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-30B-A3B")
 
 
 _BASE_ARGS = [
@@ -59,13 +59,6 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 # Server harness
 # ---------------------------------------------------------------------------
-
-
-def _is_expert_parallel(extra_args):
-    return any(
-        arg == "--enable-expert-parallel" or arg.startswith("--enable-expert-parallel=")
-        for arg in (extra_args or [])
-    )
 
 
 @contextmanager
@@ -118,6 +111,8 @@ def server(
         env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
         max_wait_seconds=timeout,
     ) as remote:
+        if not dummy_weights:
+            gen(remote.url_root, max_tokens=4, timeout=120)
         yield remote.url_root
 
 
@@ -195,6 +190,10 @@ def ok(resp) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# First-token wait for a streaming request; loaded machines need the slack.
+STREAM_START_TIMEOUT = 20.0
+
+
 @dataclass
 class StreamResult:
     started: threading.Event = field(default_factory=threading.Event)
@@ -244,12 +243,18 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
         args=(url, result, max_tokens),
     )
     thread.start()
-    started = result.started.wait(timeout=10)
+    started = result.started.wait(timeout=STREAM_START_TIMEOUT)
     if not started or result.done.is_set():
-        pause(url, mode="abort")
-        resume(url)
+        # Best-effort: on a stalled server these time out too, and would then
+        # mask the assertions below.
+        with contextlib.suppress(requests.RequestException):
+            pause(url, mode="abort")
+            resume(url)
         thread.join(timeout=10)
-    assert started, "request did not start generating"
+    assert started, (
+        f"request did not start generating within {STREAM_START_TIMEOUT}s "
+        f"(stream error: {result.error})"
+    )
     assert not result.done.is_set(), "request completed before it could be paused"
     return result, thread
 
