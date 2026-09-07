@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
+from vllm.platforms import current_platform
 
 
 class MLABmm(ABC):
@@ -119,6 +120,9 @@ class AmxMlaBmm(MLABmm):
 
 class Fp8MLABmm(MLABmm):
     def __init__(self, w_uk: torch.Tensor, w_uv: torch.Tensor) -> None:
+        if not current_platform.is_rocm():
+            raise ValueError("Fp8MLABmm requires ROCm.")
+
         self.w_k, self.w_k_scale = quantize_fp8_per_tensor(w_uk.transpose(0, 1))
         self.w_v, self.w_v_scale = quantize_fp8_per_tensor(w_uv.permute(1, 2, 0))
         self._warm_up()
@@ -186,6 +190,9 @@ class Fp8MLABmm(MLABmm):
 
 class Mxfp4MLABmm(MLABmm):
     def __init__(self, w_uk: torch.Tensor, w_uv: torch.Tensor) -> None:
+        if not current_platform.is_rocm():
+            raise ValueError("Mxfp4MLABmm requires ROCm.")
+
         self.w_k, self.w_k_scale = mxfp4_quantize(w_uk)
         self.w_k = self.w_k.transpose(0, 1)
         self.w_k_scale = self.w_k_scale.transpose(0, 1)
@@ -234,9 +241,6 @@ def create_online_mla_bmm(
         return Fp8MLABmm(w_uk, w_uv)
 
     if isinstance(quant_method, Mxfp4OnlineLinearMethod):
-        from vllm.platforms.rocm import get_cdna_version
-
-        if weight.dtype == torch.bfloat16 and get_cdna_version() == 4:
-            return Mxfp4MLABmm(w_uk, w_uv)
+        return Mxfp4MLABmm(w_uk, w_uv)
 
     return None

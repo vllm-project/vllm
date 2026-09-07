@@ -241,6 +241,8 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention.mla_bmm import (
     AmxMlaBmm,
+    Fp8MLABmm,
+    Mxfp4MLABmm,
     UnquantizedMlaBmm,
     create_online_mla_bmm,
 )
@@ -471,9 +473,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         elif isinstance(self.kv_b_proj.quant_method, OnlineLinearBase):
             raise ValueError(
-                "Online MLA BMM supports only fp8_per_tensor and mxfp4 "
-                f"kv_b_proj quantization, got "
-                f"{type(self.kv_b_proj.quant_method).__name__}."
+                "Online quantization for MLA kv_b_proj supports only fp8_per_tensor "
+                f"and mxfp4, got {type(self.kv_b_proj.quant_method).__name__}."
             )
         self.dcp_q_replicate = dcp_q_replicate
         self.head_size = kv_lora_rank + qk_rope_head_dim
@@ -1123,7 +1124,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "DCP query replication is unsupported on head-padding MLA "
                 "backends (q_pad_num_heads)."
             )
-            if self.kv_b_proj.mla_bmm is not None:
+            if isinstance(self.kv_b_proj.mla_bmm, (Mxfp4MLABmm, Fp8MLABmm)):
                 raise NotImplementedError(
                     "DCP query replication is not implemented for quantized "
                     "MLA BMM paths."
