@@ -713,11 +713,18 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
         num_stages: int,
     ) -> LaunchSpec:
         grid = (
-            expert_num_tokens.size(0),
-            triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
+            expert_num_tokens.shape[0],
+            triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.shape[1], BLOCK_N),
         )
         return grid, dict(
-            a_ptr=A, b_ptr=B, c_ptr=C, num_warps=num_warps, num_stages=num_stages
+            a_ptr=A,
+            b_ptr=B,
+            c_ptr=C,
+            a_scale_ptr=A_scale,
+            b_scale_ptr=B_scale,
+            b_zp_ptr=B_zp,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
 
