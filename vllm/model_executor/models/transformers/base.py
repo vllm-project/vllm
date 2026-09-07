@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import regex as re
 import torch
@@ -180,10 +180,6 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self.attention_instances = self.create_attention_instances()
-        # The instances are passed to the model's forward through a plain dict, so
-        # register them as submodules too, otherwise `named_modules` never yields
-        # them and their `process_weights_after_loading` does not run
-        self._attention_layers = nn.ModuleList(self.attention_instances.values())
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -573,18 +569,6 @@ class Base(
                     log_replacement(qual_name, child_module, new_module)
 
         _recursive_replace(self.model, prefix="model")
-
-    def find_fusers(self, fuser_cls: type[_F]) -> dict[int, tuple[str, _F]]:
-        """Layer index -> qualname and fuser, for every `fuser_cls` that was applied.
-
-        Only meaningful for fusers that match modules living inside a layer.
-        """
-        return {
-            extract_layer_index(prefix): (prefix, fuser)
-            for prefix, fusers in self.fusers.items()
-            for fuser in fusers
-            if isinstance(fuser, fuser_cls)
-        }
 
     def create_attention_instances(self) -> dict[int, Attention]:
         """

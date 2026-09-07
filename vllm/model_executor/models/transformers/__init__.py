@@ -40,6 +40,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 if TYPE_CHECKING:
     import torch
 
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
+
 
 def check_sinks(
     module: "torch.nn.Module",
@@ -72,6 +74,7 @@ def vllm_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
@@ -101,6 +104,7 @@ def vllm_mla_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
     num_tokens, num_heads = query.shape[:2]
