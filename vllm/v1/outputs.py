@@ -12,6 +12,7 @@ import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.watch_dog import WatchdogStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -295,6 +296,10 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Watchdog timeout statistics collected since the previous step.
+    # ``None`` when no timeout was observed in the window.
+    watchdog_stats: WatchdogStat | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
