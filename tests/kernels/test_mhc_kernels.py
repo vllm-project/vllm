@@ -640,3 +640,69 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     assert layer.hc_attn_fn_broadcast is buffer
     expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Test requires CUDA.",
+)
+def test_mhc_pre_broadcast_tilelang_without_deep_gemm(monkeypatch):
+    import vllm.utils.deep_gemm
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_pre_broadcast_tilelang,
+    )
+
+    set_random_seed(0)
+
+    called_deep_gemm = False
+    real_tf32_hc_prenorm_gemm = vllm.utils.deep_gemm.tf32_hc_prenorm_gemm
+
+    def spy_tf32_hc_prenorm_gemm(*args, **kwargs):
+        nonlocal called_deep_gemm
+        called_deep_gemm = True
+        return real_tf32_hc_prenorm_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(vllm.utils.deep_gemm, "is_deep_gemm_supported", lambda: False)
+    monkeypatch.setattr(
+        vllm.utils.deep_gemm, "tf32_hc_prenorm_gemm", spy_tf32_hc_prenorm_gemm
+    )
+
+    num_tokens, hidden_size, hc_mult = 8, 4096, 4
+    hc_mult3 = 2 * hc_mult + hc_mult**2
+
+    residual = torch.randn(num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+    fn = torch.randn(hc_mult3, hc_mult, hidden_size, device="cuda", dtype=torch.float32)
+    fn_broadcast = fn.sum(1)
+    fn_flat = fn.view(hc_mult3, hc_mult * hidden_size)
+    hc_scale = torch.ones(3, device="cuda", dtype=torch.float32)
+    hc_base = torch.zeros(hc_mult3, device="cuda", dtype=torch.float32)
+    norm_weight = torch.ones(hidden_size, device="cuda", dtype=torch.bfloat16)
+
+    residual_expanded = residual.unsqueeze(1).expand(num_tokens, hc_mult, hidden_size)
+    res_ref = mhc_pre_ref(
+        residual_expanded,
+        fn_flat,
+        hc_scale,
+        hc_base,
+        1e-5,
+        1e-5,
+        1e-5,
+        1.0,
+        1,
+    )
+    res_test = mhc_pre_broadcast_tilelang(
+        residual,
+        fn_flat,
+        hc_scale,
+        hc_base,
+        1e-5,
+        1e-5,
+        1e-5,
+        1.0,
+        1,
+        norm_weight=norm_weight,
+        fn_broadcast=fn_broadcast,
+    )
+
+    assert not called_deep_gemm, "fallback path still called into DeepGEMM"
+    torch.testing.assert_close(res_ref[0], res_test[1], atol=1e-2, rtol=1e-2)
