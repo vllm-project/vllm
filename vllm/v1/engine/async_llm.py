@@ -205,7 +205,9 @@ class AsyncLLM(EngineClient):
                 vllm_config.profiler_config,
                 worker_name=worker_name,
                 local_rank=0,
-                activities=["CPU"],
+                activities=(
+                    vllm_config.profiler_config.torch_profiler_activities or ["CPU"]
+                ),
             )
 
     @classmethod

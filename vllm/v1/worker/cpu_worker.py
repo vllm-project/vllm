@@ -114,7 +114,7 @@ class CPUWorker(Worker):
                 profiler_config,
                 worker_name=worker_name,
                 local_rank=self.local_rank,
-                activities=["CPU"],
+                activities=profiler_config.torch_profiler_activities or ["CPU"],
             )
 
     def init_device(self):

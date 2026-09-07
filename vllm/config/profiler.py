@@ -14,6 +14,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 ProtonBackend = Literal["cupti"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
@@ -50,6 +51,10 @@ class ProfilerConfig:
     """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
+
+    torch_profiler_activities: list[TorchProfilerActivity] | None = None
+    """Activities collected by the PyTorch profiler. Defaults to the
+    platform-specific activity set when unset."""
 
     proton_profiler_dir: str = ""
     """Directory to save Triton Proton profiles. Each worker writes a
@@ -166,6 +171,15 @@ class ProfilerConfig:
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
+        if self.torch_profiler_activities is not None:
+            if not self.torch_profiler_activities:
+                raise ValueError("torch_profiler_activities must not be empty")
+            if len(set(self.torch_profiler_activities)) != len(
+                self.torch_profiler_activities
+            ):
+                raise ValueError(
+                    "torch_profiler_activities must not contain duplicates"
+                )
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
         if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
             logger.warning_once(

@@ -218,7 +218,9 @@ class XPUWorker(Worker):
                 self.profiler_config,
                 worker_name=trace_name,
                 local_rank=self.local_rank,
-                activities=["CPU", "XPU"],
+                activities=(
+                    self.profiler_config.torch_profiler_activities or ["CPU", "XPU"]
+                ),
             )
             logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
