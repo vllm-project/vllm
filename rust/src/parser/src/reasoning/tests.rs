@@ -482,6 +482,20 @@ fn poolside_v1_defaults_to_reasoning_without_prompt_boundary() {
 }
 
 #[test]
+fn poolside_v1_ignores_stale_end_marker_when_no_assistant_turn() {
+    // Without an `<assistant>` marker there is no current-turn boundary, so a
+    // stale `</think>` in the prompt must not disable reasoning: the scan is
+    // scoped to an empty suffix and the `in_reasoning = true` default applies.
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[THINK_END_ID]).unwrap();
+
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(reasoning_str(&delta), Some("reason"));
+    assert_eq!(content_str(&delta), Some("answer"));
+}
+
+#[test]
 fn poolside_v1_requires_assistant_token() {
     use thiserror_ext::AsReport;
 

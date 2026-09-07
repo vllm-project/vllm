@@ -52,10 +52,14 @@ impl ReasoningParser for PoolsideV1ReasoningParser {
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         // Scope the boundary scan to the current assistant turn: tokens before
         // the last `<assistant>` belong to prior conversation and are ignored.
+        // With no `<assistant>` marker there is no current-turn boundary to
+        // honor, so scan nothing and fall back to the documented
+        // `in_reasoning = true` default rather than reacting to a stale
+        // `</think>` elsewhere in the prompt.
         let scan_start = prompt_token_ids
             .iter()
             .rposition(|&id| id == self.assistant_token_id)
-            .map_or(0, |idx| idx + 1);
+            .map_or(prompt_token_ids.len(), |idx| idx + 1);
         self.inner.initialize(&prompt_token_ids[scan_start..]);
         Ok(())
     }
