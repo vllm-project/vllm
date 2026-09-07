@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cstdlib>
+#include <vector>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -170,19 +171,25 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
     attr.srcAccessOrder = is_src_access_order_any
                               ? CU_MEMCPY_SRC_ACCESS_ORDER_ANY
                               : CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
-    size_t attrs_idx = 0;
     size_t fail_idx = 0;
     // Uncapped on CUDA (max_desc == 0 -> single call) unless overridden by
     // VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS; chunk to honor the override.
     const int64_t max_desc = resolve_max_batch_descriptors();
     const int64_t step = max_desc <= 0 ? n : max_desc;
+    // attrIdxs must be an array of `count` indices into `attrs` (each
+    // < numAttrs), not a single reused scalar -- passing a scalar leaves
+    // the driver reading past the end of it once count grows large.
+    // All-zero indices preserve the previous semantics (every descriptor
+    // uses attrs[0]). Sized to the chunk cap and reused across chunks.
+    std::vector<size_t> attr_idxs(static_cast<size_t>(step), 0);
     for (int64_t off = 0; off < n; off += step) {
       const int64_t cnt = std::min(step, n - off);
       CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data + off),
                                  reinterpret_cast<CUdeviceptr*>(src_data + off),
                                  reinterpret_cast<size_t*>(size_data + off),
-                                 static_cast<size_t>(cnt), &attr, &attrs_idx, 1,
-                                 &fail_idx, static_cast<CUstream>(stream));
+                                 static_cast<size_t>(cnt), &attr,
+                                 attr_idxs.data(), 1, &fail_idx,
+                                 static_cast<CUstream>(stream));
       STD_TORCH_CHECK(result == CUDA_SUCCESS,
                       "cuMemcpyBatchAsync failed at index ", fail_idx,
                       " with error ", result);
@@ -197,7 +204,6 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
   // rocm-7.14+ has better performance.
   {
     hipMemcpyAttributes attr = {};
-    size_t attrs_idx = 0;
     size_t fail_idx = 0;
     size_t num_attrs = 0;
   #if HIP_VERSION >= 71300000
@@ -217,13 +223,19 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
     // descriptors/call on ROCm 7.15, so chunk the batch at the resolved cap.
     const int64_t max_desc = resolve_max_batch_descriptors();
     const int64_t step = max_desc <= 0 ? n : max_desc;
+    // Same contract as the CUDA path above: attrIdxs must have `count`
+    // entries. On ROCm 7.2.1-7.2.3 num_attrs is 0 and attrIdxs is ignored,
+    // but on ROCm 7.13+ num_attrs is 1 and a single scalar would be an
+    // out-of-bounds read once count is large, so always size the array to
+    // the chunk cap.
+    std::vector<size_t> attr_idxs(static_cast<size_t>(step), 0);
     for (int64_t off = 0; off < n; off += step) {
       const int64_t cnt = std::min(step, n - off);
       hipError_t result = hipMemcpyBatchAsync(
           reinterpret_cast<void**>(dst_data + off),
           reinterpret_cast<void**>(src_data + off),
           reinterpret_cast<size_t*>(size_data + off), static_cast<size_t>(cnt),
-          &attr, &attrs_idx, num_attrs, &fail_idx,
+          &attr, attr_idxs.data(), num_attrs, &fail_idx,
           static_cast<hipStream_t>(stream));
       STD_TORCH_CHECK(result == hipSuccess,
                       "hipMemcpyBatchAsync failed at index ", fail_idx,
