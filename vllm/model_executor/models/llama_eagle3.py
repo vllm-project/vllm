@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -18,7 +19,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.model_executor.models.llama import (
+    LlamaAttention,
+    LlamaForCausalLM,
+    LlamaMLP,
+)
+from vllm.model_executor.models.llama import (
+    LlamaDecoderLayer as BaseLlamaDecoderLayer,
+)
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
@@ -32,7 +40,31 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class LlamaDecoderLayer(LlamaDecoderLayer):
+if TYPE_CHECKING:
+
+    class _Eagle3LlamaDecoderLayerBase(nn.Module):
+        hidden_size: int
+        self_attn: LlamaAttention
+        mlp: LlamaMLP
+        input_layernorm: RMSNorm
+        post_attention_layernorm: RMSNorm
+
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            prefix: str = "",
+            config: LlamaConfig | None = None,
+        ) -> None: ...
+
+    class _Eagle3LlamaForCausalLMBase(nn.Module):
+        pass
+
+else:
+    _Eagle3LlamaDecoderLayerBase = BaseLlamaDecoderLayer
+    _Eagle3LlamaForCausalLMBase = LlamaForCausalLM
+
+
+class LlamaDecoderLayer(_Eagle3LlamaDecoderLayerBase):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -136,7 +168,9 @@ class LlamaModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         # Get drafter's quantization config
@@ -187,7 +221,7 @@ class LlamaModel(nn.Module):
             self.fc_input_size = target_hidden_size * self.num_aux_hidden_states
 
             if self.norm_before_fc:
-                self.input_norm = RMSNorm(
+                self.input_norm: RMSNorm | None = RMSNorm(
                     self.fc_input_size,
                     eps=self.config.rms_norm_eps,
                 )
@@ -269,18 +303,18 @@ class LlamaModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class Eagle3LlamaForCausalLM(LlamaForCausalLM):
+class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models
@@ -306,7 +340,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
-        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+        self.use_parallel_drafting = speculative_config.parallel_drafting
 
         if self.use_parallel_drafting:
             self.register_buffer(
@@ -365,6 +399,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # combine multiple auxiliary hidden states returned by eagle3
 
         if self.model.norm_before_fc:
+            assert self.model.input_norm is not None
             hidden_states = self.model.input_norm(hidden_states)
 
         # `norm_before_fc` adds a single RMSNorm before the FC layer, whereas `fc_norm`

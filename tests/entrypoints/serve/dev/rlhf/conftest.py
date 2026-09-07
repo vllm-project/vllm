@@ -111,6 +111,8 @@ def server(
         env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
         max_wait_seconds=timeout,
     ) as remote:
+        if not dummy_weights:
+            gen(remote.url_root, max_tokens=4, timeout=120)
         yield remote.url_root
 
 
@@ -342,15 +344,6 @@ def health(url) -> int:
 # ---------------------------------------------------------------------------
 
 
-def init_weight_transfer_engine(url, init_info: dict[str, Any]):
-    """Initialize the configured backend before a weight-update cycle."""
-    return requests.post(
-        f"{url}/init_weight_transfer_engine",
-        json={"init_info": init_info},
-        timeout=10,
-    )
-
-
 def start_weight_update(url, is_checkpoint_format=True):
     return requests.post(
         f"{url}/start_weight_update",
@@ -361,15 +354,6 @@ def start_weight_update(url, is_checkpoint_format=True):
 
 def finish_weight_update(url):
     return requests.post(f"{url}/finish_weight_update", timeout=10)
-
-
-def update_weights(url, update_info: dict[str, Any]):
-    """Send one backend-specific weight update payload."""
-    return requests.post(
-        f"{url}/update_weights",
-        json={"update_info": update_info},
-        timeout=30,
-    )
 
 
 def get_world_size(url, include_dp=True):

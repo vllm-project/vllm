@@ -782,6 +782,61 @@ class TestARCPolicy:
         assert counting_t1.items_yielded == len(t1_order)
         assert counting_t2.items_yielded == len(t2_order)
 
+    @pytest.mark.parametrize(
+        "pinned, protected, new_keys, expected_evicted",
+        [
+            ([], [], [7, 8, 9], [6, 5, 3]),
+            ([], [], [7, 8, 9, 10], [6, 5, 3, 4]),
+            ([5, 6], [], [7, 8], [3, 4]),
+            ([], [5, 6], [7, 8], [3, 4]),
+            ([5, 6], [3], [7], [4]),
+            ([5, 6], [3], [7, 8], None),
+        ],
+    )
+    def test_store_falls_back_to_t1_when_t2_cannot_satisfy_eviction(
+        self, pinned, protected, new_keys, expected_evicted
+    ):
+        """A preference for T2 must not reject stores that can reclaim T1."""
+        manager, policy = self._make_manager(enable_events=False)
+        for keys in ([1, 2, 3, 4], [5, 6]):
+            assert manager.prepare_store(to_keys(keys), _EMPTY_REQ_CTX) is not None
+            manager.complete_store(to_keys(keys), _EMPTY_REQ_CTX)
+
+        # Ghost hits raise the target to 3; promotion leaves only 2 entries in T1.
+        manager.touch(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        manager.touch(to_keys([5, 6]), _EMPTY_REQ_CTX)
+        assert policy.target_t1_size == 3
+        assert list(policy.t1) == to_keys([3, 4])
+        assert list(policy.t2) == to_keys([6, 5])
+        manager.prepare_load(to_keys(pinned), _EMPTY_REQ_CTX)
+
+        counting_t1 = _CountingOrderedDict(policy.t1)
+        counting_t2 = _CountingOrderedDict(policy.t2)
+        policy.t1 = counting_t1
+        policy.t2 = counting_t2
+        before = [list(q.items()) for q in (policy.t1, policy.t2, policy.b1, policy.b2)]
+        counting_t1.items_yielded = counting_t2.items_yielded = 0
+        output = manager.prepare_store(to_keys(protected + new_keys), _EMPTY_REQ_CTX)
+        assert counting_t1.items_yielded <= len(before[0])
+        assert counting_t2.items_yielded <= len(before[1])
+
+        if expected_evicted is None:
+            assert output is None
+            assert [
+                list(q.items()) for q in (policy.t1, policy.t2, policy.b1, policy.b2)
+            ] == before
+        else:
+            assert output is not None
+            assert output.keys_to_store == to_keys(new_keys)
+            assert output.evicted_keys == to_keys(expected_evicted)
+            manager.complete_store(to_keys(new_keys), _EMPTY_REQ_CTX)
+            for key in new_keys:
+                assert manager.lookup(to_key(key), _EMPTY_REQ_CTX) is LookupResult.HIT
+        for key in pinned + protected:
+            assert manager.lookup(to_key(key), _EMPTY_REQ_CTX) is LookupResult.HIT
+        manager.complete_load(to_keys(pinned), _EMPTY_REQ_CTX)
+
     def test_batch_eviction_failure_is_atomic(self):
         """Finding only some candidates must not partially evict the cache."""
         cpu_manager, arc_policy = self._make_manager(num_blocks=4, enable_events=False)
