@@ -41,7 +41,7 @@ th:not(:first-child) {
 | [CP](../configuration/optimization.md#chunked-prefill) | ✅ | | | | | | | | | | | | | | |
 | [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | | |
 | [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
-| [SD](speculative_decoding/README.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | | |
+| [SD](speculative_decoding/README.md) | ✅ | ✅ | 🟠† | ✅ | | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | | |
 | [pooling](../models/pooling_models/README.md) | 🟠\* | 🟠\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | | |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ✅ | ✅ | ✅ | | | | | | | | |
@@ -56,6 +56,7 @@ th:not(:first-child) {
 
 \* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
 <sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.  
+† LoRA with speculative decoding is supported for EAGLE3 (see `tests/v1/e2e/spec_decode/draft_model/test_lora.py`); other speculative methods may still lack full LoRA coverage.  
 
 ### Feature x Hardware
 
