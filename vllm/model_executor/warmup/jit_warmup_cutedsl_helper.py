@@ -3,17 +3,24 @@
 
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
-from functools import wraps
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 
 DEFAULT_CUTEDSL_COMPILE_OPTIONS = "--enable-tvm-ffi"
 
 CompileKeyT = TypeVar("CompileKeyT")
 CuTeDSLLaunchSpec: TypeAlias = (
-    tuple[CompileKeyT, tuple[Any, ...], Mapping[str, Any] | None]
-    | tuple[CompileKeyT, tuple[Any, ...], Mapping[str, Any] | None, Any]
+    tuple[CompileKeyT, tuple[Any, ...]]
+    | tuple[CompileKeyT, tuple[Any, ...], Any]
+    | tuple[
+        CompileKeyT,
+        tuple[Any, ...],
+        Any,
+        Callable[[], Any],
+    ]
 )
 
 
@@ -57,25 +64,14 @@ class VllmCuTeDSLJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             *self.warmup_inputs(compile_key),
         )
 
-
-def kernel_launcher(
-    call_fn: Callable[..., CuTeDSLLaunchSpec[CompileKeyT]],
-) -> Callable[..., Any]:
-    """Invoke a cached CuTeDSL executor from a declarative ``__call__``."""
-
-    @wraps(call_fn)
-    def wrapper(
-        self: VllmCuTeDSLJitKernel[CompileKeyT],
-        *args: Any,
-        **kwargs: Any,
+    def launch(
+        self,
+        launch_spec: CuTeDSLLaunchSpec[CompileKeyT],
+        _inputs: Mapping[str, Any],
     ) -> Any:
-        spec = call_fn(self, *args, **kwargs)
-        compile_key, launch_args, runtime_context = spec[:3]
-        executor = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
-        )
+        compile_key, launch_args = launch_spec[:2]
+        executor = self._get_or_compile(compile_key)
         result = executor(*launch_args)
-        return spec[3] if len(spec) == 4 else result
-
-    return wrapper
+        if len(launch_spec) == 4:
+            return launch_spec[3]()
+        return launch_spec[2] if len(launch_spec) == 3 else result

@@ -18,12 +18,12 @@ from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton

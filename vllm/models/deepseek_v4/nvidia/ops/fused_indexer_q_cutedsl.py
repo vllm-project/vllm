@@ -19,10 +19,10 @@ from vllm.cute_utils import (
     recast_val,
     torch_to_cute_dtype,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
-    kernel_launcher,
 )
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
@@ -421,7 +421,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
             weights_out,
             float(weights_softmax_scale * weights_head_scale),
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
@@ -684,7 +684,7 @@ class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
             weights_out,
             float(weights_softmax_scale * weights_head_scale),
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 _INDEXER_Q_MXFP4_KERNEL = IndexerQMxFp4Kernel()

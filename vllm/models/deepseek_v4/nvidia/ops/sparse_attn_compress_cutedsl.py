@@ -20,10 +20,10 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import torch_to_cute_dtype
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
-    kernel_launcher,
 )
 from vllm.utils.math_utils import round_up
 
@@ -580,7 +580,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             kv_slot_mapping,
             kv_cache.shape[1],
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 class SparseAttnCompressNormRopeStoreFullC4Kernel(
@@ -1075,7 +1075,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             kv_cache.shape[1],
             fp8_scale,
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 class SparseAttnCompressC128Block8Kernel(
@@ -1444,7 +1444,7 @@ class SparseAttnCompressC128Block8Kernel(
             block_table,
             compressed_kv,
         )
-        return compile_key, launch_args, None, compressed_kv
+        return compile_key, launch_args, compressed_kv
 
 
 class SparseAttnNormRopeStoreKernel(
@@ -1823,7 +1823,7 @@ class SparseAttnNormRopeStoreKernel(
             kv_cache,
             kv_slot_mapping,
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 class SparseAttnNormRopeStoreFullKernel(
@@ -2139,7 +2139,7 @@ class SparseAttnNormRopeStoreFullKernel(
             kv_cache.shape[1],
             fp8_scale,
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(

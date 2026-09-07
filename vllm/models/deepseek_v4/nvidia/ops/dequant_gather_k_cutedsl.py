@@ -13,11 +13,10 @@ from cutlass.cute.nvgpu import cpasync
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _bf16x2_mul, cvt
-from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
-    kernel_launcher,
 )
 
 
@@ -398,7 +397,7 @@ class DequantGatherKCacheKernel(
             block_table,
             offset,
         )
-        return compile_key, launch_args, None
+        return compile_key, launch_args
 
 
 _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()

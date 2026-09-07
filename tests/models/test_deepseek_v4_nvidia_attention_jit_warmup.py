@@ -88,6 +88,18 @@ def _sparse_config(
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_indexer_cache_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.v1.attention.backends.mla import indexer
+
+    monkeypatch.setattr(
+        indexer,
+        "dsa_indexer_uses_fp4",
+        lambda config: config.attention_config.resolve_indexer_kv_dtype("fp8")
+        == "mxfp4",
+    )
+
+
 @pytest.mark.parametrize("has_gather_lens", [False, True])
 def test_dequant_gather_dispatch_matches_legacy_compile_args(
     has_gather_lens: bool,
