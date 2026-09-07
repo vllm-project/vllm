@@ -33,7 +33,7 @@ MODELS = [
 
 def _pixel_factor(factor: int):
     """`factor = patch_size * merge_size` for Qwen models"""
-    return {"min_pixels": factor ** 2, "max_pixels": 1280 *factor ** 2}
+    return {"min_pixels": factor**2, "max_pixels": 1280 * factor**2}
 
 
 @pytest.mark.parametrize("model_info,factor,extra_kwargs", MODELS)
