@@ -229,7 +229,18 @@ def test_cutlass_fp8_gemm_padded(
     torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
 
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+# Two prefill-sized cases for the SM 12.x blockwise path, where the op switches
+# the tile scheduler to a swizzled CTA order once the weight exceeds the L2
+# (16384x2560 = 40 MiB and 5120x5120 = 25 MiB on a 24 MiB L2 part); the odd M
+# also covers the non-swap-AB dispatch. Elsewhere they run the default order
+# like the rest of the list.
+BLOCKWISE_PREFILL_FACTORS = [
+    (8193, 16384, 2560),
+    (5120, 5120, 5120),
+]
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS + BLOCKWISE_PREFILL_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape,b_scale_group_shape", [((1, 128), (128, 128))]
 )
