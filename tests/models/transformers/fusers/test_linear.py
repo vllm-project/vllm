@@ -296,6 +296,36 @@ class TruthyGuardAttention(FakeAttention):
         return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
 
 
+class StatementGuardVAttention(FakeAttention):
+    """`v_proj` guarded by a statement-form `if self.v_proj:` block.
+
+    The `if`'s test is not an `ast.Compare`, so the identity-check scan skips it;
+    `_in_boolean_context` folds the test to `True` (an `nn.Linear` is always
+    truthy) and the call inside the now-`if True:` body still fuses, with the
+    live `else` surviving the rewrite."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.v_proj:
+            v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        else:
+            v = k
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
 class BranchedKVAttention(FakeAttention):
     """Gemma 4-style: q at body level, k/v inside an untaken `else` branch.
 
@@ -346,6 +376,67 @@ class RebindArgAttention(FakeAttention):
         q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         if self.recompute:
             hidden_states = hidden_states * 2
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class InPlaceMutatedArgAttention(FakeAttention):
+    """The shared input is mutated in place (in an untaken branch) before k/v.
+
+    Like `RebindArgAttention`, but the mutation keeps the name in a `Load`
+    context (`hidden_states.mul_(2)`), so a bare `Name`-store check would miss it.
+    The rewrite must still refuse: hoisting the GEMM above the mutation changes
+    the value k/v see. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states.mul_(2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class SubscriptMutatedArgAttention(FakeAttention):
+    """The shared input is written through a subscript (in an untaken branch).
+
+    `hidden_states[..., 0] = 0` leaves the name in a `Load` context on the
+    subscript's value, so it too evades a bare `Name`-store check. The rewrite
+    must refuse for the same reason. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states[..., 0] = 0
         k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
@@ -640,7 +731,13 @@ def test_qkv_identifies_output_projection():
 
 
 @pytest.mark.parametrize(
-    "attn_cls", [GuardedVAttention, TruthyGuardAttention, BranchedKVAttention]
+    "attn_cls",
+    [
+        GuardedVAttention,
+        TruthyGuardAttention,
+        StatementGuardVAttention,
+        BranchedKVAttention,
+    ],
 )
 def test_fuses_gemma4_qkv_obstacles(attn_cls):
     """A guarded `v_proj` (obstacle 1) or branch-split k/v (obstacle 2) fuses.
@@ -648,9 +745,9 @@ def test_fuses_gemma4_qkv_obstacles(attn_cls):
     Both patterns leave `v_proj` referenced beyond its single call, or split the
     calls across blocks; the rewrite folds the guard / hoists the GEMM and the
     numerics still match. The guard may be a `None` comparison or a bare
-    truthiness test; both are proven invariants, so folding them is sound. The
-    naive "relax the reference count" fix fuses the guarded cases but silently
-    drops the guard's semantics.
+    truthiness test (ternary or statement form); all are proven invariants, so
+    folding them is sound. The naive "relax the reference count" fix fuses the
+    guarded cases but silently drops the guard's semantics.
     """
     with torch.device("meta"):
         meta = attn_cls()
@@ -675,14 +772,24 @@ def test_fuses_gemma4_qkv_obstacles(attn_cls):
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.parametrize("attn_cls", [RebindArgAttention, NonFoldableRefAttention])
+@pytest.mark.parametrize(
+    "attn_cls",
+    [
+        RebindArgAttention,
+        InPlaceMutatedArgAttention,
+        SubscriptMutatedArgAttention,
+        NonFoldableRefAttention,
+    ],
+)
 def test_qkv_refuses_unsound_rewrites(attn_cls):
     """The match succeeds but the source rewrite must refuse, leaving no fuser.
 
-    `RebindArgAttention` rebinds the shared input before k/v (hoisting the GEMM
-    would change their input); `NonFoldableRefAttention` reads `v_proj` outside
-    an existence guard (the fuser cannot fold it away). Both fail closed in
-    `update_forward`, so `get_fuser` returns `None`.
+    `RebindArgAttention` rebinds the shared input before k/v, and the two
+    `*MutatedArgAttention` cases mutate it in place (`x.mul_(...)`, `x[...] = 0`)
+    -- all three would change what k/v see if the GEMM were hoisted above them.
+    `NonFoldableRefAttention` reads `v_proj` outside an existence guard (the fuser
+    cannot fold it away). All fail closed in `update_forward`, so `get_fuser`
+    returns `None`.
     """
     with torch.device("meta"):
         meta = attn_cls()
@@ -705,20 +812,19 @@ def _guard_funcdef(expr: str) -> tuple[ast.FunctionDef, ast.Attribute]:
     "expr, expected",
     [
         ("a if self.v_proj is not None else b", True),
-        ("a if self.v_proj != None else b", True),
         ("a if self.v_proj is None else b", False),
-        ("a if self.v_proj == None else b", False),
         ("a if None is not self.v_proj else b", True),  # None on the left
     ],
 )
-def test_fold_existence_guard_folds_none_comparison(expr, expected):
-    """`is`/`is not`/`==`/`!=` against `None`, either operand order, fold to a bool.
+def test_bypass_existence_guard_folds_identity_none_check(expr, expected):
+    """`is`/`is not None`, either operand order, fold to a bool.
 
     The projection is a proven invariant (it exists as an `nn.Linear`), so an
     `is (not) None` guard has a constant truth value; folding it lets the call be
-    rewritten away without changing the guard's outcome."""
+    rewritten away without changing the guard's outcome. `==`/`!=` are excluded
+    (see the refusal test) because a subclass may override `__eq__`/`__ne__`."""
     funcdef, ref = _guard_funcdef(expr)
-    qkv._fold_existence_guard(funcdef, ref, "v_proj")
+    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
     test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.IfExp)).test
     assert isinstance(test, ast.Constant) and test.value is expected
 
@@ -730,19 +836,39 @@ def test_fold_existence_guard_folds_none_comparison(expr, expected):
         "not self.v_proj",  # a `not` operand
     ],
 )
-def test_fold_existence_guard_folds_bare_truthiness(expr):
+def test_bypass_existence_guard_folds_bare_truthiness(expr):
     """A bare truthiness test folds the reference itself to `True`.
 
     An `nn.Linear` has no `__bool__`/`__len__`, so it is always truthy; in a pure
     boolean position (a test, or a `not` operand) the reference can be replaced by
     `True`, letting the projection be deleted."""
     funcdef, ref = _guard_funcdef(expr)
-    qkv._fold_existence_guard(funcdef, ref, "v_proj")
+    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
     # No `self.v_proj` reference survives; a literal `True` took its place.
     attrs = [n for n in ast.walk(funcdef) if isinstance(n, ast.Attribute)]
     assert not any(n.attr == "v_proj" for n in attrs)
     constants = [n for n in ast.walk(funcdef) if isinstance(n, ast.Constant)]
     assert any(n.value is True for n in constants)
+
+
+def test_bypass_existence_guard_folds_bare_if_statement():
+    """A statement-form `if self.<name>:` folds its test to `True`.
+
+    The `len(node.ops) == 1` `Compare` scan skips it (it is not a comparison at
+    all); `_in_boolean_context` then matches the `if`'s test and folds it, so the
+    bare-truthiness statement form is handled, not silently dropped."""
+    funcdef = ast.parse(
+        "def f(self, a, b):\n    if self.v_proj:\n        return a\n    return b"
+    ).body[0]
+    assert isinstance(funcdef, ast.FunctionDef)
+    ref = next(
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute) and node.attr == "v_proj"
+    )
+    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
+    test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.If)).test
+    assert isinstance(test, ast.Constant) and test.value is True
 
 
 @pytest.mark.parametrize(
@@ -752,16 +878,20 @@ def test_fold_existence_guard_folds_bare_truthiness(expr):
         "self.v_proj.weight",  # an attribute read, not a guard
         "a and self.v_proj",  # `and` yields the operand, which may escape
         "self.v_proj or a",  # `or` yields the module itself when truthy
+        "a if self.v_proj == None else b",  # `__eq__` may not track identity
+        "a if self.v_proj != None else b",  # `__ne__` may not track identity
     ],
 )
-def test_fold_existence_guard_refuses_non_guard_reference(expr):
-    """A surviving reference that is not an existence guard cannot be folded away.
+def test_bypass_existence_guard_refuses_non_guard_reference(expr):
+    """A surviving reference that is not an identity guard cannot be folded away.
 
     Rewriting it is unsafe (its value depends on more than the projection's
-    existence), so the fuser refuses rather than change semantics."""
+    existence), so the fuser refuses rather than change semantics. `==`/`!=` are
+    refused too: `is_linear` accepts `nn.Linear` subclasses that could override
+    `__eq__`/`__ne__`, so equality need not agree with `is (not) None`."""
     funcdef, ref = _guard_funcdef(expr)
     with pytest.raises(ValueError, match="outside an existence guard"):
-        qkv._fold_existence_guard(funcdef, ref, "v_proj")
+        qkv._bypass_existence_guard(funcdef, ref, "v_proj")
 
 
 @pytest.mark.parametrize("layer_idx", [0, 1])
