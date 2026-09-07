@@ -931,6 +931,9 @@ class RoutedExperts(PluggableLayer):
                     if self.quant_config is not None
                     else None
                 )
+
+                # NOTE: `experts`, `shared_expert` are hard-coded here and this logic
+                # would break with models that do not exactly use these layer names.
                 shared_expert_projection_prefix = (
                     f"{self.layer_name.removesuffix('.experts')}.shared_expert."
                     f"{'down_proj' if shard_id == 'w2' else 'gate_up_proj'}"
