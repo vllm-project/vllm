@@ -480,8 +480,10 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
 
         # bpreshuffle GEMM requires aiter fp8 linear to be enabled and an fp8
@@ -490,23 +492,29 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_fp8_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`.",
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`."
+                ),
             )
 
         n, k = config.weight_shape
         if not (n % 128 == 0 and k % 128 == 0):
             return (
                 False,
-                f"requires N and K dimensions divisible by 128, received "
-                f"N={n} and K={k}.",
+                (
+                    f"requires N and K dimensions divisible by 128, received "
+                    f"N={n} and K={k}."
+                ),
             )
 
         if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(n, k):
             return (
                 False,
-                f"requires a tuned aiter blockscale bpreshuffle config for "
-                f"N={n} and K={k}.",
+                (
+                    f"requires a tuned aiter blockscale bpreshuffle config for "
+                    f"N={n} and K={k}."
+                ),
             )
 
         return True, None
