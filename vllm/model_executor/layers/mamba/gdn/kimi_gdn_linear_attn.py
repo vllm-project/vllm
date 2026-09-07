@@ -21,7 +21,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -282,10 +285,69 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             else "auto"
         )
         backend = "triton" if backend == "auto" else backend
-        assert backend == "triton", (
-            "The shared Kimi GDN layer only supports the Triton KDA "
-            f"prefill backend, got {backend!r}."
+        assert backend in ("triton", "helion"), (
+            "The shared Kimi GDN layer only supports 'triton' or 'helion' "
+            f"KDA prefill backends, got {backend!r}."
         )
+
+        # --- Helion KDA backend selection ---
+        decode_backend = (
+            additional_config.get("kda_decode_backend", "auto")
+            if isinstance(additional_config, dict) else "auto"
+        )
+        prefill_backend = backend  # already resolved from "kda_prefill_backend"
+
+        # Apply env var override
+        import vllm.envs as envs
+        if envs.VLLM_DISABLE_HELION_KDA:
+            if decode_backend == "helion":
+                decode_backend = "triton"
+            if prefill_backend == "helion":
+                prefill_backend = "triton"
+            logger.info(
+                "Helion KDA backend is DISABLED (env override)"
+            )
+
+        # Resolve "auto" -> "triton" (Helion is opt-in, not auto-selected)
+        decode_backend = "triton" if decode_backend == "auto" else decode_backend
+
+        self._kda_decode_backend = decode_backend
+        self._kda_prefill_backend = prefill_backend
+
+        # Import Helion kernels lazily, only when explicitly selected
+        self._helion_packed_decode = None
+        self._helion_chunk_kda = None
+        if decode_backend == "helion" or prefill_backend == "helion":
+            if not current_platform.is_cuda():
+                raise ValueError("Helion KDA backend requires NVIDIA CUDA")
+            from vllm.utils.import_utils import has_helion
+            if not has_helion():
+                raise ImportError(
+                    "Helion KDA backend requires helion>=1.4.0. "
+                    "Install with: pip install vllm[helion]"
+                )
+            if decode_backend == "helion":
+                from vllm.kernels.helion.ops.kda.kda_decode import (
+                    helion_fused_recurrent_kda_packed_decode,
+                )
+                self._helion_packed_decode = (
+                    helion_fused_recurrent_kda_packed_decode
+                )
+            if prefill_backend == "helion":
+                from vllm.kernels.helion.ops.kda.kda_prefill import (
+                    chunk_kda as helion_chunk_kda,
+                )
+                self._helion_chunk_kda = helion_chunk_kda
+
+            log_parts = []
+            if decode_backend == "helion":
+                log_parts.append("decode")
+            if prefill_backend == "helion":
+                log_parts.append("prefill")
+            logger.info(
+                "Helion KDA backend is ENABLED for %s",
+                "/".join(log_parts),
+            )
         if not self.use_full_rank_gate:
             self.g_a_proj = ReplicatedLinear(
                 self.hidden_size,
@@ -568,30 +630,63 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
-                initial_state = gather_initial_states(
-                    recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
-                )
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = chunk_kda_with_fused_gate(
-                    q=q_ns,
-                    k=k_ns,
-                    v=v_ns,
-                    raw_g=g1_ns,
-                    raw_beta=beta_ns,
-                    A_log=self.A_log,
-                    g_bias=self.dt_bias,
-                    lower_bound=self.gate_lower_bound,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
-                )
-                # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+
+                if self._helion_chunk_kda is not None:
+                    # Helion chunk_kda updates state IN PLACE via indices.
+                    # Zero out state for new requests to avoid stale data.
+                    new_request_mask = ~has_initial_state
+                    new_indices = non_spec_state_indices_tensor[
+                        new_request_mask
+                    ]
+                    if new_indices.numel() > 0:
+                        recurrent_state[new_indices] = 0
+
+                    helion_out = self._helion_chunk_kda(
+                        q=q_ns,
+                        k=k_ns,
+                        v=v_ns,
+                        g=g1_ns,
+                        beta=beta_ns,
+                        scale=self.head_dim ** -0.5,
+                        initial_state=recurrent_state,
+                        initial_state_indices=(
+                            non_spec_state_indices_tensor
+                        ),
+                        use_qk_l2norm_in_kernel=True,
+                        cu_seqlens=non_spec_query_start_loc,
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        output_intermediate_states=False,
+                    )
+                    core_attn_out_non_spec = helion_out
+                else:
+                    initial_state = gather_initial_states(
+                        recurrent_state,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                    )
+                    (
+                        core_attn_out_non_spec,
+                        last_recurrent_state,
+                    ) = chunk_kda_with_fused_gate(
+                        q=q_ns,
+                        k=k_ns,
+                        v=v_ns,
+                        raw_g=g1_ns,
+                        raw_beta=beta_ns,
+                        A_log=self.A_log,
+                        g_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=initial_state,
+                        output_final_state=True,
+                        use_qk_l2norm_in_kernel=True,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
+                    # Init cache
+                    recurrent_state[non_spec_state_indices_tensor] = (
+                        last_recurrent_state
+                    )
 
             else:
                 # pure-decode non-spec batch
@@ -616,16 +711,39 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     validate_data=True,
                     out=packed_conv_out,
                 )
-                core_attn_out_non_spec, _ = fused_recurrent_kda_packed_decode(
-                    mixed_qkv=mixed_qkv_ns,
-                    raw_g=g1_ns,
-                    raw_beta=beta_ns,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    lower_bound=self.gate_lower_bound,
-                    initial_state=recurrent_state,
-                    state_indices=decode_conv_indices,
-                )
+                if self._helion_packed_decode is not None:
+                    B = mixed_qkv_ns.size(0)
+                    out = mixed_qkv_ns.new_empty(
+                        B, 1, self.local_num_heads, self.head_dim
+                    )
+                    # vLLM g1_ns [1,B,H,K] -> Helion a [B,H*K]
+                    # vLLM beta_ns [1,B,H] -> Helion b [B,H]
+                    self._helion_packed_decode(
+                        mixed_qkv=mixed_qkv_ns,
+                        a=g1_ns.view(B, -1),
+                        b=beta_ns.view(B, -1),
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        scale=self.head_dim ** -0.5,
+                        initial_state=recurrent_state,
+                        out=out,
+                        ssm_state_indices=decode_conv_indices,
+                        use_qk_l2norm_in_kernel=True,
+                        lower_bound=self.gate_lower_bound,
+                    )
+                    # [B,1,H,V] -> [1,B,H,V]
+                    core_attn_out_non_spec = out.transpose(0, 1)
+                else:
+                    core_attn_out_non_spec, _ = fused_recurrent_kda_packed_decode(
+                        mixed_qkv=mixed_qkv_ns,
+                        raw_g=g1_ns,
+                        raw_beta=beta_ns,
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=recurrent_state,
+                        state_indices=decode_conv_indices,
+                    )
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
