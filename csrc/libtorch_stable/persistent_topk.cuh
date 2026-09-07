@@ -48,6 +48,11 @@ constexpr size_t kFixedSmemLarge =
 
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   uint32_t bits = __float_as_uint(x);
+  // -0.0 and +0.0 are numerically equal, so the documented rule (value
+  // descending, ties by index ascending) must treat them as a tie. Their bit
+  // patterns differ, which would otherwise order +0.0 above -0.0. Canonicalise
+  // to +0 before the order-preserving transform.
+  if ((bits & 0x7FFFFFFFu) == 0u) bits = 0u;
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
@@ -121,61 +126,18 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 // Every single-CTA row goes through `det_select_row`: a radix select that
 // rescans the row for each of the four key bytes (no candidate buffers, so no
 // truncation and an exact pivot), then one index-ordered block scan that emits
-// all elements above the pivot and the lowest-index `fin` elements equal to it.
-// Both groups come out in ascending index order, so the row is two sorted runs
-// and one merge finishes it. Cost: at most five reads of the row (fewer when a
-// radix pass can be skipped) + one merge pass over <= 2048 ints. Rows longer
-// than RADIX_THRESHOLD take the multi-CTA path, whose emission is ordered by
-// per-CTA prefixes and merges the same way.
+// all elements above the pivot and the lowest-index `fin` elements equal to it
+// **directly into their final ascending positions**: the rank of a selected
+// element is (# greater before) + min(# equal before, fin), both of which the
+// emission's packed scan already carries, so no reordering pass exists at all.
+// Cost: at most five reads of the row, fewer when a radix pass can be skipped.
+// Rows longer than RADIX_THRESHOLD take the multi-CTA path, which computes the
+// same position with per-CTA prefixes added.
 // ============================================================================
-__device__ __forceinline__ uint32_t det_next_pow2(uint32_t n) {
-  uint32_t p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-template <int N_THREADS>
-__device__ __forceinline__ void det_merge_runs(int32_t* row, int k, int a,
-                                               int* scratch) {
-  // One of the runs is empty, so the row is already a single ascending run and
-  // there is nothing to interleave. `a` is uniform across the CTA, so this
-  // returns for all threads together. Hit whenever the radix early-exit fires
-  // (fin == 0, hence a == k) and on the all-equal / pivot-tie cases (a == 0).
-  if (a <= 0 || a >= k) return;
-  for (int i = threadIdx.x; i < k; i += N_THREADS) scratch[i] = row[i];
-  __syncthreads();
-  const int b = k - a;
-  for (int i = threadIdx.x; i < k; i += N_THREADS) {
-    const int v = scratch[i];
-    int pos;
-    if (i < a) {  // element of the first run: rank = i + |{second run} < v|
-      int lo = 0, hi = b;
-      while (lo < hi) {
-        const int mid = (lo + hi) >> 1;
-        if (scratch[a + mid] < v)
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      pos = i + lo;
-    } else {  // element of the second run
-      int lo = 0, hi = a;
-      while (lo < hi) {
-        const int mid = (lo + hi) >> 1;
-        if (scratch[mid] < v)
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      pos = (i - a) + lo;
-    }
-    row[pos] = v;
-  }
-  __syncthreads();
-}
 // Deterministic single-CTA top-k of one row (n > TopK).
 // Shared memory layout (bytes): [0,1024) hist, [1024,2048) hist2 (suffix
-// scratch), [2048, +scan) BlockScan storage, then next_pow2(TopK) ints of
-// merge scratch, then — when `smem_bytes` allows — the row's ordered keys
+// scratch), [2048, +scan) BlockScan storage, then — when `smem_bytes` allows —
+// the row's ordered keys
 // (4*n bytes), so passes 1..3 and the emission read shared memory and the
 // row is fetched from global memory exactly once. Otherwise every pass
 // rescans global memory (still deterministic, just slower).
@@ -184,10 +146,7 @@ __device__ __forceinline__ void det_merge_runs(int32_t* row, int k, int a,
 template <int TopK, int N_THREADS>
 __host__ __device__ constexpr size_t det_select_row_fixed_bytes() {
   using ScanT = cub::BlockScan<uint32_t, N_THREADS>;
-  size_t p = 1;
-  while (p < static_cast<size_t>(TopK)) p <<= 1;
-  return 2048 + ((sizeof(typename ScanT::TempStorage) + 127) & ~size_t(127)) +
-         p * sizeof(int);
+  return 2048 + ((sizeof(typename ScanT::TempStorage) + 127) & ~size_t(127));
 }
 // Bytes needed to keep a row of n keys cached (host side sizing helper).
 template <int TopK, int N_THREADS>
@@ -207,9 +166,6 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
   auto* scan_tmp = reinterpret_cast<typename ScanT::TempStorage*>(
       reinterpret_cast<char*>(smem) + 2048);
   const size_t fixed = det_select_row_fixed_bytes<TopK, N_THREADS>();
-  int* scratch = reinterpret_cast<int*>(
-      reinterpret_cast<char*>(smem) + fixed -
-      static_cast<size_t>(det_next_pow2(TopK)) * sizeof(int));
   uint32_t* keys =
       reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(smem) + fixed);
   const bool cached =
@@ -332,14 +288,18 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
     ScanT(*scan_tmp).ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
     const uint32_t rgt = packed_rank & 0xFFFFu, req = packed_rank >> 16;
     const uint32_t tgt = packed_total & 0xFFFFu, teq = packed_total >> 16;
-    if (fgt) out[run_gt + rgt] = i;
-    if (feq && (run_eq + req) < fin) out[gt_total + run_eq + req] = i;
+    // Final ascending position directly. The number of selected elements at
+    // lower indices is (# greater before) + min(# equal before, fin), since
+    // exactly the first `fin` equal elements by index are kept. True for a `>`
+    // element (the min saturates) and for a kept `==` element (it does not),
+    // so one expression serves both and no reordering pass is needed.
+    const uint32_t g = run_gt + rgt;
+    const uint32_t e = run_eq + req;
+    if (fgt || (feq && e < fin)) out[g + (e < fin ? e : fin)] = i;
     run_gt += tgt;
     run_eq += teq;
     __syncthreads();
   }
-  // Two ascending runs (`> pivot` then `== pivot`) -> one merge, not a sort.
-  det_merge_runs<N_THREADS>(out, TopK, static_cast<int>(gt_total), scratch);
 }
 
 // ============================================================================
@@ -349,10 +309,7 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
 constexpr uint32_t kDetMaxCtasPerGroup = 64;
 struct RadixRowState {
   uint32_t histogram[3][256];  // Triple-buffered histograms
-  uint32_t remaining_k;
-  uint32_t prefix;
   int arrival_counter;
-  int output_counter;
   uint32_t det_gt_counts[kDetMaxCtasPerGroup];  // per-CTA > pivot
   uint32_t det_eq_counts[kDetMaxCtasPerGroup];  // per-CTA == pivot
 };
@@ -373,6 +330,7 @@ struct PersistentTopKParams {
   uint32_t ctas_per_group;  // 1=medium, >1=large
   uint32_t max_seq_len;     // max seq_len across all rows (for early CTA exit)
   uint32_t det_smem_bytes;  // dynamic smem available to det_select_row
+  uint32_t force_single_cta;  // low-smem fallback: one CTA per row, no coop
 };
 
 // ============================================================================
@@ -947,10 +905,6 @@ __device__ void radix_topk(const float* __restrict__ row_input,
   barrier_phase++;
   __syncthreads();
 
-  if (cta_in_group == 0 && tx == 0) {
-    st_release(&state->output_counter, 0);
-  }
-
   // -- Stage 2: 4 rounds of radix select --
   for (uint32_t round = 0; round < 4; round++) {
     const uint32_t global_round = radix_iter * 4 + round;
@@ -1080,18 +1034,31 @@ __device__ void radix_topk(const float* __restrict__ row_input,
           (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
   barrier_phase++;
   __syncthreads();
-  uint32_t gt_before = 0, gt_total = 0, eq_before = 0;
-  for (uint32_t c = 0; c < ctas_per_group; c++) {
-    const uint32_t g =
-        ld_acquire(reinterpret_cast<int*>(&state->det_gt_counts[c]));
-    const uint32_t e =
-        ld_acquire(reinterpret_cast<int*>(&state->det_eq_counts[c]));
-    if (c < cta_in_group) {
-      gt_before += g;
-      eq_before += e;
+  // All three values are CTA-uniform, so one thread reads the count table and
+  // publishes them. Every thread doing it costs kThreadsPerBlock ctas_per_group
+  // acquire loads per CTA to produce three scalars; the barrier above already
+  // orders the publication.
+  if (tx == 0) {
+    uint32_t gb = 0, gtot = 0, eb = 0;
+    for (uint32_t c = 0; c < ctas_per_group; c++) {
+      const uint32_t g =
+          ld_acquire(reinterpret_cast<int*>(&state->det_gt_counts[c]));
+      const uint32_t e =
+          ld_acquire(reinterpret_cast<int*>(&state->det_eq_counts[c]));
+      if (c < cta_in_group) {
+        gb += g;
+        eb += e;
+      }
+      gtot += g;
     }
-    gt_total += g;
+    shared_scalars[2] = gb;
+    shared_scalars[3] = gtot;
+    shared_scalars[4] = eb;
   }
+  __syncthreads();
+  const uint32_t gt_before = shared_scalars[2];
+  const uint32_t gt_total = shared_scalars[3];
+  const uint32_t eq_before = shared_scalars[4];
   const uint32_t remaining_eq =
       (gt_total < static_cast<uint32_t>(TopK)) ? (TopK - gt_total) : 0u;
   // Both groups are emitted in ascending index order, in one packed scan per
@@ -1117,36 +1084,23 @@ __device__ void radix_topk(const float* __restrict__ row_input,
       uint32_t packed_rank, packed_total;
       ScanT(det_scan_tmp)
           .ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
-      if (fgt) {
-        const uint32_t pos = gt_before + run_gt + (packed_rank & 0xFFFFu);
+      // Same direct placement, with the per-CTA prefixes folded in. CTA c owns
+      // a lower contiguous index interval than CTA c+1, so CTA order and index
+      // order agree and the position computed here is final.
+      const uint32_t g = gt_before + run_gt + (packed_rank & 0xFFFFu);
+      const uint32_t e = eq_before + run_eq + (packed_rank >> 16);
+      if (fgt || (feq && e < remaining_eq)) {
+        const uint32_t pos = g + (e < remaining_eq ? e : remaining_eq);
         if (pos < static_cast<uint32_t>(TopK))
           row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
-      }
-      if (feq) {
-        const uint32_t r = eq_before + run_eq + (packed_rank >> 16);
-        if (r < remaining_eq)
-          row_output[gt_total + r] = static_cast<int32_t>(my_chunk_start + i);
       }
       run_gt += packed_total & 0xFFFFu;
       run_eq += packed_total >> 16;
       __syncthreads();
     }
   }
-  if (tx == 0) red_release(&state->arrival_counter, 1);
-  wait_ge(&state->arrival_counter,
-          (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
-  barrier_phase++;
-  __syncthreads();
-  if (cta_in_group == 0) {
-    // Two ascending runs -> merge, not a sort (see the emission above).
-    det_merge_runs<kThreadsPerBlock>(
-        row_output, TopK,
-        static_cast<int>(gt_total < static_cast<uint32_t>(TopK)
-                             ? gt_total
-                             : static_cast<uint32_t>(TopK)),
-        reinterpret_cast<int*>(shared_ordered));
-    __threadfence();
-  }
+  // One barrier closes the row: every CTA wrote its own final positions, so
+  // there is no second phase publishing a reordering.
   if (tx == 0) red_release(&state->arrival_counter, 1);
   wait_ge(&state->arrival_counter,
           (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
@@ -1180,7 +1134,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   if (blockIdx.x >= num_groups * ctas_per_group) return;
 
   // Early exit: non-CTA-0 threads are never needed if no large rows exist
-  if (cta_in_group != 0 && params.max_seq_len <= RADIX_THRESHOLD) return;
+  if (cta_in_group != 0 &&
+      (params.force_single_cta || params.max_seq_len <= RADIX_THRESHOLD))
+    return;
 
   uint32_t* local_histogram = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* suffix_sum = local_histogram + RADIX;
@@ -1228,7 +1184,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     int32_t* row_output = params.output + row_idx * params.top_k;
     const float* row_input = params.input + row_idx * params.stride;
 
-    if (seq_len <= RADIX_THRESHOLD) {
+    // force_single_cta is the low-smem fallback: the cooperative launch does
+    // not fit, so a single CTA runs the same deterministic select over the
+    // whole row (uncached, hence slower) rather than deferring to a kernel
+    // that does not guarantee ordering.
+    if (params.force_single_cta || seq_len <= RADIX_THRESHOLD) {
       if (cta_in_group == 0) {
         if (seq_len <= static_cast<uint32_t>(TopK)) {
           // Trivial case: seq_len <= TopK
@@ -1343,7 +1303,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               IdType* __restrict__ output,
                               const IdType* __restrict__ lengths,
                               uint32_t num_rows, uint32_t top_k,
-                              uint32_t max_len) {
+                              uint32_t max_len, uint32_t max_seq_len) {
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
   constexpr int RADIX = 256;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
@@ -1353,8 +1313,17 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   if (bid >= num_rows) return;
 
-  const int length =
-      (lengths != nullptr) ? lengths[bid] : static_cast<int>(max_len);
+  // Same row-bound contract as the persistent kernel: `max_len` is the row
+  // pitch, `max_seq_len` the logical width, and a length outside
+  // [0, min(pitch, logical)] must not be trusted -- an oversized lengths[bid]
+  // would otherwise read past the row.
+  const uint32_t row_bound = max_len < max_seq_len ? max_len : max_seq_len;
+  const int raw_len = (lengths != nullptr) ? static_cast<int>(lengths[bid])
+                                           : static_cast<int>(row_bound);
+  const uint32_t non_negative_len =
+      raw_len > 0 ? static_cast<uint32_t>(raw_len) : 0u;
+  const int length = static_cast<int>(
+      non_negative_len < row_bound ? non_negative_len : row_bound);
   const DType* score = input + bid * max_len;
   IdType* dst = output + bid * top_k;
 
@@ -1404,15 +1373,15 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
                                         const IdType* lengths,
                                         uint32_t num_rows, uint32_t top_k_val,
-                                        uint32_t max_len,
+                                        uint32_t max_len, uint32_t max_seq_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
   constexpr int MAX_VEC = 16 / sizeof(DType);
 
   dim3 grid(num_rows);
   dim3 block(FILTERED_TOPK_BLOCK_THREADS);
-  void* args[] = {&input,    &output_indices, &lengths,
-                  &num_rows, &top_k_val,      &max_len};
+  void* args[] = {&input,     &output_indices, &lengths,    &num_rows,
+                  &top_k_val, &max_len,        &max_seq_len};
 
   const int vec_size = ComputeFilteredTopKVecSize<DType>(max_len);
 
@@ -1445,10 +1414,11 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
                                         const IdType* lengths,
                                         uint32_t num_rows, uint32_t top_k_val,
-                                        uint32_t max_len,
+                                        uint32_t max_len, uint32_t max_seq_len,
                                         cudaStream_t stream = 0) {
   return filtered_topk::FilteredTopKRaggedTransform<DType, IdType, MAX_K>(
-      input, output_indices, lengths, num_rows, top_k_val, max_len, stream);
+      input, output_indices, lengths, num_rows, top_k_val, max_len, max_seq_len,
+      stream);
 }
 
 }  // namespace vllm
