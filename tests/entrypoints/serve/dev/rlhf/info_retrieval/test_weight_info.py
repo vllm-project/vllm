@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end tests for the RL weight-version information endpoints."""
+"""HTTP weight-version reads, metadata-only updates, and rejected inputs.
 
-import os
-from unittest.mock import patch
+Real weights make the unchanged-output check meaningful. Committing a version
+after actual transfer belongs to state_transitions/test_weight_update.py;
+LLM delegation is covered by entrypoints/weight_transfer/test_weight_transfer_llm.py.
+"""
 
 import pytest
 import requests
@@ -19,10 +21,9 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
 
 @pytest.fixture(scope="module")
 def server_state():
-    with (
-        patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
-        server(port=8810, dummy_weights=True) as url,
-    ):
+    with server(
+        enable_sleep_mode=False, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    ) as url:
         initial_response = weight_info_response(url)
         initial_response.raise_for_status()
         try:
@@ -59,9 +60,9 @@ class TestWeightInfoEndpoint:
         update_weight_version_response(
             server_url, "generation-check"
         ).raise_for_status()
-        assert weight_info_response(server_url).json() == {
-            "weight_version": "generation-check"
-        }
+        info = weight_info_response(server_url)
+        info.raise_for_status()
+        assert info.json() == {"weight_version": "generation-check"}
 
         after = gen(server_url)
         assert ok(after)
