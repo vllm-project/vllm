@@ -523,7 +523,7 @@ def test_prepare_load_preserves_key_order():
 
 
 def test_lru_batch_eviction_failure_is_atomic():
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     policy = manager._policy
     assert isinstance(policy, LRUCachePolicy)
     keys = to_keys([1, 2, 3, 4])
@@ -540,7 +540,7 @@ def test_lru_batch_eviction_failure_is_atomic():
 
 
 def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
-    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=1, cache_policy="lru")
     policy = manager._policy
     assert isinstance(policy, LRUCachePolicy)
     key = to_key(1)
@@ -558,7 +558,7 @@ def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
 
 
 def test_reset_discards_stale_request_access_classification():
-    manager = make_cpu_manager(num_blocks=1, cache_policy="arc")
+    manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     key = to_key(1)
@@ -1105,6 +1105,48 @@ def test_filter_reused_manager_oversized_offer_makes_progress():
     assert stored_keys == set(keys)
 
 
+def test_store_threshold_does_not_hide_ready_reuse():
+    manager = make_cpu_manager(
+        num_chunks=2,
+        cache_policy="lru",
+        store_threshold=2,
+        max_tracker_size=2,
+    )
+    head, tail, noise_1, noise_2, replacement = to_keys(list(range(5)))
+
+    seed_ctx = make_req_context("seed")
+    output = manager.prepare_store([head, tail], seed_ctx)
+    assert output is not None
+    assert not output.keys_to_store
+    output = manager.prepare_store([head, tail], seed_ctx)
+    assert output is not None
+    assert output.keys_to_store == [head, tail]
+    manager.complete_store([head, tail], seed_ctx)
+    manager.on_request_finished(seed_ctx)
+
+    # Age both resident keys out of the admission tracker without storing the
+    # noise keys. Reusing the tail recreates its counter at one, below the
+    # threshold, but must still refresh its cache recency.
+    output = manager.prepare_store([noise_1, noise_2], make_req_context("noise"))
+    assert output is not None
+    assert not output.keys_to_store
+    reuse_ctx = make_req_context("reuse")
+    skipped_before_reuse = manager.stores_skipped_in_current_batch
+    output = manager.prepare_store([tail], reuse_ctx)
+    assert output is not None
+    assert not output.keys_to_store
+    assert manager.stores_skipped_in_current_batch == skipped_before_reuse
+    manager.on_request_finished(reuse_ctx)
+
+    replacement_ctx = make_req_context("replacement")
+    output = manager.prepare_store([replacement], replacement_ctx)
+    assert output is not None
+    assert not output.keys_to_store
+    output = manager.prepare_store([replacement], replacement_ctx)
+    assert output is not None
+    assert output.evicted_keys == [head]
+
+
 def test_evictable_cache_chunk_count():
     """
     Verifies _num_evictable_cache_chunks is maintained correctly through the
@@ -1226,7 +1268,7 @@ def test_request_finish_orders_lru_prefix_independent_of_store_completion(
     finish_before_completion: bool,
 ):
     """A transfer's completion order must not make the prefix head LRU."""
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     prefix = to_keys([1, 2, 3, 4])
     ctx = make_req_context("prefix")
 
@@ -1247,7 +1289,7 @@ def test_request_finish_orders_lru_prefix_independent_of_store_completion(
 def test_request_finish_orders_lru_prefix_independent_of_load_completion(
     finish_before_completion: bool,
 ):
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     prefix = to_keys([1, 2, 3, 4])
 
     seed_ctx = make_req_context("seed")
@@ -1269,7 +1311,7 @@ def test_request_finish_orders_lru_prefix_independent_of_load_completion(
 
 
 def test_late_old_completion_does_not_override_newer_request_recency():
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     old_keys = to_keys([1, 2])
     new_keys = to_keys([3, 4])
 
@@ -1291,7 +1333,7 @@ def test_late_old_completion_does_not_override_newer_request_recency():
 
 
 def test_arc_counts_reuse_once_and_keeps_insertions_in_t1():
-    manager = make_cpu_manager(num_blocks=4, cache_policy="arc")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="arc")
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     prefix = to_keys([1, 2, 3, 4])
@@ -1322,7 +1364,7 @@ def test_arc_counts_reuse_once_and_keeps_insertions_in_t1():
 
 
 def test_arc_reuse_wins_if_same_request_later_reinserts_key():
-    manager = make_cpu_manager(num_blocks=1, cache_policy="arc")
+    manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     key_1, key_2 = to_keys([1, 2])
@@ -1350,7 +1392,7 @@ def test_arc_reuse_wins_if_same_request_later_reinserts_key():
 
 
 def test_request_finish_forwards_grouped_deduplicated_accesses(monkeypatch):
-    manager = make_cpu_manager(num_blocks=5)
+    manager = make_cpu_manager(num_chunks=5)
     existing = make_offload_key(b"existing", 0)
     group_0_new = make_offload_key(b"group-0-new", 0)
     group_1_head = make_offload_key(b"group-1-head", 1)
@@ -1390,7 +1432,7 @@ def test_request_finish_forwards_grouped_deduplicated_accesses(monkeypatch):
 
 
 def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
-    manager = make_cpu_manager(num_blocks=2, cache_policy="arc")
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     keys = to_keys([1, 2, 3])
@@ -1430,8 +1472,8 @@ def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
     assert ghost_key not in policy.t2
 
 
-def test_arc_pending_block_is_not_a_frequency_hit():
-    manager = make_cpu_manager(num_blocks=2, cache_policy="arc")
+def test_arc_pending_chunk_is_not_a_frequency_hit():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
     policy = manager._policy
     assert isinstance(policy, ARCCachePolicy)
     key = to_key(1)
@@ -1451,7 +1493,7 @@ def test_arc_pending_block_is_not_a_frequency_hit():
 
 
 def test_request_key_positions_override_store_observation_order():
-    manager = make_cpu_manager(num_blocks=2, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=2, cache_policy="lru")
     head, tail = to_keys([1, 2])
     ctx = make_req_context("out-of-order-store")
     ctx.set_offload_key_position(head, 16)
@@ -1469,7 +1511,7 @@ def test_request_key_positions_override_store_observation_order():
 
 
 def test_request_key_positions_order_tails_across_kv_groups():
-    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     group_0_head = make_offload_key(b"group-0-head", 0)
     group_0_tail = make_offload_key(b"group-0-tail", 0)
     group_1_head = make_offload_key(b"group-1-head", 1)

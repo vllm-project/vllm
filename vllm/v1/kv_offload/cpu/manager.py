@@ -247,14 +247,12 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
-        if self.counts is not None:
-            num_keys = len(keys)
-            self._record_accesses(keys)
-            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
-            self.stores_skipped_in_current_batch += num_keys - len(keys)
         keys = list(keys)
-        # Partition keys once. Pending chunks owned by another request are
-        # present, but are not cache hits and must not affect frequency.
+        if self.counts is not None:
+            self._record_accesses(keys)
+        # Partition the original offer before admission filtering. Ready
+        # resident chunks are request reuses even if their tracker entry was
+        # aged out; the threshold applies only to new store candidates.
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
         for key in keys:
@@ -264,6 +262,17 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
+
+        if self.counts is not None:
+            num_store_candidates = len(keys_to_store)
+            keys_to_store = [
+                key
+                for key in keys_to_store
+                if self.counts.get(key, 0) >= self.store_threshold
+            ]
+            self.stores_skipped_in_current_batch += num_store_candidates - len(
+                keys_to_store
+            )
 
         state = self._get_request_cache_access(req_context)
         new_store_misses = [
