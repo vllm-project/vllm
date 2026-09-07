@@ -624,6 +624,13 @@ class SamplingParams(
                 parameter="stream_interval",
                 value=self.stream_interval,
             )
+        if self.routed_experts_prompt_start < 0:
+            raise VLLMValidationError(
+                "`routed_experts_prompt_start` must be greater than or equal "
+                f"to 0, got {self.routed_experts_prompt_start}.",
+                parameter="routed_experts_prompt_start",
+                value=self.routed_experts_prompt_start,
+            )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.",
