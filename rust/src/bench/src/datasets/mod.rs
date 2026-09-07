@@ -5,6 +5,7 @@ pub mod custom;
 pub mod hf_dataset;
 pub mod multi_turn;
 pub mod prefix_repetition;
+mod progress;
 pub mod random;
 pub mod random_mm;
 pub mod random_rerank;
@@ -90,9 +91,10 @@ pub fn oversample_requests(
         return;
     }
     if no_oversample {
-        println!(
-            "Skipping oversampling. Total samples: {} (requested: {num_requests})",
-            requests.len()
+        tracing::info!(
+            samples = requests.len(),
+            requested = num_requests,
+            "skipping dataset oversampling"
         );
         return;
     }
@@ -103,9 +105,10 @@ pub fn oversample_requests(
         req.request_id = Some(format!("{request_id_prefix}{}", original_len + i));
         requests.push(req);
     }
-    println!(
-        "Oversampled requests from {original_len} to {} total samples.",
-        requests.len()
+    tracing::info!(
+        original_samples = original_len,
+        samples = requests.len(),
+        "oversampled dataset"
     );
 }
 

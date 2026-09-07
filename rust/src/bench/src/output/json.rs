@@ -98,6 +98,16 @@ pub fn build_result_json(
         "request_throughput".into(),
         serde_json::json!(metrics.request_throughput),
     );
+    if is_pooling {
+        result.insert(
+            "total_input_sequences".into(),
+            serde_json::json!(metrics.total_input_sequences),
+        );
+        result.insert(
+            "input_sequence_throughput".into(),
+            serde_json::json!(metrics.input_sequence_throughput),
+        );
+    }
     if config.goodput.is_empty() {
         result.insert("request_goodput".into(), Value::Null);
     } else {
@@ -603,7 +613,7 @@ fn add_metric_stats(
 pub fn save_result(json: &Value, file_path: &str) -> Result<()> {
     let content = serde_json::to_string(json)?;
     std::fs::write(file_path, content)?;
-    println!("Results saved to {file_path}");
+    tracing::info!(path = file_path, "saved benchmark results");
     Ok(())
 }
 
@@ -618,7 +628,7 @@ pub fn append_result(json: &Value, file_path: &str) -> Result<()> {
         file.write_all(b"\n")?;
     }
     file.write_all(content.as_bytes())?;
-    println!("Results appended to {file_path}");
+    tracing::info!(path = file_path, "appended benchmark results");
     Ok(())
 }
 

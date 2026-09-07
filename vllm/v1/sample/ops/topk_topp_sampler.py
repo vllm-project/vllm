@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -16,6 +16,13 @@ if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 logger = init_logger(__name__)
+
+
+def _skip_aiter_sampler_on_gfx1250() -> bool:
+    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -87,7 +94,7 @@ class TopKTopPSampler(nn.Module):
             # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
             # so it can't be used when the configured mode requires them.
             can_use_flashinfer = (
-                logprobs_mode not in ("processed_logits", "processed_logprobs")
+                logprobs_mode not in PROCESSED_LOGPROBS_MODES
                 and flashinfer_sampler_supported()
             )
             self.forward = (
@@ -108,8 +115,9 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_native
         elif (
-            logprobs_mode not in ("processed_logits", "processed_logprobs")
+            logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
+            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
@@ -165,7 +173,7 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
             "FlashInfer does not support returning logits/logprobs"
         )
         # flashinfer sampling functions expect contiguous logits.
@@ -192,7 +200,7 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
+        if not generators and not self.use_fp64_gumbel:
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
@@ -236,10 +244,9 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in (
-            "processed_logits",
-            "processed_logprobs",
-        ), "aiter sampler does not support returning logits/logprobs."
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
+            "aiter sampler does not support returning logits/logprobs."
+        )
         if self.aiter_ops is None and not self._init_aiter_ops():
             return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
@@ -300,10 +307,7 @@ class TopKTopPSampler(nn.Module):
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
         logits_to_return = None
-        if (
-            self.logprobs_mode == "processed_logits"
-            or self.logprobs_mode == "processed_logprobs"
-        ):
+        if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
             logits_to_return = torch.empty_like(logits)
 
         assert len(generators) != logits.shape[0], (
@@ -334,7 +338,7 @@ class TopKTopPSampler(nn.Module):
 
 # Note: this is a workaround for
 # https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     q = torch.empty_like(probs)
@@ -348,16 +352,11 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if current_platform.is_cpu():
-        if HAS_TRITON:
-            return apply_top_k_top_p_triton(logits, k, p)
-        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
-
-    if HAS_TRITON and logits.shape[0] >= 8:
+    if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)
 
-    # Use pytorch sort implementation for small batch sizes.
-    return apply_top_k_top_p_pytorch(logits, k, p)
+    is_cpu = current_platform.is_cpu()
+    return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
 
 
 def apply_top_k_top_p_pytorch(
@@ -392,9 +391,8 @@ def apply_top_k_top_p_pytorch(
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     if p is not None:
-        # Apply top-p. The cumsum below runs over the whole vocab, so accumulating
-        # in a low-precision dtype makes the nucleus undershoot p.
-        probs_sort = logits_sort.softmax(dim=-1, dtype=torch.float32)
+        # Apply top-p.
+        probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one
@@ -501,17 +499,13 @@ def flashinfer_sample(
             probs, k, deterministic=True
         )
     else:
-        # Both top-k and top-p. FlashInfer requires contiguous fp32 logits; the
-        # branches above get that from softmax().
+        # Both top-k and top-p.
         next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-            logits.float().contiguous(), k, p, deterministic=True
+            logits, k, p, deterministic=True
         )
 
     return next_token_ids.view(-1)
 
 
 def _to_tensor_scalar_tuple(x):
-    if isinstance(x, torch.Tensor):
-        return (x, 0)
-    else:
-        return (None, x)
+    return (x, 0) if isinstance(x, torch.Tensor) else (None, x)

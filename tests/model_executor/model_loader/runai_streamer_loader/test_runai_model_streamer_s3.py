@@ -3,10 +3,10 @@
 
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 
 from vllm.engine.arg_utils import EngineArgs
+from vllm.transformers_utils.repo_utils import hf_api
 
 from .conftest import RunaiDummyExecutor
 
@@ -25,7 +25,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
 
     # Download model from HF
     mock_model_dir = f"{tmp_path}/gpt2"
-    snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
+    hf_api().snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
 
     monkeypatch.setattr(
         "vllm.transformers_utils.runai_utils.runai_list_safetensors",

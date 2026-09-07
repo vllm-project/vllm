@@ -132,15 +132,7 @@ class PromptLogprobsWorker:
 
             if prompt_logprobs_list:
                 # Merge the in-progress logprobs.
-                logprobs = LogprobsTensors(
-                    logprob_token_ids=torch.cat(
-                        [x.logprob_token_ids for x in prompt_logprobs_list]
-                    ),
-                    logprobs=torch.cat([x.logprobs for x in prompt_logprobs_list]),
-                    selected_token_ranks=torch.cat(
-                        [x.selected_token_ranks for x in prompt_logprobs_list]
-                    ),
-                )
+                logprobs = LogprobsTensors.cat(prompt_logprobs_list)
                 prompt_logprobs_list.clear()
 
             if logprobs is None:

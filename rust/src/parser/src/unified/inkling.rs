@@ -8,7 +8,7 @@ use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::literal;
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::json::{
@@ -56,15 +56,15 @@ type InklingInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InklingEvent {
-    Text { len: usize },
-    Reasoning { len: usize },
+    Text,
+    Reasoning,
     TextStart,
     ReasoningStart,
     MessageStart,
     Header,
     ToolJsonStart,
     ToolJsonHeader { name: String },
-    ToolJsonArgs { len: usize, complete: bool },
+    ToolJsonArgs { complete: bool },
     BlockEnd,
 }
 
@@ -72,7 +72,9 @@ enum InklingEvent {
 enum InklingMode {
     #[default]
     Idle,
-    MessageHeader,
+    MessageHeader {
+        pending: DecodedText,
+    },
     Text,
     Reasoning,
     ToolJsonHeader,
@@ -84,7 +86,7 @@ enum InklingMode {
 
 /// Unified parser for Inkling typed content blocks.
 pub struct InklingUnifiedParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: InklingMode,
     emitted_tool_count: usize,
     active_tool_index: Option<usize>,
@@ -102,7 +104,7 @@ impl InklingUnifiedParser {
         let content_thinking_token_id = token_id(tokenizer.as_ref(), CONTENT_THINKING)?;
 
         Ok(Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: InklingMode::Idle,
             emitted_tool_count: 0,
             active_tool_index: None,
@@ -117,7 +119,9 @@ impl InklingUnifiedParser {
         self.mode = InklingMode::Idle;
         for token_id in prompt_token_ids.iter().rev().copied() {
             if token_id == self.message_model_token_id {
-                self.mode = InklingMode::MessageHeader;
+                self.mode = InklingMode::MessageHeader {
+                    pending: DecodedText::default(),
+                };
                 return;
             }
             if token_id == self.content_thinking_token_id {
@@ -134,14 +138,28 @@ impl InklingUnifiedParser {
         }
     }
 
-    fn apply_event(&mut self, event: InklingEvent, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn apply_event(
+        &mut self,
+        event: InklingEvent,
+        piece: DecodedText,
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
         match event {
-            InklingEvent::Text { len } => output.push_text(self.buffer[..len].to_string()),
-            InklingEvent::Reasoning { len } => {
-                output.push_reasoning(self.buffer[..len].to_string());
+            InklingEvent::Text => output.push_text(piece.text),
+            InklingEvent::Reasoning => output.push_reasoning(piece),
+            InklingEvent::MessageStart => {
+                self.mode = InklingMode::MessageHeader {
+                    pending: DecodedText::default(),
+                };
             }
-            InklingEvent::MessageStart => self.mode = InklingMode::MessageHeader,
-            InklingEvent::Header => {}
+            InklingEvent::Header => {
+                let InklingMode::MessageHeader { pending } = &mut self.mode else {
+                    return Err(parsing_failed!(
+                        "Inkling header text outside a message header"
+                    ));
+                };
+                pending.append(piece);
+            }
             InklingEvent::TextStart => self.mode = InklingMode::Text,
             InklingEvent::ReasoningStart => self.mode = InklingMode::Reasoning,
             InklingEvent::ToolJsonStart => self.mode = InklingMode::ToolJsonHeader,
@@ -158,7 +176,7 @@ impl InklingUnifiedParser {
                     arguments: String::new(),
                 });
             }
-            InklingEvent::ToolJsonArgs { len, complete } => {
+            InklingEvent::ToolJsonArgs { complete } => {
                 let Some(tool_index) = self.active_tool_index else {
                     return Err(parsing_failed!(
                         "Inkling arguments without an active tool call"
@@ -167,14 +185,17 @@ impl InklingUnifiedParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..len].to_string(),
+                    arguments: piece.text,
                 });
                 if complete {
                     self.mode = InklingMode::ToolJsonClose;
                 }
             }
             InklingEvent::BlockEnd => {
-                self.mode = InklingMode::Idle;
+                let mode = std::mem::take(&mut self.mode);
+                if let InklingMode::MessageHeader { pending } = mode {
+                    output.push_text(pending.text);
+                }
                 self.active_tool_index = None;
             }
         }
@@ -182,10 +203,14 @@ impl InklingUnifiedParser {
     }
 
     fn reset(&mut self) -> String {
-        self.mode = InklingMode::Idle;
+        let mut uncommitted = match std::mem::take(&mut self.mode) {
+            InklingMode::MessageHeader { pending } => pending.text,
+            _ => String::new(),
+        };
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        uncommitted.push_str(&self.buffer.take().text);
+        uncommitted
     }
 }
 
@@ -209,14 +234,14 @@ impl UnifiedParser for InklingUnifiedParser {
         true
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut UnifiedParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
+        self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_inkling_event(input, &mut self.mode)
         })? {
-            self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let piece = self.buffer.drain_prefix(consumed_len);
+            self.apply_event(event, piece, output)?;
         }
 
         Ok(())
@@ -225,12 +250,13 @@ impl UnifiedParser for InklingUnifiedParser {
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
         let mut output = UnifiedParserOutput::default();
 
-        match &self.mode {
-            InklingMode::Idle | InklingMode::Text => {
-                output.push_text(std::mem::take(&mut self.buffer))
+        match &mut self.mode {
+            InklingMode::Idle | InklingMode::Text => output.push_text(self.buffer.take().text),
+            InklingMode::MessageHeader { pending } => {
+                pending.append(self.buffer.take());
+                output.push_text(std::mem::take(pending).text);
             }
-            InklingMode::MessageHeader => self.buffer.clear(),
-            InklingMode::Reasoning => output.push_reasoning(std::mem::take(&mut self.buffer)),
+            InklingMode::Reasoning => output.push_reasoning(self.buffer.take()),
             InklingMode::ToolJsonHeader
             | InklingMode::ToolJsonArgs { .. }
             | InklingMode::ToolJsonClose => {
@@ -254,7 +280,7 @@ fn parse_next_inkling_event(
 ) -> ModalResult<InklingEvent> {
     match mode {
         InklingMode::Idle => parse_idle_event(input),
-        InklingMode::MessageHeader => parse_message_header_event(input),
+        InklingMode::MessageHeader { .. } => parse_message_header_event(input),
         InklingMode::Text => parse_text_event(input),
         InklingMode::Reasoning => parse_reasoning_event(input),
         InklingMode::ToolJsonHeader => parse_tool_json_header_event(input),
@@ -341,7 +367,7 @@ fn block_end_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
 
 /// Parse safe text while waiting for the next Inkling marker.
 fn safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(input, IDLE_MARKERS).map(|len| InklingEvent::Text { len })
+    safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe header text before the next Inkling marker.
@@ -351,12 +377,12 @@ fn safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> 
 
 /// Parse safe text before the end of a Inkling text block.
 fn safe_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|len| InklingEvent::Text { len })
+    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe reasoning before the end of a Inkling reasoning block.
 fn safe_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|len| InklingEvent::Reasoning { len })
+    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Reasoning)
 }
 
 /// Parse a Inkling JSON tool-call header.
@@ -374,9 +400,8 @@ fn parse_tool_json_args_event(
     input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<InklingEvent> {
-    let len = take_json_object(input, json_scan)?;
+    take_json_object(input, json_scan)?;
     Ok(InklingEvent::ToolJsonArgs {
-        len,
         complete: json_scan.complete(),
     })
 }
@@ -397,11 +422,11 @@ fn parse_tool_json_close_event(input: &mut InklingInput<'_>) -> ModalResult<Inkl
 mod tests {
     use std::sync::Arc;
 
-    use super::{CONTENT_TEXT, CONTENT_THINKING, InklingUnifiedParser, MESSAGE_MODEL};
+    use super::{CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE, InklingUnifiedParser, MESSAGE_MODEL};
     use crate::tool::Tool;
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
     use thiserror_ext::AsReport;
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer};
 
     struct FakeTokenizer;
 
@@ -412,6 +437,10 @@ mod tests {
             _add_special_tokens: bool,
         ) -> vllm_tokenizer::Result<Vec<u32>> {
             Ok(text.chars().map(u32::from).collect())
+        }
+
+        fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+            self.encode(text, false)
         }
 
         fn decode(
@@ -467,7 +496,7 @@ mod tests {
     impl<T: UnifiedParser + ?Sized> UnifiedParserTestExt for T {
         fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
             let mut output = UnifiedParserOutput::default();
-            self.parse_into(chunk, &mut output)?;
+            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
             Ok(output)
         }
 
@@ -499,7 +528,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect()
@@ -555,6 +584,50 @@ mod tests {
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
         assert!(output.calls().is_empty());
+    }
+
+    #[test]
+    fn inkling_reasoning_events_conserve_token_attributions() {
+        let chunk = |token_id: u32, text: &str| DecodedText {
+            text: text.to_string(),
+            attributions: [TokenAttribution {
+                token_id,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        };
+
+        let mut parser = test_parser();
+        let mut output = UnifiedParserOutput::default();
+        for (token_id, text) in [
+            (1, CONTENT_THINKING),
+            (2, "reason"),
+            (3, END_MESSAGE),
+            (4, MESSAGE_MODEL),
+            (5, CONTENT_TEXT),
+            (6, "answer"),
+            (7, END_MESSAGE),
+        ] {
+            parser.parse_into(chunk(token_id, text), &mut output).unwrap();
+        }
+        output.append(parser.finish().unwrap());
+
+        // The reasoning tokens keep their attributions; marker tokens
+        // (1, 3, 4, 5, 7) are dropped with their spans, and text pieces
+        // carry no attributions.
+        let reasoning_ids: Vec<u32> = output
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                UnifiedParserEvent::Reasoning(piece) => Some(piece),
+                _ => None,
+            })
+            .flat_map(|piece| piece.attributions.iter().map(|attr| attr.token_id))
+            .collect();
+        assert_eq!(reasoning_ids, [2]);
+        assert_eq!(output.reasoning_text(), "reason");
+        assert_eq!(output.normal_text(), "answer");
     }
 
     #[test]
@@ -668,15 +741,58 @@ mod tests {
         let mut parser = test_parser();
         parser.initialize(&[200001]).unwrap();
 
-        let output = parser
-            .parse_complete(concat!(
-                "get_weather<|content_invoke_tool_json|>",
-                "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
-            ))
-            .unwrap();
+        let mut output = parser.parse_chunk("get_").unwrap();
+        output.append(
+            parser
+                .parse_complete(concat!(
+                    "weather<|content_invoke_tool_json|>",
+                    "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
+                ))
+                .unwrap(),
+        );
 
         assert!(output.normal_text().is_empty());
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    }
+
+    #[test]
+    fn inkling_initialize_model_opener_flushes_bare_text_at_finish() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+
+        let mut output = parser.parse_chunk("plain ").unwrap();
+        output.append(parser.parse_chunk("answer").unwrap());
+        assert!(output.normal_text().is_empty());
+
+        output.append(parser.finish().unwrap());
+
+        assert_eq!(output.normal_text(), "plain answer");
+    }
+
+    #[test]
+    fn inkling_initialize_model_opener_flushes_bare_text_before_end_marker() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+
+        let output = parser
+            .parse_complete(concat!(
+                "plain answer",
+                "<|end_message|>",
+                "<|content_model_end_sampling|>"
+            ))
+            .unwrap();
+
+        assert_eq!(output.normal_text(), "plain answer");
+    }
+
+    #[test]
+    fn inkling_reset_returns_pending_message_header() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+        parser.parse_chunk("plain ").unwrap();
+        parser.parse_chunk("answer").unwrap();
+
+        assert_eq!(parser.reset(), "plain answer");
     }
 
     #[test]
@@ -731,6 +847,10 @@ mod tests {
                 _add_special_tokens: bool,
             ) -> vllm_tokenizer::Result<Vec<u32>> {
                 Ok(vec![])
+            }
+
+            fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+                self.encode(text, false)
             }
 
             fn decode(

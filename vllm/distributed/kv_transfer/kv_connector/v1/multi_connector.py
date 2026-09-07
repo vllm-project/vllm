@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -74,6 +74,11 @@ class MultiKVConnectorStats(KVConnectorStats):
     Maintain a dict of KVConnectorStats objects, one for each connector.
     This is used to aggregate the stats from all connectors separately.
     """
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            connector_id: stats.to_dict() for connector_id, stats in self.data.items()
+        }
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         for connector_id, stats in other.data.items():
@@ -122,7 +127,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
                 f"{connector_id} is not contained in the list of registered connectors "
                 f"with Prometheus metrics support: {self._prom_metrics.keys()}"
             )
-            self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
+            self._prom_metrics[connector_id].observe(stats_data, engine_idx)
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
@@ -204,10 +209,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        if not self._connectors:
-            return False
-        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_hybrid_hits for c in self._connectors
+        )
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
     def _get_connector_classes_and_configs(
@@ -234,13 +243,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             )
         return ret
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # Register on all connectors
-        for c in self._connectors:
-            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -353,9 +355,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
-        # TODO(https://github.com/vllm-project/vllm/issues/33400)
-        # Currently no connectors return non-None
-        return None
+        child_counts = [
+            connector.get_finished_count() for connector in self._connectors
+        ]
+        if any(count is None for count in child_counts):
+            return None
+        counts = {count for count in child_counts if count is not None}
+        if len(counts) > 1:
+            raise ValueError(
+                "MultiConnector children returned incompatible finished counts: "
+                f"{sorted(counts)}"
+            )
+        return next(iter(counts), None)
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
@@ -517,6 +528,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             lambda c: c.request_finished(request, blocks),
         )
 
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        accepted = [
+            c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
+            for c in self._connectors
+        ]
+        return any(accepted)
+
     def request_finished_all_groups(
         self,
         request: "Request",
@@ -599,16 +622,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 connector_name
             )
 
-            # stats_value is the serialized dataclass which contains {'data': {...}}
-            # We need to extract the inner 'data' field to avoid double-nesting
-            assert isinstance(stats_value, dict) and "data" in stats_value, (
-                f"Expected a dict with a 'data' field, got {stats_value}"
-            )
-            inner_data = stats_value["data"]
-
             # Use the connector's build_kv_connector_stats to reconstruct
             if reconstructed_stats := connector_cls.build_kv_connector_stats(
-                data=inner_data
+                data=stats_value
             ):
                 reconstructed_data[connector_name] = reconstructed_stats
 

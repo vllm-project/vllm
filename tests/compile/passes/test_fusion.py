@@ -195,8 +195,6 @@ class TestModel(torch.nn.Module):
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_group_quant_op()]
-            if self.use_aiter_fusion:
-                return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -373,6 +371,10 @@ def test_fusion_rmsnorm_quant(
             use_aiter_fusion=False,
             use_aiter_quant=False,
         )
+        if any(
+            type(layer.kernel) is not force_kernel for layer in model.fp8_linear_layers
+        ):
+            pytest.skip(f"{force_kernel.__name__} is not supported on this platform")
 
         backend, _ = _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens

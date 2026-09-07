@@ -5,13 +5,11 @@ import torch
 from torch import Generator
 
 from tests.utils import large_gpu_mark
-from vllm.model_executor.layers.vocab_parallel_embedding import pad_vocab_size
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
-    flashinfer_sample,
     random_sample,
 )
 from vllm.v1.sample.sampler import Sampler
@@ -67,6 +65,10 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     assert sampler.topk_topp_sampler.use_fp64_gumbel
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm aiter sampler test only runs on ROCm",
+)
 def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -769,6 +771,77 @@ class TestTritonTopkTopp:
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
 
+    def test_mixed_batch_grammar_rows_get_topp(self):
+        """Grammar-masked rows in a mixed top-k batch must still get top-p.
+
+        Regression: with the split top-p pipeline active (batch <= 64), a
+        row with k < vocab but <= k finite logits was covered by neither the
+        monolithic kernel (standalone top-p disabled) nor the split pipeline
+        (skips rows with k < vocab), so its top-p was silently dropped.
+        """
+        batch_size, vocab_size = 8, 32000
+        logits = torch.full((batch_size, vocab_size), float("-inf"))
+        # Rows 0-2: grammar rows (30 finite tokens); k=50 is a no-op for them.
+        for i in range(3):
+            idx = torch.randperm(vocab_size, generator=self.generator)[:30]
+            logits[i, idx] = torch.randn(30, generator=self.generator)
+        # Rows 3-4: p-only rows (k = vocab); rows 5-7: normal top-k+top-p.
+        logits[3:5] = torch.randn(2, vocab_size, generator=self.generator)
+        logits[5:] = torch.randn(3, vocab_size, generator=self.generator)
+        k = torch.tensor(
+            [50, 50, 50, vocab_size, vocab_size, 50, 50, 50], dtype=torch.int32
+        )
+        p = torch.tensor([0.5, 0.5, 0.5, 0.9, 0.9, 0.9, 0.9, 0.9])
+
+        self._compare_results(logits, k, p)
+
+        # Top-p must actually trim the grammar rows beyond the (no-op) top-k.
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        kept_topk_only = (
+            apply_top_k_top_p_triton(logits.clone(), k, None)[:3] != float("-inf")
+        ).sum(-1)
+        kept_topk_topp = (
+            apply_top_k_top_p_triton(logits.clone(), k, p)[:3] != float("-inf")
+        ).sum(-1)
+        assert (kept_topk_topp < kept_topk_only).all(), (
+            f"top-p did not trim grammar rows: {kept_topk_only.tolist()} -> "
+            f"{kept_topk_topp.tolist()}"
+        )
+
+    def test_topp_tie_break_deterministic(self):
+        """Boundary-duplicate trimming must be deterministic across calls.
+
+        Regression: the split top-p mask kernel handed out the tie budget in
+        cross-program atomic order, so which copies of a tied boundary value
+        survived could vary between identical calls.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 4, 128256
+        # 1000 tied top tokens; the p=0.5 boundary lands inside the tie
+        # group (each tied token has mass e/(1000e+1000) ~ 0.073%).
+        logits = torch.full((batch_size, vocab_size), float("-inf"))
+        logits[:, :1000] = 1.0
+        logits[:, 1000:2000] = 0.0
+        p = torch.full((batch_size,), 0.5, dtype=torch.float32)
+
+        results = [apply_top_k_top_p_triton(logits.clone(), None, p) for _ in range(5)]
+        for r in results[1:]:
+            assert torch.equal(results[0], r), "non-deterministic tie break"
+
+        # The split pipeline now keeps the first `numkeep` copies in index
+        # order, exactly like the monolithic kernel and the PyTorch impl.
+        kept_idx = (results[0][0] != float("-inf")).nonzero().flatten()
+        assert kept_idx.min().item() == 0
+        assert kept_idx.max().item() == len(kept_idx) - 1
+        pytorch_kept = (
+            (apply_top_k_top_p_pytorch(logits.clone(), None, p)[0] != float("-inf"))
+            .sum()
+            .item()
+        )
+        assert len(kept_idx) == pytorch_kept
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests
@@ -1045,39 +1118,3 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
-
-
-@pytest.mark.skipif(
-    not FLASHINFER_TOPK_TOPP_SUPPORTED,
-    reason="FlashInfer top-k/top-p sampler is not available on this platform.",
-)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("k, p", [(20, 0.95), (20, None), (None, 0.95)])
-def test_flashinfer_sample_padded_vocab(
-    dtype: torch.dtype, k: int | None, p: float | None
-):
-    """flashinfer_sample must accept the logits the sampler actually hands it.
-
-    compute_logits slices the padding off the vocab, so for a vocab that isn't a
-    multiple of 64 (e.g. opt's 50272) the logits are a strided view in the model
-    dtype, while FlashInfer requires contiguous fp32.
-    """
-    torch.set_default_device(DEVICE_TYPE)
-    batch_size = 8
-    org_vocab_size = 50272
-    padded_vocab_size = pad_vocab_size(org_vocab_size)
-    assert padded_vocab_size != org_vocab_size
-
-    logits = torch.randn(batch_size, padded_vocab_size, dtype=dtype)[
-        ..., :org_vocab_size
-    ]
-    # A single row stays contiguous despite the padded stride, hence batch_size > 1.
-    assert not logits.is_contiguous()
-
-    token_ids = flashinfer_sample(
-        logits,
-        torch.full((batch_size,), k, dtype=torch.int32) if k is not None else None,
-        torch.full((batch_size,), p, dtype=torch.float32) if p is not None else None,
-    )
-    assert token_ids.shape == (batch_size,)
-    assert torch.all((token_ids >= 0) & (token_ids < org_vocab_size))
