@@ -443,6 +443,11 @@ class Gemma4Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            # V norm: no learnable scale (pure normalization only)
+            self.v_norm = RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -451,14 +456,8 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
+        # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        if not self.is_kv_shared_layer:
-            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            # V norm: no learnable scale (pure normalization only)
-            self.v_norm = RMSNorm(
-                self.head_dim, eps=config.rms_norm_eps, has_weight=False
-            )
 
         # Determine layer type and sliding window
         layer_type = config.layer_types[layer_idx]
