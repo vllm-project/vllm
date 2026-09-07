@@ -642,6 +642,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHMLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE_SM120",
+                "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
             ):
                 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -722,6 +723,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHMLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE",
                 "FLASHINFER_MLA_SPARSE_SM120",
+                "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
             )
         ):
@@ -1839,6 +1841,10 @@ _MASKED_MHA_THRESHOLDS: dict[
         },
     },
 }
+
+# FLASH_ATTN_MLA_SPARSE_FA4 prefill batches run on FlashInfer, so it shares its rows.
+for _rows in _MASKED_MHA_THRESHOLDS.values():
+    _rows["FLASH_ATTN_MLA_SPARSE_FA4"] = _rows["FLASHINFER_MLA_SPARSE"]
 
 
 def _use_masked_mha(
