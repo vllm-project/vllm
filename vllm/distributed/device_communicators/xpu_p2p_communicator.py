@@ -300,8 +300,10 @@ class XpuP2pCommunicator(XpuCommunicator):
         # multiple vLLM instances on one host never collide.
         if self.rank_in_group == 0:
             name: list[str | None] = [
-                f"vllm_xpu_p2p_{os.getpid()}_{uuid.uuid4().hex[:8]}_"
-                f"{self.unique_name.replace(':', '_')}"
+                (
+                    f"vllm_xpu_p2p_{os.getpid()}_{uuid.uuid4().hex[:8]}_"
+                    f"{self.unique_name.replace(':', '_')}"
+                )
             ]
         else:
             name = [None]
