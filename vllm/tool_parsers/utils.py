@@ -1124,6 +1124,10 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
                 continue
         if candidate_type == "number":
             try:
+                return int(value)
+            except (ValueError, TypeError):
+                pass
+            try:
                 val = float(value)
             except (ValueError, TypeError):
                 continue
