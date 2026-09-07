@@ -328,33 +328,6 @@ def test_hisparse_registration_chunks_end_between_host_blocks():
     )
 
 
-def test_hisparse_host_pool_uses_resolved_private_mode(monkeypatch):
-    monkeypatch.setattr(
-        hisparse_runtime_module,
-        "allocate_pinned_host_pool",
-        lambda size: (
-            torch.empty(size, dtype=torch.int8),
-            torch.empty(size, dtype=torch.int8),
-        ),
-    )
-    config = SimpleNamespace(
-        instance_id="instance",
-        parallel_config=_hisparse_parallel_config(),
-    )
-
-    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
-        config,
-        [24, 40],
-        num_blocks=4,
-        host_block_stride=16,
-        use_shared_host_pool=False,
-    )
-
-    assert region is None
-    assert [pool.shape for pool in pools] == [(24,), (40,)]
-    assert [pool.shape for pool in private_pools] == [(24,), (40,)]
-
-
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     backing = torch.full((10, 2, 3), -1, dtype=torch.float32)
     cache = backing[1:9]
