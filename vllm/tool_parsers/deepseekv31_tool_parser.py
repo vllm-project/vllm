@@ -37,6 +37,7 @@ class DeepSeekV31ToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
+        self._stream_regex_timed_out: bool = False
 
         self.tool_calls_start_token: str = "<｜tool▁calls▁begin｜>"
         self.tool_calls_end_token: str = "<｜tool▁calls▁end｜>"
@@ -144,6 +145,8 @@ class DeepSeekV31ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        if self._stream_regex_timed_out:
+            return None
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
@@ -407,6 +410,7 @@ class DeepSeekV31ToolParser(ToolParser):
             return delta
 
         except TimeoutError:
+            self._stream_regex_timed_out = True
             logger.warning("Regex timeout occurred when matching tool call pattern.")
             return None
         except Exception:

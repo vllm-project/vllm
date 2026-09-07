@@ -163,3 +163,37 @@ def test_streaming_name_regex_timeout_skips_delta():
         name_regex.match.call_args.kwargs["timeout"]
         == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
     )
+
+
+def test_streaming_regex_timeout_is_not_retried_on_later_delta():
+    parser = DeepSeekV31ToolParser(_fake_deepseek_tokenizer())
+    mock_regex = MagicMock()
+    mock_regex.match.side_effect = TimeoutError("Regex timeout")
+    current_text = f"{_TOOL_CALLS_BEGIN}{_TOOL_CALL_BEGIN}foo{_TOOL_SEP}" + '{"x":1}'
+    token_ids = [1, 3]
+    later_text = current_text + "0"
+    later_token_ids = [1, 3, 3]
+
+    with patch.object(parser, "stream_tool_call_portion_regex", mock_regex):
+        first = parser.extract_tool_calls_streaming(
+            current_text,
+            current_text,
+            "",
+            token_ids,
+            token_ids,
+            [],
+            _timeout_request(),
+        )
+        second = parser.extract_tool_calls_streaming(
+            later_text,
+            later_text,
+            "0",
+            token_ids,
+            later_token_ids,
+            [3],
+            _timeout_request(),
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.match.assert_called_once()
