@@ -4,7 +4,7 @@ import json
 from argparse import Namespace
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pybase64 as base64
 import pytest
@@ -17,6 +17,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     _get_chat_content,
     _get_chat_messages,
 )
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -92,7 +93,9 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
         ],
     )
 
-    samples = get_samples(_args_for_custom_image(jsonl), _Tokenizer())
+    samples = get_samples(
+        _args_for_custom_image(jsonl), cast(TokenizerLike, _Tokenizer())
+    )
 
     assert len(samples) == 2
     assert samples[0].request_id == "req-0"
@@ -106,6 +109,7 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
     assert samples[1].multi_modal_data is None
     assert isinstance(samples[1].prompt, list)
     assert samples[1].prompt[0] == {"type": "text", "text": "Now compare "}
+    assert isinstance(samples[1].prompt[1], dict)
     assert samples[1].prompt[1]["image_url"]["url"] == f"file://{image_c}"
 
 
@@ -126,7 +130,7 @@ def test_custom_image_dataset_uses_all_image_files(tmp_path: Path) -> None:
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=cast(TokenizerLike, _Tokenizer()),
         num_requests=1,
         output_len=32,
     )
@@ -171,7 +175,7 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=cast(TokenizerLike, _Tokenizer()),
         num_requests=1,
         output_len=32,
     )
@@ -181,14 +185,18 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
     assert sample.multi_modal_data is None
     assert sample.prompt_len == 2
     assert isinstance(sample.prompt, list)
-    assert [part["type"] for part in sample.prompt] == [
+    parts = []
+    for part in sample.prompt:
+        assert isinstance(part, dict)
+        parts.append(part)
+    assert [part["type"] for part in parts] == [
         "text",
         "image_url",
         "text",
         "image_url",
     ]
-    assert sample.prompt[1]["image_url"]["url"] == f"file://{image_a}"
-    assert sample.prompt[3]["image_url"] == {
+    assert parts[1]["image_url"]["url"] == f"file://{image_a}"
+    assert parts[3]["image_url"] == {
         "url": f"file://{image_b}",
         "detail": "low",
     }
@@ -223,7 +231,7 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=cast(TokenizerLike, _Tokenizer()),
         num_requests=1,
         output_len=32,
         enable_multimodal_chat=True,
@@ -289,7 +297,7 @@ def test_custom_image_dataset_encodes_image_media_when_requested(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=cast(TokenizerLike, _Tokenizer()),
         num_requests=1,
         output_len=32,
         ensure_client_side_data=True,
@@ -335,7 +343,7 @@ def test_custom_image_dataset_encodes_interleaved_image_media(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=cast(TokenizerLike, _Tokenizer()),
         num_requests=1,
         output_len=32,
         ensure_client_side_data=True,
@@ -343,9 +351,13 @@ def test_custom_image_dataset_encodes_interleaved_image_media(
 
     sample = samples[0]
     assert isinstance(sample.prompt, list)
-    _assert_png_data_url(sample.prompt[1]["image_url"]["url"])
-    _assert_png_data_url(sample.prompt[2]["image_url"]["url"])
-    assert sample.prompt[2]["image_url"]["detail"] == "low"
+    parts = []
+    for part in sample.prompt:
+        assert isinstance(part, dict)
+        parts.append(part)
+    _assert_png_data_url(parts[1]["image_url"]["url"])
+    _assert_png_data_url(parts[2]["image_url"]["url"])
+    assert parts[2]["image_url"]["detail"] == "low"
 
 
 @pytest.mark.benchmark
@@ -363,7 +375,7 @@ def test_custom_image_dataset_rejects_invalid_image_media(
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     with pytest.raises(ValueError, match="Invalid image URL"):
         dataset.sample(
-            tokenizer=_Tokenizer(),
+            tokenizer=cast(TokenizerLike, _Tokenizer()),
             num_requests=1,
             output_len=32,
             ensure_client_side_data=True,
@@ -380,7 +392,7 @@ def test_custom_image_dataset_rejects_invalid_content_part(
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     with pytest.raises(ValueError, match="type 'text', 'image', or 'image_url'"):
         dataset.sample(
-            tokenizer=_Tokenizer(),
+            tokenizer=cast(TokenizerLike, _Tokenizer()),
             num_requests=1,
             output_len=32,
         )

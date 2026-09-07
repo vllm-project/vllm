@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_auto_gptq.py -v -s`.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -123,8 +124,8 @@ def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
     method.input_dtype = None
-    method.experts_cls = None
-    method.moe = SimpleNamespace(w13_num_shards=2)
+    method.experts_cls = None  # type: ignore[assignment]  # Weight creation does not select experts.
+    method.moe = SimpleNamespace(w13_num_shards=2)  # type: ignore[assignment]
     layer = torch.nn.Module()
 
     method.create_weights(
@@ -162,7 +163,7 @@ def test_routed_experts_loads_per_expert_biases():
         def _map_global_expert_id_to_local_expert_id(expert_id):
             return expert_id
 
-    loader = Loader()
+    loader = cast(RoutedExperts, Loader())
     w13_bias = torch.nn.Parameter(torch.zeros(1, 8), requires_grad=False)
     w2_bias = torch.nn.Parameter(torch.zeros(1, 4), requires_grad=False)
 

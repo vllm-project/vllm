@@ -109,7 +109,7 @@ def test_asr_dataset_sample_handles_local_audio_paths(tmp_path: Path) -> None:
     ]
 
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -146,7 +146,7 @@ def test_asr_dataset_sample_handles_embedded_audio_bytes(
     ]
 
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -240,7 +240,7 @@ def _make_asr_dataset(tmp_path: Path) -> datasets_module.ASRDataset:
 def test_asr_dataset_cohere_class_name_gets_decoder_prompt(tmp_path: Path) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=CohereAsrTokenizer(),
+        tokenizer=CohereAsrTokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -255,7 +255,7 @@ def test_asr_dataset_cohere_name_or_path_fallback_gets_decoder_prompt(
 ) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=_CohereNameOnlyTokenizer(),
+        tokenizer=_CohereNameOnlyTokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -268,7 +268,7 @@ def test_asr_dataset_cohere_name_or_path_fallback_gets_decoder_prompt(
 def test_asr_dataset_unknown_tokenizer_gets_empty_prompt(tmp_path: Path) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(name_or_path="some-other/asr-model"),
+        tokenizer=_Tokenizer(name_or_path="some-other/asr-model"),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,

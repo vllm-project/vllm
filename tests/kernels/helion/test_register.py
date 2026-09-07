@@ -398,6 +398,7 @@ class TestHelionKernelWrapper:
             )
 
             assert wrapper._disabled is True
+            assert wrapper._disabled_reason is not None
             assert "No configs available" in wrapper._disabled_reason
 
     def test_disabled_wrapper_raises_on_call(self, sample_kernel):

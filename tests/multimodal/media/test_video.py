@@ -53,12 +53,10 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
         imageio = ImageMediaIO()
 
         # Verify that different args pass/fail assertions as expected.
-        videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 1.0})
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0)
         _ = videoio.load_bytes(b"test")
 
-        videoio = VideoMediaIO(
-            imageio, **{"num_frames": 10, "fps": 1.0, "not_used": "not_used"}
-        )
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0, not_used="not_used")
         _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
@@ -66,11 +64,11 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 9, "fps": 1.0})
+            videoio = VideoMediaIO(imageio, num_frames=9, fps=1.0)
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad fps"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
+            videoio = VideoMediaIO(imageio, num_frames=10, fps=2.0)
             _ = videoio.load_bytes(b"test")
 
 
@@ -87,14 +85,14 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
     image = Image.open(image_path)
 
     if not is_color:
-        image_path = f"{tmp_path}/test_grayscale_image.png"
+        image_path = Path(tmp_path) / "test_grayscale_image.png"
         image = image.convert("L")
         image.save(image_path)
         # Convert to gray RGB for comparison
         image = image.convert("RGB")
     video_path = f"{tmp_path}/test_RGB_video.{ext}"
     create_video_from_image(
-        image_path,
+        str(image_path),
         video_path,
         num_frames=2,
         is_color=is_color,
@@ -390,7 +388,9 @@ def test_pynvvideocodec_unrelated_error_propagates(
 
     with pytest.raises(RuntimeError) as exc_info:
         PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
-            None, b"video", None
+            None,
+            b"video",
+            None,  # type: ignore[arg-type]  # Fails before target metadata is used.
         )
 
     assert exc_info.value is original_error
