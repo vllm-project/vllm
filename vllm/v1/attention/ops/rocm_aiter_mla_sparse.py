@@ -2610,7 +2610,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
     num_warps = 4
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    out = torch.empty_like(q)
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -3195,7 +3195,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
         )
-    output.copy_(output_chunk.to(output.dtype))
+    output.copy_(output_chunk[..., : output.shape[-1]].to(output.dtype))
 
 
 def rocm_sparse_attn_decode(
