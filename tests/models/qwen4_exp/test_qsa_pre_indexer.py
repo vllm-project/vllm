@@ -51,14 +51,14 @@ def _make_block_table(block_counts):
 
 def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
     # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
-    # value order and one ulp is one code step. In the denormal range the grid
-    # is absolute-spaced and the bf16 intermediates differ in absolute terms
-    # (cancellation in pooling/norm), so fall back to the bf16 atol there.
+    # value order and one ulp is one code step. The two paths' intermediates
+    # differ in the pooling accumulation order, which at denormal magnitudes
+    # (absolute grid step 2^-9) shows up as up to 2 code steps.
     code_diff = (
         actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
     ).abs()
     abs_diff = (actual.float() - expected.float()).abs()
-    assert bool(((code_diff <= 1) | (abs_diff <= ATOL)).all())
+    assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
 
 
 @requires_qsa_kernels
@@ -305,7 +305,10 @@ def test_qsa_fused_pre_indexer_matches_unfused(
         qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
 
     if indexer_dtype == torch.float8_e4m3fn:
-        # Both paths round the same ~bf16 intermediates to e4m3.
+        # Both paths round the same ~bf16 intermediates to e4m3. Bitwise
+        # equality (the dsv4 indexer test's bar) does not hold here: the 1D
+        # reference rope (forward_cuda) differs from _norm_rope by up to 1
+        # bf16 ulp, and even the MRoPE pair flips a code occasionally.
         unfused_query = unfused_query.to(indexer_dtype)
         assert_fp8_within_one_ulp(fused_query, unfused_query)
     else:

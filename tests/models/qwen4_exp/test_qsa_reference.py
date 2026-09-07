@@ -744,6 +744,9 @@ def test_qsa_decode_selection_correctness(
     if dtype == torch.float8_e4m3fn:
         # fp8 logits tie at the top-k boundary more often than bf16, so index
         # identity is not stable; compare the selected value multisets.
+        # SM90 wgmma accumulates fp8 in reduced precision (~3e-4 abs
+        # observed); SM100 tcgen05 is exact fp32.
+        rtol = atol = 1e-3 if current_platform.is_device_capability(90) else None
         logits = _qsa_mqa_paged_reference(
             q, cache, page_table, token_to_req, visible_blocks
         )
@@ -754,6 +757,8 @@ def test_qsa_decode_selection_correctness(
             torch.testing.assert_close(
                 logits[row, selected.long()].sort().values,
                 logits[row, wanted.long()].sort().values,
+                rtol=rtol,
+                atol=atol,
             )
         return
 
@@ -836,6 +841,9 @@ def test_qsa_prefill_selection_correctness(
     if dtype == torch.float8_e4m3fn:
         # fp8 logits tie at the top-k boundary more often than bf16, so index
         # identity is not stable; compare the selected value multisets.
+        # SM90 wgmma accumulates fp8 in reduced precision (~3e-4 abs
+        # observed); SM100 tcgen05 is exact fp32.
+        rtol = atol = 1e-3 if current_platform.is_device_capability(90) else None
         logits = _qsa_mqa_paged_reference(
             q, cache, page_table, token_to_req, visible_blocks
         )
@@ -846,6 +854,8 @@ def test_qsa_prefill_selection_correctness(
             torch.testing.assert_close(
                 logits[row, selected.long()].sort().values,
                 logits[row, wanted.long()].sort().values,
+                rtol=rtol,
+                atol=atol,
             )
         return
 

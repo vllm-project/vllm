@@ -200,6 +200,9 @@ def _qsa_mqa_paged_prefill_kernel(
             other=0.0,
             eviction_policy="evict_first",
         )
+        # With an fp8 cache, SM90 lowers this dot to reduced-precision wgmma
+        # accumulation; SM100 tcgen05 accumulates in fp32. The SM90 error
+        # (~1e-4 relative) is far below the e4m3 quantization noise floor.
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.reshape(scores, (BLOCK_N, TILE_R, NUM_HEADS_PADDED))
         score = tl.sum(tl.maximum(scores, 0.0), axis=2)
