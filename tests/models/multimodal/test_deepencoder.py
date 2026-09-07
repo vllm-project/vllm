@@ -10,6 +10,33 @@ from vllm.model_executor.models.deepencoder import (
 )
 
 
+@pytest.mark.parametrize(
+    ("repeats", "expected"),
+    [
+        (1, [1]),
+        (5, [1, 1, 1, 1, 1]),
+        (7, [2, 2, 1, 1, 1]),
+        (51, [11, 10, 10, 10, 10]),
+    ],
+)
+def test_benchmark_distributes_all_repeats(repeats: int, expected: list[int]) -> None:
+    from benchmarks.kernels.benchmark_deepencoder_rel_pos_attention import (
+        repeat_counts,
+    )
+
+    assert repeat_counts(repeats) == expected
+
+
+@pytest.mark.parametrize("repeats", [0, -1])
+def test_benchmark_rejects_non_positive_repeats(repeats: int) -> None:
+    from benchmarks.kernels.benchmark_deepencoder_rel_pos_attention import (
+        repeat_counts,
+    )
+
+    with pytest.raises(ValueError, match="repeats must be positive"):
+        repeat_counts(repeats)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_flex_attention_matches_dense_decomposed_bias(dtype: torch.dtype) -> None:

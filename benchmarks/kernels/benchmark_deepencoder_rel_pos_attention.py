@@ -150,6 +150,14 @@ def timed_samples_ms(
     return samples
 
 
+def repeat_counts(repeats: int, max_rounds: int = 5) -> list[int]:
+    if repeats <= 0:
+        raise ValueError("repeats must be positive")
+    rounds = min(max_rounds, repeats)
+    per_round, remainder = divmod(repeats, rounds)
+    return [per_round + (round_idx < remainder) for round_idx in range(rounds)]
+
+
 def peak_memory(fn: Callable[[], torch.Tensor]) -> dict[str, int]:
     torch.cuda.empty_cache()
     baseline_allocated = torch.cuda.memory_allocated()
@@ -238,14 +246,12 @@ def run_case(
     compile_seconds = time.perf_counter() - compile_start
     correctness = errors(actual, expected)
 
-    rounds = 5
-    per_round = max(1, repeats // rounds)
     reference_samples = []
     candidate_samples = []
-    for round_idx in range(rounds):
+    for round_idx, round_repeats in enumerate(repeat_counts(repeats)):
         order = (reference, candidate) if round_idx % 2 == 0 else (candidate, reference)
         for fn in order:
-            samples = timed_samples_ms(fn, warmup, per_round)
+            samples = timed_samples_ms(fn, warmup, round_repeats)
             if fn is reference:
                 reference_samples.extend(samples)
             else:
