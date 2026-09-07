@@ -8,7 +8,7 @@ pub(crate) mod error;
 mod deepseek_dsml;
 pub(crate) mod deepseek_json;
 mod glm_xml;
-mod hy_v3;
+mod hy;
 pub(crate) mod json;
 mod kimi_k2;
 mod minimax_m2;
@@ -24,7 +24,7 @@ pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub(crate) use hy_v3::{HyV3ToolMarkers, HyV3ToolParser};
+pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
     MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
