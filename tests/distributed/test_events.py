@@ -286,6 +286,49 @@ def test_snapshot_tracks_blocks_by_medium(publisher_config):
         subscriber.close()
 
 
+def test_snapshot_orders_dependencies_across_batches(publisher_config):
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+    publisher.SNAPSHOT_BATCH_SIZE = 1
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    create_stored_event([101]),
+                    create_stored_event([102], parent_block_hash=101),
+                    create_stored_event([101], session_id="restored-parent"),
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_snapshot()
+        snapshot = subscriber.receive_replay()
+        assert len(snapshot) == 3
+        snapshot_events = [event for _, batch in snapshot for event in batch.events]
+
+        assert isinstance(snapshot_events[0], AllBlocksCleared)
+        assert isinstance(snapshot_events[1], BlockStored)
+        assert snapshot_events[1].block_hashes == [101]
+        assert isinstance(snapshot_events[2], BlockStored)
+        assert snapshot_events[2].block_hashes == [102]
+    finally:
+        publisher.shutdown()
+        subscriber.close()
+
+
 def test_snapshot_orders_restored_parent_before_existing_child():
     state = _KVCacheState()
     state.update(
