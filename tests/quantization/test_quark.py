@@ -11,6 +11,7 @@ import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import huggingface_hub
 import lm_eval
@@ -702,6 +703,68 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def test_quark_w8a8_fp8_per_block_registers_weight_scale(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        get_fp8_block_weight_scale,
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.quark.schemes."
+        "quark_w8a8_fp8.get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+    )
+    scheme = QuarkW8A8Fp8PerBlock(kFp8Static128BlockSym, kFp8Dynamic128Sym)
+
+    layer = torch.nn.Module()
+    layer.weight_scale = torch.tensor([2.0])
+    assert get_fp8_block_weight_scale(layer) is None
+    layer.scheme = scheme
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
+    layer.weight_scale_inv = torch.tensor([3.0])
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
+    layer.scheme = None
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale_inv
+
+    loaded = torch.nn.Module()
+
+    def weight_loader(param, loaded_weight):
+        return None
+
+    dummy_param = torch.nn.Parameter(torch.empty(1), requires_grad=False)
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "validate_fp8_block_shape"
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "create_fp8_weight_parameter",
+            return_value=dummy_param,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "create_fp8_scale_parameter",
+            return_value=dummy_param,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "init_fp8_linear_kernel",
+            return_value=MagicMock(),
+        ),
+    ):
+        scheme.create_weights(
+            loaded,
+            output_partition_sizes=[256],
+            input_size_per_partition=256,
+            params_dtype=torch.bfloat16,
+            weight_loader=weight_loader,
+            input_size=256,
+            output_size=256,
+        )
+    assert hasattr(loaded, "weight_scale")
+    assert not hasattr(loaded, "weight_scale_inv")
+
+
 def test_quark_config_has_no_model_specific_fused_mappings():
     config = QuarkConfig({})
 
@@ -1020,32 +1083,32 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
         assert torch.isfinite(logits).all()
 
 
-def test_quark_int8_w8a8_moe(monkeypatch, dist_init, workspace_init):
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
     model_path = "amd/tiny-qwen3-moe-w8a8-int8"
-    model, vllm_config = load_model_without_vllm_runner(
+    with vllm_runner(
         model_path,
-        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
-    )
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
 
-    layer = model.model.layers[0]
-    moe = layer.mlp.experts
-    assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
-        f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
-    )
-    qkv_proj = layer.self_attn.qkv_proj
-    assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+        def check_model(model):
+            layer = model.model.layers[0]
+            # MoE experts should use QuarkW8A8Int8MoEMethod
+            moe = layer.mlp.experts
+            assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
+            )
+            # Non-MoE linear layers should use QuarkW8A8Int8
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
-    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
-    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
-    ):
-        hidden_states = model(input_ids, positions, None)
-        logits = model.compute_logits(hidden_states)
-    assert torch.isfinite(logits).all()
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
 
 
 @pytest.mark.skipif(
@@ -1123,6 +1186,44 @@ class AccuracyTestConfig:
             model_args["max_model_len"] = model_max_len
 
         return model_args
+
+
+WIKITEXT_ACCURACY_CONFIGS = [
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        excepted_value=11.3,
+    ),
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        excepted_value=10.6,
+    ),
+]
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize(
+    "config", WIKITEXT_ACCURACY_CONFIGS, ids=lambda config: config.model_name
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks="wikitext",
+        batch_size=64,
+    )
+
+    measured_value = results["results"]["wikitext"]["word_perplexity,none"]
+    assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
 
 
 GSM8K_ACCURACY_CONFIGS = [
