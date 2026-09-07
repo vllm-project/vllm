@@ -381,16 +381,23 @@ export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
     bash -c 'set -e
 echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"
 if [[ -n "${PYTEST_ADDOPTS:-}" ]]; then
-  # Tolerate exit 5 only when pytest-shard collected items but assigned 0 to this shard; real 0-collection failures still propagate.
+  # Tolerate exit 5 only when pytest-shard reports 0 items for this shard while the pre-shard selection (collected minus deselected) was non-empty; 
+  # -k/-m filters that deselect everything still fail normally.
   pytest() {
-    local ec=0 log
+    local ec=0 log collected deselected shard_count selected
     log="$(mktemp)"
     command pytest "$@" 2>&1 | tee "$log"
     ec=${PIPESTATUS[0]}
-    if [[ $ec -eq 5 ]] && grep -qE "collected [1-9][0-9]* item" "$log"; then
-      echo "pytest exited with status 5 but items were collected (0 assigned to this shard); treating as success."
-      rm -f "$log"
-      return 0
+    if [[ $ec -eq 5 ]]; then
+      collected=$(grep -oE "collected [0-9]+ item" "$log" | grep -oE "[0-9]+" | tail -1)
+      deselected=$(grep -oE "[0-9]+ deselected" "$log" | grep -oE "[0-9]+" | tail -1)
+      shard_count=$(grep -oE "Running [0-9]+ items? in this shard" "$log" | grep -oE "[0-9]+" | tail -1)
+      selected=$(( ${collected:-0} - ${deselected:-0} ))
+      if [[ "${shard_count:-}" == "0" && $selected -gt 0 ]]; then
+        echo "pytest exited with status 5 but ${selected} item(s) were selected (0 assigned to this shard); treating as success."
+        rm -f "$log"
+        return 0
+      fi
     fi
     rm -f "$log"
     return $ec
