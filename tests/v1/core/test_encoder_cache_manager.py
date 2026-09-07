@@ -453,3 +453,37 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
+
+
+def test_encoder_decoder_repeated_free_is_noop():
+    """The scheduler frees a request's encoder inputs on every step; freeing
+    the same input again must not inflate the budget beyond cache_size."""
+    manager = EncoderDecoderCacheManager(cache_size=100)
+    req = MockRequest("r1", ["imgA"], [40])
+
+    manager.allocate(req, 0)
+    assert manager.num_free_slots == 60
+
+    for _ in range(5):
+        for input_id in list(manager.get_cached_input_ids(req)):
+            manager.free_encoder_input(req, input_id)
+
+    assert manager.num_free_slots == 100
+
+
+def test_encoder_decoder_free_then_reallocate_is_freeable_again():
+    """After preemption frees all inputs, a resumed request re-allocates and
+    its inputs must be freeable again."""
+    manager = EncoderDecoderCacheManager(cache_size=100)
+    req = MockRequest("r1", ["imgA"], [40])
+
+    manager.allocate(req, 0)
+    manager.free(req)
+    assert manager.num_free_slots == 100
+
+    manager.allocate(req, 0)
+    assert manager.num_free_slots == 60
+
+    for _ in range(2):
+        manager.free_encoder_input(req, 0)
+    assert manager.num_free_slots == 100
