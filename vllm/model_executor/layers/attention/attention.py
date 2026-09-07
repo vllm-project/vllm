@@ -893,23 +893,9 @@ def fused_rope_and_unified_kv_cache_update_q_out(
     )
 
 
-def fused_rope_and_unified_kv_cache_update_q_out_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    query_out: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    is_neox: bool,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="fused_rope_and_unified_kv_cache_update_q_out",
     op_func=fused_rope_and_unified_kv_cache_update_q_out,
-    fake_impl=fused_rope_and_unified_kv_cache_update_q_out_fake,
     mutates_args=["query_out"],
 )
 
@@ -988,22 +974,8 @@ def unified_attention_with_output(
     )
 
 
-def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor | None,
-    value: torch.Tensor | None,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_attention_with_output_fake,
 )
