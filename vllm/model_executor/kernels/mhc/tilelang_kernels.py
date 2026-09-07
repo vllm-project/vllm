@@ -4,28 +4,35 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from functools import cache
+from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+    zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
+    compile_tilelang,
+    make_tilelang_warmup_tensor,
+)
 from vllm.platforms import current_platform
 from vllm.tilelang_utils import T, tilelang, tilelang_jit
 from vllm.utils.math_utils import cdiv
-
-ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     device_props = torch.cuda.get_device_properties(0)
-    n_sms = device_props.multi_processor_count
-    split_k = n_sms // grid_size
+    split_k = device_props.multi_processor_count // grid_size
     if k is not None:
-        # avoid split_k for small k
         num_block_k = cdiv(k, block_k)
+        # avoid split_k for small k
         split_k = min(split_k, num_block_k // 4)
-    split_k = max(split_k, 1)
-    return split_k
+    return max(split_k, 1)
 
 
 @tilelang_jit
@@ -38,8 +45,6 @@ def mhc_pre_big_fuse_tilelang(
     post_mix,
     comb_mix,
     layer_input,
-    pre_mix_in,
-    pre_mix_out,
     hidden_size: int,
     rms_eps: float,
     hc_pre_eps: float,
@@ -48,20 +53,12 @@ def mhc_pre_big_fuse_tilelang(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     hc_mult: int = 4,
-    use_pre_mix_in: bool = False,
-    save_pre_mix: bool = False,
-    rms_numel: int = 0,
+    launch_pdl: bool = False,
 ):
-    """Fuse coefficient generation and residual collapse after the projection.
-
-    With save_pre_mix, store the new pre-mix and collapse with pre_mix_in,
-    or select stream zero when use_pre_mix_in is false.
-    """
+    """Deeply fused kernels, everything other than gemm & sqrsum in mHC pre block."""
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     hidden_block = math.gcd(512, hidden_size)
-    if rms_numel == 0:
-        rms_numel = hc_mult * hidden_size
 
     gemm_out_mul: T.Tensor[[n_splits, num_tokens, hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
     gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
@@ -73,11 +70,8 @@ def mhc_pre_big_fuse_tilelang(
     comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
-    pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-    pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-
     with T.Kernel(num_tokens, threads=96) as i:
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
         ##################################################################
         # _pre_norm_fn_fwd_norm
@@ -87,7 +81,7 @@ def mhc_pre_big_fuse_tilelang(
         rms[0] = 0
         for i_split in T.serial(n_splits):
             rms[0] += gemm_out_sqrsum[i_split, i]
-        rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
+        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
         for j in T.Parallel(hc_mult3):
             mixes[j] = 0
             for i_split in T.serial(n_splits):
@@ -101,11 +95,6 @@ def mhc_pre_big_fuse_tilelang(
             # _pre_split_mixes_fwd (post & comb)
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
-                if save_pre_mix:
-                    pre_mix_out[i, j] = (
-                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
-                        + hc_pre_eps
-                    )
                 post_mix[i, j] = (
                     T.sigmoid(
                         mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
@@ -156,15 +145,12 @@ def mhc_pre_big_fuse_tilelang(
             # _pre_split_mixes_fwd (pre)
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
-                if use_pre_mix_in:
-                    pre_mix_shared[j] = pre_mix_in[i, j]
-                elif save_pre_mix:
-                    pre_mix_shared[j] = T.if_then_else(j == 0, 1.0, 0.0)
-                else:
-                    pre_mix_shared[j] = (
-                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
-                        + hc_pre_eps
+                pre_mix_shared[j] = (
+                    T.sigmoid(
+                        mixes_shared[j] * hc_scale[0] + hc_base[j],
                     )
+                    + hc_pre_eps
+                )
             ###################################################################
             # _pre_apply_mix_fwd
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
@@ -183,7 +169,7 @@ def mhc_pre_big_fuse_tilelang(
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -201,8 +187,6 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     comb_mix,
     layer_input,
     norm_weight,
-    pre_mix_in,
-    pre_mix_out,
     hidden_size: int,
     rms_eps: float,
     hc_pre_eps: float,
@@ -213,16 +197,12 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     n_splits: int = 16,
     hc_mult: int = 4,
     gemm_last_dim: int = -1,
-    use_pre_mix_in: bool = False,
-    save_pre_mix: bool = False,
-    rms_numel: int = 0,
+    launch_pdl: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     if gemm_last_dim < 0:
         gemm_last_dim = hc_mult3
-    if rms_numel == 0:
-        rms_numel = hc_mult * hidden_size
     hidden_block = math.gcd(1024, hidden_size)
 
     gemm_out_mul: T.Tensor[[n_splits, num_tokens, gemm_last_dim], T.float32]  # type: ignore[no-redef, valid-type]
@@ -235,21 +215,18 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
     norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
-    pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-    pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-
     with T.Kernel(num_tokens, threads=96) as i:
         rms = T.alloc_fragment(1, T.float32)
         mixes = T.alloc_fragment(hc_mult3, T.float32)
         T.clear(mixes)
         rms[0] = 0
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         for i_split in T.serial(n_splits):
             rms[0] += gemm_out_sqrsum[i_split, i]
-        rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
+        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
         for j in T.Parallel(hc_mult3):
             mixes[j] = 0
             for i_split in T.serial(n_splits):
@@ -261,11 +238,6 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         if T.get_thread_binding() < 32:
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
-                if save_pre_mix:
-                    pre_mix_out[i, j] = (
-                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
-                        + hc_pre_eps
-                    )
                 post_mix[i, j] = (
                     T.sigmoid(
                         mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
@@ -307,15 +279,12 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         else:
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
-                if use_pre_mix_in:
-                    pre_mix_shared[j] = pre_mix_in[i, j]
-                elif save_pre_mix:
-                    pre_mix_shared[j] = T.if_then_else(j == 0, 1.0, 0.0)
-                else:
-                    pre_mix_shared[j] = (
-                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
-                        + hc_pre_eps
+                pre_mix_shared[j] = (
+                    T.sigmoid(
+                        mixes_shared[j] * hc_scale[0] + hc_base[j],
                     )
+                    + hc_pre_eps
+                )
 
             # Pass 1: stash unnormalized weighted-sum output in shared memory
             # as bf16 (matches the rounding that RMSNorm would see) while
@@ -338,18 +307,9 @@ def mhc_pre_big_fuse_with_norm_tilelang(
                     for i1_h in T.Parallel(hidden_block):
                         ol[i1_h] += pre * xl[i_hc, i1_h]
 
-                if save_pre_mix:
-                    # Keep the BF16 boundary before the delayed input RMSNorm.
-                    rounded = T.alloc_fragment(hidden_block, T.bfloat16)
-                    T.copy(ol, rounded)
-                    for i1_h in T.Parallel(hidden_block):
-                        value = T.float32(rounded[i1_h])
-                        sumsq_per_pos[i1_h] += value * value
-                        output_shared[i0_h * hidden_block + i1_h] = rounded[i1_h]
-                else:
-                    for i1_h in T.Parallel(hidden_block):
-                        sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
-                        output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
+                for i1_h in T.Parallel(hidden_block):
+                    sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
+                    output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
 
             sumsq = T.alloc_fragment(1, T.float32)
             T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
@@ -373,7 +333,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -399,6 +359,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     n_splits: int = 1,
     hc_mult: int = 4,
     gemm_last_dim: int = -1,
+    launch_pdl: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
@@ -423,7 +384,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         T.clear(mixes)
         rms[0] = 0
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         for i_split in T.serial(n_splits):
@@ -535,7 +496,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -556,6 +517,7 @@ def mhc_fused_tilelang(
     h_blk: int = 256,
     tile_n: int = 1,
     split_k: int = 1,
+    launch_pdl: bool = False,
 ) -> tilelang.JITKernel:
     """Fused mhc post-mapping + pre-norm GEMM FMA"""
     m = T.dynamic("num_tokens")
@@ -596,7 +558,7 @@ def mhc_fused_tilelang(
         T.clear(sqr)
         h_split_start = i_ks * h_per_split
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         T.copy(post_mix[i_n, 0], s_post)
@@ -656,7 +618,7 @@ def mhc_fused_tilelang(
                     v2 += s_warp[w, tile_n]
                 rp_out[i_ks, i_n] = v2
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -671,6 +633,7 @@ def mhc_post_tilelang(
     hidden: int,
     n_thr: int = 128,
     h_blk: int = 1024,
+    launch_pdl: bool = False,
 ) -> tilelang.JITKernel:
     # rename for shorter code
     n = T.dynamic("num_tokens")
@@ -692,7 +655,7 @@ def mhc_post_tilelang(
 
         a_local = T.alloc_fragment((hc, hc), T.float32)
         c_local = T.alloc_fragment(hc, T.float32)
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
@@ -709,7 +672,7 @@ def mhc_post_tilelang(
                     x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
 
             T.copy(x_local, x[i_n, 0, i0_h * h_blk])
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -725,6 +688,7 @@ def hc_prenorm_gemm_tilelang(
     n_thr: int = 512,
     tile_n: int = 12,
     n_splits: int = 1,
+    launch_pdl: bool = False,
 ) -> tilelang.JITKernel:
     num_tokens = T.dynamic("num_tokens")
     hc_hidden_size = hc_mult * hidden_size
@@ -748,12 +712,12 @@ def hc_prenorm_gemm_tilelang(
         T.clear(acc)
         T.clear(sqr)
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         for it in T.serial(k_iters):
             i_k = i_s * k_per_split + it * n_thr + tid
-            x_val = T.cast(x[i_n, i_k], T.float32)
+            x_val = x[i_n, i_k]
             for i_o in T.unroll(tile_n):
                 out_idx = i_t * tile_n + i_o
                 if out_idx < n_out:
@@ -793,7 +757,7 @@ def hc_prenorm_gemm_tilelang(
                     reduced_sqr += warp_sqr[i_w]
                 sqrsum[i_s, i_n] = reduced_sqr
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -809,6 +773,7 @@ def hc_prenorm_gemm_block_m_tilelang(
     n_thr: int = 512,
     tile_n: int = 12,
     block_m: int = 2,
+    launch_pdl: bool = False,
 ) -> tilelang.JITKernel:
     num_tokens = T.dynamic("num_tokens")
     hc_hidden_size = hc_mult * hidden_size
@@ -828,7 +793,7 @@ def hc_prenorm_gemm_block_m_tilelang(
         T.clear(acc)
         T.clear(sqr)
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         for it in T.serial(k_iters):
@@ -843,7 +808,7 @@ def hc_prenorm_gemm_block_m_tilelang(
             for i_m in T.unroll(block_m):
                 token_idx = i_mt * block_m + i_m
                 if token_idx < num_tokens:
-                    x_val = T.cast(x[token_idx, i_k], T.float32)
+                    x_val = x[token_idx, i_k]
                     for i_o in T.unroll(tile_n):
                         acc[i_m, i_o] += x_val * fn_val[i_o]
                     if i_t == 0:
@@ -888,7 +853,7 @@ def hc_prenorm_gemm_block_m_tilelang(
                             reduced_sqr[i_m] += warp_sqr[i_w, i_m]
                         sqrsum[0, token_idx] = reduced_sqr[i_m]
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
 
 
@@ -905,6 +870,7 @@ def hc_head_fuse_tilelang(
     hc_mult: int = 4,
     n_thr: int = 128,
     h_blk: int = 1024,
+    launch_pdl: bool = False,
 ):
     """Two-pass fused kernel for hc_head.
 
@@ -926,7 +892,7 @@ def hc_head_fuse_tilelang(
     out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
 
     with T.Kernel(num_tokens, threads=n_thr) as i:
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_sync()
 
         # ------------------------------------------------------------------
@@ -985,5 +951,789 @@ def hc_head_fuse_tilelang(
 
             T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
 
-        if ENABLE_PDL:
+        if launch_pdl:
             T.pdl_trigger()
+
+
+class HcPrenormGemmTileLangKernel(
+    VllmJitKernel["HcPrenormGemmTileLangKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        hc_mult: int
+        n_out: int
+        n_thr: int
+        tile_n: int
+        n_splits: int
+        use_block_m: bool
+        block_m: int
+        launch_pdl: bool
+
+    @staticmethod
+    def kernel(compile_key: CompileKey) -> Any:
+        if compile_key.use_block_m:
+            return hc_prenorm_gemm_block_m_tilelang
+        return hc_prenorm_gemm_tilelang
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        hc_hidden_size: int,
+        n_thr: int = 512,
+        tile_n: int = 12,
+        n_splits: int = 1,
+        launch_pdl: bool,
+        **compile_key_fields: int,
+    ) -> CompileKey:
+        use_default_config = n_splits == 1 and tile_n == 12 and n_thr == 512
+        use_block_m = use_default_config and num_tokens >= 1024
+        use_small_tile = (
+            use_default_config
+            and not use_block_m
+            and num_tokens < 128
+            and hc_hidden_size % 1024 == 0
+        )
+        effective_n_thr = 1024 if use_small_tile else n_thr
+        effective_tile_n = 4 if use_small_tile else tile_n
+        return self.CompileKey(
+            **compile_key_fields,
+            n_thr=effective_n_thr,
+            tile_n=effective_tile_n,
+            n_splits=n_splits,
+            use_block_m=use_block_m,
+            block_m=2 if use_block_m else 1,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        vllm_config: Any,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+        n_out: int,
+    ) -> list[CompileKey]:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if max_tokens <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            hc_hidden_size=hidden_size * hc_mult,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_out=n_out,
+            launch_pdl=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        num_tokens = 1
+        hc_hidden_size = compile_key.hidden_size * compile_key.hc_mult
+        x = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hc_hidden_size)
+        fn = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_out, hc_hidden_size
+        )
+        out = make_tilelang_warmup_tensor(
+            torch.float32,
+            compile_key.n_splits,
+            num_tokens,
+            compile_key.n_out,
+        )
+        sqrsum = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_splits, num_tokens
+        )
+        kernel_arg = (
+            compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
+        )
+        compile_tilelang(
+            self.kernel(compile_key),
+            x,
+            fn,
+            out,
+            sqrsum,
+            compile_key.hidden_size,
+            compile_key.hc_mult,
+            compile_key.n_out,
+            compile_key.n_thr,
+            compile_key.tile_n,
+            kernel_arg,
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+    def __call__(
+        self,
+        x: Any,
+        fn: Any,
+        out: Any,
+        sqrsum: Any,
+        hidden_size: int,
+        hc_mult: int,
+        tile_n: int = 12,
+        n_thr: int = 512,
+        n_splits: int = 1,
+    ) -> Any:
+        assert out.shape[0] == n_splits
+        assert sqrsum.shape[0] == n_splits
+        assert x.shape[1] == hc_mult * hidden_size
+        assert x.shape[1] % n_splits == 0
+        assert (x.shape[1] // n_splits) % n_thr == 0
+        compile_key = self.dispatch(
+            num_tokens=x.shape[0],
+            hc_hidden_size=x.shape[1],
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_out=fn.shape[0],
+            n_thr=n_thr,
+            tile_n=tile_n,
+            n_splits=n_splits,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        kernel_arg = (
+            compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
+        )
+        return self.kernel(compile_key)(
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            fn.shape[0],
+            compile_key.n_thr,
+            compile_key.tile_n,
+            kernel_arg,
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+
+class MhcPreBigFuseTileLangKernel(
+    VllmJitKernel["MhcPreBigFuseTileLangKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        hc_mult: int
+        n_splits: int
+        use_norm_weight: bool
+        is_broadcast: bool
+        rms_eps: float
+        hc_pre_eps: float
+        hc_sinkhorn_eps: float
+        hc_post_mult_value: float
+        sinkhorn_repeat: int
+        norm_eps: float
+        launch_pdl: bool
+
+    @staticmethod
+    def kernel(compile_key: CompileKey) -> Any:
+        if compile_key.is_broadcast:
+            return mhc_pre_big_fuse_broadcast_with_norm_tilelang
+        if compile_key.use_norm_weight:
+            return mhc_pre_big_fuse_with_norm_tilelang
+        return mhc_pre_big_fuse_tilelang
+
+    @staticmethod
+    def _kernel_args(
+        compile_key: CompileKey,
+        *,
+        gemm_out_mul: Any,
+        gemm_out_sqrsum: Any,
+        hc_scale: Any,
+        hc_base: Any,
+        residual: Any,
+        residual_out: Any | None,
+        post_mix: Any,
+        comb_mix: Any,
+        layer_input: Any,
+        norm_weight: Any | None,
+    ) -> tuple[Any, ...]:
+        common_args = (
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hc_scale,
+            hc_base,
+            residual,
+        )
+        output_args = (post_mix, comb_mix, layer_input)
+        eps_args = (
+            compile_key.rms_eps,
+            compile_key.hc_pre_eps,
+            compile_key.hc_sinkhorn_eps,
+            compile_key.hc_post_mult_value,
+            compile_key.sinkhorn_repeat,
+        )
+        middle_args: tuple[Any, ...]
+        if compile_key.is_broadcast:
+            assert residual_out is not None
+            assert norm_weight is not None
+            middle_args = (residual_out, *output_args, norm_weight)
+        elif compile_key.use_norm_weight:
+            assert norm_weight is not None
+            middle_args = (*output_args, norm_weight)
+        else:
+            middle_args = output_args
+        norm_eps_args = (compile_key.norm_eps,) if compile_key.use_norm_weight else ()
+        return (
+            *common_args,
+            *middle_args,
+            compile_key.hidden_size,
+            *eps_args,
+            *norm_eps_args,
+            compile_key.n_splits,
+            compile_key.hc_mult,
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+        n_splits: int,
+        is_broadcast: bool,
+        use_norm_weight: bool,
+        use_pre_gemm_splits: bool = False,
+        pre_gemm_k: int = 0,
+        sinkhorn_repeat: int,
+        norm_eps: float,
+        broadcast_norm_eps: float = 0.0,
+        num_tokens: int = 1,
+        use_fused_tilelang: bool = False,
+        launch_pdl: bool,
+        **compile_key_fields: float,
+    ) -> CompileKey:
+        pre_gemm_n_splits = (
+            compute_num_split(64, pre_gemm_k, (num_tokens + 63) // 64)
+            if use_pre_gemm_splits
+            else n_splits
+        )
+        fused_n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        actual_n_splits = fused_n_splits if use_fused_tilelang else pre_gemm_n_splits
+        actual_norm_eps = broadcast_norm_eps if is_broadcast else norm_eps
+        actual_use_norm_weight = use_norm_weight or is_broadcast
+        return self.CompileKey(
+            **compile_key_fields,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_splits=actual_n_splits,
+            use_norm_weight=actual_use_norm_weight,
+            is_broadcast=is_broadcast,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=actual_norm_eps if actual_use_norm_weight else 0.0,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        vllm_config: Any,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+        use_norm_weight: bool,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_eps: float | tuple[float, ...],
+        broadcast_norm_eps: float | tuple[float, ...] | None = None,
+        include_pre_gemm_splits: bool = False,
+        include_broadcast_splits: bool = False,
+    ) -> list[CompileKey]:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if max_tokens <= 0:
+            return []
+
+        warmup_cases = zip_inputs(
+            dict(
+                is_broadcast=False,
+                use_pre_gemm_splits=False,
+                pre_gemm_k=0,
+                use_fused_tilelang=False,
+            ),
+            dict(
+                is_broadcast=False,
+                use_pre_gemm_splits=include_pre_gemm_splits,
+                pre_gemm_k=hc_mult * hidden_size,
+                use_fused_tilelang=False,
+            ),
+            dict(
+                is_broadcast=include_broadcast_splits,
+                use_pre_gemm_splits=include_broadcast_splits,
+                pre_gemm_k=hidden_size,
+                use_fused_tilelang=False,
+            ),
+            dict(
+                is_broadcast=False,
+                use_pre_gemm_splits=False,
+                pre_gemm_k=0,
+                use_fused_tilelang=True,
+            ),
+        )
+        return self._trace_dispatch(self.dispatch)(
+            warmup_cases,
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            n_splits=1,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_norm_weight=use_norm_weight,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            broadcast_norm_eps=broadcast_norm_eps
+            if broadcast_norm_eps is not None
+            else norm_eps,
+            launch_pdl=(False, True),
+            _when=lambda *, use_fused_tilelang, num_tokens: (
+                not use_fused_tilelang or num_tokens <= 16
+            ),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        hidden_size = compile_key.hidden_size
+        hc_mult = compile_key.hc_mult
+        hc_mult3 = hc_mult * (2 + hc_mult)
+        num_tokens = 1
+
+        gemm_out_mul = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_splits, num_tokens, hc_mult3
+        )
+        gemm_out_sqrsum = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_splits, num_tokens
+        )
+        hc_scale = make_tilelang_warmup_tensor(torch.float32, 3)
+        hc_base = make_tilelang_warmup_tensor(torch.float32, hc_mult3)
+        post_mix = make_tilelang_warmup_tensor(torch.float32, num_tokens, hc_mult)
+        comb_mix = make_tilelang_warmup_tensor(
+            torch.float32, num_tokens, hc_mult * hc_mult
+        )
+        layer_input = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hidden_size
+        )
+        residual_shape = (
+            (num_tokens, hidden_size)
+            if compile_key.is_broadcast
+            else (num_tokens, hc_mult, hidden_size)
+        )
+        residual = make_tilelang_warmup_tensor(torch.bfloat16, *residual_shape)
+        residual_out = (
+            make_tilelang_warmup_tensor(
+                torch.bfloat16, num_tokens, hc_mult, hidden_size
+            )
+            if compile_key.is_broadcast
+            else None
+        )
+        norm_weight = (
+            make_tilelang_warmup_tensor(torch.bfloat16, hidden_size)
+            if compile_key.is_broadcast or compile_key.use_norm_weight
+            else None
+        )
+        compile_tilelang(
+            self.kernel(compile_key),
+            *self._kernel_args(
+                compile_key,
+                gemm_out_mul=gemm_out_mul,
+                gemm_out_sqrsum=gemm_out_sqrsum,
+                hc_scale=hc_scale,
+                hc_base=hc_base,
+                residual=residual,
+                residual_out=residual_out,
+                post_mix=post_mix,
+                comb_mix=comb_mix,
+                layer_input=layer_input,
+                norm_weight=norm_weight,
+            ),
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+    def __call__(
+        self,
+        gemm_out_mul: Any,
+        gemm_out_sqrsum: Any,
+        hc_scale: Any,
+        hc_base: Any,
+        residual: Any,
+        post_mix: Any,
+        comb_mix: Any,
+        layer_input: Any,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        *,
+        residual_out: Any | None = None,
+        norm_weight: Any | None = None,
+        norm_eps: float = 0.0,
+    ) -> Any:
+        is_broadcast = residual_out is not None
+        use_norm_weight = norm_weight is not None
+        n_splits = gemm_out_mul.shape[0]
+        if is_broadcast:
+            assert residual_out is not None
+            hidden_size = residual.shape[-1]
+            hc_mult = residual_out.shape[-2]
+        else:
+            hc_mult = residual.shape[-2]
+            hidden_size = residual.shape[-1]
+
+        compile_key = self.dispatch(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_splits=n_splits,
+            is_broadcast=is_broadcast,
+            use_norm_weight=use_norm_weight,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            broadcast_norm_eps=norm_eps,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        return self.kernel(compile_key)(
+            *self._kernel_args(
+                compile_key,
+                gemm_out_mul=gemm_out_mul,
+                gemm_out_sqrsum=gemm_out_sqrsum,
+                hc_scale=hc_scale,
+                hc_base=hc_base,
+                residual=residual,
+                residual_out=residual_out,
+                post_mix=post_mix,
+                comb_mix=comb_mix,
+                layer_input=layer_input,
+                norm_weight=norm_weight,
+            ),
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+
+class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        hc_mult: int
+        launch_pdl: bool
+
+    @staticmethod
+    def kernel() -> Any:
+        return mhc_post_tilelang
+
+    def dispatch(  # type: ignore[override]
+        self,
+        **compile_key_fields: int,
+    ) -> CompileKey:
+        return self.CompileKey(**compile_key_fields)
+
+    def get_warmup_keys(
+        self,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            launch_pdl=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        num_tokens = 1
+        hidden_size = compile_key.hidden_size
+        hc_mult = compile_key.hc_mult
+        comb_mix = make_tilelang_warmup_tensor(
+            torch.float32, num_tokens, hc_mult, hc_mult
+        )
+        residual = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hc_mult, hidden_size
+        )
+        post_mix = make_tilelang_warmup_tensor(torch.float32, num_tokens, hc_mult)
+        layer_input = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hidden_size
+        )
+        out = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hc_mult, hidden_size
+        )
+        compile_tilelang(
+            self.kernel(),
+            comb_mix,
+            residual,
+            post_mix,
+            layer_input,
+            out,
+            hc_mult,
+            hidden_size,
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+    def __call__(
+        self,
+        comb_mix: Any,
+        residual: Any,
+        post_mix: Any,
+        layer_input: Any,
+        out: Any,
+        hc_mult: int,
+        hidden_size: int,
+    ) -> Any:
+        return self.kernel()(
+            comb_mix,
+            residual,
+            post_mix,
+            layer_input,
+            out,
+            hc_mult,
+            hidden_size,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+
+class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        hc_mult: int
+        n_splits: int
+        tile_n: int
+        launch_pdl: bool
+
+    @staticmethod
+    def kernel() -> Any:
+        return mhc_fused_tilelang
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        hidden_size: int,
+        hc_mult: int,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        # TODO(gnovack): investigate autotuning these heuristics
+        tile_n = 2 if num_tokens < 8 else 3
+        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_splits=n_splits,
+            tile_n=tile_n,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        vllm_config: Any,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+    ) -> list[CompileKey]:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            launch_pdl=(False, True),
+            _when=lambda *, num_tokens: num_tokens <= 16,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        num_tokens = 1
+        hidden_size = compile_key.hidden_size
+        hc_mult = compile_key.hc_mult
+        hc_mult3 = hc_mult * (2 + hc_mult)
+        comb_mix = make_tilelang_warmup_tensor(
+            torch.float32, num_tokens, hc_mult, hc_mult
+        )
+        residual_in = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hc_mult, hidden_size
+        )
+        post_mix = make_tilelang_warmup_tensor(torch.float32, num_tokens, hc_mult)
+        x_in = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hidden_size)
+        weight_t = make_tilelang_warmup_tensor(
+            torch.float32, hc_mult3, hc_mult, hidden_size
+        )
+        yp_out = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_splits, num_tokens, hc_mult3
+        )
+        rp_out = make_tilelang_warmup_tensor(
+            torch.float32, compile_key.n_splits, num_tokens
+        )
+        residual_out = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hc_mult, hidden_size
+        )
+        compile_tilelang(
+            self.kernel(),
+            comb_mix,
+            residual_in,
+            post_mix,
+            x_in,
+            weight_t,
+            yp_out,
+            rp_out,
+            residual_out,
+            hc_mult,
+            hidden_size,
+            hc_mult3,
+            tile_n=compile_key.tile_n,
+            split_k=compile_key.n_splits,
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+    def __call__(
+        self,
+        comb_mix: Any,
+        residual_in: Any,
+        post_mix: Any,
+        x_in: Any,
+        weight_t: Any,
+        hc_mult: int,
+        hidden_size: int,
+        hc_mult3: int,
+    ) -> tuple[Any, Any, Any]:
+        num_tokens = residual_in.shape[0]
+        compile_key = self.dispatch(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        yp_out = torch.empty(
+            compile_key.n_splits,
+            num_tokens,
+            hc_mult3,
+            dtype=torch.float32,
+            device=residual_in.device,
+        )
+        rp_out = torch.empty(
+            compile_key.n_splits,
+            num_tokens,
+            dtype=torch.float32,
+            device=residual_in.device,
+        )
+        residual_out = torch.empty_like(residual_in)
+        self.kernel()(
+            comb_mix,
+            residual_in,
+            post_mix,
+            x_in,
+            weight_t,
+            yp_out,
+            rp_out,
+            residual_out,
+            hc_mult,
+            hidden_size,
+            hc_mult3,
+            tile_n=compile_key.tile_n,
+            split_k=compile_key.n_splits,
+            launch_pdl=compile_key.launch_pdl,
+        )
+        return yp_out, rp_out, residual_out
+
+
+class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        hc_mult: int
+        rms_eps: float
+        hc_eps: float
+        launch_pdl: bool
+
+    @staticmethod
+    def kernel() -> Any:
+        return hc_head_fuse_tilelang
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+        rms_eps: float,
+        hc_eps: float,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            rms_eps=rms_eps,
+            hc_eps=hc_eps,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        hidden_size: int,
+        hc_mult: int,
+        rms_eps: float,
+        hc_eps: float,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            rms_eps=rms_eps,
+            hc_eps=hc_eps,
+            launch_pdl=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        num_tokens = 1
+        hidden_size = compile_key.hidden_size
+        hc_mult = compile_key.hc_mult
+        residual = make_tilelang_warmup_tensor(
+            torch.bfloat16, num_tokens, hc_mult, hidden_size
+        )
+        fn = make_tilelang_warmup_tensor(torch.float32, hc_mult, hc_mult * hidden_size)
+        hc_scale = make_tilelang_warmup_tensor(torch.float32, 1)
+        hc_base = make_tilelang_warmup_tensor(torch.float32, hc_mult)
+        out = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hidden_size)
+        compile_tilelang(
+            self.kernel(),
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            compile_key.rms_eps,
+            compile_key.hc_eps,
+            hc_mult,
+            launch_pdl=compile_key.launch_pdl,
+        )
+
+    def __call__(
+        self,
+        residual: Any,
+        fn: Any,
+        hc_scale: Any,
+        hc_base: Any,
+        out: Any,
+        hidden_size: int,
+        rms_eps: float,
+        hc_eps: float,
+        hc_mult: int,
+    ) -> Any:
+        return self.kernel()(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            rms_eps,
+            hc_eps,
+            hc_mult,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+
+_HC_PRENORM_GEMM_TILELANG_KERNEL = HcPrenormGemmTileLangKernel()
+_MHC_PRE_BIG_FUSE_TILELANG_KERNEL = MhcPreBigFuseTileLangKernel()
+_MHC_POST_TILELANG_KERNEL = MhcPostTileLangKernel()
+_MHC_FUSED_TILELANG_KERNEL = MhcFusedTileLangKernel()
+_HC_HEAD_FUSED_TILELANG_KERNEL = HcHeadFusedTileLangKernel()

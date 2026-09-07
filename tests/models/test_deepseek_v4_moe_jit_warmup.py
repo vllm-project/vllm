@@ -1,0 +1,554 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Validate JIT dispatch against pre-contract behavior."""
+
+import importlib
+import importlib.util
+import sys
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda_alike():
+    pytest.skip("NVIDIA dispatch tests require CUDA", allow_module_level=True)
+
+import vllm.model_executor.layers.fused_moe.deep_gemm_utils as deep_gemm_utils_module
+import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
+import vllm.model_executor.layers.fused_moe.moe_fused_mul_sum as mul_sum_module
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    DeepGemmEPGatherKernel,
+    DeepGemmEPScatterCopyKernel,
+    DeepGemmEPScatterStartKernel,
+)
+from vllm.model_executor.layers.fused_moe.experts import (
+    fused_batched_moe as fused_batched_moe_module,
+)
+from vllm.model_executor.layers.fused_moe.experts import (
+    nvfp4_emulation_moe as nvfp4_emulation_moe_module,
+)
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonKernel,
+)
+from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+    FusedMoeNvfp4EmulationKernel,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+    TrtLlmLoraFinalizeKernel,
+    TrtLlmLoraUnpermuteActivationKernel,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    ComputeIdentityKernel,
+    FusedMoeTritonKernel,
+)
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
+    MoeFusedMulSumKernel,
+)
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    EplbMapAndRecordKernel,
+)
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import DSV4TopKKernel
+from vllm.model_executor.layers.fused_moe.utils import CountExpertNumTokensKernel
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    _PREPARE_MEGAMOE_INPUTS_KERNEL,
+)
+from vllm.triton_utils import tl
+
+
+def test_deepseek_v4_mega_moe_prepare_inputs_warmup_keys() -> None:
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v4",
+                hidden_size=256,
+                num_experts_per_tok=6,
+            )
+        ),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+    )
+
+    assert _PREPARE_MEGAMOE_INPUTS_KERNEL.get_warmup_keys(vllm_config) == [
+        _PREPARE_MEGAMOE_INPUTS_KERNEL.CompileKey(
+            hidden_size=256,
+            top_k=6,
+            block_topk=8,
+            has_padding=False,
+            has_shared_x_sf=False,
+            shared_block_m=1,
+        ),
+        _PREPARE_MEGAMOE_INPUTS_KERNEL.CompileKey(
+            hidden_size=256,
+            top_k=6,
+            block_topk=8,
+            has_padding=True,
+            has_shared_x_sf=False,
+            shared_block_m=1,
+        ),
+    ]
+
+
+def test_deep_gemm_scatter_start_dispatch_matches_legacy_meta() -> None:
+    kernel = DeepGemmEPScatterStartKernel()
+
+    assert kernel.dispatch(num_experts=257, align_m=128) == kernel.CompileKey(
+        num_experts=257,
+        block_e=128,
+        block_expert_num=512,
+        align_m=128,
+    )
+
+
+def test_deep_gemm_scatter_start_warmup_covers_dynamic_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deep_gemm_utils_module,
+        "get_mk_alignment_for_contiguous_layout",
+        lambda: (128, 128),
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils_module,
+        "get_theoretical_mk_alignment_for_contiguous_layout",
+        lambda *, expected_m, num_groups: 32 if expected_m <= 8 else 48,
+    )
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v4",
+                n_routed_experts=256,
+                num_experts_per_tok=8,
+            )
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            enable_expert_parallel=False,
+            eplb_config=SimpleNamespace(num_redundant_experts=0),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+    )
+
+    assert DeepGemmEPScatterStartKernel().get_warmup_keys(vllm_config) == [
+        DeepGemmEPScatterStartKernel.CompileKey(
+            num_experts=256,
+            block_e=128,
+            block_expert_num=256,
+            align_m=32,
+        ),
+        DeepGemmEPScatterStartKernel.CompileKey(
+            num_experts=256,
+            block_e=128,
+            block_expert_num=256,
+            align_m=48,
+        ),
+    ]
+
+
+@pytest.mark.parametrize("has_expert_map", [False, True])
+def test_count_expert_num_tokens_compile_matches_optional_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+    has_expert_map: bool,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    kernel = CountExpertNumTokensKernel()
+    arg_names = kernel.kernel.arg_names
+    monkeypatch.setattr(
+        kernel,
+        "kernel",
+        SimpleNamespace(
+            arg_names=arg_names,
+            warmup=lambda *args, **kwargs: calls.append((args, kwargs)),
+        ),
+    )
+    compile_key = kernel.CompileKey(
+        num_experts=16,
+        topk_numel=16,
+        has_expert_map=has_expert_map,
+        block_size=16,
+    )
+
+    kernel.compile(compile_key)
+
+    assert (calls[0][1]["expert_map"] is not None) is has_expert_map
+
+
+@pytest.mark.parametrize(
+    ("pack_ue8m0", "expected_packed", "expected_packed_pad"),
+    [(False, 1, 1), (True, 14, 16)],
+)
+def test_deep_gemm_scatter_copy_dispatch_matches_legacy_meta(
+    pack_ue8m0: bool,
+    expected_packed: int,
+    expected_packed_pad: int,
+) -> None:
+    kernel = DeepGemmEPScatterCopyKernel()
+
+    assert kernel.dispatch(
+        total_token_num=17,
+        hidden_size=7168,
+        topk_num=8,
+        has_expert_map=True,
+        block_size=128,
+        pack_ue8m0=pack_ue8m0,
+    ) == kernel.CompileKey(
+        total_token_num=2,
+        topk_num=8,
+        has_expert_map=True,
+        hidden_size=7168,
+        hidden_size_pad=8192,
+        scale_hidden_size=56,
+        scale_hidden_size_pad=64,
+        pack_ue8m0=pack_ue8m0,
+        scale_packed_size=expected_packed,
+        scale_packed_size_pad=expected_packed_pad,
+    )
+
+
+def test_deep_gemm_gather_dispatch_matches_runtime_layout() -> None:
+    kernel = DeepGemmEPGatherKernel()
+
+    assert kernel.dispatch(
+        dtype=torch.bfloat16,
+        total_token_num=16,
+        hidden_size=7168,
+        topk_num=8,
+        has_expert_map=False,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        total_token_num=16,
+        topk_num=8,
+        has_expert_map=False,
+        block_d=1024,
+        hidden_stride=16,
+        topk_stride=2,
+    )
+
+
+def test_trtllm_lora_unpermute_dispatch_matches_legacy_meta() -> None:
+    kernel = TrtLlmLoraUnpermuteActivationKernel()
+
+    assert kernel.dispatch(
+        dtype=torch.bfloat16,
+        intermediate_size=18432,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        num_cols=18432,
+        block_i=1024,
+    )
+
+
+def test_trtllm_lora_finalize_dispatch_matches_legacy_meta() -> None:
+    kernel = TrtLlmLoraFinalizeKernel()
+
+    assert kernel.dispatch(
+        dtype=torch.bfloat16,
+        hidden_size=7168,
+        top_k=8,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        hidden_size=7168,
+        top_k=8,
+        block_k=512,
+    )
+
+
+def _moe_config(**_kwargs: Any) -> dict[str, int]:
+    return {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+
+
+def test_batched_triton_dispatch_matches_native_specialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fused_batched_moe_module, "_triton_moe_config", _moe_config)
+    kernel = BatchedTritonKernel()
+
+    assert kernel.dispatch(
+        max_num_tokens=17,
+        num_experts=256,
+        hidden_size=7168,
+        intermediate_size=18432,
+        config_top_k=8,
+        launch_n=18432,
+        launch_k=7168,
+        dtype=torch.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a16=False,
+        group_n=0,
+        group_k=0,
+        per_act_token_quant=False,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        e=256,
+        max_num_tokens=2,
+        n=18432,
+        k=7168,
+        group_n=0,
+        group_k=0,
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a16=False,
+        per_act_token_quant=False,
+        block_m=64,
+        block_n=128,
+        block_k=64,
+        use_td=False,
+        num_warps=4,
+        num_stages=3,
+    )
+
+
+def test_nvfp4_emulation_dispatch_matches_native_specialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(nvfp4_emulation_moe_module, "_triton_moe_config", _moe_config)
+    kernel = FusedMoeNvfp4EmulationKernel()
+
+    assert kernel.dispatch(
+        batch_tokens=17,
+        routed_multiplier=8,
+        num_experts=256,
+        hidden_size=7168,
+        intermediate_size=18432,
+        config_top_k=8,
+        launch_n=7168,
+        launch_k=18432,
+        top_k=1,
+        dtype=torch.bfloat16,
+        mul_routed_weight=True,
+        runtime_em=34,
+        runtime_num_valid_tokens=272,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        num_experts=256,
+        n=7168,
+        k=18432,
+        em=2,
+        num_valid_tokens=16,
+        top_k=1,
+        block_size_m=64,
+        block_size_n=128,
+        block_size_k=64,
+        group_size_m=8,
+        mul_routed_weight=True,
+        block_k_divisible=True,
+        compute_type=tl.bfloat16,
+    )
+
+
+def test_fused_moe_dispatch_matches_native_specialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fused_moe_module, "_triton_moe_config", _moe_config)
+    kernel = FusedMoeTritonKernel()
+
+    assert kernel.dispatch(
+        batch_tokens=17,
+        routed_multiplier=8,
+        num_experts=256,
+        hidden_size=7168,
+        intermediate_size=18432,
+        config_top_k=8,
+        launch_n=7168,
+        launch_k=18432,
+        top_k=1,
+        dtype=torch.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        group_n=0,
+        group_k=0,
+        naive_block_assignment=False,
+        runtime_em=34,
+        runtime_num_valid_tokens=272,
+        per_channel_quant=False,
+        has_bias=False,
+        mul_routed_weight=True,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        n=7168,
+        k=18432,
+        em=2,
+        num_valid_tokens=16,
+        group_n=0,
+        group_k=0,
+        naive_block_assignment=False,
+        block_size_m=64,
+        block_size_n=128,
+        block_size_k=64,
+        group_size_m=8,
+        split_k=1,
+        mul_routed_weight=True,
+        top_k=1,
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        per_channel_quant=False,
+        has_bias=False,
+        swap_ab=False,
+        use_td=False,
+        num_warps=4,
+        num_stages=3,
+    )
+
+
+def test_compute_identity_dispatch_matches_legacy_meta() -> None:
+    kernel = ComputeIdentityKernel()
+
+    assert kernel.dispatch(
+        top_k=8,
+        hidden_dim=7168,
+        num_tokens=17,
+        scales_stride=8,
+    ) == kernel.CompileKey(
+        top_k=8,
+        hidden_dim=7168,
+        num_tokens=2,
+        scales_stride=2,
+        block_size=256,
+    )
+
+
+@dataclass
+class _FakePlatform:
+    capability: int
+
+    def has_device_capability(self, capability: int) -> bool:
+        return self.capability >= capability
+
+
+@pytest.mark.parametrize(
+    ("capability", "kwargs", "expected"),
+    [
+        (
+            90,
+            dict(
+                num_tokens=64,
+                top_k=8,
+                size=7168,
+                element_size=4,
+                dtype=torch.float32,
+                has_expert_map=False,
+            ),
+            (torch.float32, False, 8, 7168, 2, 256, 8, 4),
+        ),
+        (
+            80,
+            dict(
+                num_tokens=64,
+                top_k=8,
+                size=7168,
+                element_size=2,
+                dtype=torch.bfloat16,
+                has_expert_map=True,
+            ),
+            (torch.bfloat16, True, 8, 7168, 4, 1024, 16, 2),
+        ),
+        (
+            70,
+            dict(
+                num_tokens=2048,
+                top_k=8,
+                size=512,
+                element_size=2,
+                dtype=torch.bfloat16,
+                has_expert_map=False,
+            ),
+            (torch.bfloat16, False, 8, 512, 8, 512, 8, 2),
+        ),
+    ],
+)
+def test_moe_fused_mul_sum_dispatch_matches_legacy_heuristic(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: int,
+    kwargs: dict[str, Any],
+    expected: tuple[torch.dtype, bool, int, int, int, int, int, int],
+) -> None:
+    monkeypatch.setattr(mul_sum_module, "current_platform", _FakePlatform(capability))
+    kernel = MoeFusedMulSumKernel()
+
+    assert kernel.dispatch(**kwargs) == kernel.CompileKey(*expected)
+
+
+def test_globalize_recv_topk_dispatch_matches_legacy_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2"
+    if importlib.util.find_spec("deep_ep") is None:
+        deep_ep_stub = ModuleType("deep_ep")
+        for type_name in ("ElasticBuffer", "EPHandle", "EventOverlap"):
+            setattr(deep_ep_stub, type_name, type(type_name, (), {}))
+        with monkeypatch.context() as context:
+            context.setitem(sys.modules, "deep_ep", deep_ep_stub)
+            module = importlib.import_module(module_name)
+        sys.modules.pop(module_name, None)
+    else:
+        module = importlib.import_module(module_name)
+    kernel = module.GlobalizeRecvTopkIdxKernel()
+
+    assert kernel.dispatch(
+        num_tokens=17,
+        topk=8,
+        P=4,
+        rank_expert_offset=64,
+        num_experts=256,
+    ) == kernel.CompileKey(
+        n_elements=2,
+        topk=8,
+        p=2,
+        rank_expert_offset=16,
+        num_experts=16,
+        block=1024,
+    )
+
+
+@pytest.mark.parametrize("has_num_unpadded", [False, True])
+def test_eplb_map_and_record_dispatch_matches_legacy_meta(
+    has_num_unpadded: bool,
+) -> None:
+    kernel = EplbMapAndRecordKernel()
+
+    assert kernel.dispatch(
+        has_num_unpadded=has_num_unpadded,
+        num_logical_experts=256,
+        map_slots=1024,
+        out_size=288,
+        num_active_experts=8,
+    ) == kernel.CompileKey(
+        has_num_unpadded=has_num_unpadded,
+        num_logical_experts=16,
+        map_slots=16,
+        out_size=16,
+        num_active_experts=2,
+        block_size=256,
+    )
+
+
+def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
+    kernel = DSV4TopKKernel()
+
+    assert kernel.dispatch(
+        num_experts=256,
+        indices_dtype=torch.int32,
+        routed_scaling_factor=2.5,
+        launch_pdl=True,
+    ) == kernel.CompileKey(
+        num_experts=256,
+        block_n=256,
+        indices_dtype=torch.int32,
+        routed_scaling_factor=2.5,
+        launch_pdl=True,
+    )
