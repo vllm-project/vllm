@@ -186,16 +186,11 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.host_buffer_kv_cache_layout = "NHD"
     worker._physical_blocks_per_logical_kv_block = 1
     worker._logical_num_blocks = num_blocks
-    worker.region_mem_types = []
     worker.region_group_ids = []
     worker.region_mem_types = []
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []
-    worker._mixed_mem_types = False
-    worker._desc_is_dram_by_block_size = {}
-    worker._desc_pos_by_block_size = {}
-    worker._dram_src_handles_by_block_size = {}
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
@@ -207,6 +202,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
+    worker._hisparse_destination = None
     worker._layer_specs = {name: spec for name in caches}
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
