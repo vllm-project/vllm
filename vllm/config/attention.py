@@ -119,7 +119,7 @@ class AttentionConfig:
         if self.use_fp4_indexer_cache is not None:
             logger.warning(
                 "use_fp4_indexer_cache is deprecated and will be removed in "
-                "v0.19. Use indexer_kv_dtype instead (True -> 'mxfp4')."
+                "v0.29. Use indexer_kv_dtype instead (True -> 'mxfp4')."
             )
             if self.use_fp4_indexer_cache:
                 if self.indexer_kv_dtype not in ("auto", "mxfp4"):

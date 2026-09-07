@@ -121,6 +121,13 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
+Scale-out APIs are disabled by default on `vllm serve`. The environment
+variable accepts only `0` or `1`; set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` to
+register the endpoints below. The
+dedicated `vllm launch render` and `vllm serve --tokens-only` modes are explicit
+opt-ins and enable their required endpoints when the variable is unset; an
+explicit value of `0` is rejected for those modes.
+
 ### Tokens IN <> Tokens OUT APIs
 
 - `/inference/v1/generate` - Generate completions
@@ -134,6 +141,8 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
+- [Responses Render API](renderer.md) (`/v1/responses/render`)
+    - Render self-contained Responses requests
 
 ### Derenderer APIs
 

@@ -3,6 +3,7 @@
 
 import itertools
 import math
+import typing
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -17,6 +18,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
     find_closest_aspect_ratio,
     round_by_factor,
 )
+from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -42,6 +44,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -228,6 +231,13 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "max_image_tokens", image_processor.max_image_tokens
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(max_pixels_tolerance, int | float)
+        assert isinstance(min_tiles, int)
+        assert isinstance(max_tiles, int)
+        assert isinstance(max_image_tokens, int)
+        assert isinstance(tile_size, int)
 
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
@@ -336,6 +346,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "encoder_patch_size", image_processor.encoder_patch_size
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(tile_size, int)
 
         thumbnail_height_patches = int(spatial_shapes[-1][0].item())
         thumbnail_width_patches = int(spatial_shapes[-1][1].item())
@@ -448,7 +461,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptReplacement]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token
+        image_token_id = hf_processor.image_token_id
+        tokenizer = self.info.get_tokenizer()
 
         def get_image_replacement_lfm2vl(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -463,15 +477,18 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 processor=hf_processor,
                 mm_kwargs=hf_processor_mm_kwargs,
             )
-            return PromptUpdateDetails.select_text(
-                image_repl,
-                embed_text=image_token,
+            image_repl_ids = cached_encode(
+                tokenizer, image_repl, add_special_tokens=False
+            )
+            return PromptUpdateDetails.select_token_id(
+                image_repl_ids,
+                image_token_id,
             )
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=get_image_replacement_lfm2vl,
             )
         ]
@@ -607,6 +624,7 @@ class Lfm2VLForConditionalGeneration(
     SupportsPP,
     IsHybrid,
 ):
+    supports_tower_connector_lora = True
     merge_by_field_config = True
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -666,6 +684,7 @@ class Lfm2VLForConditionalGeneration(
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         vision_config = config.vision_config
         quant_config = vllm_config.quant_config
 
@@ -909,6 +928,14 @@ class Lfm2VLForConditionalGeneration(
             "min_image_tokens",
             getattr(self.config, "min_image_tokens", None) or 64,
         )
+        if not isinstance(
+            value,
+            (str, Buffer, typing.SupportsInt, typing.SupportsIndex),
+        ):
+            raise TypeError(
+                "int() argument must be a string, a bytes-like object "
+                f"or a real number, not '{type(value).__name__}'"
+            )
         return max(1, int(value))
 
     def _get_lfm2vl_item_tile_slices(

@@ -4,7 +4,10 @@
 from typing import Literal, get_args
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -182,6 +185,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
 __all__ = [
     "QuantizationConfig",
+    "resolve_quant_method",
     "QuantizationMethods",
     "get_quantization_config",
     "register_quantization_config",

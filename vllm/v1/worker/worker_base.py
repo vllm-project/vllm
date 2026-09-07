@@ -125,6 +125,12 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def synchronize_device(self) -> None:
+        """Block until in-flight device work completes; backends outside
+        ``torch.accelerator`` must override with their own wait."""
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
+
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.

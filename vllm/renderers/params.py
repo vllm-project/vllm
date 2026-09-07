@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -23,6 +23,18 @@ logger = init_logger(__name__)
 
 
 _S = TypeVar("_S", list[int], "torch.Tensor")
+
+# Prompt keys whose entry i describes token i of the prompt, so they must be
+# reduced with the same slice as the prompt tokens themselves. Anything added
+# here is truncated by `TokenizeParams.apply_post_tokenization`.
+# `_assistant_tokens_mask` is renderer-internal: `HfRenderer.render_messages`
+# stashes it on the prompt so `_process_tokens` can move it onto the engine
+# input.
+_PARALLEL_TO_PROMPT_TOKENS = (
+    "prompt_token_offsets",
+    "prompt_is_token_ids",
+    "_assistant_tokens_mask",
+)
 
 
 def merge_kwargs(
@@ -369,6 +381,31 @@ class TokenizeParams:
 
         return text
 
+    def _get_text_truncation_offset(
+        self, tokenizer: TokenizerLike | None, text: str
+    ) -> int:
+        """Return the number of source characters removed from the left.
+
+        ``_text_len_check`` pre-truncates long text before tokenization when
+        an explicit truncation side is requested. Fast-tokenizer offsets are
+        then relative to that shortened string, so callers need this prefix
+        length to map them back to the original prompt.
+        """
+        max_input_tokens = self.max_input_tokens
+        if (
+            max_input_tokens is None
+            or tokenizer is None
+            or self.truncate_prompt_tokens is None
+            or self.truncation_side != "left"
+        ):
+            return 0
+
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if max_input_chars <= 0:
+            return 0
+
+        return max(len(text) - max_input_chars, 0)
+
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
         return text.lower() if self.do_lower_case else text
@@ -414,24 +451,39 @@ class TokenizeParams:
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
-    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply truncation to prompt tokens if necessary."""
+    def _truncation_slice(
+        self, tokenizer: TokenizerLike | None, length: int
+    ) -> slice | None:
+        """The slice truncation applies to a sequence of `length` tokens.
+
+        `None` means no truncation. Anything parallel to the prompt tokens
+        must be reduced with this same slice to stay aligned with them; list
+        such keys in `_PARALLEL_TO_PROMPT_TOKENS`.
+        """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
 
-        if max_length is None or max_length >= len(tokens):
-            return tokens
+        if max_length is None or max_length >= length:
+            return None
         if max_length == 0:
-            return tokens[:0]
+            return slice(0, 0)
 
         side = self.truncation_side or (
             tokenizer.truncation_side if tokenizer is not None else None
         )
         if side == "left":
-            return tokens[-max_length:]
+            return slice(-max_length, None)
 
-        return tokens[:max_length]
+        return slice(0, max_length)
+
+    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to prompt tokens if necessary."""
+        truncation = self._truncation_slice(tokenizer, len(tokens))
+        if truncation is None:
+            return tokens
+
+        return tokens[truncation]
 
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
@@ -462,9 +514,13 @@ class TokenizeParams:
 
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
+        # Truncation runs before padding, matching the Transformers pipeline
+        # these parameters are named after. Padding first would let a
+        # subsequent left-side truncation keep only the pad tokens it just
+        # appended, discarding the prompt entirely.
         for validator in (
-            self._token_padding,
             self._token_truncation,
+            self._token_padding,
             self._token_len_check,
         ):
             tokens = validator(tokenizer, tokens)
@@ -492,5 +548,13 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
+        prompt_dict = cast(dict, prompt)
+        for key in _PARALLEL_TO_PROMPT_TOKENS:
+            parallel = prompt_dict.get(key)
+            if parallel is None:
+                continue
+            truncation = self._truncation_slice(tokenizer, len(parallel))
+            if truncation is not None:
+                prompt_dict[key] = parallel[truncation]
 
         return prompt

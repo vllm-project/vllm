@@ -261,6 +261,25 @@ class ECConnectorBase(ABC):
         """
         return True
 
+    def start_save_caches(self, **kwargs: Any) -> None:
+        """Prepare this step's outbound pushes before the model runs."""
+        return
+
+    def start_worker_services(self) -> None:
+        """Start Worker-side services once the model is resident."""
+        return
+
+    def take_unavailable_requests(self) -> set[str]:
+        """Request IDs whose encoder inputs the connector can no longer obtain.
+
+        The Scheduler fails these; re-issuing the request re-runs the encode.
+        """
+        return set()
+
+    def update_state_after_free(self, request: "Request", index: int):
+        """Notify the connector that an encoder cache entry was released."""
+        return
+
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):
         """
