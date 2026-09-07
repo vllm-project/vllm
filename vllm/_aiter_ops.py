@@ -211,6 +211,31 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def _validate_rocm_aiter_fused_moe_shared_expert_args(
+    shared_w1: torch.Tensor | None,
+    shared_w2: torch.Tensor | None,
+    shared_w1_scale: torch.Tensor | None,
+    shared_w2_scale: torch.Tensor | None,
+    shared_expert_id: int,
+) -> bool:
+    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
+    has_shared_expert = any(tensor is not None for tensor in shared_tensors)
+    if has_shared_expert:
+        if not all(tensor is not None for tensor in shared_tensors):
+            raise ValueError(
+                "Heterogeneous fused MoE requires both shared weights and scales."
+            )
+        if shared_expert_id < 0:
+            raise ValueError(
+                "Heterogeneous fused MoE requires a non-negative shared expert ID."
+            )
+    elif shared_expert_id >= 0:
+        raise ValueError(
+            "A non-negative shared expert ID requires shared weights and scales."
+        )
+    return has_shared_expert
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -236,7 +261,20 @@ def _rocm_aiter_fused_moe_impl(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
+    has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
+        shared_w1,
+        shared_w2,
+        shared_w1_scale,
+        shared_w2_scale,
+        shared_expert_id,
+    )
+
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
@@ -252,6 +290,15 @@ def _rocm_aiter_fused_moe_impl(
     ):
         extra_kwargs["beta"] = beta
         extra_kwargs["linear_beta"] = linear_beta
+
+    if has_shared_expert:
+        extra_kwargs.update(
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+        )
 
     return fused_moe(
         hidden_states,
@@ -304,6 +351,11 @@ def _rocm_aiter_fused_moe_fake(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -387,18 +439,6 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
-def _rocm_aiter_topk_softmax_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    num_shared_experts: int = 0,
-    shared_expert_scoring_func: str = "",
-) -> None:
-    pass
-
-
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -407,14 +447,6 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(topk_weights, topk_indices, gating_output)
-
-
-def _rocm_aiter_topk_sigmoid_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-) -> None:
-    pass
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -441,19 +473,6 @@ def _rocm_aiter_biased_grouped_topk_impl(
     )
 
 
-def _rocm_aiter_biased_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
-
-
 def _rocm_aiter_grouped_topk_impl(
     gating_output: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -477,19 +496,6 @@ def _rocm_aiter_grouped_topk_impl(
         is_softmax,
         routed_scaling_factor,
     )
-
-
-def _rocm_aiter_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
 
 
 def _rocm_aiter_fused_topk_impl(
@@ -616,29 +622,6 @@ def _rocm_aiter_mla_decode_fwd_impl(
         max_seqlen_qo,
         **kwargs,
     )
-
-
-def _rocm_aiter_mla_decode_fwd_fake(
-    q: torch.Tensor,
-    kv_buffer: torch.Tensor,
-    o: torch.Tensor,
-    qo_indptr: torch.Tensor,
-    max_seqlen_qo: int,
-    kv_indptr: torch.Tensor | None = None,
-    kv_indices: torch.Tensor | None = None,
-    kv_last_page_lens: torch.Tensor | None = None,
-    sm_scale: float = 1.0,
-    logit_cap: float = 0.0,
-    q_scale: torch.Tensor | None = None,
-    kv_scale: torch.Tensor | None = None,
-    work_meta_data: torch.Tensor | None = None,
-    work_indptr: torch.Tensor | None = None,
-    work_info_set: torch.Tensor | None = None,
-    reduce_indptr: torch.Tensor | None = None,
-    reduce_final_map: torch.Tensor | None = None,
-    reduce_partial_map: torch.Tensor | None = None,
-) -> None:
-    pass
 
 
 def _rocm_aiter_w8a8_gemm_impl(
@@ -1102,15 +1085,6 @@ def _rocm_aiter_per_tensor_quant_impl(
         dynamic_per_tensor_quant(out, x, scale)
     else:
         static_per_tensor_quant(out, x, scale)
-
-
-def _rocm_aiter_per_tensor_quant_fake(
-    out: torch.Tensor,
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    is_dynamic: bool,
-) -> None:
-    pass
 
 
 def _rocm_aiter_per_token_quant_impl(
@@ -1597,18 +1571,6 @@ def _triton_rotary_embedding_impl(
     key = key.view(key_shape)
 
 
-def _triton_rotary_embedding_fake(
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    head_size: int,
-    cos_sin_cache: torch.Tensor,
-    is_neox_style: bool,
-    offsets: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 def _rocm_aiter_fp8_attn_impl(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2088,6 +2050,44 @@ class rocm_aiter_ops:
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
     @staticmethod
+    def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
+        """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
+        if type(num_tokens) is not int or num_tokens <= 0:
+            return False
+
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter.fused_moe import fused_moe
+
+            params = inspect.signature(fused_moe).parameters
+            supports_dsv4_i384_fhmoe = getattr(fhmoe, "supports_dsv4_i384_fhmoe", None)
+            if not callable(supports_dsv4_i384_fhmoe):
+                return False
+            supports_num_tokens = supports_dsv4_i384_fhmoe(num_tokens)
+        except Exception:
+            return False
+
+        return supports_num_tokens is True and all(
+            name in params
+            for name in (
+                "shared_w1",
+                "shared_w2",
+                "shared_w1_scale",
+                "shared_w2_scale",
+                "shared_expert_id",
+            )
+        )
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
+        """Whether AITER has DSV4 native-I384 configs through the given M."""
+        return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
 
@@ -2132,7 +2132,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_softmax",
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-                fake_impl=_rocm_aiter_topk_softmax_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2140,7 +2139,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
-                fake_impl=_rocm_aiter_topk_sigmoid_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2148,7 +2146,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_biased_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2156,7 +2153,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_grouped_topk",
                 op_func=_rocm_aiter_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2172,7 +2168,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
-                fake_impl=_rocm_aiter_mla_decode_fwd_fake,
             )
 
             direct_register_custom_op(
@@ -2266,7 +2261,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=["out", "scale"],
-                fake_impl=_rocm_aiter_per_tensor_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2306,7 +2300,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_triton_rotary_embedding",
                 op_func=_triton_rotary_embedding_impl,
                 mutates_args=["query", "key"],  # These tensors are modified in-place
-                fake_impl=_triton_rotary_embedding_fake,
             )
 
             direct_register_custom_op(
@@ -2562,6 +2555,11 @@ class rocm_aiter_ops:
         swiglu_limit: float = 0.0,
         beta: float | None = None,
         linear_beta: float | None = None,
+        shared_w1: torch.Tensor | None = None,
+        shared_w2: torch.Tensor | None = None,
+        shared_w1_scale: torch.Tensor | None = None,
+        shared_w2_scale: torch.Tensor | None = None,
+        shared_expert_id: int = -1,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2588,6 +2586,11 @@ class rocm_aiter_ops:
             swiglu_limit,
             beta,
             linear_beta,
+            shared_w1,
+            shared_w2,
+            shared_w1_scale,
+            shared_w2_scale,
+            shared_expert_id,
         )
 
     @staticmethod
@@ -3170,6 +3173,13 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
         return shuffle_scale_a16w4(tensor, num_experts, gate_up)
+
+    @staticmethod
+    def shuffle_scale(tensor: torch.Tensor) -> torch.Tensor:
+        """Shuffle a non-gate/up E8M0 scale tensor for AITER."""
+        from aiter.ops.shuffle import shuffle_scale
+
+        return shuffle_scale(tensor)
 
     @staticmethod
     def shuffle_weights(
