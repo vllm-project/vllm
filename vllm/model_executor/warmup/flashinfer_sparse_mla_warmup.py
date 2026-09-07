@@ -55,7 +55,11 @@ def _sparse_mla_refine_tokens(worker: "Worker") -> tuple[int, ...]:
         getattr(worker.vllm_config.compilation_config, "cudagraph_capture_sizes", None)
         or ()
     )
-    return tuple(sorted({s for s in sizes if 0 < s <= _SPARSE_MLA_REFINE_TOKEN_CAP}))
+    # A uniform-decode dummy run at bucket s schedules s requests; buckets past
+    # max_num_reqs cannot be formed.
+    max_reqs = getattr(worker.model_runner, "max_num_reqs", 0) or 0
+    cap = min(_SPARSE_MLA_REFINE_TOKEN_CAP, max_reqs)
+    return tuple(sorted({s for s in sizes if 0 < s <= cap}))
 
 
 def _attention_backend_name(backend: object) -> str | None:
