@@ -1218,7 +1218,7 @@ def _get_kv_cache_groups_glm5_next(
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, KpoolTailSpec)
     }
-    attn_specs = {
+    attn_specs: dict[str, KVCacheSpec] = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if type(spec) is MLAAttentionSpec
