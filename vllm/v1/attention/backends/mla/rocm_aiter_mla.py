@@ -1047,6 +1047,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     "AITER MLA segmented DCP verify builds causally bounded "
                     "rows and cannot serve a non-causal block."
                 )
+            # The replay slices query positions with a uniform stride, so every
+            # request has to contribute exactly max_qo_len rows. Checking the
+            # row total alone is not enough: a mixed batch of, say, lengths
+            # (4, 4, 2, 2) still divides by a stride of 4, and would then read
+            # rows belonging to the wrong request without failing. Done on the
+            # CPU copy of query_start_loc so the hot path stays sync-free.
+            # Zero-length entries are the full-CG dummy requests, which
+            # _uniform_padded_mtp_qo_len has already forced to one qlen.
+            uneven_qo_len = qo_len[qo_len > 0] if pad_uniform_mtp else qo_len
+            if not bool(torch.all(uneven_qo_len == max_qo_len)):
+                raise NotImplementedError(
+                    "AITER MLA non-causal multi-token decode requires every "
+                    f"request in the block to have {max_qo_len} query rows, "
+                    f"got {qo_len.tolist()}."
+                )
 
         # Segmented DCP verify carries its own per-row subpage table, so the
         # flat per-token view is dead work for it. Leave the buffer alone and
