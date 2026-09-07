@@ -783,8 +783,7 @@ def invoke_fused_moe_triton_kernel(
     B_bias: torch.Tensor | None = None,
 ):
     if (
-        use_fp8_w8a8
-        and (A.dtype == torch.float8_e4m3fn or B.dtype == torch.float8_e4m3fn)
+        (A.dtype == torch.float8_e4m3fn or B.dtype == torch.float8_e4m3fn)
         and current_platform.is_cuda()
         and not current_platform.has_device_capability(89)
     ):
