@@ -21,11 +21,29 @@ namespace {
 // 6000 Blackwell / GB202: 96-128 MiB) keep the default order, which is also
 // the faster one there (2560x6144 at 15 MiB: 178 vs 163 at M=2048).
 constexpr int kBlockwiseFp8SwizzleSize = 8;
+// Above the L2 the swizzled order is not unconditionally better. On a GB10
+// (24 MiB L2) it loses to the default order across a band of middling
+// activation sizes -- worst at M = 2560 (5120x5120 -10.4 %, 10240x2560
+// -9.4 %, 16384x2560 -6.4 %), and 3-5 % at M = 4096 on the 2560-wide weights.
+// It wins again once the activation slab is large (up to 3.2x), and it wins at
+// very small M. Over four starts on 6 shapes x M = 1024..6144 (66 cells),
+// gating on the weight alone leaves 118.8 percentage points on the table, the
+// activation term alone 54.0, and the two together 35.3.
+//
+// The small-M island stops at 1024 because it is K-dependent: at K = 2560 the
+// swizzle wins there, at K = 5120 the default order does, so an island reaching
+// M = 2048 gives back 6.9-8.5 % on the 5120-wide weights.
+constexpr int64_t kBlockwiseFp8SwizzleMinActivationBytes = 14ll << 20;
+constexpr int64_t kBlockwiseFp8SwizzleSmallM = 1024;
 
-int blockwise_fp8_swizzle_size(int64_t weight_bytes) {
+int blockwise_fp8_swizzle_size(int64_t m, int64_t k, int64_t weight_bytes) {
   const int64_t l2_bytes = get_device_prop()->l2CacheSize;
-  return (l2_bytes > 0 && weight_bytes > l2_bytes) ? kBlockwiseFp8SwizzleSize
-                                                   : 1;
+  if (l2_bytes <= 0 || weight_bytes <= l2_bytes) return 1;
+  if (m <= kBlockwiseFp8SwizzleSmallM) return kBlockwiseFp8SwizzleSize;
+  // FP8 activations: one byte per element.
+  return (m * k >= kBlockwiseFp8SwizzleMinActivationBytes)
+             ? kBlockwiseFp8SwizzleSize
+             : 1;
 }
 
 }  // namespace
@@ -35,7 +53,8 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
     torch::stable::Tensor const& b_scales) {
   // b is [K, N] FP8 (one byte per element).
-  const int swizzle = blockwise_fp8_swizzle_size(b.size(1) * b.size(0));
+  const int swizzle =
+      blockwise_fp8_swizzle_size(a.size(0), a.size(1), b.size(1) * b.size(0));
   if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     cutlass_gemm_blockwise_sm120_fp8_dispatch<cutlass::bfloat16_t>(
         out, a, b, a_scales, b_scales, swizzle);

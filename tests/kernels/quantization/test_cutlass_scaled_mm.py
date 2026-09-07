@@ -229,14 +229,19 @@ def test_cutlass_fp8_gemm_padded(
     torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
 
 
-# Two prefill-sized cases for the SM 12.x blockwise path, where the op switches
-# the tile scheduler to a swizzled CTA order once the weight exceeds the L2
-# (16384x2560 = 40 MiB and 5120x5120 = 25 MiB on a 24 MiB L2 part); the odd M
+# Prefill-sized cases for the SM 12.x blockwise path, where the op switches the
+# tile scheduler to a swizzled CTA order. On a 24 MiB L2 part the weights here
+# exceed the L2 (16384x2560 = 40 MiB, 5120x5120 = 25 MiB) and the three arms of
+# the gate are then covered by M: 8193 and 5120 take the swizzled order via the
+# activation term, 2560 takes the default order in the band where the swizzle
+# loses, and 1024 takes the swizzled order via the small-M island. The odd M
 # also covers the non-swap-AB dispatch. Elsewhere they run the default order
 # like the rest of the list.
 BLOCKWISE_PREFILL_FACTORS = [
     (8193, 16384, 2560),
     (5120, 5120, 5120),
+    (2560, 16384, 2560),
+    (1024, 16384, 2560),
 ]
 
 
