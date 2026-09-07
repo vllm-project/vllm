@@ -451,13 +451,12 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
-        is_auto_tool_choice = enable_auto_tools and (
-            request.tool_choice == "auto"
-            or request.tool_choice is None
-            or (
-                not supports_required_and_named
-                and (is_named_tool_choice or is_required_tool_choice)
-            )
+        is_auto_tool_choice = (
+            enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ) or (
+            not supports_required_and_named
+            and (is_named_tool_choice or is_required_tool_choice)
         )
 
         tool_calls = list[FunctionCall]()

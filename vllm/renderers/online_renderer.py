@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias
 
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ToolChoiceFunction,
+)
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIMessage
 from openai_harmony import ToolNamespaceConfig
@@ -194,29 +198,27 @@ class OnlineRenderer:
             _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
             _mt.validate_request_params(request)
 
-        # Check if tool parsing is unavailable (common condition)
-        tool_parsing_unavailable = (
-            tool_parser is None
-            and not is_mistral_tokenizer(tokenizer)
-            and not self.use_harmony
-        )
-
         # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
+        if (
+            not is_mistral_tokenizer(tokenizer)
+            and not self.use_harmony
+            and request.tool_choice not in (None, "none")
         ):
-            if request.tool_choice == "auto" and not self.enable_auto_tools:
+            if request.tool_choice == "auto" and (
+                not self.enable_auto_tools or tool_parser is None
+            ):
                 # for hf tokenizers, "auto" tools requires
                 # --enable-auto-tool-choice and --tool-call-parser
                 return self.create_error_response(
                     '"auto" tool choice requires '
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
-            elif request.tool_choice != "auto":
+            elif request.tool_choice != "auto" and tool_parser is None:
                 # "required" or named tool requires tool parser
                 if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
                     tool_choice_desc = f'function "{request.tool_choice.function.name}"'
+                elif isinstance(request.tool_choice, ToolChoiceFunction):
+                    tool_choice_desc = f'function "{request.tool_choice.name}"'
                 else:
                     tool_choice_desc = f'"{request.tool_choice}"'
                 return self.create_error_response(
@@ -303,6 +305,38 @@ class OnlineRenderer:
                 err_type="invalid_request_error",
                 param="previous_response_id",
             )
+
+        if (
+            not is_mistral_tokenizer(self.renderer.tokenizer)
+            and not self.use_harmony
+            and request.tools
+        ):
+            tool_parser = (
+                self.parser.tool_parser_cls if self.parser is not None else None
+            )
+            if request.tool_choice == "auto" and (
+                not self.enable_auto_tools or tool_parser is None
+            ):
+                return self.create_error_response(
+                    '"auto" tool choice requires '
+                    "--enable-auto-tool-choice and --tool-call-parser to be set"
+                )
+            elif (
+                request.tool_choice not in (None, "none", "auto")
+                and tool_parser is None
+            ):
+                if isinstance(request.tool_choice, ToolChoiceFunction):
+                    tool_choice_desc = f'function "{request.tool_choice.name}"'
+                elif isinstance(
+                    request.tool_choice, ChatCompletionNamedToolChoiceParam
+                ):
+                    tool_choice_desc = f'function "{request.tool_choice.function.name}"'
+                else:
+                    tool_choice_desc = f'"{request.tool_choice}"'
+                return self.create_error_response(
+                    f"tool_choice={tool_choice_desc} requires "
+                    "--tool-call-parser to be set"
+                )
 
         tool_dicts = construct_tool_dicts(
             request.tools,
