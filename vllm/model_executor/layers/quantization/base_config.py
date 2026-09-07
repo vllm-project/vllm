@@ -114,7 +114,6 @@ class QuantizationConfig(ABC):
         super().__init__()
         # mapping is updated by models as they initialize
         self.packed_modules_mapping: dict[str, list[str]] = dict()
-        self.online_quantization_config: OnlineQuantizationConfig | None = None
 
     @abstractmethod
     def get_name(self) -> QuantizationMethods:
@@ -203,48 +202,6 @@ class QuantizationConfig(ABC):
             method.
         """
         raise NotImplementedError
-
-    def get_effective_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> QuantizeMethodBase | None:
-        """Return the checkpoint method with configured online quantization."""
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-            UnquantizedFusedMoEMethod,
-        )
-        from vllm.model_executor.layers.linear import (
-            LinearBase,
-            UnquantizedLinearMethod,
-        )
-
-        base_quant_method = self.get_quant_method(layer, prefix)
-        if self.online_quantization_config is None:
-            return base_quant_method
-        # Online quantization currently supports only LinearBase and RoutedExperts.
-        # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-        if not isinstance(layer, (LinearBase, RoutedExperts)):
-            return base_quant_method
-
-        self.online_quantization_config.packed_modules_mapping = (
-            self.packed_modules_mapping
-        )
-        checkpoint_is_quantized = base_quant_method is not None and not isinstance(
-            base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
-        )
-        online_target = self.online_quantization_config.resolve_quant_method_cls(
-            layer, prefix
-        )
-        if checkpoint_is_quantized:
-            if online_target is not None:
-                raise ValueError(
-                    f"Cannot apply requested online quantization {online_target[3]} to "
-                    f"pre-quantized layer {prefix}: {base_quant_method} was already "
-                    "selected by the checkpoint quantization config."
-                )
-            return base_quant_method
-        if online_target is None:
-            return base_quant_method
-        return self.online_quantization_config.get_quant_method(layer, prefix)
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":
