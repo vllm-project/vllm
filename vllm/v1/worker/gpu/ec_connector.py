@@ -62,6 +62,9 @@ class ActiveECConnector(ECConnector):
         assert scheduler_output.ec_connector_metadata is not None
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
+        if ec_connector.is_producer:
+            ec_connector.start_save_caches(encoder_cache=self.encoder_cache)
+
         if ec_connector.is_consumer:
             ec_connector.start_load_caches(self.encoder_cache)
 
