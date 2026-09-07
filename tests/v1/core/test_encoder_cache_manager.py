@@ -167,6 +167,38 @@ def test_get_freed_mm_hashes_clears_freed_list():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_referencing_a_freeable_entry_protects_it_from_eviction():
+    """A waiting request can hold an entry it is not scheduled for yet.
+
+    Entries with no referent are evictable. A request that is deferred (e.g.
+    by an EC connector waiting on another item) still needs the items it
+    already has, and a connector that hands out one transfer per request
+    cannot always produce the same item a second time.
+    """
+    manager = EncoderCacheManager(cache_size=10)
+    owner = MockRequest("owner", ["a"], [5])
+    waiter = MockRequest("waiter", ["a"], [5])
+    newcomer = MockRequest("newcomer", ["b"], [6])
+
+    manager.allocate(owner, 0)
+    manager.free_encoder_input(owner, 0)
+    assert "a" in manager.freeable
+
+    # The waiting request references it; it is no longer reclaimable.
+    assert manager.check_and_update_cache(waiter, 0)
+    assert "a" not in manager.freeable
+
+    # 'b' no longer fits, and 'a' must not be taken away to make room.
+    assert not manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert "a" in manager.cached
+    assert manager.get_freed_mm_hashes() == []
+
+    # Once the waiter is done with it, the entry is reclaimable again.
+    manager.free_encoder_input(waiter, 0)
+    assert manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert manager.get_freed_mm_hashes() == ["a"]
+
+
 def test_reallocated_hash_is_not_reported_as_freed():
     manager = EncoderCacheManager(cache_size=8)
     req_a = MockRequest("reqA", ["a"], [4])
