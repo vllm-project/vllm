@@ -100,18 +100,50 @@ DINLINE void store_global_16(void* address, const uint32_t (&value)[4]) {
 #endif
 }
 
+DINLINE void mnnvl_multimem_publish_flag(FlagType* flag_addr, FlagType flag) {
+#if !defined(USE_ROCM) && CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ >= 900)
+  asm volatile("multimem.st.release.sys.global.u32 [%0], %1;"
+               :
+               : "l"(flag_addr), "r"(flag)
+               : "memory");
+  // The flag is stored through the multicast alias and polled through the
+  // local unicast alias in the same grid.
+  asm volatile("fence.proxy.alias;" ::: "memory");
+#elif defined(USE_ROCM)
+  __builtin_trap();
+#else
+  asm volatile("trap;");
+#endif
+}
+
+template <bool ready, int ngpus>
+__global__ void mnnvl_multimem_barrier_kernel(Signal* local_signal,
+                                              Signal* multicast_signal,
+                                              int rank) {
+  FlagType flag = local_signal->_flag[0] + 1;
+  FlagType* multicast_counters =
+      ready ? multicast_signal->start[0] : multicast_signal->end[0];
+  FlagType* local_counters =
+      ready ? local_signal->start[0] : local_signal->end[0];
+  // Replicate this rank's counter into every backing allocation.
+  mnnvl_multimem_publish_flag(&multicast_counters[rank], flag);
+#pragma unroll
+  for (int peer = 0; peer < ngpus; ++peer) {
+    while (ld_flag_acquire(&local_counters[peer]) != flag);
+  }
+  local_signal->_flag[0] = flag;
+}
+
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
     mnnvl_multimem_reduce_scatter_kernel(const T* __restrict__ multicast_input,
-                                         T* __restrict__ result, RankSignals sg,
-                                         Signal* self_sg, int rank,
+                                         T* __restrict__ result, int rank,
                                          int packs_per_rank) {
   constexpr int kThreadsPerWarp = 32;
   constexpr int kWarpsPerCta = kMnnvlMultimemRsThreads / kThreadsPerWarp;
   constexpr int kPacksPerWarpIteration =
       kThreadsPerWarp * kMnnvlMultimemRsUnroll;
-
-  barrier_at_start_release<ngpus>(sg, self_sg, rank);
 
   int lane;
 #if !defined(USE_ROCM)
@@ -148,8 +180,6 @@ __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
     }
     pack_offset += pack_stride;
   }
-
-  barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename P>

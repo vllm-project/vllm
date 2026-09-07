@@ -192,10 +192,9 @@ void CustomAllreduce::mnnvl_lamport_reduce_scatter(cudaStream_t stream,
 }
 
 template <typename T>
-void CustomAllreduce::mnnvl_multimem_reduce_scatter(cudaStream_t stream,
-                                                    const T* multicast_input,
-                                                    T* output, int size,
-                                                    int block_limit) {
+void CustomAllreduce::mnnvl_multimem_reduce_scatter(
+    cudaStream_t stream, const T* multicast_input, T* output,
+    Signal* local_signal, Signal* multicast_signal, int size, int block_limit) {
   if (size <= 0)
     throw std::runtime_error(
         "MNNVL multimem reduce-scatter requires a non-empty input");
@@ -213,11 +212,15 @@ void CustomAllreduce::mnnvl_multimem_reduce_scatter(cudaStream_t stream,
   int blocks = std::min(
       block_limit, (packs_per_rank + packs_per_block - 1) / packs_per_block);
 
-#define MNNVL_MULTIMEM_RS_CASE(ngpus)                                       \
-  case ngpus:                                                               \
-    mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                          \
-        <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(                   \
-            multicast_input, output, sg_, self_sg_, rank_, packs_per_rank); \
+#define MNNVL_MULTIMEM_RS_CASE(ngpus)                                 \
+  case ngpus:                                                         \
+    mnnvl_multimem_barrier_kernel<true, ngpus>                        \
+        <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
+    mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                    \
+        <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(             \
+            multicast_input, output, rank_, packs_per_rank);          \
+    mnnvl_multimem_barrier_kernel<false, ngpus>                       \
+        <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
     break;
 
   switch (world_size_) {
@@ -423,29 +426,33 @@ void mnnvl_multimem_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
   auto multicast_buffer = reinterpret_cast<void*>(_multicast_buffer);
   STD_TORCH_CHECK(local_buffer != nullptr);
   STD_TORCH_CHECK(multicast_buffer != nullptr);
+  auto* local_signal = reinterpret_cast<vllm::Signal*>(
+      static_cast<char*>(local_buffer) - sizeof(vllm::Signal));
+  auto* multicast_signal = reinterpret_cast<vllm::Signal*>(
+      static_cast<char*>(multicast_buffer) - sizeof(vllm::Signal));
   STD_CUDA_CHECK(cudaMemcpyAsync(local_buffer, inp.const_data_ptr(), input_size,
                                  cudaMemcpyDeviceToDevice, stream));
   switch (out.scalar_type()) {
     case torch::headeronly::ScalarType::Float: {
       fa->mnnvl_multimem_reduce_scatter<float>(
           stream, reinterpret_cast<float*>(multicast_buffer),
-          reinterpret_cast<float*>(out.mutable_data_ptr()), inp.numel(),
-          block_limit);
+          reinterpret_cast<float*>(out.mutable_data_ptr()), local_signal,
+          multicast_signal, inp.numel(), block_limit);
       break;
     }
     case torch::headeronly::ScalarType::Half: {
       fa->mnnvl_multimem_reduce_scatter<half>(
           stream, reinterpret_cast<half*>(multicast_buffer),
-          reinterpret_cast<half*>(out.mutable_data_ptr()), inp.numel(),
-          block_limit);
+          reinterpret_cast<half*>(out.mutable_data_ptr()), local_signal,
+          multicast_signal, inp.numel(), block_limit);
       break;
     }
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
     case torch::headeronly::ScalarType::BFloat16: {
       fa->mnnvl_multimem_reduce_scatter<nv_bfloat16>(
           stream, reinterpret_cast<nv_bfloat16*>(multicast_buffer),
-          reinterpret_cast<nv_bfloat16*>(out.mutable_data_ptr()), inp.numel(),
-          block_limit);
+          reinterpret_cast<nv_bfloat16*>(out.mutable_data_ptr()), local_signal,
+          multicast_signal, inp.numel(), block_limit);
       break;
     }
 #endif

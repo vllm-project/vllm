@@ -229,6 +229,7 @@ def test_mnnvl_multimem_reduce_scatter_skips_rendezvous_after_peer_alloc_failure
         group_value.zero_()
 
     monkeypatch.setattr(car, "torch_symm_mem", FakeSymmMem)
+    monkeypatch.setattr(car.ops, "meta_size", lambda: 128)
     monkeypatch.setattr(car.dist, "all_reduce", report_peer_allocation_failure)
     warnings = []
     monkeypatch.setattr(
@@ -279,6 +280,7 @@ def test_mnnvl_multimem_reduce_scatter_warns_on_rendezvous_failure(monkeypatch):
 
     warnings = []
     monkeypatch.setattr(car, "torch_symm_mem", FakeSymmMem)
+    monkeypatch.setattr(car.ops, "meta_size", lambda: 128)
     monkeypatch.setattr(car.dist, "all_reduce", preserve_local_result)
     monkeypatch.setattr(
         car.logger,
@@ -307,6 +309,65 @@ def test_mnnvl_multimem_reduce_scatter_warns_on_rendezvous_failure(monkeypatch):
         "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
         "failed on at least one rank; falling back to NCCL."
     ]
+
+
+def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
+    events = []
+    buffers = []
+
+    class FakeHandle:
+        multicast_ptr = 0x3000
+
+    class FakeSymmMem:
+        @staticmethod
+        def empty(size, **_kwargs):
+            events.append(("empty", size))
+            buffer = torch.ones(size, dtype=torch.uint8)
+            buffers.append(buffer)
+            return buffer
+
+        @staticmethod
+        def rendezvous(*_args, **_kwargs):
+            events.append(("rendezvous", None))
+            return FakeHandle()
+
+    def preserve_local_result(*_args, **_kwargs):
+        events.append(("all_reduce", None))
+
+    monkeypatch.setattr(car, "torch_symm_mem", FakeSymmMem)
+    monkeypatch.setattr(car.ops, "meta_size", lambda: 128)
+    monkeypatch.setattr(
+        car.torch.accelerator,
+        "synchronize",
+        lambda: events.append(("synchronize", None)),
+    )
+    monkeypatch.setattr(car.dist, "all_reduce", preserve_local_result)
+
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = True
+    communicator._ptr = 0
+    communicator.group = type("Group", (), {"group_name": "test"})()
+    communicator.device = torch.device("cpu")
+    communicator.max_mnnvl_multimem_reduce_scatter_size = 129
+    communicator.mnnvl_multimem_rs_supported = True
+    communicator.mnnvl_multimem_rs_initialized = False
+    communicator.mnnvl_multimem_rs_buffer = None
+    communicator.mnnvl_multimem_rs_multicast_ptr = 0
+
+    communicator._init_mnnvl_multimem_reduce_scatter_buffer()
+
+    assert events == [
+        ("empty", 257),
+        ("all_reduce", None),
+        ("rendezvous", None),
+        ("synchronize", None),
+        ("all_reduce", None),
+    ]
+    assert torch.all(buffers[0][:128] == 0)
+    assert torch.all(buffers[0][128:] == 1)
+    assert communicator.mnnvl_multimem_rs_buffer_size == 129
+    assert communicator.mnnvl_multimem_rs_local_ptr == buffers[0].data_ptr() + 128
+    assert communicator.mnnvl_multimem_rs_multicast_ptr == 0x3080
 
 
 @ray.remote(num_gpus=1, max_calls=1)

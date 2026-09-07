@@ -413,9 +413,10 @@ class CustomAllreduce:
 
         assert torch_symm_mem is not None
         buffer = None
+        signal_size = ops.meta_size()
         try:
             buffer = torch_symm_mem.empty(
-                self.max_mnnvl_multimem_reduce_scatter_size,
+                signal_size + self.max_mnnvl_multimem_reduce_scatter_size,
                 dtype=torch.uint8,
                 device=self.device,
             )
@@ -433,6 +434,9 @@ class CustomAllreduce:
         handle = None
         try:
             handle = torch_symm_mem.rendezvous(buffer, self.group.group_name)
+            if handle is not None:
+                buffer[:signal_size].zero_()
+                torch.accelerator.synchronize()
         except RuntimeError as error:
             logger.debug("MNNVL multimem RS rendezvous failed: %s", error)
         if not _all_ranks_true(
@@ -450,8 +454,8 @@ class CustomAllreduce:
         self.mnnvl_multimem_rs_buffer = buffer
         self.mnnvl_multimem_rs_handle = handle
         self.mnnvl_multimem_rs_buffer_size = self.max_mnnvl_multimem_reduce_scatter_size
-        self.mnnvl_multimem_rs_local_ptr = buffer.data_ptr()
-        self.mnnvl_multimem_rs_multicast_ptr = handle.multicast_ptr
+        self.mnnvl_multimem_rs_local_ptr = buffer.data_ptr() + signal_size
+        self.mnnvl_multimem_rs_multicast_ptr = handle.multicast_ptr + signal_size
 
     @contextmanager
     def capture(self):
