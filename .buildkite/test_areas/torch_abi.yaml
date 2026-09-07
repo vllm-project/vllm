@@ -2,7 +2,7 @@ group: Torch ABI
 depends_on:
   - image-build
 steps:
-- label: Torch Stable ABI Audit
+- label: ":nvidia: (L4) Torch Stable ABI Audit"
   key: torch-stable-abi-audit
   timeout_in_minutes: 5
   source_file_dependencies:

@@ -433,11 +433,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size) -> Tensor");
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out("
-      "Tensor q_in, Tensor kv, Tensor! q_out, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size) -> ()");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -466,6 +461,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
       "int cache_block_size, Tensor? position_ids=None, "
       "Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_kv_concat(Tensor k_nope, Tensor k_pe, Tensor! k_out) "
+      "-> ()");
+  ops.def(
+      "fused_kimi_k3_mla_kv_concat_quant_fp8("
+      "Tensor k_nope, Tensor k_pe, Tensor v, Tensor! k_fp8, Tensor! v_fp8) "
+      "-> ()");
   ops.def(
       "fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert("
       "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
@@ -527,12 +529,24 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
+  ops.def(
+      "fused_gdn_decode_post_conv_mtp("
+      "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
+      "Tensor state_indices, Tensor cu_seqlens, Tensor num_accepted_tokens, "
+      "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
+      "float scale, float norm_eps=1e-5, "
+      "str output_gate_activation='silu') -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
-      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
-      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
-      "int num_blocks, float eps, float output_norm_eps) -> ()");
+      "Tensor! prefix, Tensor? delta, Tensor! blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor? output_norm_weight, Tensor! output, "
+      "int num_blocks, "
+      "int block_write_idx, float eps, "
+      "float output_norm_eps) -> ()");
 #endif
 
   // Apply repetition penalties to logits in-place.
@@ -601,9 +615,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
       "linear_beta=-1.0) -> ()");
+  // Fused SituGLU activation + dynamic FP8 quantization for the Humming w2 path
+  // (writes the fp8 down input and its float32 scale). group_size=0 ->
+  // per-token scale [.., 1]; group_size=128 -> k-major block-FP8 scale [..,
+  // d/128].
+  ops.def(
+      "situ_and_mul_quant(Tensor! out, Tensor! scale, Tensor input, "
+      "float beta=1.0, float linear_beta=-1.0, int group_size=0, "
+      "Tensor? num_valid_tokens=None, int topk=1) -> ()");
   ops.def(
       "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
       "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
+  ops.def(
+      "masked_moe_activation(Tensor! out, Tensor input, Tensor "
+      "valid_token_counts, str activation, float clamp_limit=0.0, float "
+      "alpha=1.0, float beta=0.0, float situ_beta=1.0, float "
+      "situ_linear_beta=-1.0) -> ()");
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
@@ -680,6 +707,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // LongCat n-gram embedding index kernel. All tensor args are marked mutable
   // to match the (non-const) stable-Tensor& C++ signature; only ne_token_table
   // and n_gram_ids are actually written in place.
+  // Fused vocab-parallel embedding: gather the rows this rank owns and write
+  // zeros for the rest, so the following all-reduce reconstructs the full
+  // embedding.
+  ops.def(
+      "vocab_parallel_embedding(Tensor! out, Tensor input_ids, Tensor weight, "
+      "int org_vocab_start_index, int org_vocab_end_index, "
+      "int num_org_vocab_padding, int added_vocab_start_index, "
+      "int added_vocab_end_index) -> ()");
   ops.def(
       "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
       "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
@@ -691,6 +726,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // LongCat n-gram embedding index kernel.
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
+  ops.impl("vocab_parallel_embedding", TORCH_BOX(&vocab_parallel_embedding));
 
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
@@ -757,8 +793,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
-  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out",
-           TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out));
   ops.impl(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
@@ -769,6 +803,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
   ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_ds_mla_insert));
+  ops.impl("fused_kimi_k3_mla_kv_concat",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat));
+  ops.impl("fused_kimi_k3_mla_kv_concat_quant_fp8",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat_quant_fp8));
   ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
            TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
   ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
@@ -784,6 +822,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
+  ops.impl("fused_gdn_decode_post_conv_mtp",
+           TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -812,7 +855,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
   ops.impl("situ_and_mul", TORCH_BOX(&situ_and_mul));
+  ops.impl("situ_and_mul_quant", TORCH_BOX(&situ_and_mul_quant));
   ops.impl("masked_situ_and_mul", TORCH_BOX(&masked_situ_and_mul));
+  ops.impl("masked_moe_activation", TORCH_BOX(&masked_moe_activation));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
@@ -958,6 +1003,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "seq_starts) -> ()");
 
   ops.def(
+      "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor workspace_starts, int batch_size) -> ()");
+
+  ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
       "slot_mapping, "
       "int quant_block_size, str kv_cache_dtype) -> ()");
@@ -1027,6 +1076,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
   ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
            TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));
+  ops.impl("cp_gather_and_upconvert_nvfp4_kv_cache",
+           TORCH_BOX(&cp_gather_and_upconvert_nvfp4_kv_cache));
   ops.impl("indexer_k_quant_and_cache", TORCH_BOX(&indexer_k_quant_and_cache));
   ops.impl("concat_mla_q", TORCH_BOX(&concat_mla_q));
   ops.impl("cp_gather_indexer_k_quant_cache",

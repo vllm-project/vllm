@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
@@ -51,6 +52,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         quant_config: the appropriate QuantizationConfig
     """
 
+    supports_pre_processed_weights = True
+
     def __init__(self, quant_config: QuantizationConfig):
         self.quant_config = quant_config
 
@@ -72,6 +75,20 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            # Scale buffers were exported with post-processed values; drop the
+            # consumed scale placeholders and rebuild the host-side copies.
+            for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+                if hasattr(layer, name):
+                    delattr(layer, name)
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = layer._k_scale.item()
+                layer._v_scale_float = layer._v_scale.item()
+                layer._q_scale_float = layer._q_scale.item()
+                layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
+                layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
+            return
+
         # skip if there are no weights to process (for example, weight reloading)
         if not hasattr(layer, "q_scale"):
             assert not hasattr(layer, "k_scale")
@@ -80,8 +97,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             return
 
         # Per-token-head quantized KV cache: scales are computed dynamically
-        # per (token, head) in the kernel at cache-write time.  Checkpoint
-        # scales are never used regardless of calculate_kv_scales.
+        # per (token, head) in the kernel at cache-write time.
         if kv_cache_uses_per_token_head_scales(layer.kv_cache_dtype):
             layer._k_scale.copy_(1.0)
             layer._v_scale.copy_(1.0)
@@ -97,10 +113,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to
         # calculate them on the fly.
-        if (
-            is_quantized_kv_cache(layer.kv_cache_dtype)
-            and not layer.calculate_kv_scales
-        ):
+        if is_quantized_kv_cache(layer.kv_cache_dtype):
             if layer.k_scale > 0.0 and layer.v_scale > 0.0:
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
@@ -158,7 +171,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             q_scale = layer.q_scale
             if current_platform.is_fp8_fnuz():
                 q_scale *= 2
-            layer.calculate_kv_scales = False
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:

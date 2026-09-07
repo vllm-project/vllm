@@ -5,6 +5,7 @@
       "function": {
         "name": "get_weather",
         "description": "weather",
+        "strict": true,
         "parameters": {
           "type": "object",
           "properties": {
@@ -34,12 +35,16 @@
           "type": "function",
           "function": {
             "name": "calc",
-            "description": "calculator",
+            "strict": false,
             "parameters": {
               "type": "object",
               "properties": {
                 "x": {
-                  "type": "number"
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "default": null
                 }
               },
               "required": [

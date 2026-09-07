@@ -232,6 +232,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
+        self.shared_experts: Ernie4_5_VLMoeMLP | None
         if self.has_shared_experts:
             intermediate_size = (
                 config.moe_intermediate_size[0] * config.moe_num_shared_experts
@@ -611,7 +612,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -771,9 +772,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                     param = params_dict[name]
 

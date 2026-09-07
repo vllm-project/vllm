@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Minimal single-node reference proxy for MoRI-IO prefill/decode disaggregation.
+# It demonstrates the DP-rank pinning contract the connector expects: pick one
+# prefill DP rank per request (flat_interleaved_dp_route) and pin BOTH legs to it
+# via the ``X-data-parallel-rank`` header plus ``kv_transfer_params``
+# (``remote_dp_rank`` / ``remote_dp_size`` / ``remote_tp_size``).
+#
+# Scope: single-node only. It intentionally does NOT supply the cross-pod
+# Wide-EP (2P2D) peer info -- ``remote_hosts`` / ``multi_pod_hosts``,
+# ``data_parallel_size_local``, ``is_request_leader``. In real multi-pod
+# deployments that peer info is produced by a production routing sidecar, e.g.:
+#   * llm-d-router  (https://github.com/llm-d/llm-d-router)
+#   * vLLM's own vllm-router (examples in the vllm-project org)
+#   * or any NIXL-shaped router that sets the same kv_transfer_params contract.
+# Use this file as a protocol reference, not a production router.
 import argparse
 import asyncio
 import copy
@@ -181,7 +196,7 @@ async def send_request_to_prefill(
                 raise RuntimeError(error_message)
 
 
-async def start_decode_request(endpoint, req_data, request_id):
+async def start_decode_request(endpoint, req_data, request_id, selected_dp_rank=None):
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
     )
@@ -189,6 +204,10 @@ async def start_decode_request(endpoint, req_data, request_id):
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
+    # Pin the decode leg to the same DP rank as its prefill leg so both land on
+    # the same rank (vLLM reads this header directly; no engine-side routing).
+    if selected_dp_rank is not None:
+        headers["X-data-parallel-rank"] = str(selected_dp_rank)
     response = await session.post(url=endpoint, json=req_data, headers=headers)
     return session, response
 
@@ -361,7 +380,9 @@ async def handle_request(api: str, request: Request):
 
         decode_request_url = decode_instance_endpoint["request_address"] + api
         decode_request_task = asyncio.create_task(
-            start_decode_request(decode_request_url, req_data, request_id)
+            start_decode_request(
+                decode_request_url, req_data, request_id, selected_prefill_dp_rank
+            )
         )
 
         session, decode_response = await decode_request_task

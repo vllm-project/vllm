@@ -1,0 +1,4 @@
+Mixtral-8x7B-Fp8-AutoFp8-triton.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-marlin.yaml
+Qwen3-30B-A3B-Fp8-CT-Channel-marlin.yaml
+Qwen3-30B-A3B-Fp8-CT-Channel-vllm-cutlass.yaml
