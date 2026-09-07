@@ -793,8 +793,22 @@ def test_all2all_backend_default_needs_cuda_and_expert_parallel(
     """Only CUDA with expert parallel gets the one-sided backend; everything
     else keeps the portable default (#53952)."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
     config = ParallelConfig(enable_expert_parallel=enable_expert_parallel)
     assert config.all2all_backend == expected_backend
+
+
+def test_all2all_backend_falls_back_without_flashinfer_one_sided(monkeypatch):
+    """FlashInferNVLinkOneSidedManager asserts on this module, so a CUDA
+    install without it must keep serving instead of failing at startup."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
+    )
+    config = ParallelConfig(enable_expert_parallel=True)
+    assert config.all2all_backend == "allgather_reducescatter"
 
 
 def test_all2all_backend_explicit_one_sided_downgrades_without_expert_parallel(

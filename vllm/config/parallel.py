@@ -523,6 +523,18 @@ class ParallelConfig:
             )
             self.all2all_backend = "allgather_reducescatter"
 
+        if self.all2all_backend == "flashinfer_nvlink_one_sided":
+            # Only reachable with expert parallel enabled, which keeps the
+            # FlashInfer import (~3s) off non-EP startup paths.
+            from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+            if not has_flashinfer_nvlink_one_sided():
+                logger.warning_once(
+                    "FlashInfer trtllm_moe_alltoall is unavailable; falling "
+                    "back to the 'allgather_reducescatter' all2all backend."
+                )
+                self.all2all_backend = "allgather_reducescatter"
+
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "

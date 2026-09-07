@@ -91,7 +91,9 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
     monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
     monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
 
-    vllm_config = VllmConfig(parallel_config=ParallelConfig())
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(enable_expert_parallel=True)
+    )
     with set_current_vllm_config(vllm_config):
         device_comm_cls = CudaCommunicator
         device_communicator = device_comm_cls(
@@ -130,7 +132,8 @@ def test_engine_args_resolves_all2all_backend_default(
     backend = EngineArgs().all2all_backend
 
     assert backend == expected_backend
-    assert ParallelConfig(all2all_backend=backend).all2all_backend == expected_backend
+    config = ParallelConfig(all2all_backend=backend, enable_expert_parallel=True)
+    assert config.all2all_backend == expected_backend
 
 
 # ---------------------------------------------------------------------------
