@@ -88,7 +88,7 @@ def _supports_fused_pre_indexer(
 
 
 class QSAIndexer(nn.Module):
-    """Replicated Q/K projection plus paged, weight-free QSA selection.
+    """QSA projection weights, side caches, and paged, weight-free selection.
 
     ``prefix`` must be the checkpoint's indexer prefix, normally
     ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
@@ -167,7 +167,18 @@ class QSAIndexer(nn.Module):
 
     @property
     def output_width(self) -> int:
+        """Selection (index) columns per row."""
         return self.token_topk + self.compress_ratio - 1
+
+    @property
+    def packed_output_width(self) -> int:
+        """Packed selection-buffer width: output_width + 1.
+
+        The trailing column holds each row's valid-entry count (written by
+        the expand kernel) — never a token index; the sparse attention
+        kernel reads it as its tile-loop bound.
+        """
+        return self.output_width + 1
 
     def _metadata(
         self,
@@ -207,11 +218,18 @@ class QSAIndexer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return fixed-width request-relative token indices padded with ``-1``."""
+        """Update side caches and select token indices from pre-projected Q/K.
+
+        Returns the packed buffer of shape [num_tokens, output_width + 1]:
+        the leading ``output_width`` columns are ``-1``-padded
+        request-relative token indices, and the trailing column is the row's
+        valid-entry count (the attention kernel's loop bound, never a token
+        index).
+        """
 
         metadata = self._metadata()
         if metadata is None:
@@ -219,11 +237,13 @@ class QSAIndexer(nn.Module):
             if self.skip_topk and out is not None:
                 return out
             result = torch.full(
-                (hidden_states.shape[0], self.output_width),
+                (projected_qk.shape[0], self.packed_output_width),
                 -1,
                 dtype=torch.int32,
-                device=hidden_states.device,
+                device=projected_qk.device,
             )
+            # Inert rows carry a zero valid count (empty loop bound), not -1.
+            result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
                 return out
@@ -238,11 +258,9 @@ class QSAIndexer(nn.Module):
 
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
-        hidden_states = hidden_states[:num_tokens]
+        projected_qk = projected_qk[:num_tokens]
         positions = positions[..., :num_tokens]
 
-        # Q/K projection
-        projected_qk, _ = self.index_qk_proj(hidden_states)
         projected_q, raw_keys = projected_qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
@@ -357,11 +375,11 @@ class QSAIndexer(nn.Module):
         if out is None:
             out = torch.empty(
                 num_tokens,
-                self.output_width,
+                self.packed_output_width,
                 dtype=torch.int32,
                 device=q.device,
             )
-        elif out.shape != (num_tokens, self.output_width):
+        elif out.shape != (num_tokens, self.packed_output_width):
             raise ValueError("QSA selection output has an invalid shape")
 
         num_decode_tokens = compressed_metadata.num_decode_tokens
@@ -405,6 +423,7 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
+                compressed_metadata.max_seq_len,
             )
         expand_qsa_block_indices(
             block_indices,
