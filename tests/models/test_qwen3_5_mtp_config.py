@@ -21,7 +21,12 @@ def _multimodal_wrapper_mtp_config(
     model_type: str, mtp_layers: int = 1
 ) -> PretrainedConfig:
     """Construct a multimodal wrapper config with mtp_num_hidden_layers
-    in text_config."""
+    in text_config.
+
+    Reference real-world HF Hub configurations:
+    - Dense: https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json
+    - MoE:   https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/config.json
+    """
     text_config = PretrainedConfig(
         model_type="qwen3_5_moe_text" if "moe" in model_type else "qwen3_5_text",
         architectures=["SomeArch"],
