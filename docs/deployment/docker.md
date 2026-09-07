@@ -10,7 +10,7 @@ toc_depth: 2
 
 ## Run a vLLM Recipes configuration
 
-[vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
+[vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yml`
 and `env.sh`. See the
 [Recipes conversion tool README](../../tools/recipes/README.md) for usage.
 
@@ -20,13 +20,13 @@ starting vLLM:
 ```bash
 docker run --rm --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -v "$PWD/config.yaml:/recipe/config.yaml:ro" \
+    -v "$PWD/config.yml:/recipe/config.yml:ro" \
     -v "$PWD/env.sh:/recipe/env.sh:ro" \
     -p 8000:8000 \
     --ipc=host \
     --entrypoint /bin/bash \
     vllm/vllm-openai:latest \
-    -lc 'source /recipe/env.sh && exec vllm serve --config /recipe/config.yaml'
+    -lc 'source /recipe/env.sh && exec vllm serve --config /recipe/config.yml'
 ```
 
 ## Persist the compile cache across containers

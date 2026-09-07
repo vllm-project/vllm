@@ -13,7 +13,7 @@
 ## Deploy from a vLLM Recipe
 
 The **Recipe** column below links to validated Xeon 6 configurations when
-available. Use the Recipe conversion tool to generate `config.yaml` and
+available. Use the Recipe conversion tool to generate `config.yml` and
 `env.sh`; see the
 [Recipes conversion tool README](../../../tools/recipes/README.md) for usage.
 
@@ -21,7 +21,7 @@ Load the generated environment before starting vLLM:
 
 ```bash
 source env.sh
-vllm serve --config config.yaml
+vllm serve --config config.yml
 ```
 
 ## Recommended Models
