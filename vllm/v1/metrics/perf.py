@@ -1527,7 +1527,7 @@ class PerfMetricsLogging:
             )
 
         log_fn(
-            "%sMFU: %.1f TF/s/GPU %.1f GB/s/GPU",
+            "%sMFU: %.1f TF/s/device %.1f GB/s/device",
             log_prefix,
             avg_tflops_per_gpu,
             avg_gbps_per_gpu,
