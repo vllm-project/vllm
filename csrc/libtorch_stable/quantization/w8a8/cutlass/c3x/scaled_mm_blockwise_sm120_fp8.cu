@@ -11,8 +11,8 @@ namespace {
 // On a GB10 (24 MiB L2) the blockwise kernel loses most of its throughput once
 // the weight is re-streamed from DRAM per row of M tiles: a 16384x2560 FP8
 // weight runs at 165 TFLOPS at M=4096 but 90 at M=8192 and 52 at M>=16384;
-// 8192x8192 is at 54 from M=6144. With the tile scheduler's max_swizzle_size = 8
-// the same launches run at 150-174 TFLOPS at every M, bit-identical to the
+// 8192x8192 is at 54 from M=6144. With the tile scheduler's max_swizzle_size =
+// 8 the same launches run at 150-174 TFLOPS at every M, bit-identical to the
 // default order (ten N/K shapes, M 2048-16384, all cells identical). The one
 // place the default order is better is a narrow band around M=4096 on the
 // 2560-wide weights (167 vs 153 at 16384x2560, 160 vs 154 at 12288x2560);
