@@ -119,6 +119,7 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        self._capture_mla_bmm(layer)
         weight_fp4, weight_scale = mxfp4_quantize(layer.weight.contiguous())
 
         layer.input_scale = None

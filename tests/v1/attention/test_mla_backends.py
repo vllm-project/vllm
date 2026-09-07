@@ -280,7 +280,7 @@ if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
         BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 
-def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
+def test_mla_post_load_refreshes_unquantized_bmm_weights(monkeypatch):
     layer = MLAAttention.__new__(MLAAttention)
     torch.nn.Module.__init__(layer)
     layer.kv_lora_rank = 2
@@ -292,8 +292,6 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
     )
     layer.kv_b_proj.quant_method = None
-    layer.is_aiter_triton_fp4_bmm_enabled = False
-    layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
     layer.quant_config = None
@@ -306,20 +304,16 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 
     with torch.no_grad():
         layer.process_weights_after_loading(torch.float32)
-        assert isinstance(layer.W_UV, torch.nn.Parameter)
-        assert isinstance(layer.W_UK_T, torch.nn.Parameter)
-        w_uv_ptr = layer.W_UV.data_ptr()
-        w_uk_t_ptr = layer.W_UK_T.data_ptr()
-        old_w_uv = layer.W_UV.clone()
-        old_w_uk_t = layer.W_UK_T.clone()
+        assert isinstance(layer.mla_bmm, mla_attention_module.UnquantizedMlaBmm)
+        old_w_uv = layer.mla_bmm.w_uv.clone()
+        old_w_uk_t = layer.mla_bmm.w_uk_t.clone()
 
         layer.kv_b_proj.weight.add_(100)
         layer.process_weights_after_loading(torch.float32)
 
-    assert layer.W_UV.data_ptr() == w_uv_ptr
-    assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
-    torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
-    torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+    assert isinstance(layer.mla_bmm, mla_attention_module.UnquantizedMlaBmm)
+    torch.testing.assert_close(layer.mla_bmm.w_uv, old_w_uv + 100)
+    torch.testing.assert_close(layer.mla_bmm.w_uk_t, old_w_uk_t + 100)
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.

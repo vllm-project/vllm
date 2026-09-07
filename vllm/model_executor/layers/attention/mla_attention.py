@@ -212,11 +212,9 @@ from typing import ClassVar, Generic, TypeVar, cast
 import numpy as np
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -228,7 +226,6 @@ from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_tp_group,
-    is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -242,6 +239,11 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
+from vllm.model_executor.layers.attention.mla_bmm import (
+    AmxMlaBmm,
+    UnquantizedMlaBmm,
+    create_online_mla_bmm,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -251,16 +253,21 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+    OnlineLinearBase,
+)
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
-    get_and_maybe_dequant_weights,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down, round_up
@@ -447,8 +454,28 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
+        self.kv_b_proj.mla_bmm = None
+        if isinstance(
+            self.kv_b_proj.quant_method,
+            (Fp8PerTensorOnlineLinearMethod, Mxfp4OnlineLinearMethod),
+        ):
+            self.kv_b_proj._mla_bmm_builder = lambda quant_method, weight: (
+                create_online_mla_bmm(
+                    quant_method,
+                    weight,
+                    self.num_heads,
+                    self.kv_lora_rank,
+                    self.qk_nope_head_dim,
+                    self.v_head_dim,
+                )
+            )
+        elif isinstance(self.kv_b_proj.quant_method, OnlineLinearBase):
+            raise ValueError(
+                "Online MLA BMM supports only fp8_per_tensor and mxfp4 "
+                f"kv_b_proj quantization, got "
+                f"{type(self.kv_b_proj.quant_method).__name__}."
+            )
         self.dcp_q_replicate = dcp_q_replicate
-        self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
@@ -666,15 +693,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 is_lse_base_on_e=self.impl.lse_base_on_e,
                 use_pcp=self.use_pcp,
             )
-
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
-
-        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
-        self.is_aiter_triton_fp4_bmm_enabled = (
-            rocm_aiter_ops.is_fp4bmm_enabled()
-            and hasattr(self.kv_b_proj, "weight")
-            and self.kv_b_proj.weight.dtype == torch.bfloat16
-        )
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -954,58 +972,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    transpose_bm=True,
-                    prequant=True,
-                    y_scale=self._q_scale if fp8_attention else None,
-                )
-            elif self.is_aiter_triton_fp8_bmm_enabled:
-                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True,
-                )
-            elif self.is_amx_bmm_enabled:
-                # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
-                # AMXMLAImpl's own (N, L, P) packed W_UK -- same as prefill.
-                N, B, P = mqa_q_nope.shape
-                L = self.kv_lora_rank
-                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-                ops.bmm_cpu(
-                    mqa_ql_nope,
-                    mqa_q_nope,
-                    self.impl._w_uk_packed,  # type: ignore[attr-defined]
-                    True,
-                    None,
-                )
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
-            else:
-                # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = mqa_q_nope.shape
-                W_UK_T = self.W_UK_T_dcp_qrep if qrep_decode else self.W_UK_T
-                assert W_UK_T is not None
-                _, _, L = W_UK_T.shape
-
-                if self.q_pad_num_heads is not None:
-                    mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
-                    mqa_ql_nope.resize_((N, B, L))
-                else:
-                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-
-                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
-
-                # Convert from (N, B, L) to (B, N, L)
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+            assert self.kv_b_proj.mla_bmm is not None
+            mqa_ql_nope = self.kv_b_proj.mla_bmm.qk(mqa_q_nope, qrep_decode)
 
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
@@ -1143,17 +1111,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
             # prefill and decode. Release the now-unused raw weight.
+            self.kv_b_proj.mla_bmm = AmxMlaBmm(self.impl, self.kv_lora_rank)
             self.kv_b_proj.weight = torch.nn.Parameter(
                 torch.empty(0), requires_grad=False
             )
             return
-
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
 
         if self.dcp_q_replicate:
             # qrep wired here: validate unsupported decode backends once.
@@ -1161,99 +1123,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "DCP query replication is unsupported on head-padding MLA "
                 "backends (q_pad_num_heads)."
             )
-            if (
-                self.is_aiter_triton_fp4_bmm_enabled
-                or self.is_aiter_triton_fp8_bmm_enabled
-            ):
+            if self.kv_b_proj.mla_bmm is not None:
                 raise NotImplementedError(
-                    "DCP query replication is not implemented for the aiter "
-                    "FP4/FP8 MLA BMM paths."
+                    "DCP query replication is not implemented for quantized "
+                    "MLA BMM paths."
                 )
 
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), (
-            f"{kv_b_proj_weight.shape=}, "
-            f"{self.kv_lora_rank=}, "
-            f"{self.num_heads=}, "
-            f"{self.qk_nope_head_dim=}, "
-            f"{self.v_head_dim=}"
-        )
-        kv_b_proj_weight = kv_b_proj_weight.view(
-            self.kv_lora_rank,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-
-        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from vllm.model_executor.layers.quantization.quark.utils import (
-                quark_quantize_weight_to_mxfp4,
+        if self.kv_b_proj.mla_bmm is None:
+            self.kv_b_proj.mla_bmm = UnquantizedMlaBmm(
+                self.kv_b_proj,
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.v_head_dim,
+                act_dtype,
+                self.dcp_q_replicate,
             )
-
-            self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
-            # Convert from (L, N, P) to (N, L, P)
-            self.W_K = self.W_K.transpose(0, 1)
-            self.W_K_scale = self.W_K_scale.transpose(0, 1)
-
-            self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
-                W_UV.permute(1, 2, 0)
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            W_K = W_UK.transpose(0, 1)  # 16 512 128
-            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
-                W_K, dtype=current_platform.fp8_dtype()
-            )
-            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
-                W_V, dtype=current_platform.fp8_dtype()
-            )
-
-            # The kernel operates on non-padded inputs. Hence, pre-compiling
-            # triton kernel to avoid runtime compilation for unseen batch sizes
-            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
-            # On DS-R1, this step adds roughly 50s to the model loading time.
-            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
-            pre_compilation_list = list(range(1, max_batch_size + 1))
-            if is_global_first_rank():
-                pre_compilation_list = tqdm(
-                    pre_compilation_list,
-                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
-                    total=max_batch_size,
-                )
-
-            for m in pre_compilation_list:
-                x = torch.empty(
-                    (self.W_K.shape[0], m, self.W_K.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_K.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-                )
-
-                x = torch.empty(
-                    (self.W_V.shape[0], m, self.W_V.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_V.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
-                )
-        else:
-            # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
-            # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
-            if self.dcp_q_replicate:
-                self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
-                    self.W_UK_T.contiguous(), dim=0
-                )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -1301,35 +1186,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            out = rocm_aiter_ops.batched_gemm_a16wfp4(
-                x,
-                self.W_V,
-                self.W_V_scale,
-                out,
-                transpose_bm=True,
-                prequant=True,
-                y_scale=None,
-            )
-            x = out.view(-1, self.num_heads * self.v_head_dim)
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
-            )
-        elif self.is_amx_bmm_enabled:
-            # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
-            # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
-            ops.bmm_cpu(
-                out.transpose(0, 1),
-                x,
-                self.impl._w_uv_packed,  # type: ignore[attr-defined]
-                True,
-                None,
-            )
-        else:
-            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        assert self.kv_b_proj.mla_bmm is not None
+        self.kv_b_proj.mla_bmm.uv(x, out)
 
 
 def unified_mla_kv_cache_update(
@@ -3196,7 +3055,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:

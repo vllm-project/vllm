@@ -1757,7 +1757,6 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
-        VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
@@ -1820,9 +1819,6 @@ class rocm_aiter_ops:
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-    # TODO: Consolidate under _LINEAR_ENABLED
-    _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
-    _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
@@ -1851,8 +1847,6 @@ class rocm_aiter_ops:
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-        cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
-        cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -2044,19 +2038,6 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
-
-    @classmethod
-    @if_aiter_supported
-    def is_fp8bmm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
-
-    @classmethod
-    @if_aiter_supported
-    def is_fp4bmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import get_cdna_version
-
-        # TODO GFX1250: Enable for cdna 4+ when aiter supports batched_gemm_a16wfp4 on gfx1250
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and get_cdna_version() == 4
 
     @classmethod
     @if_aiter_supported
