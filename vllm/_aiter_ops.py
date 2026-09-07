@@ -387,18 +387,6 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
-def _rocm_aiter_topk_softmax_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    num_shared_experts: int = 0,
-    shared_expert_scoring_func: str = "",
-) -> None:
-    pass
-
-
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -407,14 +395,6 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(topk_weights, topk_indices, gating_output)
-
-
-def _rocm_aiter_topk_sigmoid_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-) -> None:
-    pass
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -441,19 +421,6 @@ def _rocm_aiter_biased_grouped_topk_impl(
     )
 
 
-def _rocm_aiter_biased_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
-
-
 def _rocm_aiter_grouped_topk_impl(
     gating_output: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -477,19 +444,6 @@ def _rocm_aiter_grouped_topk_impl(
         is_softmax,
         routed_scaling_factor,
     )
-
-
-def _rocm_aiter_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
 
 
 def _rocm_aiter_fused_topk_impl(
@@ -616,29 +570,6 @@ def _rocm_aiter_mla_decode_fwd_impl(
         max_seqlen_qo,
         **kwargs,
     )
-
-
-def _rocm_aiter_mla_decode_fwd_fake(
-    q: torch.Tensor,
-    kv_buffer: torch.Tensor,
-    o: torch.Tensor,
-    qo_indptr: torch.Tensor,
-    max_seqlen_qo: int,
-    kv_indptr: torch.Tensor | None = None,
-    kv_indices: torch.Tensor | None = None,
-    kv_last_page_lens: torch.Tensor | None = None,
-    sm_scale: float = 1.0,
-    logit_cap: float = 0.0,
-    q_scale: torch.Tensor | None = None,
-    kv_scale: torch.Tensor | None = None,
-    work_meta_data: torch.Tensor | None = None,
-    work_indptr: torch.Tensor | None = None,
-    work_info_set: torch.Tensor | None = None,
-    reduce_indptr: torch.Tensor | None = None,
-    reduce_final_map: torch.Tensor | None = None,
-    reduce_partial_map: torch.Tensor | None = None,
-) -> None:
-    pass
 
 
 def _rocm_aiter_w8a8_gemm_impl(
@@ -1102,15 +1033,6 @@ def _rocm_aiter_per_tensor_quant_impl(
         dynamic_per_tensor_quant(out, x, scale)
     else:
         static_per_tensor_quant(out, x, scale)
-
-
-def _rocm_aiter_per_tensor_quant_fake(
-    out: torch.Tensor,
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    is_dynamic: bool,
-) -> None:
-    pass
 
 
 def _rocm_aiter_per_token_quant_impl(
@@ -1595,18 +1517,6 @@ def _triton_rotary_embedding_impl(
     )
     query = query.view(query_shape)
     key = key.view(key_shape)
-
-
-def _triton_rotary_embedding_fake(
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    head_size: int,
-    cos_sin_cache: torch.Tensor,
-    is_neox_style: bool,
-    offsets: torch.Tensor | None = None,
-) -> None:
-    return
 
 
 def _rocm_aiter_fp8_attn_impl(
@@ -2132,7 +2042,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_softmax",
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-                fake_impl=_rocm_aiter_topk_softmax_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2140,7 +2049,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
-                fake_impl=_rocm_aiter_topk_sigmoid_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2148,7 +2056,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_biased_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2156,7 +2063,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_grouped_topk",
                 op_func=_rocm_aiter_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2172,7 +2078,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
-                fake_impl=_rocm_aiter_mla_decode_fwd_fake,
             )
 
             direct_register_custom_op(
@@ -2266,7 +2171,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=["out", "scale"],
-                fake_impl=_rocm_aiter_per_tensor_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2306,7 +2210,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_triton_rotary_embedding",
                 op_func=_triton_rotary_embedding_impl,
                 mutates_args=["query", "key"],  # These tensors are modified in-place
-                fake_impl=_triton_rotary_embedding_fake,
             )
 
             direct_register_custom_op(
@@ -3468,7 +3371,7 @@ class rocm_aiter_ops:
         # AITER's Python wrapper allocates intermediate/output tensors without
         # explicit device arguments, so run it under the residual tensor's device.
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input = mhc_pre(
+            args = (
                 residual_flat,
                 fn,
                 hc_scale,
@@ -3478,9 +3381,11 @@ class rocm_aiter_ops:
                 hc_sinkhorn_eps,
                 hc_post_mult_value,
                 sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
             )
+            if norm_weight is None:
+                post_mix, comb_mix, layer_input = mhc_pre(*args)
+            else:
+                post_mix, comb_mix, layer_input = mhc_pre(*args, norm_weight, norm_eps)
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
@@ -3630,23 +3535,26 @@ class rocm_aiter_ops:
                 ),
             )
 
+        args = (
+            x_flat,
+            residual_flat,
+            post_flat,
+            comb_flat,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
         with torch.device(residual_flat.device):
-            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
-                x_flat,
-                residual_flat,
-                post_flat,
-                comb_flat,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-                norm_weight,
-                norm_eps,
-            )
+            if norm_weight is None:
+                result = mhc_fused_post_pre(*args)
+            else:
+                result = mhc_fused_post_pre(*args, norm_weight, norm_eps)
+            post_mix, comb_mix, layer_input, next_residual = result
 
         return (
             next_residual.view_as(residual),

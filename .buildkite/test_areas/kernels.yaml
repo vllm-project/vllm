@@ -33,13 +33,32 @@ steps:
   num_devices: 2
   device: h100
   source_file_dependencies:
-  - csrc/minimax_reduce_rms_kernel.cu
-  - csrc/minimax_reduce_rms_kernel.h
-  - vllm/model_executor/layers/mamba/linear_attn.py
-  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MiniMax Reduce RMS Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/minimax_rms_norm/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/core/test_minimax_reduce_rms.py
+      - tests/utils.py
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
@@ -147,7 +166,7 @@ steps:
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
-- label: ":nvidia: (H100) FlashMLA Kernels"
+- label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100
   timeout_in_minutes: 25
   device: h100
@@ -157,12 +176,16 @@ steps:
   - vllm/v1/attention/ops/flashmla.py
   - vllm/v1/attention/backends/mla/flashmla.py
   - vllm/v1/attention/backends/mla/flashmla_sparse.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
+  - vllm/utils/flashinfer.py
+  - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_flashmla.py
   - tests/kernels/attention/test_flashmla_sparse.py
   - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
   commands:
     - pytest -v -s kernels/attention/test_flashmla.py
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
+    - pytest -v -s kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
@@ -318,6 +341,7 @@ steps:
   - csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - csrc/libtorch_stable/ops.h
   - csrc/libtorch_stable/torch_bindings.cpp
+  - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py

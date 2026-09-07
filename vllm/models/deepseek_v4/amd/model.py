@@ -123,20 +123,20 @@ class DeepseekV4MLP(nn.Module):
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
             return
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+            get_fp8_block_weight_scale,
+        )
         from vllm.model_executor.utils import replace_parameter
 
         w = getattr(self.gate_up_proj, "weight", None)
-        ws = getattr(self.gate_up_proj, "weight_scale_inv", None)  # per-block scale
+        ws = get_fp8_block_weight_scale(self.gate_up_proj)
         if w is None or ws is None or w.dim() != 2:
             return
         # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
         if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
             return
         if ws.dtype == torch.float8_e8m0fnu:
-            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-                _upcast_e8m0_to_fp32,
-            )
-
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         replace_parameter(
             self.gate_up_proj,
@@ -774,6 +774,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         loaded_params: set[str] = set()
 
         def _resolve_param_name(name: str) -> str:
+            # Fp8LinearMethod registers block scales as ``weight_scale_inv``.
+            # Quark checkpoints / QuarkW8A8Fp8PerBlock use ``weight_scale``.
+            # Alias only when the registered param is the ``_inv`` name.
             inv_name = f"{name}_inv"
             if name not in params_dict and inv_name in params_dict:
                 return inv_name
@@ -922,20 +925,17 @@ def _make_deepseek_v4_weights_mapper(
 ) -> WeightsMapper:
     if expert_dtype == "fp4":
         # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # (non-fused) shared experts use Fp8LinearMethod's block scales,
-        # which register as ``weight_scale_inv``.
+        # ``w{1,2,3}_weight_scale`` (no _inv suffix). Native DeepSeek FP8
+        # linear / shared experts use Fp8LinearMethod's ``weight_scale_inv``.
+        # Quark linear block-FP8 registers ``weight_scale`` and is left
+        # as-is; load_weights aliases ``.weight_scale`` -> ``.weight_scale_inv``
+        # only when the latter is the registered parameter.
         #
         #  - DeepSeek native ``.scale``: expert scales -> ``.weight_scale``,
         #    everything else -> ``.weight_scale_inv``.
-        #  - AMD-Quark ``.weight_scale``: linear/attn scales ->
-        #    ``.weight_scale_inv``. Expert and shared-expert
-        #    ``w{1,2,3}.weight_scale`` are left untouched (consumed as-is by
-        #    the MXFP4 expert loader, which produces ``w{13,2}_weight_scale``);
         scale_regex = {
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
-            re.compile(r"(?<!\.w[123])\.weight_scale$"): ".weight_scale_inv",
         }
     else:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
