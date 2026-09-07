@@ -1083,6 +1083,17 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 f" {strategy}"
             )
 
+        # NVFP4 KV stores one global scale per side: reshape_and_cache_nvfp4
+        # dereferences k_scale/v_scale as scalars, so per-head scales would
+        # silently apply head 0's scale to every head. Reject rather than
+        # quantize the whole cache against the wrong scale.
+        if num_bits == 4 and strategy != QuantizationStrategy.TENSOR:
+            raise NotImplementedError(
+                "NVFP4 KV cache (num_bits=4) supports only per-tensor scales; "
+                "the cache-store kernel reads a single k/v scale per side. "
+                f"Found strategy: {strategy}."
+            )
+
         is_symmetric = kv_cache_scheme.get("symmetric")
         if not is_symmetric:
             raise NotImplementedError(

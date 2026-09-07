@@ -184,9 +184,9 @@ def test_spans_skip_decode_requests():
 # --------------------------------------------------------------------------- #
 # get_cudagraph_support: no decode-graph capture for VO-split NVFP4 groups
 # --------------------------------------------------------------------------- #
-def _sm12x_nvfp4_cg_support(head_size, monkeypatch):
-    """Cudagraph support the builder advertises for one NVFP4 KV group on
-    sm12x, with the platform capability checks pinned (no GPU needed)."""
+def _sm12x_nvfp4_cg_support(head_size, monkeypatch, cache_dtype="nvfp4"):
+    """Cudagraph support the builder advertises for one KV group on sm12x,
+    with the platform capability checks pinned (no GPU needed)."""
     import vllm.v1.attention.backends.flashinfer as fi
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -197,7 +197,7 @@ def _sm12x_nvfp4_cg_support(head_size, monkeypatch):
     )
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        cache_config=SimpleNamespace(cache_dtype="nvfp4"),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
     )
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.uint8
@@ -224,4 +224,20 @@ def test_cudagraph_support_uniform_head_nvfp4_sm12x_keeps_decode(monkeypatch):
     assert (
         _sm12x_nvfp4_cg_support(256, monkeypatch)
         == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+
+
+@pytest.mark.parametrize("cache_dtype", ["nvfp4", "auto", "fp8"])
+def test_cudagraph_support_vo_split_never_regardless_of_kv_dtype(
+    cache_dtype, monkeypatch
+):
+    # _vo_split_factor() keys on head_size alone, so a 512-wide head takes the
+    # two-pass VO split for bf16 and FP8 KV as well as NVFP4 -- and with it the
+    # reorder_batch_threshold = 0 routing that makes a captured decode graph
+    # replay stale plan data. The refusal must not be conditioned on the dtype.
+    from vllm.v1.attention.backend import AttentionCGSupport
+
+    assert (
+        _sm12x_nvfp4_cg_support(512, monkeypatch, cache_dtype=cache_dtype)
+        == AttentionCGSupport.NEVER
     )
