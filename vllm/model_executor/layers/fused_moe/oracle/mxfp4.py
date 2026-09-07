@@ -670,7 +670,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backends = _get_requested_backends(runner_backend, None)
+        if runner_backend == "b12x":
+            requested_backends = _get_requested_backends(runner_backend, None)
+        else:
+            # Try every variant of the alias in priority order. Narrowing to
+            # the BF16 variant would drop SM100+ W4A8 variants on devices where
+            # the BF16 variant is gated to SM90.
+            requested_backends = map_mxfp4_backend(runner_backend)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
