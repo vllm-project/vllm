@@ -1169,17 +1169,25 @@ _ATTN_BLOCK_GRANULARITY = 16
 
 
 def _fit_specs_under_page(
-    specs: dict[str, KVCacheSpec], page: int
+    specs: dict[str, KVCacheSpec], page: int, ref_block_size: int
 ) -> dict[str, KVCacheSpec] | None:
     """Shrink each attention spec's block so its page fits under ``page``, then
-    pad the page to exactly ``page``. Returns None if a block would drop below
-    the kernel granularity."""
+    pad the page to exactly ``page``. The block is the largest kernel-granular
+    size that fits and also divides ``ref_block_size`` (the model's own block),
+    so that block-aligned prefix-cache lookups can still line up across the
+    groups; a non-dividing block would silently make every lookup miss.
+    Returns None if no such block exists."""
     fitted: dict[str, KVCacheSpec] = {}
     for name, spec in specs.items():
         assert isinstance(spec, AttentionSpec)
         per_token = spec.unpadded_page_size_bytes // spec.block_size
-        block_size = (page // per_token) // _ATTN_BLOCK_GRANULARITY
-        block_size *= _ATTN_BLOCK_GRANULARITY
+        max_block = (page // per_token) // _ATTN_BLOCK_GRANULARITY
+        max_block *= _ATTN_BLOCK_GRANULARITY
+        block_size = 0
+        for candidate in range(max_block, 0, -_ATTN_BLOCK_GRANULARITY):
+            if ref_block_size % candidate == 0:
+                block_size = candidate
+                break
         if block_size < _ATTN_BLOCK_GRANULARITY:
             return None
         if block_size != spec.block_size:
@@ -1284,7 +1292,8 @@ def _get_kv_cache_groups_glm5_next(
 
     extra_group: KVCacheGroupSpec | None = None
     if extra_specs:
-        fitted = _fit_specs_under_page(extra_specs, mla_page)
+        mla_block = next(iter(mla_specs.values())).block_size
+        fitted = _fit_specs_under_page(extra_specs, mla_page, mla_block)
         if fitted is None:
             return None
         extra_uniform = UniformTypeKVCacheSpecs.from_specs(fitted)
