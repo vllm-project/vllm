@@ -308,7 +308,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         # (warning_once args must be hashable for its lru_cache).
         monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
         config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
+            attention_config=AttentionConfig(),
         )
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
