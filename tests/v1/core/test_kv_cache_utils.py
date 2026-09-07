@@ -2609,11 +2609,11 @@ def test_hisparse_derived_groups_do_not_participate_in_hash_alignment():
     groups = [
         KVCacheGroupSpec(["source"], source),
         KVCacheGroupSpec(
-            ["resident"], HiSparseResidentSpec(block_size=64, page_size=64)
+            ["resident"], HiSparseResidentSpec(block_size=96, page_size=96)
         ),
         KVCacheGroupSpec(
             ["hot"],
-            HiSparseHotSpec(block_size=64, page_size=64, blocks_per_request=1),
+            HiSparseHotSpec(block_size=96, page_size=96, blocks_per_request=1),
         ),
     ]
     kv_cache_config = KVCacheConfig(
@@ -2633,7 +2633,7 @@ def test_hisparse_derived_groups_do_not_participate_in_hash_alignment():
 
     assert kv_cache_utils.resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
-    ) == (64, 64)
+    ) == (192, 64)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
