@@ -77,11 +77,7 @@ def fp8_round_up_hidden_size_and_intermediate_size(
     if backend == Fp8MoeBackend.AITER:
         # AITER's 2-stage CK fp8 MoE GEMM is numerically broken for intermediate
         # sizes that aren't 128-aligned (e.g. Gemma4-26B-A4B's 704;
-        # activation-independent). Align to 128. NOTE: the loader only
-        # narrow-copies the checkpoint's real rows/columns into the padded
-        # parameters, so the expert weights must be allocated zeroed (see the
-        # fp8 MoE methods' create_weights); an uninitialized tail is live
-        # garbage weight for the kernel.
+        # activation-independent). Align to 128.
         intermediate_size = round_up(intermediate_size, 128)
     return hidden_size, intermediate_size
 

@@ -918,6 +918,149 @@ def test_aiter_fused_moe_gelu_tanh_accuracy():
     )
 
 
+def _pad_intermediate_dim(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    intermediate_dim_padded: int,
+    *,
+    fill: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Lay out ``w1``/``w2`` with the intermediate dim rounded up to
+    ``intermediate_dim_padded`` the way the fp8 MoE methods allocate them, with
+    the checkpoint's rows/columns in place and the tail either zeroed or filled
+    with garbage (an uninitialized allocation)."""
+    num_experts, two_intermediate, hidden_dim = w1.shape
+    intermediate_dim = two_intermediate // 2
+    assert w2.shape == (num_experts, hidden_dim, intermediate_dim)
+    assert intermediate_dim_padded >= intermediate_dim
+
+    def _alloc(*shape: int) -> torch.Tensor:
+        if fill == "zeros":
+            return torch.zeros(*shape, dtype=w1.dtype, device=w1.device)
+        assert fill == "garbage"
+        return torch.randn(*shape, dtype=torch.float32, device=w1.device).to(w1.dtype)
+
+    # w13 stacks the gate rows above the up rows, so each half is padded on its own,
+    # matching where the loader places the checkpoint in the rounded-up parameter.
+    w1_padded = _alloc(num_experts, 2 * intermediate_dim_padded, hidden_dim)
+    w1_padded[:, :intermediate_dim] = w1[:, :intermediate_dim]
+    up_rows = slice(intermediate_dim_padded, intermediate_dim_padded + intermediate_dim)
+    w1_padded[:, up_rows] = w1[:, intermediate_dim:]
+    w2_padded = _alloc(num_experts, hidden_dim, intermediate_dim_padded)
+    w2_padded[:, :, :intermediate_dim] = w2
+    return w1_padded, w2_padded
+
+
+@pytest.mark.parametrize("quant", ["bf16", "fp8_per_tensor"])
+def test_aiter_fused_moe_gelu_tanh_padded_matches_unpadded_reference(quant: str):
+    """The fp8 MoE path rounds a non-128-aligned intermediate size up (704 -> 768
+    for Gemma4-26B-A4B) and allocates the padded expert weights zeroed. With a
+    zero tail, padding + gelu_tanh must reproduce the unpadded reference; a
+    garbage tail is live weight and must not."""
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        fp8_round_up_hidden_size_and_intermediate_size,
+    )
+
+    _assert_aiter_supported()
+    if quant == "fp8_per_tensor" and not (on_gfx942() or on_gfx950()):
+        pytest.skip("AITER fp8 MoE is gfx942/gfx950 only")
+
+    hidden_dim, intermediate_dim = 512, 704
+    _, intermediate_dim_padded = fp8_round_up_hidden_size_and_intermediate_size(
+        Fp8MoeBackend.AITER, hidden_dim, intermediate_dim
+    )
+    assert intermediate_dim_padded == 768
+    case = _make_moe_case(
+        num_tokens=32,
+        hidden_dim=hidden_dim,
+        intermediate_dim=intermediate_dim,
+        num_experts=4,
+        topk=2,
+        seed=7,
+    )
+    hidden_states = case["hidden_states"]
+    # Unpadded bf16 weights feed the reference; the kernel gets their padded
+    # (and, for fp8, quantized) layout.
+    w1_ref, w2_ref = case["w1"], case["w2"]
+    w1_kernel, w2_kernel = w1_ref, w2_ref
+    kernel_kwargs: dict[str, torch.Tensor] = {}
+    if quant == "bf16":
+        quant_method = QuantMethod.NO
+        atol, budget_kwargs = 0.05, {}
+    else:
+        hidden_states = hidden_states / 10
+        (w1_ref, w1_kernel, w1_scale, _), (w2_ref, w2_kernel, w2_scale, _) = (
+            make_test_weights(
+                case["w1"].shape[0],
+                intermediate_dim,
+                hidden_dim,
+                torch.bfloat16,
+                torch.float8_e4m3fn,
+                per_out_ch_quant=False,
+            )
+        )
+        _, a1_scale = rocm_aiter_ops.per_tensor_quant(
+            hidden_states, current_platform.fp8_dtype()
+        )
+        kernel_kwargs = dict(w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a1_scale)
+        quant_method = QuantMethod.PER_TENSOR
+        atol, budget_kwargs = 0.02, dict(pass_rate=1.0, max_violation_factor=1.5)
+
+    ref_out = ref_moe_forward(
+        hidden_states,
+        w1_ref,
+        w2_ref,
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu_tanh",
+    )
+
+    def _run_padded(fill: str) -> torch.Tensor:
+        w1_padded, w2_padded = _pad_intermediate_dim(
+            w1_kernel, w2_kernel, intermediate_dim_padded, fill=fill
+        )
+        w1_shuffled, w2_shuffled = _shuffle_moe_weights(w1_padded, w2_padded)
+        return torch.ops.vllm.rocm_aiter_fused_moe(
+            hidden_states,
+            w1_shuffled,
+            w2_shuffled,
+            case["topk_weights"],
+            case["topk_ids"],
+            expert_mask=None,
+            activation_method=int(ActivationMethod.GELU_TANH),
+            quant_method=int(quant_method),
+            doweight_stage1=False,
+            **kernel_kwargs,
+        ).float()
+
+    out = _run_padded("zeros")
+    assert out.shape == hidden_states.shape
+    _assert_close_budget(
+        out,
+        ref_out,
+        label=f"gelu_tanh_padded_zero_tail quant={quant}",
+        atol=atol,
+        rtol=0.0,
+        **budget_kwargs,
+    )
+
+    if quant == "bf16":
+        # The check above only means something if the tail is live weight: an
+        # uninitialized (garbage) tail must move the output well outside the budget.
+        out_garbage = _run_padded("garbage")
+        max_diff = (out_garbage - ref_out).abs().max().item()
+        assert max_diff > atol, (
+            f"garbage tail did not affect the output ({max_diff:.3e})"
+        )
+
+
 def test_aiter_fused_moe_determinism():
     """The BF16 fused-MoE kernel should stay bitwise deterministic for the
     same inputs."""
