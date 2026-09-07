@@ -53,6 +53,7 @@ SILENT_GROUPS = [
     "tests/plugins_tests/gguf",
     "tests/plugins_tests/lora_resolvers",
     "tests/quantization",
+    "tests/reasoning",
     "tests/spec_decode",
     "tests/transformers_utils",
     "tests/v1/distributed",
@@ -86,7 +87,6 @@ SEPARATE_GROUPS = [
     "tests/models/multimodal",
     "tests/parser",
     "tests/plugins_tests",
-    "tests/reasoning",
     "tests/renderers",
     "tests/samplers",
     "tests/tokenizers_",
@@ -208,3 +208,5 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
