@@ -1008,22 +1008,28 @@ def _make_sparse_attention_problem(
         "page_size",
         "use_prefill_config",
         "num_requests",
+        "fp8",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        # fp8_e4m3 K/V caches on the TP1 head split.
+        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
+        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
+        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -1033,72 +1039,15 @@ def test_qsa_sparse_paged_attention_correctness(
     page_size: int,
     use_prefill_config: bool,
     num_requests: int,
+    fp8: bool,
 ) -> None:
-    torch.manual_seed(2)
-    (
-        q,
-        k_cache,
-        v_cache,
-        logical_indices,
-        block_table,
-        token_to_req,
-        selection_width,
-    ) = _make_sparse_attention_problem(
-        num_rows, num_query_heads, num_kv_heads, page_size, num_requests
-    )
-    scale = q.shape[-1] ** -0.5
+    """QSA sparse paged attention matches the dense reference.
 
-    actual = qsa_ops.qsa_sparse_paged_attention(
-        q,
-        k_cache,
-        v_cache,
-        logical_indices,
-        block_table,
-        token_to_req,
-        use_prefill_config=use_prefill_config,
-    )
-    expected = _qsa_sparse_paged_attention_reference(
-        q,
-        k_cache,
-        v_cache,
-        logical_indices[:, :selection_width],
-        block_table,
-        token_to_req,
-        scale,
-    )
-
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-
-
-@requires_qsa_kernels
-@pytest.mark.parametrize(
-    (
-        "num_rows",
-        "num_query_heads",
-        "num_kv_heads",
-        "page_size",
-        "use_prefill_config",
-        "num_requests",
-    ),
-    [
-        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
-        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
-        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
-    ],
-)
-def test_qsa_sparse_paged_attention_fp8_kv(
-    num_rows: int,
-    num_query_heads: int,
-    num_kv_heads: int,
-    page_size: int,
-    use_prefill_config: bool,
-    num_requests: int,
-) -> None:
-    """fp8_e4m3 caches: the kernel must match the reference computed on the
-    dequantized cache (the check measures the kernel, not e4m3 rounding), the
-    per-tensor K/V scales must be folded in, and the bf16 branch must be
-    unchanged when the scale arguments are present."""
+    With fp8=True the K/V caches are e4m3 with per-tensor scales; the reference
+    runs on the dequantized cache so the check measures the kernel, not e4m3
+    rounding, and covers scales the kernel must fold in. With fp8=False, unit
+    scale arguments must leave the bf16 path bit-identical.
+    """
     torch.manual_seed(2)
     (
         q,
@@ -1113,29 +1062,35 @@ def test_qsa_sparse_paged_attention_fp8_kv(
     )
     scale = q.shape[-1] ** -0.5
     selection = logical_indices[:, :selection_width]
-    one = torch.ones((), device="cuda", dtype=torch.float32)
 
-    bf16_plain = qsa_ops.qsa_sparse_paged_attention(
-        q,
-        k_cache,
-        v_cache,
-        logical_indices,
-        block_table,
-        token_to_req,
-        use_prefill_config=use_prefill_config,
-    )
-    bf16_scaled = qsa_ops.qsa_sparse_paged_attention(
-        q,
-        k_cache,
-        v_cache,
-        logical_indices,
-        block_table,
-        token_to_req,
-        use_prefill_config=use_prefill_config,
-        k_scale=one,
-        v_scale=one,
-    )
-    assert torch.equal(bf16_plain, bf16_scaled)
+    if not fp8:
+        actual = qsa_ops.qsa_sparse_paged_attention(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config=use_prefill_config,
+        )
+        expected = _qsa_sparse_paged_attention_reference(
+            q, k_cache, v_cache, selection, block_table, token_to_req, scale
+        )
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        one = torch.ones((), device="cuda", dtype=torch.float32)
+        scaled = qsa_ops.qsa_sparse_paged_attention(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config=use_prefill_config,
+            k_scale=one,
+            v_scale=one,
+        )
+        assert torch.equal(actual, scaled)
+        return
 
     for k_scale_value, v_scale_value in ((1.0, 1.0), (0.5, 2.0)):
         k_scale = torch.full((), k_scale_value, device="cuda", dtype=torch.float32)

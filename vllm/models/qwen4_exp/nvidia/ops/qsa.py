@@ -87,6 +87,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
     softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
+    # For fp8 caches, fold the per-tensor K dequant scale into the softmax
+    # scale so it is applied once here, not to every tile's logits in the loop.
+    score_scale = k_scale * softmax_scale_log2 if IS_FP8 else softmax_scale_log2
 
     tile_end = tl.minimum(NUM_TILES, tl.cdiv(tl.minimum(valid_count, TOPK), BLOCK_N))
 
@@ -140,11 +143,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         if IS_FP8:
             values = values.to(tl.bfloat16)
         scores = tl.dot(query, keys)
-        if IS_FP8:
-            # Fold the per-tensor K dequant scale into the logits.
-            scores *= k_scale
-        # Scaling scores avoids re-quantizing a scaled query to BF16.
-        scores *= softmax_scale_log2
+        # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
+        # caches the K dequant scale is already folded into score_scale above.
+        scores *= score_scale
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
         alpha = tl.math.exp2(max_value - next_max)
