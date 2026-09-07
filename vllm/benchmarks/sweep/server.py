@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
 import contextlib
 import os
 import signal
@@ -9,6 +10,8 @@ from types import TracebackType
 
 import requests
 from typing_extensions import Self
+
+from vllm.utils.network_utils import join_host_port
 
 
 class ServerProcess:
@@ -77,23 +80,11 @@ class ServerProcess:
         self.run_subcommand(self.after_bench_cmd)
 
     def _get_vllm_server_address(self) -> str:
-        server_cmd = self.server_cmd
-
-        for host_key in ("--host",):
-            if host_key in server_cmd:
-                host = server_cmd[server_cmd.index(host_key) + 1]
-                break
-        else:
-            host = "localhost"
-
-        for port_key in ("-p", "--port"):
-            if port_key in server_cmd:
-                port = int(server_cmd[server_cmd.index(port_key) + 1])
-                break
-        else:
-            port = 8000  # The default value in vllm serve
-
-        return f"http://{host}:{port}"
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument("--host", default="localhost")
+        parser.add_argument("-p", "--port", type=int, default=8000)
+        args, _ = parser.parse_known_args(self.server_cmd)
+        return f"http://{join_host_port(args.host, args.port)}"
 
     def is_server_ready(self) -> bool:
         server_address = self._get_vllm_server_address()
