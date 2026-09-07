@@ -606,7 +606,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
-            id="online-fp8-per-block-linear-fp8-per-tensor-moe",
+            id="per_layer_kind_overrides",
         ),
         # quantization='online' with per-layer target patterns
         pytest.param(
@@ -621,7 +621,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
-            id="fp8_mixed",
+            id="targets",
         ),
         # ignore with direct layer name
         pytest.param(
@@ -633,7 +633,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
             {},
-            id="fp8_per_tensor-ignored-layers",
+            id="ignore",
         ),
         pytest.param(
             GRANITE_MODEL_NAME,
