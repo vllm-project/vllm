@@ -940,6 +940,21 @@ class DeepseekV4Indexer(nn.Module):
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if has_cutedsl():
+                from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
+                    _INDEXER_Q_FP8_KERNEL,
+                    _INDEXER_Q_MXFP4_KERNEL,
+                )
+
+                indexer_q_kernel = (
+                    _INDEXER_Q_MXFP4_KERNEL
+                    if self.use_fp4_kv
+                    else _INDEXER_Q_FP8_KERNEL
+                )
+                indexer_q_kernel.register_warmup()
 
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(

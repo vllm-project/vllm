@@ -59,7 +59,7 @@ class VllmCuTeDSLJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         )
 
 
-def cutedsl_kernel_launcher(
+def kernel_launcher(
     call_fn: Callable[..., CuTeDSLLaunchSpec[CompileKeyT]],
 ) -> Callable[..., Any]:
     """Invoke a cached CuTeDSL executor from a declarative ``__call__``."""

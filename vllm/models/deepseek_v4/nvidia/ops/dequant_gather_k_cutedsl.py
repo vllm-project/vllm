@@ -13,14 +13,17 @@ from cutlass.cute.nvgpu import cpasync
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _bf16x2_mul, cvt
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    zip_inputs,
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+    kernel_launcher,
 )
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 
 
-class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.CompileKey"]):
+class DequantGatherKCacheKernel(
+    VllmCuTeDSLJitKernel["DequantGatherKCacheKernel.CompileKey"]
+):
     # Hard-coded for DSv4.
     head_dim = 512
     fp8_dim = 448
@@ -317,22 +320,30 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         block_size = vllm_config.cache_config.block_size
+        compress_ratios = vllm_config.model_config.hf_config.compress_ratios
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
-                dict(block_size=block_size, has_gather_lens=True),
-                dict(block_size=block_size, has_gather_lens=False),
-                dict(block_size=max(1, block_size // 4), has_gather_lens=True),
-                dict(block_size=max(1, block_size // 128), has_gather_lens=True),
+                dict(
+                    block_size=block_size,
+                    has_gather_lens=True,
+                    enabled=True,
+                ),
+                dict(
+                    block_size=max(1, block_size // 4),
+                    has_gather_lens=False,
+                    enabled=4 in compress_ratios,
+                ),
+                dict(
+                    block_size=max(1, block_size // 128),
+                    has_gather_lens=False,
+                    enabled=128 in compress_ratios,
+                ),
             ),
-            enabled=block_size > 0,
-            _when=lambda *, enabled: enabled,
+            valid_block_size=block_size > 0,
+            _when=lambda *, enabled, valid_block_size: enabled and valid_block_size,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
-        host_entrypoint = self.kernel(compile_key)
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_reqs = cute.sym_int()
         head_dim = self.head_dim
         fp8_dim = self.fp8_dim
@@ -354,8 +365,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
         )
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
 
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            host_entrypoint,
+        return (
             out,
             k_cache,
             seq_lens,
@@ -364,6 +374,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
             Int32(0),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -374,20 +385,12 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
         block_table: torch.Tensor,
         block_size: int,
         offset: int,
-    ) -> Any:
-        has_gather_lens = gather_lens is not None
+    ) -> CuTeDSLLaunchSpec["DequantGatherKCacheKernel.CompileKey"]:
         compile_key = self.dispatch(
             block_size=block_size,
-            has_gather_lens=has_gather_lens,
+            has_gather_lens=gather_lens is not None,
         )
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context={
-                "block_size": block_size,
-                "has_gather_lens": has_gather_lens,
-            },
-        )
-        return kernel(
+        launch_args = (
             out,
             k_cache,
             seq_lens,
@@ -395,6 +398,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
             block_table,
             offset,
         )
+        return compile_key, launch_args, None
 
 
 _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()

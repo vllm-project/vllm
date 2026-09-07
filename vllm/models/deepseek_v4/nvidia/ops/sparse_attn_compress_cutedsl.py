@@ -20,8 +20,11 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import torch_to_cute_dtype
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+    kernel_launcher,
+)
 from vllm.utils.math_utils import round_up
 
 
@@ -73,7 +76,7 @@ def _fp32x2_to_fp8e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint16
 
 
 class SparseAttnCompressNormRopeStoreC4Kernel(
-    VllmJitKernel["SparseAttnCompressNormRopeStoreC4Kernel.CompileKey"]
+    VllmCuTeDSLJitKernel["SparseAttnCompressNormRopeStoreC4Kernel.CompileKey"]
 ):
     min_scale = 1.0e-4
     rcp_ln2 = 1.4426950408889634
@@ -439,9 +442,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         state_width = compile_key.state_width
         rope_head_dim = compile_key.rope_head_dim
@@ -524,10 +525,8 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             assumed_align=16,
         )
         kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
-        host_entrypoint = self.kernel(compile_key)
 
-        compiled = compile_cutedsl(
-            host_entrypoint,
+        return (
             state_cache,
             token_to_req_indices,
             positions,
@@ -541,8 +540,8 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             kv_slot_mapping,
             Int64(0),
         )
-        self._compiled_cache[compile_key] = compiled
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -560,23 +559,14 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
         compress_ratio: int,
         head_dim: int,
         rope_head_dim: int,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["SparseAttnCompressNormRopeStoreC4Kernel.CompileKey"]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             norm_weight_dtype=torch_to_cute_dtype(rms_norm_weight.dtype),
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
         )
-        runtime_context = {
-            "kv_cache_shape": tuple(kv_cache.shape),
-            "kv_cache_stride": tuple(kv_cache.stride()),
-            "compress_ratio": compress_ratio,
-        }
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
-        )
-        return kernel(
+        launch_args = (
             state_cache,
             token_to_req_indices,
             positions,
@@ -590,10 +580,11 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             kv_slot_mapping,
             kv_cache.shape[1],
         )
+        return compile_key, launch_args, None
 
 
 class SparseAttnCompressNormRopeStoreFullC4Kernel(
-    VllmJitKernel["SparseAttnCompressNormRopeStoreFullC4Kernel.CompileKey"]
+    VllmCuTeDSLJitKernel["SparseAttnCompressNormRopeStoreFullC4Kernel.CompileKey"]
 ):
     rcp_ln2 = 1.4426950408889634
 
@@ -946,9 +937,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         state_width = compile_key.state_width
         rope_head_dim = compile_key.rope_head_dim
@@ -1025,10 +1014,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
         )
         kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
         fp8_scale = make_fake_tensor(Float32, (1,), divisibility=1)
-        host_entrypoint = self.kernel(compile_key)
-
-        compiled = compile_cutedsl(
-            host_entrypoint,
+        return (
             state_cache,
             token_to_req_indices,
             positions,
@@ -1043,8 +1029,8 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             Int64(0),
             fp8_scale,
         )
-        self._compiled_cache[compile_key] = compiled
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -1064,7 +1050,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
         fp8_scale: torch.Tensor | None,
         head_dim: int,
         rope_head_dim: int,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["SparseAttnCompressNormRopeStoreFullC4Kernel.CompileKey"]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             store_full_fp8=store_full_fp8,
@@ -1072,19 +1058,9 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
         )
-        runtime_context = {
-            "kv_cache_shape": tuple(kv_cache.shape),
-            "kv_cache_stride": tuple(kv_cache.stride()),
-            "compress_ratio": compress_ratio,
-            "store_full_fp8": store_full_fp8,
-        }
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
-        )
         if fp8_scale is None:
             fp8_scale = torch.ones(1, dtype=torch.float32, device=kv_cache.device)
-        return kernel(
+        launch_args = (
             state_cache,
             token_to_req_indices,
             positions,
@@ -1099,10 +1075,11 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             kv_cache.shape[1],
             fp8_scale,
         )
+        return compile_key, launch_args, None
 
 
 class SparseAttnCompressC128Block8Kernel(
-    VllmJitKernel["SparseAttnCompressC128Block8Kernel.CompileKey"]
+    VllmCuTeDSLJitKernel["SparseAttnCompressC128Block8Kernel.CompileKey"]
 ):
     head_tile = 64
     rows_per_warp = 16
@@ -1377,9 +1354,9 @@ class SparseAttnCompressC128Block8Kernel(
         return host_entrypoint
 
     def dispatch(  # type: ignore[override]
-        self, **compile_key_fields: int
+        self, *, head_size: int, state_width: int
     ) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
+        return self.CompileKey(head_size=head_size, state_width=state_width)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
@@ -1390,9 +1367,7 @@ class SparseAttnCompressC128Block8Kernel(
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         state_width = compile_key.state_width
         if head_size % SparseAttnCompressC128Block8Kernel.head_tile != 0:
@@ -1432,10 +1407,7 @@ class SparseAttnCompressC128Block8Kernel(
             stride=(head_size, 1),
             assumed_align=4,
         )
-        host_entrypoint = self.kernel(compile_key)
-
-        compiled = compile_cutedsl(
-            host_entrypoint,
+        return (
             state_cache,
             token_to_req_indices,
             positions,
@@ -1443,8 +1415,11 @@ class SparseAttnCompressC128Block8Kernel(
             block_table,
             compressed_kv,
         )
-        self._compiled_cache[compile_key] = compiled
 
+    # This kernel cannot use @kernel_launcher: it allocates the
+    # ``compressed_kv`` output when the caller omits it and returns that buffer,
+    # whereas the launcher forwards the executor's own (None) result. It still
+    # shares the executor via the base ``_get_or_compile`` owner cache.
     def __call__(
         self,
         *,
@@ -1457,14 +1432,8 @@ class SparseAttnCompressC128Block8Kernel(
         head_dim: int,
         compressed_kv: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        compile_key = self.dispatch(head_size=head_dim, state_width=head_dim)
-        runtime_context = {
-            "state_cache_shape": tuple(state_cache.shape),
-            "head_dim": head_dim,
-        }
         kernel = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
+            self.dispatch(head_size=head_dim, state_width=head_dim)
         )
         if compressed_kv is None:
             compressed_kv = torch.empty(
@@ -1484,7 +1453,7 @@ class SparseAttnCompressC128Block8Kernel(
 
 
 class SparseAttnNormRopeStoreKernel(
-    VllmJitKernel["SparseAttnNormRopeStoreKernel.CompileKey"]
+    VllmCuTeDSLJitKernel["SparseAttnNormRopeStoreKernel.CompileKey"]
 ):
     min_scale = 1.0e-4
 
@@ -1693,8 +1662,9 @@ class SparseAttnNormRopeStoreKernel(
         cache_block_size: int,
         cache_alignment: int,
         norm_weight_dtype: type[cutlass.Numeric],
+        head_size: int,
+        rope_head_dim: int,
         runtime_kv_block_stride: int | None = None,
-        **compile_key_fields: int,
     ) -> CompileKey:
         raw_kv_cache_block_size = cache_block_size // compress_ratio
         kv_cache_block_size = (
@@ -1703,7 +1673,8 @@ class SparseAttnNormRopeStoreKernel(
         token_stride = 576
         scale_dim = 8
         return self.CompileKey(
-            **compile_key_fields,
+            head_size=head_size,
+            rope_head_dim=rope_head_dim,
             fp8_max=448.0,
             quant_block=64,
             token_stride=token_stride,
@@ -1751,9 +1722,7 @@ class SparseAttnNormRopeStoreKernel(
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         rope_head_dim = compile_key.rope_head_dim
         quant_block = compile_key.quant_block
@@ -1813,10 +1782,7 @@ class SparseAttnNormRopeStoreKernel(
             assumed_align=16,
         )
         kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
-        host_entrypoint = self.kernel(compile_key)
-
-        compiled = compile_cutedsl(
-            host_entrypoint,
+        return (
             compressed_kv,
             positions,
             slot_mapping,
@@ -1826,8 +1792,8 @@ class SparseAttnNormRopeStoreKernel(
             k_cache,
             kv_slot_mapping,
         )
-        self._compiled_cache[compile_key] = compiled
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -1842,7 +1808,7 @@ class SparseAttnNormRopeStoreKernel(
         compress_ratio: int,
         head_dim: int,
         rope_head_dim: int,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["SparseAttnNormRopeStoreKernel.CompileKey"]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             cache_block_size=kv_cache.shape[1] * compress_ratio,
@@ -1852,16 +1818,7 @@ class SparseAttnNormRopeStoreKernel(
             rope_head_dim=rope_head_dim,
             runtime_kv_block_stride=kv_cache.stride(0),
         )
-        runtime_context = {
-            "kv_cache_shape": tuple(kv_cache.shape),
-            "kv_cache_stride": tuple(kv_cache.stride()),
-            "compress_ratio": compress_ratio,
-        }
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
-        )
-        return kernel(
+        launch_args = (
             compressed_kv,
             positions,
             slot_mapping,
@@ -1871,10 +1828,11 @@ class SparseAttnNormRopeStoreKernel(
             kv_cache,
             kv_slot_mapping,
         )
+        return compile_key, launch_args, None
 
 
 class SparseAttnNormRopeStoreFullKernel(
-    VllmJitKernel["SparseAttnNormRopeStoreFullKernel.CompileKey"]
+    VllmCuTeDSLJitKernel["SparseAttnNormRopeStoreFullKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -2056,10 +2014,14 @@ class SparseAttnNormRopeStoreFullKernel(
         *,
         store_full_fp8: bool,
         norm_weight_dtype: type[cutlass.Numeric],
-        **compile_key_fields: int,
+        head_size: int,
+        rope_head_dim: int,
+        compress_ratio: int,
     ) -> CompileKey:
         return self.CompileKey(
-            **compile_key_fields,
+            head_size=head_size,
+            rope_head_dim=rope_head_dim,
+            compress_ratio=compress_ratio,
             fp8_max=448.0,
             quant_block=64,
             store_full_fp8=store_full_fp8,
@@ -2083,9 +2045,7 @@ class SparseAttnNormRopeStoreFullKernel(
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         head_size = compile_key.head_size
         rope_head_dim = compile_key.rope_head_dim
         quant_block = compile_key.quant_block
@@ -2132,10 +2092,7 @@ class SparseAttnNormRopeStoreFullKernel(
         )
         kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
         fp8_scale = make_fake_tensor(Float32, (1,), divisibility=1)
-        host_entrypoint = self.kernel(compile_key)
-
-        compiled = compile_cutedsl(
-            host_entrypoint,
+        return (
             compressed_kv,
             positions,
             slot_mapping,
@@ -2147,8 +2104,8 @@ class SparseAttnNormRopeStoreFullKernel(
             Int64(0),
             fp8_scale,
         )
-        self._compiled_cache[compile_key] = compiled
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -2165,7 +2122,7 @@ class SparseAttnNormRopeStoreFullKernel(
         fp8_scale: torch.Tensor | None,
         head_dim: int,
         rope_head_dim: int,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["SparseAttnNormRopeStoreFullKernel.CompileKey"]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             store_full_fp8=store_full_fp8,
@@ -2173,19 +2130,9 @@ class SparseAttnNormRopeStoreFullKernel(
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
         )
-        runtime_context = {
-            "kv_cache_shape": tuple(kv_cache.shape),
-            "kv_cache_stride": tuple(kv_cache.stride()),
-            "compress_ratio": compress_ratio,
-            "store_full_fp8": store_full_fp8,
-        }
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context=runtime_context,
-        )
         if fp8_scale is None:
             fp8_scale = torch.ones(1, dtype=torch.float32, device=kv_cache.device)
-        return kernel(
+        launch_args = (
             compressed_kv,
             positions,
             slot_mapping,
@@ -2197,6 +2144,7 @@ class SparseAttnNormRopeStoreFullKernel(
             kv_cache.shape[1],
             fp8_scale,
         )
+        return compile_key, launch_args, None
 
 
 def split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(

@@ -19,10 +19,11 @@ from vllm.cute_utils import (
     recast_val,
     torch_to_cute_dtype,
 )
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+    kernel_launcher,
 )
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
@@ -151,7 +152,7 @@ def _load_q_and_rope(
     )
 
 
-class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
+class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
     tb_size = 128
 
     @dataclass(frozen=True)
@@ -323,9 +324,10 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+
         hf_config = vllm_config.model_config.hf_config
-        use_fp4 = vllm_config.attention_config.use_fp4_indexer_cache
-        if hf_config is None or not use_fp4:
+        if hf_config is None or not dsa_indexer_uses_fp4(vllm_config):
             return []
 
         num_heads = int(getattr(hf_config, "index_n_heads", 0) or 0)
@@ -342,10 +344,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
             coarsen=(1, 4),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_tokens = cute.sym_int()
         max_pos = cute.sym_int()
         q = make_fake_tensor(
@@ -379,8 +378,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
         weights_out = make_fake_tensor(
             Float32, (num_tokens, compile_key.num_heads), divisibility=4
         )
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
+        return (
             positions,
             q,
             cos_sin_cache,
@@ -391,6 +389,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
             Float32(0.0),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -403,29 +402,16 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
         q_packed: torch.Tensor,
         q_scale: torch.Tensor,
         weights_out: torch.Tensor,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["IndexerQMxFp4Kernel.CompileKey"]:
         num_tokens, num_heads, head_dim = q.shape
-        rope_dim = cos_sin_cache.shape[-1]
-        cos_sin_dtype = torch_to_cute_dtype(cos_sin_cache.dtype)
-        coarsen = 1 if num_tokens < 512 else 4
         compile_key = self.dispatch(
             head_dim=head_dim,
-            rope_dim=rope_dim,
+            rope_dim=cos_sin_cache.shape[-1],
             num_heads=num_heads,
-            cos_sin_dtype=cos_sin_dtype,
-            coarsen=coarsen,
+            cos_sin_dtype=torch_to_cute_dtype(cos_sin_cache.dtype),
+            coarsen=1 if num_tokens < 512 else 4,
         )
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context={
-                "head_dim": head_dim,
-                "rope_dim": rope_dim,
-                "num_heads": num_heads,
-                "cos_sin_dtype": cos_sin_dtype,
-                "coarsen": coarsen,
-            },
-        )
-        return kernel(
+        launch_args = (
             positions,
             q,
             cos_sin_cache,
@@ -435,9 +421,10 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
             weights_out,
             float(weights_softmax_scale * weights_head_scale),
         )
+        return compile_key, launch_args, None
 
 
-class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
+class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
     tb_size = 128
 
     @dataclass(frozen=True)
@@ -612,9 +599,10 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+
         hf_config = vllm_config.model_config.hf_config
-        use_fp4 = vllm_config.attention_config.use_fp4_indexer_cache
-        if hf_config is None or use_fp4:
+        if hf_config is None or dsa_indexer_uses_fp4(vllm_config):
             return []
 
         num_heads = int(getattr(hf_config, "index_n_heads", 0) or 0)
@@ -631,10 +619,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
             coarsen=(1, 4),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_tokens = cute.sym_int()
         max_pos = cute.sym_int()
         q = make_fake_tensor(
@@ -659,8 +644,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
         weights_out = make_fake_tensor(
             Float32, (num_tokens, compile_key.num_heads), divisibility=4
         )
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
+        return (
             positions,
             q,
             cos_sin_cache,
@@ -670,6 +654,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
             Float32(0.0),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -681,29 +666,16 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
         weights_head_scale: float,
         q_fp8: torch.Tensor,
         weights_out: torch.Tensor,
-    ) -> Any:
+    ) -> CuTeDSLLaunchSpec["IndexerQFp8Kernel.CompileKey"]:
         num_tokens, num_heads, head_dim = q.shape
-        rope_dim = cos_sin_cache.shape[-1]
-        cos_sin_dtype = torch_to_cute_dtype(cos_sin_cache.dtype)
-        coarsen = 1 if num_tokens < 512 else 4
         compile_key = self.dispatch(
             head_dim=head_dim,
-            rope_dim=rope_dim,
+            rope_dim=cos_sin_cache.shape[-1],
             num_heads=num_heads,
-            cos_sin_dtype=cos_sin_dtype,
-            coarsen=coarsen,
+            cos_sin_dtype=torch_to_cute_dtype(cos_sin_cache.dtype),
+            coarsen=1 if num_tokens < 512 else 4,
         )
-        kernel = self._get_or_compile(
-            compile_key,
-            runtime_context={
-                "head_dim": head_dim,
-                "rope_dim": rope_dim,
-                "num_heads": num_heads,
-                "cos_sin_dtype": cos_sin_dtype,
-                "coarsen": coarsen,
-            },
-        )
-        return kernel(
+        launch_args = (
             positions,
             q,
             cos_sin_cache,
@@ -712,6 +684,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
             weights_out,
             float(weights_softmax_scale * weights_head_scale),
         )
+        return compile_key, launch_args, None
 
 
 _INDEXER_Q_MXFP4_KERNEL = IndexerQMxFp4Kernel()
