@@ -16,12 +16,12 @@ from its config.json.
 
 Start the server with:
 
-    vllm serve Qwen/Qwen3-ForcedAligner-0.6B-hf \\
-        --runner pooling \\
-        --convert classify \\
-        --pooler-config \\
-        '{"tok_pooling_type":"STEP","step_tag_id":151705,"use_activation":false}' \\
-        --enforce-eager \\
+    vllm serve Qwen/Qwen3-ForcedAligner-0.6B-hf \
+        --runner pooling \
+        --convert classify \
+        --pooler-config \
+        '{"tok_pooling_type":"STEP","step_tag_id":151705,"use_activation":false}' \
+        --enforce-eager \
         --trust-request-chat-template
 
 Then run:
