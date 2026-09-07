@@ -74,6 +74,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -2434,6 +2435,17 @@ class ModelOptLinearMethod(LinearMethodBase):
         maybe_fuse_global_scales(layer)
         self.fmt.post_process(layer)
         self.kernel.process_weights_after_loading(layer)
+
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        """Reconstruct serialized weights for online requantization."""
+        if self.wkey.key is kMxfp8Static:
+            return dequant_mxfp8_to_bf16(
+                layer.weight.contiguous(), layer.weight_scale.contiguous()
+            )
+        else:
+            raise NotImplementedError(
+                "ModelOpt weight dequantization is only supported for MXFP8."
+            )
 
     def apply(self, layer, x, bias=None):
         return self.fmt.apply(
