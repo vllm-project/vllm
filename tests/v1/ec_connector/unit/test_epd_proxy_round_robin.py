@@ -32,8 +32,13 @@ def _load_proxy_module():
 
 
 @pytest.fixture(scope="module")
-def assign():
-    return _load_proxy_module().encoder_rr_assignment
+def proxy():
+    return _load_proxy_module()
+
+
+@pytest.fixture(scope="module")
+def assign(proxy):
+    return proxy.encoder_rr_assignment
 
 
 def _drive(assign, e_urls, counts):
@@ -80,3 +85,44 @@ def test_single_encoder_always_resolves_to_it(assign):
     urls, next_cursor = assign(["E0"], 0, 4)
     assert urls == ["E0"] * 4
     assert next_cursor == 0
+
+
+def test_generic_e_p_d_routing_without_mooncake_is_supported(proxy):
+    proxy.validate_ec_consumer_routing(["http://prefill"], [])
+
+
+def test_mooncake_e_pd_routing_is_supported(proxy):
+    proxy.validate_ec_consumer_routing([], ["tcp://decode:19019"])
+
+
+def test_mooncake_independent_prefill_routing_fails_fast(proxy):
+    with pytest.raises(ValueError, match=r"supports E\+PD only"):
+        proxy.validate_ec_consumer_routing(["http://prefill"], ["tcp://decode:19019"])
+
+
+def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "image"}}],
+            }
+        ]
+    }
+
+    rewritten = proxy.rewrite_for_decode(
+        request,
+        {
+            0: {
+                "mm_hash": "proxy-uuid",
+                "ec_mm_hash": "engine-derived-hash",
+                "transfer_id": "transfer",
+                "image_grid_thw": [1, 2, 3],
+            }
+        },
+    )
+
+    assert rewritten["messages"][0]["content"][0]["uuid"] == "proxy-uuid"
+    assert rewritten["ec_transfer_params"]["ec_items"] == [
+        {"mm_hash": "engine-derived-hash", "transfer_id": "transfer"}
+    ]
