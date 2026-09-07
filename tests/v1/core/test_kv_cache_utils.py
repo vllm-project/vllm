@@ -2476,7 +2476,7 @@ def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
         for group in groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         and all(
-            isinstance(spec, SlidingWindowSpec)
+            isinstance(spec, SlidingWindowSpec) and not isinstance(spec, KpoolTailSpec)
             for spec in group.kv_cache_spec.kv_cache_specs.values()
         )
     )
