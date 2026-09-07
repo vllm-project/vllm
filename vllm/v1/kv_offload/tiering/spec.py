@@ -304,6 +304,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    unlink_owner=True,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -397,6 +398,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank=rank,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            unlink_owner=False,
         )
         try:
             if self.config.canonical_layout:

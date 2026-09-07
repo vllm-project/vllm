@@ -236,6 +236,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             rank=rank,
             kv_bytes_per_chunk=row_stride,
             cpu_page_size=row_stride // world_size,
+            unlink_owner=rank == 0,
         )
         regions.append(region)
         # The Triton load path dereferences CPU pointers on the GPU, which is

@@ -13,7 +13,6 @@ import torch
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
-from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -79,9 +78,9 @@ class SharedOffloadRegion:
     initialization fails.
 
     File path: /dev/shm/vllm_offload_{engine_id}.mmap. When a barrier is
-    given, the path is unlinked once every worker has mapped the file, so
-    the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    given, the caller-selected unlink owner removes the path once the barrier
+    releases. Without a barrier, that owner removes the path during cleanup.
+    Mappings taken before the unlink stay valid.
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
@@ -100,6 +99,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        unlink_owner: bool,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -112,7 +112,7 @@ class SharedOffloadRegion:
 
         self.rank = rank
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._is_singleton_owner = rank is not None and is_local_first_rank()
+        self._is_unlink_owner = unlink_owner
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
             self._worker_offset = rank * cpu_page_size
@@ -197,9 +197,9 @@ class SharedOffloadRegion:
                 self.mmap_obj = None
                 self.fd = None
                 raise
-            if self._is_singleton_owner:
+            if self._is_unlink_owner:
                 os.unlink(self.mmap_path)
-                self._is_singleton_owner = False
+                self._is_unlink_owner = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
@@ -376,7 +376,7 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._is_singleton_owner and getattr(self, "mmap_path", None):
+        if self._is_unlink_owner and getattr(self, "mmap_path", None):
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
@@ -386,4 +386,4 @@ class SharedOffloadRegion:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
-            self._is_singleton_owner = False
+            self._is_unlink_owner = False

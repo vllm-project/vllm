@@ -297,6 +297,7 @@ def test_transfer(
             rank=0,
             kv_bytes_per_chunk=kv_bytes_per_chunk,
             cpu_page_size=cpu_page_size,
+            unlink_owner=True,
         )
 
     worker = CPUOffloadingWorker(
