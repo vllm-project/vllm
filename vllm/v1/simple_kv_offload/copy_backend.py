@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 
 import torch
 
@@ -74,7 +75,7 @@ class DmaCopyBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[tuple[int, torch.Event]] | deque[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
         params = self._store_params if is_store else self._load_params

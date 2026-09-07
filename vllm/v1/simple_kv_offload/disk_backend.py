@@ -13,6 +13,7 @@ import contextlib
 import os
 import queue
 import threading
+from collections import deque
 
 import torch
 
@@ -189,7 +190,7 @@ class DiskBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[tuple[int, torch.Event]] | deque[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
         q = self._store_queue if is_store else self._load_queue
