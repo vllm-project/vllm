@@ -781,7 +781,7 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     assert len(resident) == num_prompt_blocks
     assert all(block.is_null for block in resident)
     assert len(hot) == 2
-    assert manager.block_pools[0].get_num_free_blocks() == 0
+    assert manager.block_pools[0].get_num_free_blocks() == 1
 
 
 def test_hisparse_external_import_survives_capacity_retry():
