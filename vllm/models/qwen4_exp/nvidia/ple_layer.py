@@ -877,16 +877,6 @@ def qwen4_exp_compute_ple_ngram_ids(
     )
 
 
-def qwen4_exp_compute_ple_ngram_ids_fake(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     residual_output: torch.Tensor,
@@ -896,19 +886,10 @@ def qwen4_exp_ple_short_conv(
     layer._short_conv(inputs, residual_output)
 
 
-def qwen4_exp_ple_short_conv_fake(
-    inputs: torch.Tensor,
-    residual_output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="qwen4_exp_compute_ple_ngram_ids",
     op_func=qwen4_exp_compute_ple_ngram_ids,
     mutates_args=["output"],
-    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
 )
 
 
@@ -916,7 +897,6 @@ direct_register_custom_op(
     op_name="qwen4_exp_ple_short_conv",
     op_func=qwen4_exp_ple_short_conv,
     mutates_args=["residual_output"],
-    fake_impl=qwen4_exp_ple_short_conv_fake,
 )
 
 
