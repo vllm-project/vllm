@@ -536,7 +536,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
-        10,
+        11,
         16,
         transfer_device_cache=True,
     )
