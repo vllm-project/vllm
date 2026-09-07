@@ -156,7 +156,7 @@ class _KVCacheState:
     def __init__(self) -> None:
         self._next_store_id = 0
         self._stores: dict[int, _StoredBlocks] = {}
-        self._active_stores: dict[_BlockKey, int] = {}
+        self._active_keys: set[_BlockKey] = set()
         self._latest_stores: dict[_BlockKey, int] = {}
         self._keys_by_hash: dict[ExternalBlockHash, set[_BlockKey]] = {}
         self._dependents: dict[_BlockKey, set[int]] = {}
@@ -186,7 +186,7 @@ class _KVCacheState:
     def clear(self) -> None:
         self._next_store_id = 0
         self._stores.clear()
-        self._active_stores.clear()
+        self._active_keys.clear()
         self._latest_stores.clear()
         self._keys_by_hash.clear()
         self._dependents.clear()
@@ -202,7 +202,7 @@ class _KVCacheState:
         for stored in ordered_stores:
             event = stored.event
             removed_hashes = [
-                key[0] for key in stored.keys if key not in self._active_stores
+                key[0] for key in stored.keys if key not in self._active_keys
             ]
             if removed_hashes:
                 events.append(
@@ -254,7 +254,7 @@ class _KVCacheState:
         stored = _StoredBlocks(event, keys, set(keys), parent_key)
         self._stores[store_id] = stored
         for key in keys:
-            self._active_stores[key] = store_id
+            self._active_keys.add(key)
             self._latest_stores[key] = store_id
             self._keys_by_hash.setdefault(key[0], set()).add(key)
         if parent_key is not None:
@@ -277,16 +277,18 @@ class _KVCacheState:
                 self._deactivate(key)
 
     def _deactivate(self, key: _BlockKey, *, collect: bool = True) -> None:
-        store_id = self._active_stores.pop(key, None)
-        if store_id is None:
+        if key not in self._active_keys:
             return
+        store_id = self._latest_stores.get(key)
+        assert store_id is not None
+        stored = self._stores[store_id]
+        self._active_keys.remove(key)
 
         hash_keys = self._keys_by_hash[key[0]]
         hash_keys.remove(key)
         if not hash_keys:
             del self._keys_by_hash[key[0]]
 
-        stored = self._stores[store_id]
         stored.active_keys.remove(key)
         if collect:
             self._collect_store(store_id)
