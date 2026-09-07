@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_humming_moe
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
 
@@ -112,6 +113,9 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer CUTLASS backends
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
+    # FlashInfer CUTLASS "humming" MXFP4 weight x FP8 activation (SM90 only,
+    # pre-MMA E8M0 scale fusion, FlashInfer PR #3738).
+    FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING = "FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
@@ -186,6 +190,7 @@ def backend_to_kernel_cls(
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING,
     ):
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
@@ -304,6 +309,9 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         ],
         "flashinfer_cutlass_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8],
+        "flashinfer_cutlass_humming": [
+            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING
+        ],
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
@@ -393,7 +401,9 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kFp8StaticTensorSym
     if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         return kMxfp4Dynamic
-    return None  # BF16 activation
+    # Humming quantizes activations to FP8 *inside* the kernel (bf16 in, no
+    # input_sf from vLLM), so from vLLM's view the activation is unquantized.
+    return None  # BF16 activation (also humming, kernel-internal FP8 act)
 
 
 def _user_moe_activation_override() -> QuantKey | None:
@@ -431,6 +441,35 @@ def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
         f"deployment configuration"
     )
     return f"{base} since {reason}." if reason else f"{base}."
+
+
+def _check_explicit_backend_requirements(
+    runner_backend: MoEBackend, backends: list[Mxfp4MoeBackend]
+) -> None:
+    """Fail fast on an explicitly requested backend this deployment can never
+    run, so the user gets an actionable hint instead of the generic "does not
+    support the deployment configuration" from `_return_or_raise` -- or, for a
+    FlashInfer too old to carry the kernel, an ImportError raised deep inside
+    weight loading."""
+    if Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING not in backends:
+        return
+    if not (current_platform.is_cuda() and current_platform.is_device_capability(90)):
+        raise ValueError(
+            f"moe_backend={runner_backend!r} selects the FlashInfer CUTLASS "
+            "humming MXFP4-weight x FP8-activation MoE kernel, which is "
+            "implemented for SM90 (Hopper) only; this device reports compute "
+            f"capability {current_platform.get_device_capability()}. Drop the "
+            "flag to fall back to the automatic backend selection."
+        )
+    if not has_flashinfer_humming_moe():
+        raise ValueError(
+            f"moe_backend={runner_backend!r} needs the FlashInfer humming "
+            "MXFP4 x FP8 MoE kernel speaking the per-local-expert residual "
+            "contract from FlashInfer #4431, which the installed FlashInfer "
+            "does not provide; it requires flashinfer-python>=0.6.18. Note "
+            "that a build carrying the kernel without #4431 is also rejected: "
+            "it takes one residual scale per routed token instead."
+        )
 
 
 def _return_or_raise(
@@ -547,6 +586,7 @@ def select_mxfp4_moe_backend(
         requested_backends = _get_requested_backends(
             runner_backend, requested_activation_key
         )
+        _check_explicit_backend_requirements(runner_backend, requested_backends)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -671,6 +711,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(runner_backend, None)
+        _check_explicit_backend_requirements(runner_backend, requested_backends)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -755,6 +796,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING,
     ):
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
@@ -998,6 +1040,20 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight_scale,
             w13_bias,
             w2_bias,
+        )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING:
+        # The humming weight preprocessing (see
+        # convert_weight_to_mxfp4_moe_kernel_format) assumes the DeepSeek-V4
+        # block layout (gate/up as two contiguous halves) and only swaps the
+        # halves. GPT-OSS-style checkpoints store w13 row-interleaved, which
+        # would run through the kernel with the right shapes but the wrong
+        # numerics, so refuse it instead of returning silently wrong values.
+        raise ValueError(
+            "moe_backend='flashinfer_cutlass_humming' only supports the "
+            "DeepSeek-V4 MXFP4 expert layout; this checkpoint uses the "
+            "GPT-OSS row-interleaved w13 layout, which the humming weight "
+            "preprocessing does not handle. Use --moe-backend auto instead."
         )
 
     elif mxfp4_backend in (
@@ -1409,6 +1465,76 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_weight_scale,
             w2_weight_scale,
             w13_bias,
+            w2_bias,
+        )
+
+    if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING:
+        # The SM90 mixed-gemm interleave assumes both GEMM dims are already
+        # rounded to 128 (see
+        # mxfp4_round_up_hidden_size_and_intermediate_size); check here so a
+        # bad shape reports the dimension instead of failing inside FlashInfer.
+        humming_n = w13_weight.shape[1] // 2
+        humming_k = w13_weight.shape[2] * 2
+        if humming_n % 128 != 0 or humming_k % 128 != 0:
+            raise ValueError(
+                "moe_backend='flashinfer_cutlass_humming' requires "
+                "intermediate_size and hidden_size to be multiples of 128, "
+                f"got intermediate_size={humming_n}, hidden_size={humming_k}."
+            )
+
+        from flashinfer.fused_moe import (
+            interleave_moe_scales_for_sm90_mixed_gemm,
+            interleave_moe_weights_for_sm90_mixed_gemm,
+            preprocess_moe_weights_for_sm90_mixed_gemm_humming,
+        )
+
+        # vLLM w13 is block-laid-out gate(w1) on top, up(w3) below. The kernel's
+        # SwiGLU convention (silu on the second chunk) is the reverse, so swap
+        # to up-then-gate (validated by scripts/humming_offline_check.py). Unlike
+        # the gpt-oss CUTLASS branch, DSv4 weights are NOT row-interleaved, so we
+        # only swap the two halves (no de-interleave).
+        w1_g, w3_u = torch.chunk(w13_weight.data, 2, dim=1)
+        w13_swapped = torch.cat([w3_u, w1_g], dim=1).contiguous()
+        s1_g, s3_u = torch.chunk(w13_weight_scale.data, 2, dim=1)
+        w13_scale_swapped = torch.cat([s3_u, s1_g], dim=1).contiguous()
+        w13_bias_swapped = None
+        if w13_bias is not None:
+            b1_g, b3_u = torch.chunk(w13_bias.data, 2, dim=1)
+            w13_bias_swapped = torch.cat([b3_u, b1_g], dim=1).contiguous()
+
+        # Humming preprocessing: rewrite MXFP4 payload + fold E8M0 scale into a
+        # small exp-offset; residual (per-expert fp32) is applied in the epilogue
+        # via the routed-token activation scale. interleave=False first, then the
+        # SM90 mixed-gemm interleave (mirrors the reference test path).
+        w13_proc, w13_off, w13_residual = (
+            preprocess_moe_weights_for_sm90_mixed_gemm_humming(
+                w13_swapped.view(torch.uint8),
+                w13_scale_swapped.view(torch.uint8),
+                interleave=False,
+            )
+        )
+        w2_proc, w2_off, w2_residual = (
+            preprocess_moe_weights_for_sm90_mixed_gemm_humming(
+                w2_weight.data.view(torch.uint8),
+                w2_weight_scale.data.view(torch.uint8),
+                interleave=False,
+            )
+        )
+        w13_il = interleave_moe_weights_for_sm90_mixed_gemm(w13_proc, "fp4_fp8")
+        w2_il = interleave_moe_weights_for_sm90_mixed_gemm(w2_proc, "fp4_fp8")
+        w13_scale_il = interleave_moe_scales_for_sm90_mixed_gemm(w13_off)
+        w2_scale_il = interleave_moe_scales_for_sm90_mixed_gemm(w2_off)
+
+        # Stash per-expert fp32 residuals for the quant config / apply to consume.
+        layer.humming_w13_residual = w13_residual.contiguous()
+        layer.humming_w2_residual = w2_residual.contiguous()
+
+        return (
+            w13_il,
+            w2_il,
+            w13_scale_il,
+            w2_scale_il,
+            w13_bias_swapped,
             w2_bias,
         )
 
@@ -1881,6 +2007,33 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
             is_scale_swizzled=True,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING:
+        # SM90 humming: MXFP4 weights, kernel-internal FP8 activation. From
+        # vLLM's view the activation is unquantized (bf16 in, no input_sf).
+        # Per-expert fp32 residuals are carried in alpha_or_gscale (-> g1/g2
+        # _alphas) and folded per-token in FlashInferExperts.apply.
+        assert layer is not None
+        return FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(),
+            _a2=FusedMoEQuantDesc(),
+            _w1=FusedMoEQuantDesc(
+                "mxfp4",
+                None,
+                w1_scale,
+                getattr(layer, "humming_w13_residual", None),
+                None,
+                w1_bias,
+            ),
+            _w2=FusedMoEQuantDesc(
+                "mxfp4",
+                None,
+                w2_scale,
+                getattr(layer, "humming_w2_residual", None),
+                None,
+                w2_bias,
+            ),
+            use_wfp4afp8_humming=True,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations

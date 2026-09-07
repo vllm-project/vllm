@@ -85,6 +85,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             " float16 quantization are currently supported."
         )
         self.device = moe_config.device
+        # Constants the SM90 humming branch would otherwise rebuild on every
+        # forward; see apply(). Filled lazily there because g1/g2_alphas are
+        # only populated once weights are loaded.
+        self._humming_g1_scaled: torch.Tensor | None = None
+        self._humming_g2_scaled: torch.Tensor | None = None
+        self._humming_one: torch.Tensor | None = None
         self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.ep_size = moe_config.moe_parallel_config.ep_size
@@ -281,6 +287,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             swiglu_limit = self.gemm1_clamp_limit
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
+        use_wfp4afp8_humming = False
         # Select quantization metadata based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
@@ -315,6 +322,70 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+        elif self.quant_config.use_wfp4afp8_humming:
+            # SM90 humming (MXFP4 weight x kernel-internal FP8 act). The
+            # per-expert fp32 residuals arrive via g1/g2_alphas and are handed
+            # to the kernel as-is: since flashinfer #4431 slots 1 and 4 are
+            # [num_local_experts] and the kernel selects each routed row's
+            # residual with its own expert map (validated by
+            # scripts/humming_offline_check.py).
+            assert self.w1_scale is not None and self.w2_scale is not None
+            assert self.g1_alphas is not None and self.g2_alphas is not None
+            assert hidden_states.dtype == torch.bfloat16
+            # Plain SwiGLU, no clamp: this is the activation path validated by
+            # the offline check + M1 correctness (which pass no swiglu_* args).
+            # Must reset the clamp set at the top of apply, else the kernel
+            # switches to the un-validated SwigluBias path.
+            swiglu_alpha = None
+            swiglu_beta = None
+            swiglu_limit = None
+            # 2^6 exponent-bias compensation from humming's FP4->FP8 conversion
+            # (matches HUMMING_EPILOGUE_COMPENSATION in the flashinfer reference
+            # test test_moe_fp8_mxfp4_humming_prescale_hopper_correctness).
+            HUMMING_EPILOGUE_COMPENSATION = 64.0
+            # The compensation is a constant, so fold it into the residuals once
+            # instead of re-scaling on every forward. g1/g2_alphas are shared
+            # with the nvfp4 paths above and must not be scaled in place.
+            # topk_ids stay GLOBAL expert ids: the kernel's permutation converts
+            # valid routes to rank-local indices before reading these arrays, so
+            # EP needs nothing extra here.
+            if self._humming_g1_scaled is None or self._humming_g2_scaled is None:
+                self._humming_g1_scaled = (
+                    self.g1_alphas * HUMMING_EPILOGUE_COMPENSATION
+                ).contiguous()
+                self._humming_g2_scaled = (
+                    self.g2_alphas * HUMMING_EPILOGUE_COMPENSATION
+                ).contiguous()
+            if self._humming_one is None:
+                self._humming_one = torch.ones(
+                    (), device=self.device, dtype=torch.float32
+                )
+            fc2_act_global = self._humming_one
+            # Positional contract with the humming kernel: it indexes these five
+            # slots by position, so the order below is load-bearing and a
+            # reordering fails silently with wrong values rather than raising.
+            #   0 fc1 weight E8M0 exponent offsets (int32-viewed)
+            #   1 fc1 residual, one fp32 per local expert (x 2^6)
+            #   2 fc2 activation global scale (1.0; fc2 input is kernel-produced)
+            #   3 fc2 weight E8M0 exponent offsets (int32-viewed)
+            #   4 fc2 residual, same per-local-expert layout as slot 1
+            quant_scales = [
+                self.w1_scale.view(torch.int32),
+                self._humming_g1_scaled,
+                fc2_act_global,
+                self.w2_scale.view(torch.int32),
+                self._humming_g2_scaled,
+            ]
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+            fc1_expert_biases = self.w1_bias
+            fc2_expert_biases = self.w2_bias
+            a1q_scale = None
+            use_w4_group_scaling = True
+            use_wfp4afp8_humming = True
+            # The humming kernel asserts float32 routing weights.
+            topk_weights = topk_weights.to(torch.float32)
+
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
@@ -388,6 +459,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            use_wfp4afp8_humming=use_wfp4afp8_humming,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
