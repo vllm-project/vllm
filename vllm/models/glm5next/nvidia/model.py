@@ -473,7 +473,8 @@ class Glm5NextDecoderLayer(nn.Module):
         # Attention needs the full token sequence; mHC above ran on the SP
         # shard. Gather for attention, scatter back afterward (DSv4 pattern).
         if self.is_sequence_parallel:
-            x = sp_all_gather(x)[: positions.shape[0]]
+            # positions may be (3, num_tokens) under M-RoPE: use the token dim.
+            x = sp_all_gather(x)[: positions.shape[-1]]
 
         x = self.self_attn(
             hidden_states=x,
@@ -708,11 +709,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if not get_pp_group().is_last_rank:
             # PP is gated off for GLM-5.3-Flash (no make_empty_intermediate_tensors),
             # so this branch is not exercised. Auxiliary hidden states are not
-            # relayed across PP ranks either (supports_aux_hidden_states_over_pp
-            # stays False, so the runner rejects EAGLE-3 / DFlash with PP > 1). post/comb are the deferred
-            # hc_post state of this rank's last mHC layer; a future PP path
-            # would need to propagate them, but for now they are dropped (the
-            # receiving rank's first layer would fall back to standalone pre).
+            # relayed across PP ranks either: supports_aux_hidden_states_over_pp
+            # stays False, so the runner rejects EAGLE-3 / DFlash with PP > 1.
+            # post/comb are the deferred hc_post state of this rank's last mHC
+            # layer; a future PP path would need to propagate them, but for now
+            # they are dropped (the receiving rank's first layer would fall back
+            # to standalone pre).
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
