@@ -184,6 +184,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
+            # Abort-before-schedule empty recv: no WRITE will complete, so
+            # get_finished would never pop this entry. Do not persist it, and
+            # do not report finished_recving (the request is already gone
+            # from the scheduler).
+            if not any(len(group) > 0 for group in meta.local_block_ids):
+                continue
             self._recving_metadata[req_id] = meta
 
         # --- D-side: registrations to send to P via NIXL ---
