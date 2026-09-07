@@ -233,7 +233,7 @@ def test_np_lookup_gathers_and_returns_dp_local_rows(
         "forward",
         forward,
     )
-    output = embedding._fetch_np_embeddings_impl(local_ids)
+    output = embedding.fetch_np_embeddings(local_ids)
 
     expected = embeddings[dp_rank * 3 : dp_rank * 3 + local_tokens]
     assert torch.equal(output, expected)
@@ -499,7 +499,7 @@ def test_ngram_embedding_delegates_prefetch_start_to_backend(
     module.ngram_embedding = PrefetchEmbedding()
     hidden_states = torch.zeros(3, 4)
     ngram_ids = torch.arange(6).reshape(3, 2)
-    monkeypatch.setattr(module, "_compute_ngram_ids", lambda *args: ngram_ids)
+    monkeypatch.setattr(module, "compute_ngram_ids", lambda *args: ngram_ids)
 
     module.start_prefetch(
         hidden_states,
@@ -525,19 +525,15 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
     expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
 
     def finalize_prefetched(
-        actual_hidden_states: torch.Tensor,
         prefetch_output: torch.Tensor,
         output: torch.Tensor,
-        layer_name: str,
     ) -> None:
-        assert actual_hidden_states is hidden_states
         assert prefetch_output is embedding._prefetch_buffer
-        assert layer_name == embedding.layer_name
         output.copy_(expected)
 
     monkeypatch.setattr(
-        torch.ops.vllm,
-        "qwen4_exp_ple_finalize_prefetched",
+        embedding,
+        "_finalize_prefetch_impl",
         finalize_prefetched,
     )
 
@@ -668,51 +664,6 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
         rtol=0,
         atol=0,
     )
-
-
-def test_ple_ngram_ids_custom_op_uses_current_request_layout(monkeypatch) -> None:
-    class RuntimeNGramEmbedding(nn.Module):
-        def compute_ngram_ids(
-            self,
-            input_ids: torch.Tensor,
-            query_start_loc: torch.Tensor,
-            ngram_context: torch.Tensor,
-            output: torch.Tensor,
-        ) -> torch.Tensor:
-            del input_ids, ngram_context
-            num_reqs = query_start_loc.numel() - 1
-            output.fill_(num_reqs)
-            return output
-
-    layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(layer)
-    layer.ple_embedding = RuntimeNGramEmbedding()
-    monkeypatch.setattr(
-        ple_layer_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(no_compile_layers={"ple": layer}),
-    )
-    input_ids = torch.arange(4)
-    ngram_context = torch.zeros(2, 2, dtype=torch.long)
-    output = torch.empty(4, 2, dtype=torch.long)
-
-    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
-        input_ids,
-        torch.tensor([0, 4]),
-        ngram_context,
-        output,
-        "ple",
-    )
-    assert torch.equal(output, torch.ones_like(output))
-
-    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
-        input_ids,
-        torch.tensor([0, 2, 4]),
-        ngram_context,
-        output,
-        "ple",
-    )
-    assert torch.equal(output, torch.full_like(output, 2))
 
 
 def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:

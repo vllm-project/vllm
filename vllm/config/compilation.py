@@ -768,10 +768,6 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
-        "vllm::qwen4_exp_compute_ple_ngram_ids",
-        "vllm::qwen4_exp_ple_fetch_np_embeddings",
-        "vllm::qwen4_exp_ple_start_prefetch",
-        "vllm::qwen4_exp_ple_finalize_prefetched",
         # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",

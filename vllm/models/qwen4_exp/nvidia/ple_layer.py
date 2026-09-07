@@ -49,10 +49,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-    get_accelerator_view_from_cpu_tensor,
-)
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
@@ -393,7 +390,7 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Resident embedding prefetch is a no-op."""
         return None
 
-    def _fetch_np_embeddings_impl(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+    def fetch_np_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         """Gather NP inputs, look up embeddings, and select local rows."""
         slot_size, slot_offset = self._get_np_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
@@ -403,20 +400,6 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
             ngram_ids.shape[0],
             slot_offset,
         )
-
-    def fetch_np_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        """Fetch resident embeddings through the NP graph boundary."""
-        output = torch.empty(
-            (*ngram_ids.shape, self.embedding_dim),
-            dtype=self.weight.dtype,
-            device=ngram_ids.device,
-        )
-        torch.ops.vllm.qwen4_exp_ple_fetch_np_embeddings(
-            ngram_ids,
-            output,
-            self.layer_name,
-        )
-        return output
 
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self.np_data_parallel_size == 1:
@@ -561,34 +544,23 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             return reduced.view(embeddings.dtype)
         return self.parallel_group.all_reduce(embeddings)
 
-    def _prefetch_impl(
+    @eager_break_during_capture
+    def start_prefetch(
         self,
+        hidden_states: torch.Tensor,
         ngram_ids: torch.Tensor,
-        output: torch.Tensor,
     ) -> None:
         """Gather NP IDs and launch their UVA lookup on the side stream."""
         slot_size, _ = self._get_np_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
-        active_output = output[: gathered_ids.shape[0]]
+        active_output = self._prefetch_buffer[: gathered_ids.shape[0]]
         prefetch_stream = self._prefetch_stream
         prefetch_stream.wait_stream(torch.cuda.current_stream())
         gathered_ids.record_stream(prefetch_stream)
         with torch.cuda.stream(prefetch_stream):
             self._lookup(gathered_ids, output=active_output)
 
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
-        """Start the pinned lookup through the graph-splitting custom op."""
-        torch.ops.vllm.qwen4_exp_ple_start_prefetch(
-            hidden_states,
-            ngram_ids,
-            self._prefetch_buffer,
-            self.layer_name,
-        )
-
+    @eager_break_during_capture
     def _finalize_prefetch_impl(
         self,
         prefetch_output: torch.Tensor,
@@ -607,16 +579,11 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output.copy_(embeddings.flatten(-2))
 
     def finalize_prefetch(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Finish the pinned lookup through the graph-splitting custom op."""
+        """Finish the pinned lookup into graph-owned output storage."""
         output = self._prefetch_buffer.new_empty(
             (hidden_states.shape[0], self._output_dim)
         )
-        torch.ops.vllm.qwen4_exp_ple_finalize_prefetched(
-            hidden_states,
-            self._prefetch_buffer,
-            output,
-            self.layer_name,
-        )
+        self._finalize_prefetch_impl(self._prefetch_buffer, output)
         return output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -930,26 +897,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             id_blocks.append(ids[request_indices, adjusted_columns])
         return torch.cat(id_blocks, dim=-1)
 
-    def _compute_ngram_ids(
-        self,
-        input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        ngram_context: torch.Tensor,
-    ) -> torch.Tensor:
-        # Request-dependent IDs must be refreshed at each piecewise replay.
-        # The eager segment writes into graph-owned output storage.
-        ngram_ids = input_ids.new_empty(
-            (input_ids.numel(), self.ngram_heads), dtype=torch.long
-        )
-        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
-            input_ids,
-            query_start_loc,
-            ngram_context,
-            ngram_ids,
-            self.layer_name,
-        )
-        return ngram_ids
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -960,7 +907,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
             return embedding(hidden_states)
-        ngram_ids = self._compute_ngram_ids(input_ids, query_start_loc, ngram_context)
+        ngram_ids = self.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         return self.ngram_embedding(ngram_ids).flatten(-2)
 
     def start_prefetch(
@@ -974,7 +921,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embedding = self.ngram_embedding
         if not embedding.supports_prefetch:
             return
-        ngram_ids = self._compute_ngram_ids(
+        ngram_ids = self.compute_ngram_ids(
             input_ids,
             query_start_loc,
             ngram_context,
@@ -1392,128 +1339,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         self._short_conv(conv_input, gated_output)
         return gated_output
-
-
-@eager_break_during_capture
-def qwen4_exp_compute_ple_ngram_ids(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding.compute_ngram_ids(
-        input_ids,
-        query_start_loc,
-        ngram_context,
-        output,
-    )
-
-
-def qwen4_exp_compute_ple_ngram_ids_fake(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_compute_ple_ngram_ids",
-    op_func=qwen4_exp_compute_ple_ngram_ids,
-    mutates_args=["output"],
-    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
-)
-
-
-@eager_break_during_capture
-def qwen4_exp_ple_start_prefetch(
-    hidden_states: torch.Tensor,
-    ngram_ids: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Refresh NP metadata and launch the pinned lookup on each replay."""
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding.ngram_embedding._prefetch_impl(ngram_ids, output)
-
-
-def qwen4_exp_ple_start_prefetch_fake(
-    hidden_states: torch.Tensor,
-    ngram_ids: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-@eager_break_during_capture
-def qwen4_exp_ple_finalize_prefetched(
-    hidden_states: torch.Tensor,
-    prefetch_output: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Join the lookup stream and select current DP rows on each replay."""
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding.ngram_embedding._finalize_prefetch_impl(prefetch_output, output)
-
-
-def qwen4_exp_ple_finalize_prefetched_fake(
-    hidden_states: torch.Tensor,
-    prefetch_output: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-@eager_break_during_capture
-def qwen4_exp_ple_fetch_np_embeddings(
-    ngram_ids: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fetch resident NP rows into graph-owned storage on each replay."""
-    layer = get_forward_context().no_compile_layers[layer_name]
-    embeddings = layer.ple_embedding.ngram_embedding._fetch_np_embeddings_impl(
-        ngram_ids
-    )
-    output.copy_(embeddings)
-
-
-def qwen4_exp_ple_fetch_np_embeddings_fake(
-    ngram_ids: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_start_prefetch",
-    op_func=qwen4_exp_ple_start_prefetch,
-    mutates_args=["hidden_states", "output"],
-    fake_impl=qwen4_exp_ple_start_prefetch_fake,
-)
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_finalize_prefetched",
-    op_func=qwen4_exp_ple_finalize_prefetched,
-    mutates_args=["hidden_states", "prefetch_output", "output"],
-    fake_impl=qwen4_exp_ple_finalize_prefetched_fake,
-)
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_fetch_np_embeddings",
-    op_func=qwen4_exp_ple_fetch_np_embeddings,
-    mutates_args=["output"],
-    fake_impl=qwen4_exp_ple_fetch_np_embeddings_fake,
-)
 
 
 __all__ = [
