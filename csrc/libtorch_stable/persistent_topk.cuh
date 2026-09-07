@@ -152,6 +152,47 @@ __device__ __forceinline__ void det_block_sort_asc(int* data, int n, int cap) {
     }
   }
 }
+// Merge two ascending runs, [0, a) and [a, k), of `row` in place through
+// `scratch`. det_select_row's emission already writes both the `> pivot` group
+// and the `== pivot` group in ascending index order, so the row is two sorted
+// runs and a full sort is not needed. Values are row indices and therefore
+// distinct, so a lower-bound rank is exact and the result is bit-identical to
+// sorting. One pass over k with a binary search, instead of the
+// log2(next_pow2(k)) * (log2+1) / 2 sync-separated bitonic stages.
+template <int N_THREADS>
+__device__ __forceinline__ void det_merge_runs(int32_t* row, int k, int a,
+                                               int* scratch) {
+  for (int i = threadIdx.x; i < k; i += N_THREADS) scratch[i] = row[i];
+  __syncthreads();
+  const int b = k - a;
+  for (int i = threadIdx.x; i < k; i += N_THREADS) {
+    const int v = scratch[i];
+    int pos;
+    if (i < a) {  // element of the first run: rank = i + |{second run} < v|
+      int lo = 0, hi = b;
+      while (lo < hi) {
+        const int mid = (lo + hi) >> 1;
+        if (scratch[a + mid] < v)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      pos = i + lo;
+    } else {  // element of the second run
+      int lo = 0, hi = a;
+      while (lo < hi) {
+        const int mid = (lo + hi) >> 1;
+        if (scratch[mid] < v)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      pos = (i - a) + lo;
+    }
+    row[pos] = v;
+  }
+  __syncthreads();
+}
 template <int N_THREADS>
 __device__ __forceinline__ void det_sort_row(int32_t* row, int k,
                                              int* scratch) {
@@ -188,6 +229,9 @@ template <int TopK, int N_THREADS>
 __device__ void det_select_row(const float* __restrict__ row, int n,
                                int32_t* __restrict__ out, void* smem,
                                size_t smem_bytes) {
+  static_assert(N_THREADS <= 0xFFFF,
+                "the emission packs two per-tile counts into one uint32");
+  static_assert(N_THREADS >= 32, "the bin scan runs in one full warp");
   using ScanT = cub::BlockScan<uint32_t, N_THREADS>;
   uint32_t* hist = reinterpret_cast<uint32_t*>(smem);  // [256]
   uint32_t* hist2 = hist + 256;                        // [256]
@@ -251,38 +295,55 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
       }
     }
     __syncthreads();
-    // parallel suffix sum over the 256 bins (8 log-steps, double buffered):
-    // hist -> suf[b] = #elements in this prefix group with byte >= b
-    {
-      uint32_t* src = hist;
-      uint32_t* dst = hist2;
+    // Suffix sum over the 256 bins and the threshold search, in ONE warp:
+    // lane l owns bins [8l, 8l+8), sums them serially, then a Hillis-Steele
+    // suffix scan over the 32 lane totals gives what lies above the lane.
+    // suf[b] = #elements in this prefix group with byte >= b, and the first
+    // bin of the next lane has suf = `above`, so the search is lane-local too.
+    // The previous 8-step double-buffered version cost 8 __syncthreads() here,
+    // 32 over the four passes; this costs none.
+    if (tx < 32) {
+      uint32_t local[8];
+      uint32_t total = 0;
 #pragma unroll
-      for (int step = 0; step < 8; step++) {
-        const int stride = 1 << step;
-        if (tx < 256) {
-          uint32_t v = src[tx];
-          if (tx + stride < 256) v += src[tx + stride];
-          dst[tx] = v;
-        }
-        __syncthreads();
-        uint32_t* t = src;
-        src = dst;
-        dst = t;
+      for (int j = 7; j >= 0; j--) {
+        total += hist[tx * 8 + j];
+        local[j] = total;
       }
-      // after 8 steps `src` holds the suffix sums
-      if (tx < 256) {
-        const uint32_t suf_b = src[tx];
-        const uint32_t suf_b1 = (tx + 1 < 256) ? src[tx + 1] : 0u;
+      uint32_t s_suf = total;  // inclusive suffix over lane totals
+#pragma unroll
+      for (int off = 1; off < 32; off <<= 1) {
+        const uint32_t v = __shfl_down_sync(0xFFFFFFFFu, s_suf, off);
+        if (tx + off < 32) s_suf += v;
+      }
+      const uint32_t above = s_suf - total;  // strictly higher lanes
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        const uint32_t suf_b = local[j] + above;
+        const uint32_t suf_b1 = (j < 7) ? (local[j + 1] + above) : above;
         if (suf_b >= remaining && suf_b1 < remaining) {
-          hist2[0] = tx;
+          hist2[0] = static_cast<uint32_t>(tx * 8 + j);
           hist2[1] = suf_b1;
+          hist2[2] = suf_b - suf_b1;  // population of the threshold bin
         }
       }
     }
     __syncthreads();
     const uint32_t thr = hist2[0];
+    const uint32_t bin_pop = hist2[2];
     remaining -= hist2[1];
     prefix |= thr << shift;
+    // Early exit: the threshold bin holds exactly what is still needed, so all
+    // of it is selected and the lower key bytes cannot change the answer. The
+    // selection becomes `key >= prefix`, i.e. `key > prefix - 1`, with no ties
+    // to rank. (`remaining == 0` can never happen: the bin search guarantees
+    // suf_b1 < remaining, so the subtraction above always leaves at least 1.)
+    if (bin_pop == remaining && prefix != 0u) {
+      prefix -= 1u;
+      remaining = 0u;
+      __syncthreads();
+      break;
+    }
     __syncthreads();
   }
   const uint32_t pivot = prefix;
@@ -296,17 +357,20 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
     if (valid) key = cached ? keys[i] : convert_to_uint32_v2(row[i]);
     const uint32_t fgt = (valid && key > pivot) ? 1u : 0u;
     const uint32_t feq = (valid && key == pivot) ? 1u : 0u;
-    uint32_t rgt, tgt, req, teq;
-    ScanT(*scan_tmp).ExclusiveSum(fgt, rgt, tgt);
-    __syncthreads();
-    ScanT(*scan_tmp).ExclusiveSum(feq, req, teq);
+    // Both flags in one scan: they are mutually exclusive and a tile holds at
+    // most N_THREADS elements, so each count fits in 16 bits.
+    uint32_t packed_rank, packed_total;
+    ScanT(*scan_tmp).ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
+    const uint32_t rgt = packed_rank & 0xFFFFu, req = packed_rank >> 16;
+    const uint32_t tgt = packed_total & 0xFFFFu, teq = packed_total >> 16;
     if (fgt) out[run_gt + rgt] = i;
     if (feq && (run_eq + req) < fin) out[gt_total + run_eq + req] = i;
     run_gt += tgt;
     run_eq += teq;
     __syncthreads();
   }
-  det_sort_row<N_THREADS>(out, TopK, scratch);
+  // Two ascending runs (`> pivot` then `== pivot`) -> one merge, not a sort.
+  det_merge_runs<N_THREADS>(out, TopK, static_cast<int>(gt_total), scratch);
 }
 
 // ============================================================================
@@ -1060,34 +1124,41 @@ __device__ void radix_topk(const float* __restrict__ row_input,
   }
   const uint32_t remaining_eq =
       (gt_total < static_cast<uint32_t>(TopK)) ? (TopK - gt_total) : 0u;
-  if (tx == 0) local_histogram[0] = 0;
-  __syncthreads();
-  for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-    if (shared_ordered[i] > ordered_pivot) {
-      const uint32_t local_pos = atomicAdd(&local_histogram[0], 1);
-      const uint32_t pos = gt_before + local_pos;
-      if (pos < static_cast<uint32_t>(TopK))
-        row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
-    }
-  }
+  // Both groups are emitted in ascending index order, in one packed scan per
+  // tile. The `> pivot` group used to take its slots with atomicAdd, i.e. in
+  // thread-arrival order, which left that region unsorted and made the final
+  // sort load-bearing. Ranking it by index instead makes each CTA's slice
+  // ascending, and CTA c covers a lower index range than CTA c+1, so the whole
+  // region is ascending — which lets the merge below replace the sort.
   {
     using ScanT = cub::BlockScan<uint32_t, kThreadsPerBlock>;
     __shared__ typename ScanT::TempStorage det_scan_tmp;
-    uint32_t running = 0;
+    static_assert(kThreadsPerBlock <= 0xFFFF,
+                  "the emission packs two per-tile counts into one uint32");
+    uint32_t run_gt = 0, run_eq = 0;
     for (uint32_t base = 0; base < actual_chunk_size;
          base += kThreadsPerBlock) {
       const uint32_t i = base + tx;
-      const uint32_t flag =
-          (i < actual_chunk_size && shared_ordered[i] == ordered_pivot) ? 1u
-                                                                        : 0u;
-      uint32_t rank, tile_total;
-      ScanT(det_scan_tmp).ExclusiveSum(flag, rank, tile_total);
-      if (flag) {
-        const uint32_t r = eq_before + running + rank;
+      const bool valid = (i < actual_chunk_size);
+      const uint32_t fgt =
+          (valid && shared_ordered[i] > ordered_pivot) ? 1u : 0u;
+      const uint32_t feq =
+          (valid && shared_ordered[i] == ordered_pivot) ? 1u : 0u;
+      uint32_t packed_rank, packed_total;
+      ScanT(det_scan_tmp)
+          .ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
+      if (fgt) {
+        const uint32_t pos = gt_before + run_gt + (packed_rank & 0xFFFFu);
+        if (pos < static_cast<uint32_t>(TopK))
+          row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
+      }
+      if (feq) {
+        const uint32_t r = eq_before + run_eq + (packed_rank >> 16);
         if (r < remaining_eq)
           row_output[gt_total + r] = static_cast<int32_t>(my_chunk_start + i);
       }
-      running += tile_total;
+      run_gt += packed_total & 0xFFFFu;
+      run_eq += packed_total >> 16;
       __syncthreads();
     }
   }
@@ -1097,8 +1168,13 @@ __device__ void radix_topk(const float* __restrict__ row_input,
   barrier_phase++;
   __syncthreads();
   if (cta_in_group == 0) {
-    det_sort_row<kThreadsPerBlock>(row_output, TopK,
-                                   reinterpret_cast<int*>(shared_ordered));
+    // Two ascending runs -> merge, not a sort (see the emission above).
+    det_merge_runs<kThreadsPerBlock>(
+        row_output, TopK,
+        static_cast<int>(gt_total < static_cast<uint32_t>(TopK)
+                             ? gt_total
+                             : static_cast<uint32_t>(TopK)),
+        reinterpret_cast<int*>(shared_ordered));
     __threadfence();
   }
   if (tx == 0) red_release(&state->arrival_counter, 1);
