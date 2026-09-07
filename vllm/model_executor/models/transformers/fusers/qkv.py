@@ -61,7 +61,7 @@ def _in_boolean_context(funcdef: ast.FunctionDef, ref: ast.expr) -> bool:
     return False
 
 
-def _fold_existence_guard(
+def _bypass_existence_guard(
     funcdef: ast.FunctionDef, ref: ast.Attribute, name: str
 ) -> None:
     """Fold a guard on `self.<name>`'s existence to its constant value.
