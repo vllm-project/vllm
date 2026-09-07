@@ -128,6 +128,9 @@ def test_engine_args_resolves_all2all_backend_default(
     therefore arrive as a resolved string; leaking a `FieldInfo` through makes
     every launch without `--all2all-backend` fail config validation."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
 
     backend = EngineArgs().all2all_backend
 
