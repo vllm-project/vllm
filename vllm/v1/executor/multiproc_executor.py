@@ -74,6 +74,38 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+# Time allowed for workers to exit after SIGTERM before escalating to SIGKILL.
+WORKER_SIGTERM_GRACE_S = 4.0
+
+
+def worker_shutdown_grace_s() -> float:
+    """Seconds to wait for workers to exit on their own before escalating.
+
+    ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`` defaults to 5s, which is shorter
+    than ROCm worker teardown normally takes: releasing the KV cache and
+    destroying the communicators runs past it, and while the worker main thread
+    is inside those native calls it cannot service SIGTERM either, so the
+    escalation runs to completion and SIGKILLs the workers mid-cleanup.
+
+    The EngineCore process manager already allows
+    ``ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S`` for this exact reason, but that
+    budget covers the EngineCore process rather than the workers holding the
+    device memory, so the shorter schedule here preempts it and the outer grace
+    never applies. Derive the ROCm default from the same constant, leaving room
+    for the SIGTERM step, so the two levels agree instead of racing.
+
+    An explicitly configured value is always honoured.
+    """
+    grace = float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    if os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS") is not None:
+        return grace
+    if not current_platform.is_rocm():
+        return grace
+    # Deferred: vllm.v1.engine.utils imports this package.
+    from vllm.v1.engine.utils import ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+
+    return max(grace, ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S - WORKER_SIGTERM_GRACE_S)
+
 
 class FutureWrapper(Future):
     def __init__(
@@ -473,9 +505,7 @@ class MultiprocExecutor(Executor):
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
         )
-        if wait_for_termination(
-            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
-        ):
+        if wait_for_termination(active_procs(), timeout=worker_shutdown_grace_s()):
             logger.info_once("[shutdown] Executor: all workers exited gracefully")
             return
 
@@ -488,7 +518,7 @@ class MultiprocExecutor(Executor):
         )
         for p in remaining:
             p.terminate()
-        if not wait_for_termination(active_procs(), 4):
+        if not wait_for_termination(active_procs(), WORKER_SIGTERM_GRACE_S):
             # Send SIGKILL if still running
             remaining = active_procs()
             logger.warning(
