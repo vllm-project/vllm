@@ -53,13 +53,21 @@ def make_groups(
 @pytest.mark.parametrize(
     ("shapes", "blocks_per_chunk", "num_chunks", "expected"),
     [
+        # 4500 * 36864 // 144 = 1152000
         pytest.param(FULL_16, 16, 4500, 1152000, id="single-full-group"),
+        # 4000 * 36864 // min(144, 16) = 9216000
         pytest.param(((16, 16),), 16, 4000, 9216000, id="uniform-swa-4096"),
+        # 4000 * 36864 // min(144, 4) = 36864000
         pytest.param(((16, 4),), 16, 4000, 36864000, id="uniform-swa-1024"),
+        # 4000 * 36864 // (144 + 6 * 4) = 877714
         pytest.param(GEMMA, 16, 4000, 877714, id="full-plus-6-swa-1024"),
+        # 8000 * 36432 // (69 + 9 * 1) = 3736615, at the last full chunk
         pytest.param(GRANITE, 1, 8000, 3736615, id="full-plus-9-mamba"),
+        # 8000 * 36864 // min(70, 1) = 294912000
         pytest.param(((528, 1),), 1, 8000, 294912000, id="pure-mamba"),
+        # 4500 * 36864 // (144 + 288) = 384000
         pytest.param(FULL_PLUS_HIDDEN, 16, 4500, 384000, id="full-plus-hidden"),
+        # 4000 * 36864 // (144 + 4 + 1) = 989637
         pytest.param(HYBRID, 16, 4000, 989637, id="full-plus-swa-plus-mamba"),
     ],
 )
@@ -84,8 +92,11 @@ def test_capacity_over_model_shapes(
 @pytest.mark.parametrize(
     ("tokens_per_block", "blocks_per_chunk", "num_chunks"),
     [
+        # 4500 * 36864 // 144 = 4500 * 256 = 1152000
         pytest.param(16, 16, 4500, id="qwen3-8b-shape"),
+        # 8000 * 36432 // 69 = 8000 * 528 = 4224000, at the last full chunk
         pytest.param(528, 1, 8000, id="chunk-size-divides-max-len-with-remainder"),
+        # 4500 * 36864 // 288 = 4500 * 128 = 576000
         pytest.param(8, 16, 4500, id="small-block"),
     ],
 )
@@ -116,8 +127,11 @@ def test_empty_tier_reports_an_exact_zero() -> None:
 @pytest.mark.parametrize(
     ("shapes", "max_model_len"),
     [
+        # max_model_len 0 leaves no length to divide, so None
         pytest.param(FULL_16, 0, id="max-model-len-not-known"),
+        # no group leaves the tokens_per_chunk set empty, so None
         pytest.param((), MAX_MODEL_LEN, id="no-groups"),
+        # 16 * 0 = 0 tokens for each chunk, so None
         pytest.param(((0, None),), MAX_MODEL_LEN, id="blocks-span-no-tokens"),
     ],
 )
@@ -135,10 +149,15 @@ def test_capacity_is_none_when_the_token_scale_is_unknown(
 @pytest.mark.parametrize(
     ("shapes", "blocks_per_chunk", "seq_len", "expected"),
     [
+        # cdiv(36864, 16 * 16) = 144
         pytest.param(FULL_16, 16, 36864, 144, id="one-full-group"),
+        # 144 + 6 * min(144, 4) = 168
         pytest.param(GEMMA, 16, 36864, 168, id="full-plus-6-swa-1024"),
+        # cdiv(36432, 528) + 9 * min(69, 1) = 69 + 9 = 78
         pytest.param(GRANITE, 1, 36432, 78, id="full-plus-9-mamba"),
+        # min(cdiv(256, 256), 4) = 1
         pytest.param(((16, 4),), 16, 256, 1, id="request-below-the-window"),
+        # min(cdiv(36864, 256), 4) = 4
         pytest.param(((16, 4),), 16, 36864, 4, id="window-caps-the-request"),
     ],
 )
@@ -157,7 +176,9 @@ def test_chunks_per_request(
 @pytest.mark.parametrize(
     ("shapes", "blocks_per_chunk"),
     [
+        # 1000 * 4096 // (16 + 6 * 4) = 102400
         pytest.param(GEMMA, 16, id="full-plus-6-swa-1024"),
+        # 1000 * 3840 // (15 + 10) = 153600, at the 384-token floor
         pytest.param(((16, None), (24, None)), 16, id="chunk-sizes-do-not-nest"),
     ],
 )
