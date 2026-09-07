@@ -21,6 +21,7 @@ class _CacheConfig:
 
 @dataclass
 class _SpeculativeConfig:
+    attention_backend: str | None = None
     draft_load_config: object = None
     kv_cache_dtype: str | None = None
     draft_model_config: object = None
