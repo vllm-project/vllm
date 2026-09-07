@@ -129,11 +129,22 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
     conditions in FlashInfer's FA2 prefill are the 1-byte-KV shared-smem
     specialisation, which excludes FP4 outright; 16-bit and FP8 KV reach
     the CTA_TILE_Q=32 configuration that handles HEAD_DIM_VO >= 512
-    directly. Splitting those would be a behaviour change for models this
-    path was never meant to touch: it forces
-    ``reorder_batch_threshold = 0``, routing decode through the
-    per-step-planned prefill wrapper and giving up the decode CUDA-graph
-    path. So bf16 and FP8 keep ``head_dim_vo = head_size``.
+    directly, so both run a 512-wide head unsplit.
+
+    Splitting them is not merely redundant. Measured on a GB10 (sm121)
+    with Gemma 4 E2B (``global_head_dim`` 512) and the backend pinned to
+    FlashInfer:
+
+    * bf16 KV cannot use the split at all. The ``(head_dim_qk=512,
+      head_dim_vo=256)`` pass exceeds the 99 KiB shared-memory budget per
+      block even at ``cta_tile_q=16``, so FA2 raises and the engine dies
+      during startup profiling. Unsplit, the same model serves correctly.
+    * FP8 KV can use the split -- it *is* the 1-byte specialisation -- but
+      pays a second pass and forces ``reorder_batch_threshold = 0``, which
+      routes decode through the per-step-planned prefill wrapper and gives
+      up the decode CUDA-graph path.
+
+    So bf16 and FP8 keep ``head_dim_vo = head_size``.
 
     NVFP4 additionally requires linear (non-swizzled) V scale factors,
     which the sm12x cache writer stores, so the V data and scale views
@@ -1040,7 +1051,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
-        )
         # Adaptive verification trims drafts on device, so decode query lengths
         # must come from the device qo_indptr; only trtllm-gen supports that
         # (the selector already rejects the other configurations).
@@ -1244,6 +1254,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # wired for uniform multi-token capture. Advertise single-token only
         # rather than promising UNIFORM_BATCH the decode route cannot honour.
         cache_config = vllm_config.cache_config
+        # Upstream's SM90 XQA work (#50439) dropped the shared sm12x local this
+        # used to borrow, so derive it here.
+        is_sm12x = current_platform.is_device_capability_family(120)
         if (
             is_sm12x
             and cache_config is not None
