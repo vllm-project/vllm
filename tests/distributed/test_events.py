@@ -17,6 +17,7 @@ from vllm.distributed.kv_events import (
     KVEventBatch,
     NullEventPublisher,
     ZmqEventPublisher,
+    _KVCacheState,
 )
 
 DP_RANK = 0
@@ -48,20 +49,33 @@ def create_test_events(count: int) -> SampleBatch:
 def create_stored_event(
     block_hashes: list[int],
     *,
+    parent_block_hash: int | None = None,
     medium: str = MEDIUM_GPU,
     group_idx: int = 0,
+    locality: str | None = None,
+    ownership: str | None = None,
+    session_id: str | None = None,
 ) -> BlockStored:
     block_size = 4
     return BlockStored(
         block_hashes=block_hashes,
-        parent_block_hash=None,
+        parent_block_hash=parent_block_hash,
         token_ids=list(range(len(block_hashes) * block_size)),
         block_size=block_size,
         lora_id=None,
         medium=medium,
         lora_name=None,
         group_idx=group_idx,
+        locality=locality,
+        ownership=ownership,
+        session_id=session_id,
     )
+
+
+def snapshot_stores(state: _KVCacheState) -> list[BlockStored]:
+    return [
+        event for event in state.snapshot_events() if isinstance(event, BlockStored)
+    ]
 
 
 def test_basic_publishing(publisher, subscriber):
@@ -270,6 +284,88 @@ def test_snapshot_tracks_blocks_by_medium(publisher_config):
     finally:
         publisher.shutdown()
         subscriber.close()
+
+
+def test_snapshot_orders_restored_parent_before_existing_child():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+            create_stored_event([101], session_id="restored-parent"),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+    parent_idx = next(i for i, event in enumerate(stores) if 101 in event.block_hashes)
+    child_idx = next(i for i, event in enumerate(stores) if 102 in event.block_hashes)
+
+    assert parent_idx < child_idx
+    assert stores[parent_idx].session_id == "restored-parent"
+
+
+def test_snapshot_retains_removed_parent_for_active_child():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            ),
+        ]
+    )
+
+    events = state.snapshot_events()
+    parent_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockStored) and 101 in event.block_hashes
+    )
+    child_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockStored) and 102 in event.block_hashes
+    )
+    remove_parent_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockRemoved) and 101 in event.block_hashes
+    )
+
+    assert parent_idx < child_idx < remove_parent_idx
+
+
+def test_snapshot_scopes_removal_by_ownership():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101], ownership="primary"),
+            create_stored_event([101], ownership="secondary"),
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+                ownership="primary",
+            ),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+
+    assert len(stores) == 1
+    assert stores[0].ownership == "secondary"
+
+
+def test_snapshot_preserves_session_id():
+    state = _KVCacheState()
+    state.update([create_stored_event([101], session_id="session-1")])
+
+    [store] = snapshot_stores(state)
+
+    assert store.session_id == "session-1"
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
