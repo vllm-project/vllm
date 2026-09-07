@@ -1234,6 +1234,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
 
+    @property
+    def shared_expert_online_loader(self):
+        """Return the loader for online MXFP4 shared-expert weights."""
+        from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
+            OnlineMxfp4SharedExpertLoader,
+        )
+
+        return OnlineMxfp4SharedExpertLoader()
+
     def maybe_roundup_sizes(
         self,
         hidden_size: int,

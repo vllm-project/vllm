@@ -8,8 +8,12 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
+logger = init_logger(__name__)
 
 
 def get_quark_ocp_mx_group_size(
@@ -64,18 +68,86 @@ def is_shared_expert_quant_fse_compatible(
     Returns:
         A compatibility flag and, when incompatible, the reason.
     """
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+    )
+    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+
     if projection_names is None:
         projection_names = ["gate_up_proj", "down_proj"]
 
     if quant_config is None:
         return True, None
 
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        is_layer_skipped,
-    )
-    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+    online_quant_config = quant_config.online_quantization_config
+    if online_quant_config is not None:
+        from vllm.model_executor.layers.fused_moe import (
+            RoutedExperts,
+            UnquantizedFusedMoEMethod,
+        )
+        from vllm.model_executor.layers.linear import (
+            LinearBase,
+            UnquantizedLinearMethod,
+        )
+
+        online_quant_config.packed_modules_mapping = quant_config.packed_modules_mapping
+        shared_expert_targets = [
+            online_quant_config.resolve_quant_method_cls(
+                LinearBase, f"{shared_expert_prefix}.{projection_name}"
+            )
+            for projection_name in projection_names
+        ]
+
+        # TODO: Extend with use at your own risk.
+        if isinstance(quant_config, QuarkConfig):
+            routed_weight_key, routed_activation_key, routed_method_cls = (
+                quant_config.get_quant_method_target(expert_prefix, RoutedExperts)
+            )
+        else:
+            reason = (
+                "online quantization FSE compatibility check is not implemented for "
+                f"{type(quant_config).__name__}"
+            )
+            logger.warning(reason)
+            return False, reason
+
+        if routed_method_cls in (None, UnquantizedFusedMoEMethod):
+            return False, "routed-expert quantization target is unavailable"
+
+        for shared_expert_target in shared_expert_targets:
+            if shared_expert_target is None:
+                return (False, "shared expert is not quantized")
+
+            _, _, _, shared_quant_spec, shared_method_cls = shared_expert_target
+            if shared_method_cls in (None, UnquantizedLinearMethod):
+                return (
+                    False,
+                    "online quantization excludes FSE weights at "
+                    f"{shared_expert_prefix}",
+                )
+            assert issubclass(shared_method_cls, OnlineLinearBase)
+            shared_weight_key = shared_quant_spec.weight
+
+            # NOTE: We can not rely on shared_quant_spec.activation_quant_key
+            # as _ONLINE_SHORTHANDS: dict[str, QuantSpec] in quantization.py
+            # does not define the default activation quant key.
+            # `online_quant_config.resolve_quant_method_cls` should return the
+            # activation quant key as well.
+            shared_activation_key = shared_method_cls.activation_quant_key
+
+            if (
+                shared_weight_key != routed_weight_key
+                or shared_activation_key != routed_activation_key
+            ):
+                return (
+                    False,
+                    "online shared-expert quantization keys do not match the "
+                    "routed expert keys",
+                )
+        return True, None
 
     if isinstance(quant_config, DeepseekV4FP8Config):
         from vllm.config import get_current_vllm_config

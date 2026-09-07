@@ -300,7 +300,7 @@ def resolve_quant_method(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
     online_target = quant_config.online_quantization_config.resolve_quant_method_cls(
-        layer, prefix
+        type(layer), prefix
     )
     if checkpoint_is_quantized:
         if online_target is not None:

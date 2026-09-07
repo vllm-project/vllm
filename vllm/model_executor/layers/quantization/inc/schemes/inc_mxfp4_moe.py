@@ -76,6 +76,15 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
                 "Using MarlinExperts (weight-only FP4) for AutoRound MXFP4 MoE"
             )
 
+    @property
+    def shared_expert_online_loader(self):
+        """Return the loader for online MXFP4 shared-expert weights."""
+        from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
+            OnlineMxfp4SharedExpertLoader,
+        )
+
+        return OnlineMxfp4SharedExpertLoader()
+
     def create_weights(
         self,
         layer: torch.nn.Module,

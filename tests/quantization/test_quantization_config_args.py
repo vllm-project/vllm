@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for QuantizationConfigArgs parsing."""
 
-from unittest.mock import Mock
-
 import pytest
 
 from vllm.config.quantization import (
@@ -209,6 +207,4 @@ def test_targets_reject_moe_only_shorthand_for_linear_layer():
     )
 
     with pytest.raises(ValueError, match="does not define a QuantSpec"):
-        config.resolve_quant_method_cls(
-            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
-        )
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
