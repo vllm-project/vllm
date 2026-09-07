@@ -8,6 +8,8 @@ forwarding chain. Endpoint-level coverage lives in
 ``tests/entrypoints/scale_out/render/test_render.py``.
 """
 
+import asyncio
+
 import pytest
 
 from vllm.renderers.params import TokenizeParams
@@ -50,6 +52,21 @@ def _make_base_renderer_with(tokenizer):
             raise NotImplementedError
 
     return _StubRenderer(tokenizer)
+
+
+class _OffsetTokenizer:
+    """Small deterministic fast tokenizer for pre-tokenization tests."""
+
+    is_fast = True
+    max_chars_per_token = 1
+    truncation_side = "right"
+    pad_token_id = 0
+
+    def __call__(self, text, **kwargs):
+        return {
+            "input_ids": list(range(len(text))),
+            "offset_mapping": [(i, i + 1) for i in range(len(text))],
+        }
 
 
 class TestTokenizePromptOffsets:
@@ -239,3 +256,44 @@ class TestTruncationKeepsOffsetsAligned:
         # belonging to the surviving tokens.
         expected = full_offsets[-keep:] if side == "left" else full_offsets[:keep]
         assert offsets == expected
+
+    @pytest.mark.parametrize(
+        ("side", "expected_offsets"),
+        [
+            ("left", [(36, 37), (37, 38), (38, 39), (39, 40)]),
+            ("right", [(0, 1), (1, 2), (2, 3), (3, 4)]),
+        ],
+    )
+    def test_text_pretrim_preserves_source_offsets(self, side, expected_offsets):
+        renderer = _make_base_renderer_with(_OffsetTokenizer())
+        text = "0123456789" * 4
+        params = TokenizeParams(
+            max_total_tokens=16,
+            return_token_offsets=True,
+            truncate_prompt_tokens=4,
+            truncation_side=side,
+            add_special_tokens=False,
+        )
+
+        result = renderer.tokenize_prompt({"prompt": text}, params)
+
+        assert result["prompt_token_offsets"] == expected_offsets
+
+    def test_async_left_text_pretrim_preserves_source_offsets(self):
+        renderer = _make_base_renderer_with(_OffsetTokenizer())
+        text = "0123456789" * 4
+        params = TokenizeParams(
+            max_total_tokens=16,
+            return_token_offsets=True,
+            truncate_prompt_tokens=4,
+            truncation_side="left",
+        )
+
+        result = asyncio.run(renderer.tokenize_prompt_async({"prompt": text}, params))
+
+        assert result["prompt_token_offsets"] == [
+            (36, 37),
+            (37, 38),
+            (38, 39),
+            (39, 40),
+        ]

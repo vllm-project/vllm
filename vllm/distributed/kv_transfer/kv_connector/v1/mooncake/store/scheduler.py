@@ -102,6 +102,7 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -402,6 +403,14 @@ class MooncakeStoreScheduler:
             )
 
         self._apply_current_save_block_ids(meta, scheduler_output)
+
+        # Finish-time handoffs arrive after the producing step's metadata was
+        # built. Their exact blocks were pinned when they were registered, so
+        # they remain valid after request cleanup and need no current snapshot.
+        for req_meta in self._finished_partial_tail_metas.values():
+            meta.add_request(req_meta)
+        self._finished_partial_tail_metas.clear()
+
         self._reference_save_blocks(meta)
         return meta
 
@@ -440,6 +449,9 @@ class MooncakeStoreScheduler:
             assert pool is not None, (
                 "GPU block pool must be bound before any store job is emitted"
             )
+            if req_meta.store_job_id is not None:
+                assert req_meta.store_job_id in self._pinned_saves
+                continue
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids: list[int] = []
@@ -469,6 +481,60 @@ class MooncakeStoreScheduler:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue and pin a finish-time tail for the next connector step."""
+        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError(
+                "Partial-tail offloads for one request must share a boundary"
+            )
+        boundary_tokens = next(iter(boundaries))
+        if boundary_tokens > tracker.prefill_end_tokens:
+            return False
+
+        pinned_block_ids: list[int] = []
+        for group_id, block_id, _ in partial_tail_offloads:
+            if group_id not in self._boundary_state_group_ids:
+                return False
+            if block_id == NULL_BLOCK_ID:
+                return False
+            pinned_block_ids.append(block_id)
+        pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
+
+        pool = self._gpu_block_pool
+        assert pool is not None, (
+            "GPU block pool must be bound before a finish-time handoff"
+        )
+        assert request.request_id not in self._finished_partial_tail_metas
+        store_job_id = self._next_store_job_id
+        self._next_store_job_id += 1
+        self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
+        pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
+
+        self._finished_partial_tail_metas[request.request_id] = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            block_ids=tuple(group.copy() for group in block_ids),
+            block_hashes=list(request.block_hashes),
+            can_save=True,
+            num_prompt_tokens=tracker.prefill_end_tokens,
+            store_job_id=store_job_id,
+            boundary_state_offloads=partial_tail_offloads,
+        )
+        tracker.has_pending_offload = True
+        # The store job owns exact block refs, so request cleanup need not wait.
+        return False
 
     def _handle_boundary_state_offloads(
         self,

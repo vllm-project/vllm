@@ -14,6 +14,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.quantization.utils import load_model_without_vllm_runner
+from vllm.config import set_current_vllm_config
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     LinearBase,  # noqa: E501
     UnquantizedLinearMethod,
@@ -26,6 +30,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,  # noqa: E501
 )
+from vllm.platforms import current_platform
 
 
 class FakeQuantLinearMethod(UnquantizedLinearMethod):
@@ -124,23 +129,26 @@ def test_register_quantization_config(caplog_vllm):
         "meta-llama/Llama-3.2-1B-Instruct",
     ],
 )
-def test_custom_quant(vllm_runner, model, monkeypatch):
+def test_custom_quant(model, monkeypatch, dist_init, workspace_init):
     """Test infer with the custom quantization method."""
-    # `LLM.apply_model` requires pickling a function.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    vllm_model, vllm_config = load_model_without_vllm_runner(
+        model,
+        quantization="custom_quant",
+    )
+    layer = vllm_model.model.layers[0]
+    qkv_proj = layer.self_attn.qkv_proj
 
-    with vllm_runner(
-        model_name=model, quantization="custom_quant", enforce_eager=True
-    ) as llm:
+    # Check the quantization method is FakeQuantLinearMethod.
+    assert isinstance(qkv_proj.quant_method, FakeQuantLinearMethod)
 
-        def check_model(model):
-            layer = model.model.layers[0]
-            qkv_proj = layer.self_attn.qkv_proj
-
-            # Check the quantization method is FakeQuantLinearMethod
-            assert isinstance(qkv_proj.quant_method, FakeQuantLinearMethod)
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=1)
-        assert output
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    device_type = current_platform.device_type
+    input_ids = torch.tensor([1, 2, 3, 4], device=device_type)
+    positions = torch.arange(input_ids.numel(), device=device_type)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = vllm_model(input_ids, positions, None)
+        logits = vllm_model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()

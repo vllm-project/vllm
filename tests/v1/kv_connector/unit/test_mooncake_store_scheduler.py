@@ -42,6 +42,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -969,6 +970,65 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
+
+
+def test_finished_partial_tail_is_pre_pinned_as_store_job():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.client = SimpleNamespace(discard=lambda *_: None)
+    request = SimpleNamespace(
+        request_id="req-0",
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=12,
+        allocated_block_ids=([3], [9]),
+        token_ids=list(range(12)),
+        prefill_end_tokens=12,
+    )
+    block_ids = ([3], [9])
+
+    delay_free = scheduler.register_finished_partial_tail(
+        request,
+        block_ids,
+        [(1, 9, 12)],
+    )
+
+    # The exact source is pinned immediately, so the request can be freed
+    # before the next connector metadata build.
+    assert delay_free is False
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
+    assert scheduler._gpu_block_pool.blocks[3].ref_cnt == 0
+
+    out = SimpleNamespace(
+        finished_req_ids={"req-0"},
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(),
+    )
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.req_id == "req-0"
+    assert req_meta.token_len_chunk == 0
+    assert req_meta.block_ids == block_ids
+    assert req_meta.block_hashes == request.block_hashes
+    assert req_meta.boundary_state_offloads == [(1, 9, 12)]
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9]
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
+    assert scheduler._finished_partial_tail_metas == {}
+
+    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 0
 
 
 def test_decode_boundary_state_offload_dropped_unclaimed():
