@@ -44,6 +44,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
+    RoutedExpertsLists,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
@@ -122,6 +123,48 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+def test_routed_experts_prompt_start_at_prompt_end():
+    """A prompt-end offset should return empty routing data, not crash."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    assert request.sampling_params is not None
+    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    num_scheduled_tokens = scheduler_output.num_scheduled_tokens[request.request_id]
+
+    routed_experts_manager = Mock()
+    routed_experts_manager.routed_experts_by_slot = np.empty((0, 1, 1), dtype=np.uint8)
+    routed_experts_manager.get.return_value = np.empty((0, 1, 1), dtype=np.uint8)
+    scheduler.enable_return_routed_experts = True
+    scheduler.routed_experts_mgr = routed_experts_manager
+    scheduler._re_block_ids = {request.request_id: []}
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            routed_experts=RoutedExpertsLists(
+                routing_data=np.zeros((num_scheduled_tokens, 1, 1), dtype=np.uint8),
+                slot_mapping=np.arange(num_scheduled_tokens),
+            ),
+        ),
+    )
+
+    routed_experts_manager.get.assert_called_once_with(
+        [],
+        request.num_prompt_tokens,
+        token_start=request.num_prompt_tokens,
+    )
+    assert outputs[request.client_index].outputs[0].routed_experts.shape == (0, 1, 1)
 
 
 def test_finish_request():
