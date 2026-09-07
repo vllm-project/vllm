@@ -5,6 +5,7 @@ import functools
 import logging
 import math
 from dataclasses import replace
+from fractions import Fraction
 from functools import partial
 
 import torch
@@ -31,6 +32,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 try:
@@ -128,14 +130,10 @@ def create_whisper_attention_backend_with_block_pooling(
             vllm_config: VllmConfig,
             device: torch.device,
         ):
-            assert kv_cache_spec.num_kv_heads % block_pool_size == 0
-            # Scale pooled-unit quantities back to unpooled (encoder-token)
-            # units for the underlying attention metadata: the KV cache spec
-            # counts blocks in pooled units, but the kernel runs on the
-            # `block_pool_size`x-expanded sequence built below.
-            spec_overrides = dict(
+            kv_cache_spec = replace(
+                kv_cache_spec,
                 block_size=kv_cache_spec.block_size * block_pool_size,
-                num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size,
+                tokens_per_state=1,
             )
             if isinstance(kv_cache_spec, SlidingWindowSpec):
                 # The manager keeps `sliding_window` in pooled units; the kernel
@@ -143,8 +141,7 @@ def create_whisper_attention_backend_with_block_pooling(
                 # unpooled units (`get_kv_cache_spec` sizes the pooled window so
                 # this window always stays resident).
                 assert sliding_window is not None
-                spec_overrides["sliding_window"] = sliding_window
-            kv_cache_spec = replace(kv_cache_spec, **spec_overrides)
+                kv_cache_spec = replace(kv_cache_spec, sliding_window=sliding_window)
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
             # Override model_config-derived values with the actual
             # encoder values from kv_cache_spec
@@ -229,6 +226,7 @@ def create_whisper_attention_backend_with_block_pooling(
         b
         for b in (
             AiterFlashAttentionBackend,
+            CPUAttentionBackend,
             FlashAttentionBackend,
             RocmAttentionBackend,
             TritonAttentionBackend,
@@ -243,7 +241,9 @@ def create_whisper_attention_backend_with_block_pooling(
             "appreciated."
         )
 
-    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+    if not issubclass(
+        underlying_attn_backend, (CPUAttentionBackend, FlashAttentionBackend)
+    ):
         logger.info(
             "Using %s for Whisper causal attention with block pooling. "
             "This backend was recently enabled for this model. "
@@ -261,18 +261,6 @@ def create_whisper_attention_backend_with_block_pooling(
         overrides={
             "get_builder_cls": lambda: WhisperCausalAttentionWithBlockPoolingBuilder,
             "get_impl_cls": lambda: WhisperCausalAttentionWithBlockPoolingImpl,
-            "get_kv_cache_shape": lambda num_blocks,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str: underlying_attn_backend.get_kv_cache_shape(
-                num_blocks,
-                # we stretch each block by `block_pool_size`
-                block_size * block_pool_size,
-                num_kv_heads // block_pool_size,
-                head_size,
-                cache_dtype_str,
-            ),
             "forward_includes_kv_cache_update": True,
         },
     )
@@ -341,7 +329,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         assert isinstance(kv_cache_spec, AttentionSpec)
         kv_cache_spec = replace(
             kv_cache_spec,
-            num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
+            tokens_per_state=Fraction(1, self.block_pool_size),
         )
         if isinstance(kv_cache_spec, SlidingWindowSpec):
             # The manager counts blocks in pooled units, so express the window in

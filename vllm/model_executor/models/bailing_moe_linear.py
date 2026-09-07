@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -133,19 +133,21 @@ class BailingMoeV25MLAAttention(nn.Module):
 
         if self.q_lora_rank is not None:
             # Use fused_qkv_a_proj when q_lora_rank is set
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                self.hidden_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
+            self.fused_qkv_a_proj: MergedColumnParallelLinear | None = (
+                MergedColumnParallelLinear(
+                    self.hidden_size,
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                    disable_tp=True,
+                )
             )
-            self.q_a_layernorm = RMSNorm(
+            self.q_a_layernorm: RMSNorm | None = RMSNorm(
                 self.q_lora_rank,
                 eps=config.rms_norm_eps,
             )
-            self.q_b_proj = ColumnParallelLinear(
+            self.q_b_proj: ColumnParallelLinear | None = ColumnParallelLinear(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -311,6 +313,8 @@ class BailingMoeV25(nn.Module):
                 "score_function and correction_bias should be "
                 "(softmax, None) or (sigmoid, not None)"
             )
+        else:
+            self.score_function = "softmax"
 
         # Shared experts (using BailingMLP)
         if self.num_shared_experts > 0:
@@ -319,7 +323,7 @@ class BailingMoeV25(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            self.shared_experts = BailingMLP(
+            self.shared_experts: BailingMLP | None = BailingMLP(
                 intermediate_size=intermediate_size,
                 config=config,
                 quant_config=quant_config,
@@ -329,8 +333,8 @@ class BailingMoeV25(nn.Module):
         else:
             self.shared_experts = None
 
-        # Routed experts using FusedMoE
-        self.experts = FusedMoE(
+        # Routed experts using FusedMoEFactory
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -533,6 +537,10 @@ class BailingMoeV25Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
 
+    @property
+    def embed_tokens(self) -> nn.Module:
+        return self.word_embeddings
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -598,7 +606,7 @@ class BailingMoeV25Model(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        # Expert parameter mappings from FusedMoE
+        # Expert parameter mappings from FusedMoEFactory
         expert_mappings = list(self.get_expert_mapping())
 
         def load_param(name: str, tensor: torch.Tensor, shard_id=None) -> bool:
@@ -609,7 +617,9 @@ class BailingMoeV25Model(nn.Module):
                 return False
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
 
             if shard_id is None:
                 weight_loader(param, tensor)
@@ -687,11 +697,16 @@ class BailingMoeV25Model(nn.Module):
                         continue
 
                 # Routed experts
-                for param_name, weight_name, expert_id, shard_id in expert_mappings:
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    expert_shard_id,
+                ) in expert_mappings:
                     if weight_name not in norm_name:
                         continue
                     mapped = norm_name.replace(weight_name, param_name)
-                    if load_param(mapped, weight, (expert_id, shard_id)):
+                    if load_param(mapped, weight, (expert_id, expert_shard_id)):
                         break
                 continue
 
@@ -779,7 +794,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> tuple[tuple[int, int, int]]:
         """Calculate shape for linear attention cache."""
         config = vllm_config.model_config.hf_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size

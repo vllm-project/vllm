@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen3.5-35B-A3B"
+accuracy_threshold: 0.90
+num_questions: 1319
+num_fewshot: 5
+gen_prefix: " <think>\n\n</think>\n"
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --moe-backend humming
+  --quantization experts_int8

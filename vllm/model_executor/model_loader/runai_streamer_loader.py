@@ -47,21 +47,29 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             # Validate every value before mutating os.environ, so a later
             # invalid key cannot leave an earlier one partially applied.
             env_updates: dict[str, str] = {}
-            for key, env_var in (
-                ("concurrency", "RUNAI_STREAMER_CONCURRENCY"),
-                ("memory_limit", "RUNAI_STREAMER_MEMORY_LIMIT"),
-            ):
-                if key in extra_config:
-                    value = extra_config[key]
-                    if (
-                        isinstance(value, bool)
-                        or not isinstance(value, int)
-                        or value <= 0
-                    ):
-                        raise ValueError(
-                            f"{key} must be a positive integer, got {value!r}"
-                        )
-                    env_updates[env_var] = str(value)
+            if "concurrency" in extra_config:
+                concurrency = extra_config["concurrency"]
+                if (
+                    isinstance(concurrency, bool)
+                    or not isinstance(concurrency, int)
+                    or concurrency <= 0
+                ):
+                    raise ValueError(
+                        f"concurrency must be a positive integer, got {concurrency!r}"
+                    )
+                env_updates["RUNAI_STREAMER_CONCURRENCY"] = str(concurrency)
+
+            if "memory_limit" in extra_config:
+                memory_limit = extra_config["memory_limit"]
+                if (
+                    isinstance(memory_limit, bool)
+                    or not isinstance(memory_limit, int)
+                    or memory_limit < -1
+                ):
+                    raise ValueError(
+                        f"memory_limit must be an integer >= -1, got {memory_limit!r}"
+                    )
+                env_updates["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
             os.environ.update(env_updates)
 
             runai_streamer_s3_endpoint = os.getenv("RUNAI_STREAMER_S3_ENDPOINT")

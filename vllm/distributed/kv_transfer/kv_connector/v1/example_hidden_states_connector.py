@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -38,8 +39,10 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    block_size = kv_cache.shape[2]
+    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
+        :num_tokens
+    ]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -99,15 +102,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
-
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
-        """
-        # Must be False so that drafter kv cache isn't merged with verifier's
-        return False
 
     @classmethod
     def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
@@ -239,7 +233,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # this event is complete the request is considered "done sending"
         # by get_finished; clients block on the per-file flock to wait for
         # the disk write itself.
-        self._req_copy_events: dict[str, torch.Event] = {}
+        self._req_copy_events: dict[str, torch.cuda.Event] = {}
         # req_ids reported as finished-generating by the scheduler,
         # accumulated across get_finished calls.
         self._accumulated_finished_req_ids: set[str] = set()
@@ -310,17 +304,19 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
-        if self._block_size != self._kv_cache.shape[1]:
+        # Views are [num_blocks, num_heads, block_size, head_size], matching what
+        # extract_from_kv_cache() indexes.
+        if self._block_size != self._kv_cache.shape[2]:
             raise ValueError(
                 f"Hidden-states block-size mismatch: derived {self._block_size} "
-                f"but buffer block size is {self._kv_cache.shape[1]}; read slots "
+                f"but buffer block size is {self._kv_cache.shape[2]}; read slots "
                 "would be wrong (likely a hybrid block-size resolution bug)."
             )
 
     @staticmethod
     def _write_tensors(
         tensors: dict[str, torch.Tensor],
-        event: torch.Event,
+        event: torch.cuda.Event,
         filename: str,
         lock_fd: int | None,
     ) -> None:
@@ -375,17 +371,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         copy_stream = self._get_copy_stream()
 
         # Ensure the copy stream sees all prior writes on the default stream.
-        ready_event = torch.Event()
+        ready_event = torch.cuda.Event()
         ready_event.record()
         copy_stream.wait_event(ready_event)
 
         with torch.cuda.stream(copy_stream):
             # Move the CPU slot_mapping to GPU on the copy stream so the
             # implicit H2D inside fancy indexing doesn't sync the default
-            # stream.
-            slot_mapping_gpu = slot_mapping.to(
-                device=self._kv_cache.device, non_blocking=True
-            )
+            # stream. Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping_gpu = slot_mapping.to(
+                    device=self._kv_cache.device, non_blocking=True
+                )
             hidden_states_gpu = extract_from_kv_cache(
                 self._kv_cache, slot_mapping_gpu, num_tokens
             )
@@ -396,7 +393,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
 
         # Record completion of this copy on the copy stream.
-        copy_done = torch.Event()
+        copy_done = torch.cuda.Event()
         copy_done.record(copy_stream)
 
         # token_ids is already on CPU (created in request_finished).
@@ -605,9 +602,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # NHD means we have (num_tokens, num_heads)
-        # HND means we have (num_heads, num_tokens)
-        # For now, we only support NHD layout since this keeps the
+        # LBNHC means we have (num_tokens, num_heads)
+        # LBHNC means we have (num_heads, num_tokens)
+        # For now, we only support LBNHC layout since this keeps the
         # hidden states for each token together in memory.
-        # HND is primarily used when sharding heads across devices.
-        return "NHD"
+        # LBHNC is primarily used when sharding heads across devices.
+        return "LBNHC"

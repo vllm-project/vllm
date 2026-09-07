@@ -42,7 +42,7 @@ and the maximum batch size (`max_num_seqs` option).
 ```python
 from vllm import LLM
 
-llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct", max_model_len=2048, max_num_seqs=2)
 ```
 
 ## Reduce CUDA Graphs

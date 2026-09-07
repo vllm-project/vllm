@@ -270,7 +270,7 @@ def convert_to_w4a8_int8_moe_format(
     """
     # Derive dimensions from tensor shapes
     E = w13_weight.shape[0]  # num_experts
-    I2 = w13_weight.shape[1]  # w13_out_features (2*IN)
+    w13_out_features = w13_weight.shape[1]  # 2 * intermediate_size
     H = w13_weight.shape[2]  # w13_in_features (hidden_size)
     IN = w2_weight.shape[2]  # w2_in_features (intermediate_size)
     w2_out_features = w2_weight.shape[1]  # Should equal H
@@ -286,7 +286,7 @@ def convert_to_w4a8_int8_moe_format(
                 w13_weight_scale[e],  # [2I, H/g or 1]
                 w13_bias[e] if w13_bias is not None else None,  # [2I]
                 H,
-                I2,
+                w13_out_features,
                 group_size,
             )
         )

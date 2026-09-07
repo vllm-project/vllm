@@ -60,6 +60,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     hooks.
     """
 
+    _TRANSFER_MODE: str = "push"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -121,9 +123,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
-
         return 0, False
 
     def update_state_after_alloc(
@@ -170,7 +169,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             request.request_id,
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
-        local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
+        local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -186,6 +185,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "remote_host": params["remote_host"],
             "remote_port": params["remote_port"],
             "remote_tp_size": params["tp_size"],
+            "remote_pp_size": params.get("pp_size", 1),
         }
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
@@ -198,7 +198,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids, ())
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -238,7 +238,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # serving layer via abort_immediately. To keep P from
             # stranding the prefill blocks, we still register an empty
             # recv so the worker emits a notif that lets P free them.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
+            params["remote_block_ids"] = ()
+            self._reqs_need_recv[request.request_id] = (request, [], ())
             params["do_remote_prefill"] = False
             return False, None
 
@@ -268,7 +270,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 time.perf_counter() + self._kv_lease_duration
             )
 
-            block_ids = self.get_sw_clipped_blocks(block_ids)
+            block_ids = self.get_exchange_clipped_blocks(block_ids)
             remote_num_tokens = request.num_computed_tokens
 
             # Store finished blocks for worker-level matching with D
@@ -285,7 +287,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
     def build_connector_meta(

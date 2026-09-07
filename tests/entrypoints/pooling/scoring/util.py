@@ -6,7 +6,6 @@ from io import BytesIO
 import pybase64 as base64
 import torch
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from PIL import Image
 from safetensors.torch import load_file
 from transformers import AutoModel, AutoTokenizer
@@ -18,6 +17,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
+from vllm.transformers_utils.repo_utils import hf_api
 
 
 class ColBERTScoringHfRunner(torch.nn.Module):
@@ -38,7 +38,7 @@ class ColBERTScoringHfRunner(torch.nn.Module):
         ).to(self.device)
         self.model.eval()
 
-        path = hf_hub_download(model_name, filename="model.safetensors")
+        path = hf_api().hf_hub_download(model_name, filename="model.safetensors")
         weights = load_file(path)
 
         self.linear_weight = weights[linear_weights_key].to(self.device).float()

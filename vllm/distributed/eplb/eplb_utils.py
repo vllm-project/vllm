@@ -31,7 +31,7 @@ class CpuGpuEvent:
     """
 
     def __init__(self):
-        self._event = torch.Event()
+        self._event = torch.cuda.Event()
         self._recorded = threading.Event()
 
     def wait(self, stream: torch.cuda.Stream | None = None):
@@ -56,7 +56,7 @@ class CpuGpuEvent:
                 "CpuGpuEvent.record() called before the previous event was "
                 "consumed by wait()"
             )
-        self._event = torch.Event()
+        self._event = torch.cuda.Event()
         self._event.record(stream)
         self._recorded.set()
 

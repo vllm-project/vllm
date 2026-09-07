@@ -243,6 +243,26 @@ def get_quant_config(
     if model_config.quantization is None:
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
+    from vllm.config.quantization import _ONLINE_SHORTHANDS, QuantizationConfigArgs
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    # resolve_quantization_config does not resolve `quantization_config` from
+    # ambiguous shorthands as `"mxfp4"`, `"mxfp8"`.
+    online_args = model_config.quantization_config
+
+    def maybe_compose_online_quantization(
+        checkpoint_config: QuantizationConfig,
+    ) -> QuantizationConfig:
+        if online_args is None:
+            return checkpoint_config
+        assert isinstance(online_args, QuantizationConfigArgs)
+
+        checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
+            online_args
+        )
+        return checkpoint_config
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -260,12 +280,8 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
-        else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+        n_heads = model_config.model_arch_config.total_num_attention_heads
+        n_kv_heads = model_config.model_arch_config.total_num_kv_heads
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
@@ -288,30 +304,41 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return quant_cls.from_config(hf_quant_config)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config(hf_quant_config)
+            )
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
     hf_overrides = model_config.hf_overrides
+    if callable(hf_overrides):
+        # A callable hf_overrides is a config-to-config transform (e.g. the
+        # one SpeculativeConfig installs on draft model configs); it cannot
+        # carry quantization config entries, so treat it as no overrides.
+        hf_overrides = {}
     if not isinstance(hf_overrides, dict):
         raise ValueError(
             "hf_overrides must be a dict for get_quant_config "
             "to get the quantization config from it."
         )
-    quantization_config_file = hf_overrides.get("quantization_config_file", None)
+    quantization_config_file = hf_overrides.get("quantization_config_file")
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
-            return quant_cls.from_config_file(quantization_config_file)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config_file(quantization_config_file)
+            )
         else:
             raise NotImplementedError(
                 "from_config_file is specified in hf_override config, "
                 "but quant_cls.from_config_file is not implemented in "
                 f"{quant_cls}"
             )
-    quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
+    quantization_config_json = hf_overrides.get("quantization_config_dict_json")
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
-            return quant_cls.from_config_dict_json(quantization_config_json)
+            return maybe_compose_online_quantization(
+                quant_cls.from_config_dict_json(quantization_config_json)
+            )
         else:
             raise NotImplementedError(
                 "from_config_dict_json is specified in hf_override config, "
@@ -319,20 +346,15 @@ def get_quant_config(
                 f"{quant_cls}"
             )
 
-    # Online quantization doesn't read from checkpoint configs - it quantizes
-    # fp16/bf16 weights on the fly during loading.
-    if model_config.quantization_config is not None:
-        from vllm.config.quantization import QuantizationConfigArgs
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
+    # Raw unambiguous online quantization doesn't read from checkpoint configs
+    # We must continue to load/read the config below in two cases:
+    # 1. composed online quantization, before `maybe_compose_online_quantization`,
+    # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
+    # is not set yet.
+    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+        assert isinstance(online_args, QuantizationConfigArgs)
+        return OnlineQuantizationConfig(args=online_args)
 
-        assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
-        return OnlineQuantizationConfig(args=model_config.quantization_config)
-
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -361,7 +383,11 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
-        return quant_cls()
+        if model_config.quantization in _ONLINE_SHORTHANDS:
+            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
+            assert isinstance(args, QuantizationConfigArgs)
+            return OnlineQuantizationConfig(args=args)
+        return maybe_compose_online_quantization(quant_cls())
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
@@ -369,6 +395,10 @@ def get_quant_config(
         f for f in config_files if any(f.endswith(x) for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
+        if model_config.quantization in _ONLINE_SHORTHANDS:
+            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
+            assert isinstance(args, QuantizationConfigArgs)
+            return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
         raise ValueError(
@@ -380,18 +410,16 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return quant_cls.from_config(config)
+                return maybe_compose_online_quantization(quant_cls.from_config(config))
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return quant_cls.from_config(config)
+    return maybe_compose_online_quantization(quant_cls.from_config(config))
 
 
 def get_sparse_attention_config(
@@ -595,6 +623,14 @@ def filter_duplicate_safetensors_files(
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+    # Check if files referenced in model.safetensors.index.json actually exist.
+    # Raise error if any file is missing.
+    hf_weights_files_set = set(hf_weights_files)
+    missing_files = weight_files_in_index - hf_weights_files_set
+    if missing_files:
+        raise FileNotFoundError(
+            f"Weight files referenced in index but missing: {missing_files}"
+        )
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files
@@ -686,10 +722,20 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return the available RAM in bytes."""
+    """Return available RAM, honoring cgroup limits."""
     import psutil
 
-    return psutil.virtual_memory().available
+    host_available = psutil.virtual_memory().available
+
+    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is None:
+        return host_available
+    cgroup_available = (
+        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
+    )
+    return min(host_available, cgroup_available)
 
 
 def _get_fs_type(files: list[str]) -> str:
@@ -1100,7 +1146,7 @@ def instanttensor_weights_iterator(
         import instanttensor
     except ImportError as e:
         raise ImportError(
-            "Please install instanttensor via `pip install instanttensor`"
+            "Please install instanttensor via `pip install vllm[instanttensor]`"
         ) from e
 
     if not current_platform.is_cuda():
@@ -1116,18 +1162,33 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    # copy=True yields tensors that own their memory, staying valid after the
+    # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
-        hf_weights_files, framework="pt", device=device, process_group=process_group
+        hf_weights_files,
+        framework="pt",
+        device=device,
+        process_group=process_group,
+        copy=True,
     ) as f:
-        yield from tqdm(
-            f.tensors(),
+        # Track bytes so the bar reports load throughput (GB/s).
+        pbar = tqdm(
+            total=f.total_tensor_size,
             desc="Loading safetensors using InstantTensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
             position=tqdm._get_free_pos(),
-            total=len(f.keys()),
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
             mininterval=1.0,
         )
+        try:
+            for name, tensor in f.tensors():
+                pbar.update(tensor.numel() * tensor.element_size())
+                yield name, tensor
+        finally:
+            pbar.close()
 
 
 def pt_weights_iterator(

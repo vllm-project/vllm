@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from typing_extensions import override
 
-from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
@@ -19,6 +19,7 @@ class LRUCachePolicy(CachePolicy):
     """
 
     def __init__(self, cache_capacity: int):
+        super().__init__(cache_capacity)
         # Blocks with ref_cnt 0 (not participating in any loads/stores) ordered in LRU
         self.evictable_blocks: OrderedDict[OffloadKey, None] = OrderedDict()
         self.blocks: dict[OffloadKey, BlockStatus] = {}
@@ -39,7 +40,7 @@ class LRUCachePolicy(CachePolicy):
         self.evictable_blocks.pop(key, None)
 
     @override
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.evictable_blocks:
                 self.evictable_blocks.move_to_end(key)

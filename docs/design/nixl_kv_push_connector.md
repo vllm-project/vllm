@@ -47,7 +47,8 @@ sequenceDiagram
     else only one side present
         PWriter->>PWriter: stash and wait, self-poll only when blocks unmatched
     end
-    PWriter->>PWriter: ensure D handshake (one-time)
+    PWriter->>PWriter: _ensure_handshake to D (async; defer WRITE)
+    PWriter->>PWriter: handshake callback re-queues on _deferred_push_inbox, wake
     PWriter->>DWriter: NIXL WRITE direct to D GPU + completion notif
 
     note over DWorker,DWriter: D side - completion accounting
@@ -100,15 +101,20 @@ event:
    D, completion notifs after a WRITE, late-arriving ``PUSH_REG``)
    even when there is no new metadata to act on.
 3. **Handshake-completion callback** (background handshake executor
-   thread) — when a deferred D→P handshake finishes successfully, the
-   future's done-callback re-enqueues the registration onto
-   ``_reg_send_inbox`` and sets the wake so the corresponding
-   ``send_notif`` runs on the writer (we never call ``send_notif`` from
-   the executor thread). On this second pass ``_ensure_handshake``
-   returns ``None`` (the agent is now connected), so the writer sends
-   the ``PUSH_REG`` directly. If the handshake *failed*, the callback
-   fails the request instead of re-enqueuing, so there is no retry
-   loop.
+   thread) — both handshakes run on the executor and never block the
+   writer; their done-callbacks re-enqueue the deferred op and set the
+   wake, since neither ``send_notif`` nor the NIXL WRITE may run off the
+   writer thread:
+    * the **D→P** handshake (before sending ``PUSH_REG``) re-enqueues the
+      registration onto ``_reg_send_inbox``;
+    * the **P→D** handshake (before a WRITE) re-enqueues the matched
+      ``(req_id, blocks, reg_data)`` onto ``_deferred_push_inbox``.
+
+   On this second pass ``_ensure_handshake`` returns ``None`` (the agent
+   is now connected), so the writer sends the ``PUSH_REG`` / issues the
+   WRITE directly. If a handshake *failed*, the callback fails or drops
+   the request instead of re-enqueuing, so there is no retry loop (see
+   Failure handling).
 
 In addition to event-driven wakes, the writer self-polls at
 ``_PUSH_WRITER_POLL_INTERVAL_MS = 1.0`` ms while there are P-side
@@ -227,6 +233,13 @@ Two per-request timers are armed on the scheduler:
 * **D-side ``send_notif`` failure when shipping the PUSH_REG to P** —
   identical handling: ``_handle_failed_transfer`` marks the recv as
   failed.
+* **P-side handshake failure (P→D handshake before a WRITE)** — the
+  future's done-callback logs ``push_handshake_failed`` and drops the
+  request without re-queuing. It deliberately does *not* call
+  ``_handle_failed_transfer`` (there is no ``_recving_metadata`` entry to
+  invalidate on the producer side, same reasoning as the WRITE-submission
+  failure below). P's blocks are reclaimed by the ``_kv_lease_duration``
+  lease and D's stale registration by its watchdog.
 * **P-side WRITE submission failure** — the WRITE handle (if any) is
   released and ``xfer_stats.record_failed_transfer()`` bumps the
   failure counter. We deliberately do not call
@@ -246,10 +259,11 @@ existing NIXL connector:
   class — all subclasses of the existing base classes;
 * one dedicated background thread per worker;
 * a few cross-thread queues, each with a single consumer (the writer);
-  most have one producer, except ``_reg_send_inbox``, which is fed both
-  by the engine main thread (new registrations) and by the
-  handshake-completion callback (registrations replayed after their
-  D→P handshake finishes);
+  most have one producer, except the two replay queues fed by both the
+  engine main thread and a handshake-completion callback:
+  ``_reg_send_inbox`` (registrations replayed after their D→P handshake)
+  and ``_deferred_push_inbox`` (matched pushes replayed after their P→D
+  handshake);
 * one new notification type (`PUSH_REG:<msgpack>`).
 
 Behavior on the engine main thread is otherwise unchanged. The writer

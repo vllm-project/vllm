@@ -6,7 +6,7 @@ import time
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.inputs import TextPrompt

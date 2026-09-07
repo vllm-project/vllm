@@ -6,6 +6,7 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
@@ -97,7 +98,7 @@ def test_no_load_chat_template_filelike():
     # Testing chatml template
     template = "../../examples/does_not_exist"
 
-    with pytest.raises(ValueError, match="looks like a file path"):
+    with pytest.raises(VLLMValidationError, match="looks like a file path"):
         load_chat_template(chat_template=template)
 
 
@@ -424,9 +425,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     ("model", "expected_format"),
     [
         ("Salesforce/blip2-opt-2.7b", "string"),
-        ("facebook/chameleon-7b", "string"),
         ("deepseek-ai/deepseek-vl2-tiny", "string"),
-        ("adept/fuyu-8b", "string"),
         ("google/paligemma-3b-mix-224", "string"),
     ],
 )

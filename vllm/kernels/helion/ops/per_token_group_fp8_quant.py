@@ -135,23 +135,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     return result
 
 
-def fake_impl(
-    input: torch.Tensor,  # [num_tokens, hidden_size]
-    output_q: torch.Tensor,  # [num_tokens, hidden_size]
-    output_s: torch.Tensor,  # [num_tokens, groups_per_row]
-    group_size: int,
-    eps: float,
-    fp8_min: float,
-    fp8_max: float,
-    scale_ue8m0: bool,
-    # Unused dummy args
-    # Kept for consistency with existing kernel interface
-    dummy_is_scale_transposed: bool = False,
-    dummy_is_tma_aligned: bool = False,
-) -> None:
-    return
-
-
 def baseline(
     input: torch.Tensor,  # [num_tokens, hidden_size]
     output_q: torch.Tensor,  # [num_tokens, hidden_size]
@@ -164,25 +147,23 @@ def baseline(
     dummy_is_scale_transposed: bool = False,
     dummy_is_tma_aligned: bool = False,
 ) -> None:
-    torch.ops._C.per_token_group_fp8_quant(
-        input,
-        output_q,
-        output_s,
-        group_size,
-        eps,
-        fp8_min,
-        fp8_max,
-        scale_ue8m0,
-        dummy_is_scale_transposed,
-        dummy_is_tma_aligned,
-    )
+    num_tokens, hidden_size = input.shape
+    groups_per_row = hidden_size // group_size
+
+    x = input.view(num_tokens, groups_per_row, group_size).to(torch.float32)
+    s = torch.clamp(torch.amax(torch.abs(x), dim=-1), min=eps) / fp8_max
+    if scale_ue8m0:
+        s = torch.exp2(torch.ceil(torch.log2(s)))
+    y = torch.clamp(x / s[:, :, None], fp8_min, fp8_max)
+
+    output_s.copy_(s)
+    output_q.copy_(y.view(num_tokens, hidden_size).to(output_q.dtype))
 
 
 @register_kernel(
     mutates_args=["output_q", "output_s"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
     ),

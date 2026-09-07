@@ -1,4 +1,7 @@
-use vllm_tokenizer::DynTokenizer;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
@@ -33,7 +36,7 @@ impl ReasoningParser for Qwen3ReasoningParser {
         Ok(())
     }
 
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
 

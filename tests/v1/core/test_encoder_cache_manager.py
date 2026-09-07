@@ -167,6 +167,25 @@ def test_get_freed_mm_hashes_clears_freed_list():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_reallocated_hash_is_not_reported_as_freed():
+    manager = EncoderCacheManager(cache_size=8)
+    req_a = MockRequest("reqA", ["a"], [4])
+    req_b = MockRequest("reqB", ["b"], [4])
+    req_c = MockRequest("reqC", ["c"], [4])
+
+    manager.allocate(req_a, 0)
+    manager.allocate(req_b, 0)
+    manager.free(req_a)
+    manager.free(req_b)
+
+    assert manager.can_allocate(req_c, 0, int(1e9), 0)
+    manager.allocate(req_c, 0)
+    assert manager.can_allocate(req_a, 0, int(1e9), 0)
+    manager.allocate(req_a, 0)
+
+    assert manager.get_freed_mm_hashes() == ["b"]
+
+
 def test_schedule_request_multi_images_respect_space_limit():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("reqA", ["a", "b"], [5, 6])
@@ -328,6 +347,43 @@ def test_free_request_with_duplicate_mm_hashes():
 
     manager.free(req)
     assert "r1" not in manager.request_cached_ids
+
+
+def test_duplicate_mm_hash_stays_referenced_until_last_free():
+    """`cached` holds one reference per request, not per position, so freeing
+    the first of two occurrences must not release the entry."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
+
+    manager.allocate(req, 0)
+    assert manager.check_and_update_cache(req, 1)
+
+    manager.free_encoder_input(req, 0)
+    assert manager.cached["imgA"] == {"r1"}
+    assert "imgA" not in manager.freeable
+    assert manager.num_freeable_slots == 16
+
+    manager.free_encoder_input(req, 1)
+    assert not manager.cached["imgA"]
+    assert manager.freeable["imgA"] == 4
+    assert manager.num_freeable_slots == 20
+
+
+def test_duplicate_mm_hash_is_not_evicted_before_last_use():
+    """An item repeated within one request (an image carried across
+    conversation turns) must not become reclaimable capacity while a later
+    occurrence still has to be spliced in, or the encoder recomputes it."""
+    manager = EncoderCacheManager(cache_size=8)
+    req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
+    other = MockRequest("r2", ["imgB"], [8])
+
+    manager.allocate(req, 0)
+    assert manager.check_and_update_cache(req, 1)
+    manager.free_encoder_input(req, 0)
+
+    assert not manager.can_allocate(other, 0, int(1e9), 0)
+    assert manager.check_and_update_cache(req, 1)
+    assert manager.get_freed_mm_hashes() == []
 
 
 def test_encoder_decoder_cache_manager_reset():

@@ -18,13 +18,13 @@ from fastapi import Request
 from pydantic import Field
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
@@ -142,7 +142,7 @@ class GenerativeScoringResponse(OpenAIBaseModel):
 # ============================================================================
 
 
-class ServingGenerativeScoring(OpenAIServing):
+class ServingGenerativeScoring(BaseServing):
     """Serving class for generative scoring computation.
 
     This class handles computing the probability of specified token IDs
@@ -164,10 +164,12 @@ class ServingGenerativeScoring(OpenAIServing):
         request_logger: RequestLogger | None,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
             models=models,
+            model_config=engine_client.model_config,
             request_logger=request_logger,
         )
+        self.engine_client = engine_client
+        self.renderer = engine_client.renderer
 
     async def create_generative_scoring(
         self,
@@ -193,6 +195,7 @@ class ServingGenerativeScoring(OpenAIServing):
         # Check if engine is alive
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+        self.engine_client.check_admission(len(request.items))
 
         # Get tokenizer
         tokenizer = self.renderer.tokenizer

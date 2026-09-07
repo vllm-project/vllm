@@ -87,6 +87,8 @@ void moe_permute_impl(
       inv_permuted_idx.sizes().equals(token_expert_indices.sizes()),
       "token_expert_indices shape must be same as inv_permuted_idx");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   auto device = input.device();
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
@@ -182,6 +184,8 @@ void moe_unpermute(
       permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
       "permuted_hidden_states dtype must be same as hidden_states");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      hidden_states.get_device_index());
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = get_current_cuda_stream(hidden_states.get_device_index());
@@ -208,23 +212,30 @@ __global__ void shuffleInputRowsKernel(const T* input,
                                        int64_t num_src_rows,
                                        int64_t num_dst_rows, int64_t num_cols) {
   int64_t dest_row_idx = blockIdx.x;
-  int64_t const source_row_idx = dst2src_map[dest_row_idx];
-
   if (blockIdx.x < num_dst_rows) {
+    int64_t const source_row_idx = dst2src_map[dest_row_idx];
     // Load 128-bits per thread
     constexpr int64_t ELEM_PER_THREAD = 128 / sizeof(T) / 8;
     using DataElem = cutlass::Array<T, ELEM_PER_THREAD>;
 
-    // Duplicate and permute rows
-    auto const* source_row_ptr =
-        reinterpret_cast<DataElem const*>(input + source_row_idx * num_cols);
     auto* dest_row_ptr =
         reinterpret_cast<DataElem*>(output + dest_row_idx * num_cols);
-
     int64_t const start_offset = threadIdx.x;
     int64_t const stride = blockDim.x;
     int64_t const num_elems_in_col = num_cols / ELEM_PER_THREAD;
 
+    if (source_row_idx < 0 || source_row_idx >= num_src_rows) {
+      DataElem const zero{};
+      for (int elem_index = start_offset; elem_index < num_elems_in_col;
+           elem_index += stride) {
+        dest_row_ptr[elem_index] = zero;
+      }
+      return;
+    }
+
+    // Duplicate and permute rows
+    auto const* source_row_ptr =
+        reinterpret_cast<DataElem const*>(input + source_row_idx * num_cols);
     for (int elem_index = start_offset; elem_index < num_elems_in_col;
          elem_index += stride) {
       dest_row_ptr[elem_index] = source_row_ptr[elem_index];
@@ -238,6 +249,8 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
   STD_TORCH_CHECK(input_tensor.scalar_type() == output_tensor.scalar_type(),
                   "Input and output tensors must have the same data type");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      output_tensor.get_device_index());
   auto stream = get_current_cuda_stream(output_tensor.get_device_index());
   const int64_t blocks = output_tensor.size(0);
   const int64_t threads = 256;
