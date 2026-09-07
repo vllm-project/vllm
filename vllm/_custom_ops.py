@@ -100,17 +100,6 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         m = input.numel() // n
         return create_fp4_output_tensors(m, n, input.device, is_sf_swizzled_layout)
 
-    @register_fake("_C::scaled_fp4_quant.out")
-    def _scaled_fp4_quant_out_fake(
-        input: torch.Tensor,
-        input_scale: torch.Tensor,
-        is_sf_swizzled_layout: bool,
-        *,
-        output: torch.Tensor,
-        output_scale: torch.Tensor,
-    ) -> None:
-        return None
-
 
 # page attention ops
 def paged_attention_rocm(
@@ -738,27 +727,6 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
-
-
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
-
-    @register_fake("_rocm_C::moe_gptq_gemm_rdna3")
-    def _moe_gptq_gemm_rdna3_fake(
-        a: torch.Tensor,
-        c: torch.Tensor,
-        b_q_weight: torch.Tensor,
-        b_scales: torch.Tensor,
-        b_qzeros: torch.Tensor,
-        topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
-        expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
-        top_k: int,
-        block_size_m: int,
-        mul_topk_weight: bool,
-        output_topk: int = 0,
-    ) -> None:
-        return
 
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
@@ -2435,17 +2403,6 @@ def fp32_router_gemm(
     )
     torch.ops._C.fp32_router_gemm(output, hidden_states, router_weight)
     return output
-
-
-if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
-
-    @register_fake("_C::fp32_router_gemm")
-    def fp32_router_gemm_fake(
-        output: torch.Tensor,
-        mat_a: torch.Tensor,
-        mat_b: torch.Tensor,
-    ) -> None:
-        return
 
 
 def topk_softmax(
@@ -4361,19 +4318,6 @@ def safeFusedQuantizeNv(
     """
     torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
     return
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
-
-    @register_fake("vllm::safeFusedQuantizeNv")
-    def _fake_fused_quantize_nv(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        xh_e2m1: torch.Tensor,
-        xh_e4m3: torch.Tensor,
-        global_scale: torch.Tensor,
-    ) -> None:
-        return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
