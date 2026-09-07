@@ -21,7 +21,6 @@ Only tensor parallelism is supported; pipeline, data, and expert parallelism
 are rejected at launch.
 """
 
-import contextlib
 import fcntl
 import multiprocessing
 import os
@@ -53,23 +52,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 )
 from vllm.platforms import current_platform
 
-logger = init_logger(__name__)
-
-
-def _report_ready(message: str) -> None:
-    """Write a readiness message straight to the original stderr descriptor.
-
-    Loading the model pulls in FlashInfer's CuTeDSL JIT compiler, which swaps
-    ``sys.stdout``/``sys.stderr`` for in-memory buffers while compiling kernels
-    across worker threads. That save/restore races on the interpreter-global
-    streams and can leave them (and vLLM's logging handler, which caches the
-    original stream object) detached, silently swallowing everything logged
-    afterwards -- including the daemon's readiness announcement. Since operators
-    rely on that line to know the daemon is serving, write it directly to file
-    descriptor 2 so it bypasses the logging machinery entirely.
-    """
-    with contextlib.suppress(OSError):
-        os.write(2, (message + "\n").encode())
+logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 def export_entries(
@@ -191,9 +174,6 @@ class WeightCacheDaemon:
         logger.info(
             "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
         )
-        print(
-            f"Weight cache daemon rank {self.tp_rank} ready: serving on {socket_path}"
-        )
         if ready_callback is not None:
             ready_callback()
         try:
@@ -273,6 +253,12 @@ class WeightCacheDaemon:
                 "aliases": self.aliases,
                 "gpu_uuid": self._gpu_uuid(),
             },
+        )
+        logger.info_once(
+            "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
+            self.tp_rank,
+            len(self.entries),
+            len(self.aliases),
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
@@ -393,16 +379,11 @@ def main() -> None:
                 for proc in procs:
                     proc.join()
                 sys.exit(max((p.exitcode or 0) for p in procs))
-    logger.info_once(
-        "===== Weight cache daemon READY: all %d ranks serving in %s =====",
+    logger.info(
+        "Weight cache daemon ready: all %d ranks serving in %s",
         tp_size,
         args.weight_cache_socket_dir or "the default socket dir",
     )
-    _report_ready(
-        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
-        f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
-    )
-
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))
