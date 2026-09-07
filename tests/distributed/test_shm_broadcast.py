@@ -735,7 +735,7 @@ def test_check_shm_free_space_checks_cgroup(tmp_path):
     )
 
 
-def test_check_cgroup_memory_available_raises(monkeypatch):
+def test_check_cgroup_memory_available_warns_on_low_headroom(monkeypatch):
     monkeypatch.setattr(
         cpu_resource_utils,
         "get_cgroup_memory_limit",
@@ -744,14 +744,21 @@ def test_check_cgroup_memory_available_raises(monkeypatch):
 
     with (
         mock.patch.object(cpu_resource_utils.logger, "info") as log_info,
-        pytest.raises(
-            RuntimeError,
-            match="512 MiB available.*512 MiB current usage",
-        ),
+        mock.patch.object(cpu_resource_utils.logger, "warning") as log_warning,
     ):
         check_cgroup_memory_available(600 << 20, "mmap")
 
     log_info.assert_not_called()
+    log_warning.assert_called_once_with(
+        "Low cgroup memory headroom for %s: %.0f MiB required, %.0f MiB "
+        "available under the %.0f MiB limit (%.0f MiB current usage). "
+        "Increase the container memory limit or reduce the allocation size.",
+        "mmap",
+        600.0,
+        512.0,
+        1024.0,
+        512.0,
+    )
 
 
 def test_check_cgroup_memory_available_logs_preflight(monkeypatch):

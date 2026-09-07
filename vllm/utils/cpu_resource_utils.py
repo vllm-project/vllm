@@ -99,17 +99,15 @@ def check_cgroup_memory_available(
     required_bytes: int,
     allocation_name: str,
 ) -> None:
-    """Raise if a memory allocation would exceed the cgroup limit.
+    """Log cgroup memory headroom for an upcoming allocation.
 
     Args:
         required_bytes: Bytes required by the allocation.
-        allocation_name: Human-readable name used in the error message.
+        allocation_name: Human-readable name used in log messages.
 
-    Raises:
-        RuntimeError: If the cgroup has a finite limit and insufficient
-            memory remains for the allocation.
-
-    If the cgroup limit or usage cannot be read, the check is skipped.
+    Low headroom logs a warning, but does not reject the allocation because
+    cgroup usage can include reclaimable memory. If the cgroup limit or usage
+    cannot be read, the check is skipped.
     """
     cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
     if cgroup_limit is None or cgroup_usage is None:
@@ -132,12 +130,14 @@ def check_cgroup_memory_available(
         return
 
     logger.warning(
-        f"Low cgroup memory headroom for {allocation_name}: "
-        f"{required_bytes / mib:.0f} MiB required, "
-        f"{cgroup_available / mib:.0f} MiB available under the "
-        f"{cgroup_limit / mib:.0f} MiB limit "
-        f"({cgroup_usage / mib:.0f} MiB current usage). "
-        "Increase the container memory limit or reduce the allocation size."
+        "Low cgroup memory headroom for %s: %.0f MiB required, %.0f MiB "
+        "available under the %.0f MiB limit (%.0f MiB current usage). "
+        "Increase the container memory limit or reduce the allocation size.",
+        allocation_name,
+        required_bytes / mib,
+        cgroup_available / mib,
+        cgroup_limit / mib,
+        cgroup_usage / mib,
     )
 
 
