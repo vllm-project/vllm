@@ -1271,6 +1271,10 @@ void fused_deepseek_v4_kv_rope_quant_insert(
                   "position_ids must be contiguous 1D int64 CUDA");
   STD_TORCH_CHECK(cos_sin_cache.device().is_cuda(), "cos_sin_cache must be CUDA");
   STD_TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
+  STD_TORCH_CHECK(
+      (kv.stride(0) * kv.element_size()) % 16 == 0 &&
+          (reinterpret_cast<uintptr_t>(kv.const_data_ptr()) % 16 == 0),
+      "kv rows must be 16-byte aligned for vectorized loads");
   STD_TORCH_CHECK(k_cache.scalar_type() == torch::headeronly::ScalarType::Byte,
                   "k_cache must be uint8");
   STD_TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
