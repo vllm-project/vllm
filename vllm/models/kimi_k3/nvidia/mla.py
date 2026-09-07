@@ -430,6 +430,15 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # fp8_ds_mla: 656-byte custom layout; see flashmla_sparse.py.
             state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+            # Keep the non-causal DSpark draft out of the target's KV cache
+            # group: MLAAttentionSpec.merge ORs non_causal_multi_token_decode,
+            # so a merged group would flag the causal target too, raising its
+            # TritonMLA reorder threshold and misrouting its short prefills and
+            # causal verification blocks into a decode path that expects one
+            # query row per request.
+            model_version="kimi_k3_dspark"
+            if self.non_causal_multi_token_decode
+            else None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
