@@ -281,9 +281,7 @@ class TestResponseInputToHarmonyMessage:
     # -----------------------------------------------------------------------
 
     def test_unknown_type_raises_validation_error(self):
-        with pytest.raises(
-            VLLMValidationError, match="Unknown input type"
-        ) as exc_info:
+        with pytest.raises(VLLMValidationError, match="Unknown input type") as exc_info:
             response_input_to_harmony(
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
