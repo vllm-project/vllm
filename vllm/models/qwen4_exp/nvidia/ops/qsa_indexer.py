@@ -365,7 +365,7 @@ def warmup_qsa_mqa_paged_decode(
             BLOCK_N=_DECODE_BLOCK_N,
             TILES_PER_PROG=tiles_per_program,
             STAGES=2,
-            # fp8 cache config tuned on GB300
+            # tuned on GB300
             num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
             grid=(
                 num_requests,
@@ -394,7 +394,7 @@ def _prefill_logits(
     logits = torch.empty(
         (num_queries, logits_width), dtype=torch.float32, device=q.device
     )
-    # fp8 cache config tuned on GB300
+    # tuned on GB300
     if k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
     else:
@@ -556,7 +556,7 @@ def qsa_select_paged_decode(
         BLOCK_N=_DECODE_BLOCK_N,
         TILES_PER_PROG=tiles_per_program,
         STAGES=2,
-        # fp8 cache config tuned on GB300
+        # tuned on GB300
         num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
     )
     _topk(
