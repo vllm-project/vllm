@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Config,
     MoeWNA16Method,
 )
+from vllm.platforms import current_platform
 
 
 def test_map_wna16_backend_supports_triton():
@@ -203,3 +204,165 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     )
 
     assert method.get_fused_moe_quant_config(layer) is quant_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Compressed-tensors Humming WNA16 MoE requires CUDA",
+)
+@pytest.mark.parametrize("num_bits", [3, 5, 6, 7])
+def test_compressed_tensors_wna16_moe_create_weights_uses_ceil_packed_shapes(
+    num_bits,
+):
+    pytest.importorskip("humming")
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=512,
+    )
+    moe_config.moe_backend = "humming"
+    method = CompressedTensorsWNA16MoEMethod(quant_args, None, moe_config)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=512,
+        params_dtype=torch.float16,
+        intermediate_size_full=512,
+    )
+
+    packed_hidden = (256 * num_bits + 31) // 32
+    packed_intermediate = (512 * num_bits + 31) // 32
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert layer.w13_weight_packed.shape == (2, 1024, packed_hidden)
+    assert layer.w2_weight_packed.shape == (2, 256, packed_intermediate)
+    assert layer.w13_weight_scale.shape == (2, 1024, 2)
+    assert layer.w2_weight_scale.shape == (2, 256, 4)
+    assert layer.w13_weight_packed.dtype is torch.int32
+    assert layer.w2_weight_scale.dtype is torch.float16
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Compressed-tensors Humming WNA16 MoE requires CUDA",
+)
+def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
+    pytest.importorskip("humming")
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=3,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=512,
+    )
+    moe_config.moe_backend = "humming"
+    method = CompressedTensorsWNA16MoEMethod(quant_args, None, moe_config)
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+    layer.layer_name = "test.humming_moe"
+    layer._expert_routing_tables = lambda: (None, None, None)
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=512,
+        intermediate_size_full=512,
+        params_dtype=torch.bfloat16,
+    )
+    layer.cuda()
+    for parameter in layer.parameters():
+        parameter.data.zero_()
+
+    method.process_weights_after_loading(layer)
+
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert method.moe_kernel is not None
+    assert set(layer.weight_schemas) == {"w13", "w2"}
+    assert set(layer.humming_configs) == {"w13", "w2"}
+    assert not hasattr(layer, "w13_weight_packed")
+    assert not hasattr(layer, "w2_weight_packed")
+    assert layer.w13_weight.dtype is torch.int32
+    assert layer.w2_weight.dtype is torch.int32
+
+
+def test_moe_wna16_forwards_packed_modules_mapping_to_linear_delegate(monkeypatch):
+    """The linear delegate must receive packed_modules_mapping.
+
+    It is rebuilt from the raw HF quantization dict, which lists shard names and
+    never fused ones, so without the mapping a fused layer resolves to
+    `UnquantizedLinearMethod` and the checkpoint's qweight has nowhere to load.
+    """
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=False,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={
+            "bits": 4,
+            "group_size": 128,
+            "desc_act": False,
+            "sym": True,
+            "quant_method": "gptq",
+            # As emitted by AutoGPTQ: shard names, never the fused name.
+            "modules_in_block_to_quantize": [["mlp.gate_proj", "mlp.up_proj"]],
+        },
+    )
+    config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    seen: dict[str, dict[str, list[str]]] = {}
+    monkeypatch.setattr(
+        AutoGPTQConfig,
+        "get_quant_method",
+        lambda self, layer, prefix: seen.setdefault(
+            "mapping", self.packed_modules_mapping
+        ),
+    )
+    layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+    config.get_quant_method(layer, "model.layers.0.mlp.gate_up_proj")
+
+    assert seen["mapping"] == {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+
+def test_xpu_platform_supports_moe_wna16():
+    """Regression guard for the XPU quantization allowlist."""
+    try:
+        from vllm.platforms.xpu import XPUPlatform
+    except ImportError:
+        pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
+
+    assert "moe_wna16" in XPUPlatform.supported_quantization

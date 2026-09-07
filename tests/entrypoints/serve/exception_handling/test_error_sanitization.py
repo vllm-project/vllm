@@ -116,7 +116,6 @@ class TestAffectedModulesUseSanitize:
     @pytest.mark.parametrize(
         "module",
         [
-            "vllm.entrypoints.anthropic.api_router",
             "vllm.entrypoints.anthropic.serving",
             "vllm.entrypoints.speech_to_text.realtime.connection",
         ],

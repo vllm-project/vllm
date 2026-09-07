@@ -2,10 +2,11 @@ group: Plugins
 depends_on: 
   - image-build
 steps:
-- label: Plugin Tests (2 GPUs)
+- label: ":nvidia: (L4) Plugin Integration"
   key: plugin-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/plugins/
@@ -49,9 +50,20 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_online.py # it needs a clean process
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
+  mirror:
+    amd:
+      label: ":amd: (MI250) Plugin Integration"
+      device: mi250_2
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/plugins/
+      - tests/plugins/
+      - vllm/platforms/rocm.py
 
 
-- label: GGUF Plugin
+- label: ":nvidia: (H200 MIG 18GB) GGUF Plugin"
   key: gguf-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -64,7 +76,7 @@ steps:
     - pip install "vllm-gguf-plugin >= 0.0.2"
     - pytest -v -s plugins_tests/gguf
 
-- label: BitsAndBytes Plugin
+- label: ":nvidia: (H200 MIG 18GB) BitsAndBytes Plugin"
   key: bitsandbytes-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -75,13 +87,17 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/plugins_tests/bitsandbytes
   commands:
+    # bitsandbytes' int8 quant syncs internally, and it is out-of-tree, so
+    # there is nothing to wrap on the vLLM side.
+    - unset VLLM_GPU_SYNC_CHECK
     - pip install "vllm-bnb-plugin >= 0.0.1"
     - pytest -v -s plugins_tests/bitsandbytes -m 'not distributed'
 
-- label: BitsAndBytes Plugin (2 GPUs)
+- label: ":nvidia: (L4) BitsAndBytes Plugin"
   key: bitsandbytes-plugin-2-gpus
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   soft_fail: true
   optional: true
@@ -89,5 +105,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/plugins_tests/bitsandbytes
   commands:
+    # bitsandbytes' int8 quant syncs internally, and it is out-of-tree, so
+    # there is nothing to wrap on the vLLM side.
+    - unset VLLM_GPU_SYNC_CHECK
     - pip install "vllm-bnb-plugin >= 0.0.1"
     - pytest -v -s plugins_tests/bitsandbytes -m 'distributed(num_gpus=2)'

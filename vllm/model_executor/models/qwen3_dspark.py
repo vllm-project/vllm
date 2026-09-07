@@ -30,7 +30,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
-from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
@@ -177,9 +182,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = Qwen3DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -195,8 +198,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != target_vocab_size:
+        self.target_vocab_size = vllm_config.model_config.get_vocab_size()
+        if self.config.draft_vocab_size != self.target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
                 torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
@@ -275,16 +278,35 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        skip_substrs = ["mask_embedding"]
+        uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
+        uses_reduced_vocab = self.config.draft_vocab_size != self.target_vocab_size
+        if uses_expanded_input_vocab and not includes_embed_tokens:
+            raise ValueError(
+                "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
+                "the target vocabulary must include embed_tokens weights."
+            )
+        if uses_reduced_vocab and not includes_lm_head:
+            raise ValueError(
+                "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
+                "lm_head weights; the full target lm_head cannot be shared."
+            )
+        if uses_reduced_vocab and not includes_draft_id_mapping:
+            raise ValueError(
+                "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
+                "d2t mapping so sampled draft ids can be converted to target ids."
+            )
+
+        orig_to_new_substr = {"mask_embedding": None}
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
         if not includes_lm_head:
-            skip_substrs.append("lm_head")
+            orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
+            orig_to_new_substr["draft_id_to_target_id"] = None
         if self.model.confidence_head is None or not includes_confidence_head:
             self.model.confidence_head = None
-            skip_substrs.append("confidence_head")
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
-        loader.load_weights(model_weights.items())
+            orig_to_new_substr["confidence_head"] = None
+        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(model_weights.items(), mapper=mapper)
         self.model._build_fused_kv_buffers()

@@ -58,9 +58,9 @@ async fn main() -> Result<()> {
             local_input_address: None,
             local_output_address: None,
         },
-        data_parallel_size: args.engine_count,
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
+        generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),
@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         chat_template: None,
         default_chat_template_kwargs: None,
         limit_mm_per_prompt: HashMap::new(),
+        lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
