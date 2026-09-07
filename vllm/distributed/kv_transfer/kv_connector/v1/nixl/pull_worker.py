@@ -168,6 +168,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
+        groups_differ = local_region_groups != remote_region_groups
         if not local_block_ids:
             read_specs = [
                 ReadSpec(
@@ -188,8 +189,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_region_groups,
             )
             return
-        groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        elif groups_differ:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
