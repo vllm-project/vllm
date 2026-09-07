@@ -25,6 +25,7 @@ from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -432,3 +433,89 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
         region = worker.gpu_kv_caches[name]
         assert region.data_ptr() == cache.data_ptr()
         assert region.stride(0) == specs[name].page_size_bytes
+
+
+@pytest.mark.parametrize("rank_blocks", [1, 5])
+def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
+    """Registration holds at block counts that are not powers of two.
+
+    ``num_blocks`` comes out of ``available_memory // bytes_per_block``, so
+    any integer is reachable. Registration derives regions from the config's
+    own block count and strides, and the CPU pool rounds down from the same
+    per-block byte total; none of it assumes anything about how the count
+    was reached.
+    """
+    num_layers = 4
+    block_size = 64
+    specs = _dsa_specs(num_layers, block_size)
+    group = KVCacheGroupSpec(
+        list(specs),
+        UniformTypeKVCacheSpecs(block_size=block_size, kv_cache_specs=specs),
+    )
+    layout = KVCacheLayout.LBNHC
+    vllm_config = MagicMock()
+    vllm_config.cache_config = CacheConfig()
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.cache_config.num_gpu_blocks_override = None
+
+    pages = [spec.page_size_bytes for spec in specs.values()]
+    kv_cache_config = get_kv_cache_config_from_groups(
+        vllm_config, [group], sum(pages) * rank_blocks
+    )
+    assert kv_cache_config.num_blocks == rank_blocks
+
+    kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=sum(pages) * rank_blocks,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    worker.register_kv_caches(kv_caches)
+
+    assert worker.gpu_kv_caches is not None
+    assert {n: c.shape for n, c in worker.gpu_kv_caches.items()} == {
+        name: (rank_blocks, spec.page_size_bytes) for name, spec in specs.items()
+    }
+    assert worker.num_cpu_blocks == rank_blocks
+
+
+def test_mixed_page_byte_placement_is_dcp_invariant():
+    """DCP scales a block's token span, not its byte placement.
+
+    ``get_kv_cache_config_from_groups`` never reads
+    ``decode_context_parallel_size``, so every placement field registration
+    derives regions from is identical at dcp=1 and dcp=2. What DCP scales is
+    the block's token span, reported by ``resolve_kv_cache_block_sizes``;
+    checking that it doubles proves DCP was actually in effect, or the
+    identity above would be trivially true.
+    """
+    specs = _dsa_specs(4, block_size=128)
+
+    placements = []
+    for dcp_size in (1, 2):
+        group = KVCacheGroupSpec(
+            list(specs),
+            UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=specs),
+        )
+        vllm_config = MagicMock()
+        vllm_config.cache_config = CacheConfig()
+        vllm_config.cache_config.block_size = 128
+        vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+
+        page_bytes = sum(spec.page_size_bytes for spec in specs.values())
+        config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
+        scheduler_block_size, _ = resolve_kv_cache_block_sizes(config, vllm_config)
+        assert scheduler_block_size == 128 * dcp_size
+        placements.append(
+            [
+                (t.size, tuple(t.layers), t.layer_stride, t.block_stride, t.offset)
+                for t in config.kv_cache_tensors
+            ]
+        )
+
+    assert placements[0] == placements[1]
