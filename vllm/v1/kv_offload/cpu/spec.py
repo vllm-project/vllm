@@ -5,6 +5,7 @@ from typing import Any
 import torch
 from typing_extensions import override
 
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -183,6 +184,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                unlink_owner=is_local_first_rank(),
             )
         try:
             return CPUOffloadingWorker(

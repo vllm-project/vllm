@@ -45,8 +45,11 @@ def _make_region(
     num_workers: int = 1,
     rank: int | None = 0,
     barrier=None,
+    unlink_owner: bool | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
+    if unlink_owner is None:
+        unlink_owner = rank == 0
     return SharedOffloadRegion(
         engine_id=engine_id,
         num_chunks=num_chunks,
@@ -54,6 +57,7 @@ def _make_region(
         kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
         barrier=barrier,
+        unlink_owner=unlink_owner,
     )
 
 
@@ -112,6 +116,7 @@ def _multi_region(
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            unlink_owner=rank == 0,
         )
         for rank in range(num_workers)
     ]
@@ -143,6 +148,7 @@ def _race_construct(
                 rank=rank,
                 kv_bytes_per_chunk=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
+                unlink_owner=rank == 0,
             )
         except Exception as e:
             errors.append(e)
@@ -177,6 +183,7 @@ def _mp_race_construct_and_write(
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            unlink_owner=rank == 0,
         )
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
@@ -200,7 +207,6 @@ def _mp_barrier_construct_and_hold(
     """Construct with a real cross-process barrier, write, then hold the
     mapping (no cleanup) until the parent SIGKILLs this process."""
     try:
-<<<<<<< HEAD
         populate_calls = 0
         get_populate_write_fn = region_module._get_populate_write_fn
 
@@ -210,11 +216,7 @@ def _mp_barrier_construct_and_hold(
             return get_populate_write_fn(mmap_obj)
 
         region_module._get_populate_write_fn = track_population
-=======
-        from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-        sor.is_local_first_rank = lambda: rank == 0
->>>>>>> 3baa273b52 ([Bugfix][KV Offload] Cover barrier cleanup without creator)
+        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
@@ -223,6 +225,7 @@ def _mp_barrier_construct_and_hold(
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
             populate_only_on_creator=replicated,
+            unlink_owner=rank == 0,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
@@ -403,6 +406,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         rank=0,
         kv_bytes_per_chunk=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
+        unlink_owner=True,
     )
     try:
         child = ctx.Process(
@@ -715,11 +719,8 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_singleton_owner_removes_file(iid, monkeypatch):
+def test_cleanup_unlink_owner_removes_file(iid):
     """cleanup() on the local owner closes resources and removes the file."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
     r = _make_region(iid)
     path = r.mmap_path
     fd = r.fd
@@ -728,19 +729,15 @@ def test_cleanup_singleton_owner_removes_file(iid, monkeypatch):
     r.cleanup()
 
     assert mmap_obj.closed, "mmap should be closed after cleanup"
-    assert not os.path.exists(path), "singleton owner should remove the file"
+    assert not os.path.exists(path), "unlink owner should remove the file"
     with pytest.raises(OSError):
         os.fstat(fd)  # fd should be closed
 
 
-def test_cleanup_non_owner_leaves_file(iid, monkeypatch):
+def test_cleanup_non_owner_leaves_file(iid):
     """A non-owner must close local resources without removing the file."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    r0 = _make_region(iid)
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
-    r1 = _make_region(iid)
+    r0 = _make_region(iid, unlink_owner=True)
+    r1 = _make_region(iid, unlink_owner=False)
     path = r0.mmap_path
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
@@ -756,14 +753,10 @@ def test_cleanup_non_owner_leaves_file(iid, monkeypatch):
         _cleanup_file(path)
 
 
-def test_joiner_owner_cleans_up_after_initializer_exits(iid, monkeypatch):
+def test_joiner_owner_cleans_up_after_initializer_exits(iid):
     """A joiner owner must unlink after the initializer releases its resources."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
-    creator = _make_region(iid)
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    owner = _make_region(iid)
+    creator = _make_region(iid, unlink_owner=False)
+    owner = _make_region(iid, unlink_owner=True)
     path = creator.mmap_path
     try:
         creator.cleanup()
@@ -776,52 +769,40 @@ def test_joiner_owner_cleans_up_after_initializer_exits(iid, monkeypatch):
         _cleanup_file(path)
 
 
-def test_layout_rank_does_not_determine_singleton_owner(iid, monkeypatch):
+def test_layout_rank_does_not_determine_unlink_owner(iid):
     """A replicated-layout slot-0 worker may still be a non-owner."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
-    with _region(iid, rank=0) as region:
+    with _region(iid, rank=0, unlink_owner=False) as region:
         assert region.rank == 0
-        assert region._is_singleton_owner is False
+        assert region._is_unlink_owner is False
 
 
-def test_scheduler_region_is_not_singleton_owner(iid, monkeypatch):
-    """The unranked scheduler mapping must not own the worker path."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    with _region(iid, rank=None) as region:
-        assert region._is_singleton_owner is False
+def test_explicit_scheduler_region_owner(iid):
+    """The caller can assign unlink ownership independently of rank."""
+    with _region(iid, rank=None, unlink_owner=True) as region:
+        assert region._is_unlink_owner is True
 
 
-def test_worker_and_scheduler_regions_have_one_owner_per_path(iid, monkeypatch):
-    """Only worker local rank 0 may own a path shared with the scheduler."""
-    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
-
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    local_rank_0 = _make_region(iid, num_workers=2, rank=0)
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
-    local_rank_1 = _make_region(iid, num_workers=2, rank=1)
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    scheduler_region = _make_region(iid, num_workers=2, rank=None)
+def test_worker_and_scheduler_regions_have_one_owner_per_path(iid):
+    """The caller assigns one unlink owner for a shared path."""
+    local_rank_0 = _make_region(iid, num_workers=2, rank=0, unlink_owner=False)
+    local_rank_1 = _make_region(iid, num_workers=2, rank=1, unlink_owner=False)
+    scheduler_region = _make_region(iid, num_workers=2, rank=None, unlink_owner=True)
     regions = [local_rank_0, local_rank_1, scheduler_region]
     try:
-        assert sum(region._is_singleton_owner for region in regions) == 1
-        assert local_rank_0._is_singleton_owner is True
-        assert scheduler_region._is_singleton_owner is False
+        assert sum(region._is_unlink_owner for region in regions) == 1
+        assert local_rank_0._is_unlink_owner is False
+        assert scheduler_region._is_unlink_owner is True
     finally:
         for region in regions:
             region.cleanup()
         _cleanup_file(local_rank_0.mmap_path)
 
 
-def test_cleanup_disarms_singleton_owner(iid, monkeypatch):
+def test_cleanup_disarms_unlink_owner(iid, monkeypatch):
     """A cleanup owner must not try to unlink the path on a second cleanup."""
+    unlink = MagicMock(wraps=os.unlink)
     from vllm.v1.kv_offload.cpu import shared_offload_region as sor
 
-    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
-    unlink = MagicMock(wraps=os.unlink)
     monkeypatch.setattr(sor.os, "unlink", unlink)
     region = _make_region(iid)
     path = region.mmap_path
@@ -830,7 +811,7 @@ def test_cleanup_disarms_singleton_owner(iid, monkeypatch):
         region.cleanup()
 
         assert unlink.call_count == 1
-        assert region._is_singleton_owner is False
+        assert region._is_unlink_owner is False
     finally:
         _cleanup_file(path)
 
@@ -1070,6 +1051,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
             rank=0,
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
+            unlink_owner=True,
         )
 
     mock_unlink.assert_called_once_with(mmap_path)
@@ -1105,6 +1087,7 @@ def test_ftruncate_failure_removes_newly_created_file(monkeypatch):
             rank=0,
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
+            unlink_owner=True,
         )
 
     mock_unlink.assert_called_once_with(mmap_path)
@@ -1128,7 +1111,7 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
-        assert region._is_singleton_owner is False
+        assert region._is_unlink_owner is False
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -1149,14 +1132,12 @@ def test_barrier_failure_unlinks_local_owner_and_raises(iid):
 
 def test_ready_joiners_unlink_after_barrier(iid, monkeypatch):
     """Local rank 0 must unlink a ready stale file without an initializer."""
-    monkeypatch.setattr(region_module, "is_local_first_rank", lambda: False)
-    initializer = _make_region(iid)
+    initializer = _make_region(iid, unlink_owner=False)
     path = initializer.mmap_path
     initializer.cleanup()
     assert os.path.exists(path)
 
-    monkeypatch.setattr(region_module, "is_local_first_rank", lambda: True)
-    joiner = _make_region(iid, barrier=lambda: None)
+    joiner = _make_region(iid, barrier=lambda: None, unlink_owner=True)
     try:
         assert not os.path.exists(path)
     finally:
