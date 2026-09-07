@@ -289,9 +289,7 @@ class Worker(WorkerBase):
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
         ep_rank = (
-            get_ep_group().rank_in_group
-            if self.vllm_config.model_config.is_moe
-            else 0
+            get_ep_group().rank_in_group if self.vllm_config.model_config.is_moe else 0
         )
 
         checksums: dict[str, str] = {}
@@ -306,8 +304,7 @@ class Worker(WorkerBase):
                 .tobytes()
             )
             key = (
-                f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:"
-                f"tp{tp_rank}:ep{ep_rank}:{name}"
+                f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:{name}"
             )
             checksums[key] = hashlib.sha256(raw).hexdigest()
         return checksums

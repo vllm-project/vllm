@@ -60,7 +60,7 @@ steps:
   - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/serve -m "not distributed" --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   - pytest -v -s entrypoints/scale_out
   mirror:
@@ -71,6 +71,20 @@ steps:
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
+
+- label: ":nvidia: RL weight checker (TP2 DP2 EP)"
+  key: rl-weight-checker-distributed
+  device: h100
+  num_devices: 4
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/entrypoints/serve/dev/rlhf/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/entrypoints/serve/dev/rlhf/
+  commands:
+  - pytest -v -s entrypoints/serve/dev/rlhf/state_transitions/test_weight_checker.py -m distributed
 
 - label: ":nvidia: (H200) Entrypoints Integration (API Server OpenAI - Part 1)"
   device: h200_35gb

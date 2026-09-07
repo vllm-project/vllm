@@ -94,10 +94,7 @@ def _iter_checksum_targets(model: nn.Module):
             name = f"{module_name}.{buffer_name}" if module_name else buffer_name
             if any(pattern in name for pattern in non_persistent_buffer_patterns):
                 continue
-            if (
-                not tensor.is_floating_point()
-                and tensor.dtype not in supported_dtypes
-            ):
+            if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
                 continue
             yield name, tensor
 

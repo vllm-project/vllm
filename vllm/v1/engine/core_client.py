@@ -1541,13 +1541,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def compute_weight_checksums_all_async(self) -> list[dict]:
         # Return results from all engines.
-        return (
-            await asyncio.gather(
-                *[
-                    self._call_utility_async("compute_weight_checksums", engine=engine)
-                    for engine in self.core_engines
-                ]
-            )
+        return await asyncio.gather(
+            *[
+                self._call_utility_async("compute_weight_checksums", engine=engine)
+                for engine in self.core_engines
+            ]
         )
 
     async def reset_weights_all_async(self) -> None:
