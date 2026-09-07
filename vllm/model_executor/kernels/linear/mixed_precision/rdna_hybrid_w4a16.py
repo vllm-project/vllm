@@ -388,13 +388,17 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
+    symmetry = "asym" if w_zp is not None else "sym"
+
     if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS:
         # record_function is not torch.compile-safe; use nullcontext when
         # compiling to keep the op traceable.
         ctx = (
             nullcontext()
             if torch.compiler.is_compiling()
-            else torch.profiler.record_function(f"wvsplitk_int4 {M}x{N}x{K}")
+            else torch.profiler.record_function(
+                f"wvsplitk_int4 {M}x{N}x{K} g={group_size} {symmetry}"
+            )
         )
         with ctx:
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
@@ -402,7 +406,9 @@ def _rdna_hybrid_w4a16_apply_impl(
     ctx = (
         nullcontext()
         if torch.compiler.is_compiling()
-        else torch.profiler.record_function(f"hybrid_triton_w4a16 {M}x{N}x{K}")
+        else torch.profiler.record_function(
+            f"hybrid_triton_w4a16 {M}x{N}x{K} g={group_size} {symmetry}"
+        )
     )
     with ctx:
         output = triton_w4a16_skinny_fmt_gemm(
