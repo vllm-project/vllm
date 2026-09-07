@@ -760,8 +760,8 @@ class OffloadingConnectorScheduler:
                     group_config.sliding_window_size_in_chunks
                 )
 
-                # For eagle groups, query one extra chunk that will be popped.
-                # We only need to increase the query size for sliding window groups.
+                # SWA eagle over-queries one extra chunk (popped below). Full-
+                # attention eagle is a PREFIX scan and must not over-query.
                 query_max = max_hit_size_tokens
                 if is_eagle_unverified and sliding_window_size_in_chunks is not None:
                     query_max = min(
@@ -800,7 +800,13 @@ class OffloadingConnectorScheduler:
                     defer_lookup = True
                 else:
                     if is_eagle_unverified:
-                        num_hit_chunks -= 1
+                        # Pair with the SWA-only over-query above. Full-attn
+                        # eagle never over-queries, and with offload_prompt_only
+                        # / store-side decode drop it never stores a volatile
+                        # tail — decrementing would drop a verified prompt
+                        # chunk and veto <=1-chunk prefixes (CPU→GPU stays 0).
+                        if sliding_window_size_in_chunks is not None:
+                            num_hit_chunks -= 1
                         eagle_verified.add(group_idx)
 
                     max_hit_size_tokens = min(
