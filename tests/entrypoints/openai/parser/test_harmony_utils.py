@@ -978,8 +978,9 @@ class TestGetSystemMessage:
         with pytest.raises(
             VLLMValidationError,
             match="reasoning_effort='max' is not supported by Harmony",
-        ):
+        ) as exc_info:
             get_system_message(reasoning_effort="max")
+        assert exc_info.value.parameter == "reasoning_effort"
 
 
 class TestResponseInputToHarmonyReasoningItem:
