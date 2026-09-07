@@ -345,6 +345,7 @@ class AsyncLLM(EngineClient):
         return self._supported_tasks
 
     async def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return discovered KV-cache event publisher sources."""
         return self.engine_core.get_kv_event_sources()
 
     async def add_request(

@@ -421,6 +421,7 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_weight_version()
 
     def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return KV-event discovery information for the in-process engine."""
         config = self.engine_core.scheduler.get_kv_event_publisher_config()
         source = describe_kv_event_source(self.engine_core.engine_index, config)
         return [source] if source is not None else []
@@ -863,6 +864,7 @@ class MPClient(EngineCoreClient):
         self._kv_event_sources[response.data_parallel_rank] = response.kv_events_config
 
     def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return enabled KV-event sources ordered by data-parallel rank."""
         sources = (
             describe_kv_event_source(rank, config)
             for rank, config in self._kv_event_sources.items()

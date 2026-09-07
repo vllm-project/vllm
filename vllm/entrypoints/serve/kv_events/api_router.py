@@ -11,6 +11,7 @@ router = APIRouter()
 
 
 def engine_client(request: Request) -> EngineClient:
+    """Return the engine client attached to the application."""
     return request.app.state.engine_client
 
 
@@ -22,4 +23,5 @@ async def get_kv_event_sources(raw_request: Request):
 
 
 def attach_router(app: FastAPI):
+    """Register KV-event discovery routes on the application."""
     app.include_router(router)
