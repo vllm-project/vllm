@@ -670,6 +670,34 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             self.compile(compile_key)
 
 
+def _same_value(left: Any, right: Any) -> bool:
+    """True if two registration values are the same object or compare equal.
+
+    Identity is checked first so shared singletons (e.g. ``vllm_config``, torch
+    dtypes) short-circuit before any potentially deep or non-boolean ``__eq__``.
+    """
+    if left is right:
+        return True
+    try:
+        return bool(left == right)
+    except (TypeError, ValueError, RuntimeError):
+        return False
+
+
+def _same_registration(
+    left: tuple[tuple[Any, ...], dict[str, Any]],
+    right: tuple[tuple[Any, ...], dict[str, Any]],
+) -> bool:
+    """True if two ``(args, kwargs)`` registrations are equivalent."""
+    left_args, left_kwargs = left
+    right_args, right_kwargs = right
+    if len(left_args) != len(right_args) or left_kwargs.keys() != right_kwargs.keys():
+        return False
+    return all(
+        _same_value(x, y) for x, y in zip(left_args, right_args, strict=True)
+    ) and all(_same_value(left_kwargs[k], right_kwargs[k]) for k in left_kwargs)
+
+
 class JitWarmupRegistry:
     """Collect and compile JIT kernels selected during runner setup."""
 
@@ -713,13 +741,15 @@ class JitWarmupRegistry:
         kwargs: dict[str, Any],
     ) -> None:
         registrations = self._registrations.setdefault(kernel, [])
-        if (
-            not args
-            and not kwargs
-            and any(
-                not registered_args and not registered_kwargs
-                for registered_args, registered_kwargs in registrations
-            )
+        # Every layer of a deep model appends an identical (args, kwargs) here
+        # (e.g. a 61-layer DSA model registers the same pack (dtype, pad_value)
+        # 61 times); each expands to the same compile keys, so tracing
+        # get_warmup_keys once per distinct registration is sufficient. Dedup on
+        # identity-or-equality -- identity short-circuits shared singletons like
+        # vllm_config before any deep __eq__.
+        if any(
+            _same_registration(registered, (args, kwargs))
+            for registered in registrations
         ):
             return
         registrations.append((args, kwargs))
@@ -737,7 +767,11 @@ class JitWarmupRegistry:
         for kernel, registrations in self._registrations.items():
             compile_keys: dict[Any, None] = {}
             for args, kwargs in registrations:
-                if not args and not kwargs:
+                if (
+                    not args
+                    and not kwargs
+                    and inspect.signature(kernel.get_warmup_keys).parameters
+                ):
                     args = (self.vllm_config,)
                 for compile_key in kernel.get_warmup_keys(*args, **kwargs):
                     compile_keys[compile_key] = None

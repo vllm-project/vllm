@@ -35,7 +35,7 @@ from vllm.v1.kv_cache_interface import (
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
-    INKLING_FA4_REL_ATTENTION_KERNEL,
+    _INKLING_FA4_REL_ATTENTION_KERNEL,
     bucket_max_seqlen_q,
     check_inkling_fa4_support,
     inkling_fa4_num_splits,
@@ -176,6 +176,9 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 
@@ -291,7 +294,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             max_kv_len=self._max_kv_len,
         )
-        INKLING_FA4_REL_ATTENTION_KERNEL(
+        _INKLING_FA4_REL_ATTENTION_KERNEL(
             q[:nt],
             key_cache,
             value_cache,
