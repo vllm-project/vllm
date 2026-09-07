@@ -5,6 +5,7 @@ from argparse import ArgumentError
 
 import pytest
 
+from vllm.config import ModelConfig, SpeculativeConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -51,6 +52,45 @@ def test_prefix_caching_from_cli():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.prefix_cache_retention_interval == 64
+
+
+@pytest.mark.parametrize(
+    ("has_inner_state", "use_eagle", "explicit", "expected"),
+    [
+        pytest.param(True, True, "unset", None, id="mamba-eagle-dense"),
+        pytest.param(True, True, 0, 0, id="mamba-eagle-explicit-zero"),
+        pytest.param(True, True, None, None, id="mamba-eagle-explicit-none"),
+        pytest.param(True, True, 64, 64, id="mamba-eagle-explicit-interval"),
+        pytest.param(True, False, "unset", 0, id="mamba-without-eagle"),
+        pytest.param(False, True, "unset", 0, id="eagle-without-mamba"),
+        pytest.param(False, False, "unset", 0, id="plain-model"),
+    ],
+)
+def test_prefix_cache_retention_interval_default_resolution(
+    monkeypatch, has_inner_state, use_eagle, explicit, expected
+):
+    """An unset ``prefix_cache_retention_interval`` resolves to dense (None)
+    for Mamba models with EAGLE-style speculative decoding — sparse retention
+    (0) leaves no reachable Mamba state checkpoints under EAGLE, so prefix
+    caching never hits — and to 0 otherwise. Explicit values are respected."""
+    monkeypatch.setattr(
+        ModelConfig, "has_inner_state", property(lambda self: has_inner_state)
+    )
+    if use_eagle:
+        spec_config = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+        spec_config.method = "eagle"
+        monkeypatch.setattr(
+            EngineArgs,
+            "create_speculative_config",
+            lambda self, **kwargs: spec_config,
+        )
+    engine_kwargs = (
+        {} if explicit == "unset" else {"prefix_cache_retention_interval": explicit}
+    )
+    vllm_config = EngineArgs(
+        model="Qwen/Qwen3-0.6B", **engine_kwargs
+    ).create_engine_config()
+    assert vllm_config.cache_config.prefix_cache_retention_interval == expected
 
 
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
