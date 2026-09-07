@@ -2606,6 +2606,13 @@ class VllmConfig:
                     unsupported.append(
                         "standalone drafting with a shorter draft context"
                     )
+                if (
+                    speculative_config.enforce_eager is not None
+                    and speculative_config.enforce_eager != model_config.enforce_eager
+                ):
+                    unsupported.append(
+                        "standalone drafting with a different draft eager setting"
+                    )
             elif speculative_config.method not in (
                 "eagle",
                 "eagle3",

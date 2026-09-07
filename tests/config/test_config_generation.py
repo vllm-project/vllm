@@ -21,15 +21,17 @@ from vllm.platforms import current_platform
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("draft_tp", "draft_max_len", "unsupported"),
+    ("draft_tp", "draft_max_len", "draft_eager", "unsupported"),
     [
-        (1, 2048, None),
-        (2, 2048, "distributed standalone drafting"),
-        (1, 1024, "standalone drafting with a shorter draft context"),
+        (1, 2048, None, None),
+        (2, 2048, None, "distributed standalone drafting"),
+        (1, 1024, None, "standalone drafting with a shorter draft context"),
+        (1, 2048, False, None),
+        (1, 2048, True, "standalone drafting with a different draft eager setting"),
     ],
 )
 def test_standalone_draft_runner_selection(
-    monkeypatch, draft_tp, draft_max_len, unsupported
+    monkeypatch, draft_tp, draft_max_len, draft_eager, unsupported
 ):
     """Unsupported drafts fall back by default and explain forced-V2 failures."""
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
@@ -48,6 +50,7 @@ def test_standalone_draft_runner_selection(
             is_hybrid=False,
             is_moe=False,
             enable_prompt_embeds=False,
+            enforce_eager=False,
             max_model_len=2048,
             logits_processors=None,
         ),
@@ -64,6 +67,7 @@ def test_standalone_draft_runner_selection(
             draft_model_config=draft_model_config,
             use_heterogeneous_vocab=False,
             parallel_drafting=False,
+            enforce_eager=draft_eager,
         ),
     )
 
