@@ -438,6 +438,7 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    num_reqs: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -447,6 +448,8 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
+    if num_reqs is None:
+        num_reqs = block_table.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
@@ -461,6 +464,7 @@ def compute_global_topk_indices_and_lens(
         block_table.stride(0),
         block_size,
         is_valid_token,
+        num_reqs,
         TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
@@ -479,6 +483,7 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_table_stride: tl.constexpr,
     block_size: tl.constexpr,
     is_valid_token_ptr,
+    num_reqs,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -495,23 +500,31 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = local_idx >= 0
-
         block_indices = local_idx // block_size
+        valid_mask = (
+            (local_idx >= 0)
+            & (req_idx >= 0)
+            & (req_idx < num_reqs)
+            & (block_indices < block_table_stride)
+        )
+
+        safe_req_idx = tl.where((req_idx >= 0) & (req_idx < num_reqs), req_idx, 0)
+        safe_block_indices = tl.where(valid_mask, block_indices, 0)
         block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=mask & is_valid,
+            block_table_ptr + safe_req_idx * block_table_stride + safe_block_indices,
+            mask=mask & valid_mask,
+            other=-1,
         )
         block_offsets = local_idx % block_size
 
         slot_ids = block_numbers * block_size + block_offsets
-        slot_ids = tl.where(is_valid, slot_ids, -1)
+        slot_ids = tl.where(valid_mask, slot_ids, -1)
         tl.store(
             global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
             slot_ids,
             mask=mask,
         )
-        count += tl.sum(is_valid.to(tl.int32), axis=0)
+        count += tl.sum((valid_mask & mask).to(tl.int32), axis=0)
 
     # Zero out length for padding tokens.
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
