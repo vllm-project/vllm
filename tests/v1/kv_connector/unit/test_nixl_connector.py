@@ -2092,7 +2092,9 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
-    worker._failed_inflight_recvs = set()
+    worker._failed_recv_pending = set()
+    worker._failed_recv_lock = threading.Lock()
+    worker._host_stager = None
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
