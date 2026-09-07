@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from functools import cache
 from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
@@ -8,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
@@ -16,6 +18,8 @@ from vllm.v1.attention.backends.registry import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+logger = init_logger(__name__)
 
 
 class AttentionSelectorConfig(NamedTuple):
@@ -244,6 +248,25 @@ def get_attn_backend(
 
 
 @cache
+def _accepts_layout_constraint(fn: Callable) -> bool:
+    """Whether a platform's ``get_attn_backend_cls`` takes ``layout_constraint``.
+
+    Out-of-tree platforms may still override the older signature; passing the
+    argument to those raises TypeError, so drop it and leave them unconstrained.
+    Keyed on the resolved callable so a replaced attribute is inspected too.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "layout_constraint" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+@cache
 def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
@@ -252,11 +275,20 @@ def _cached_get_attn_backend(
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
+    kwargs: dict[str, tuple[str, ...] | None] = {}
+    if _accepts_layout_constraint(current_platform.get_attn_backend_cls):
+        kwargs["layout_constraint"] = layout_constraint
+    elif layout_constraint is not None:
+        logger.warning_once(
+            "%s.get_attn_backend_cls() predates layout_constraint, so draft "
+            "backend selection is unconstrained on this platform.",
+            type(current_platform).__name__,
+        )
     attention_cls = current_platform.get_attn_backend_cls(
         backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
-        layout_constraint=layout_constraint,
+        **kwargs,
     )
     if not attention_cls:
         raise ValueError(

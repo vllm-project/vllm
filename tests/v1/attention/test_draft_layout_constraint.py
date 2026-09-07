@@ -42,8 +42,13 @@ class _TargetLayer(AttentionLayerBase):
         raise NotImplementedError
 
 
-def _select_backend_for_draft(target_layouts: tuple[str, ...]) -> dict:
-    """Record what the platform hook is asked for while building a draft."""
+def _select_backend_for_draft(*per_layer_layouts: tuple[str, ...] | None) -> dict:
+    """Record what the platform hook is asked for while building a draft.
+
+    Each argument installs one already-built target layer, so passing more than
+    one exercises the intersection across layers rather than a single layer's
+    ordering.
+    """
     captured: dict = {}
 
     def _spy(selected_backend, attn_selector_config, num_heads=None, **kwargs):
@@ -51,9 +56,11 @@ def _select_backend_for_draft(target_layouts: tuple[str, ...]) -> dict:
         return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
 
     config = VllmConfig()
-    config.compilation_config.static_forward_context["target.attn"] = _TargetLayer(
-        _backend(*target_layouts)
-    )
+    for i, layouts in enumerate(per_layer_layouts):
+        backend = _Backend(None) if layouts is None else _backend(*layouts)
+        config.compilation_config.static_forward_context[f"target.attn.{i}"] = (
+            _TargetLayer(backend)
+        )
     from vllm.platforms import current_platform
     from vllm.v1.attention import selector
 
@@ -76,7 +83,13 @@ def test_draft_selection_is_constrained_to_the_targets_layouts() -> None:
 
 
 def test_constraint_is_the_intersection_of_built_layers() -> None:
-    captured = _select_backend_for_draft(("LBHNC", "BLHNC"))
+    """Two target layers: only the layout both support may reach the draft."""
+    captured = _select_backend_for_draft(("LBHNC", "BLHNC"), ("BLHNC", "LBNHC"))
+    assert captured["layout_constraint"] == ("BLHNC",)
+
+
+def test_a_layer_declaring_no_layouts_does_not_narrow_the_constraint() -> None:
+    captured = _select_backend_for_draft(("LBHNC", "BLHNC"), None)
     assert captured["layout_constraint"] == ("BLHNC", "LBHNC")
 
 
