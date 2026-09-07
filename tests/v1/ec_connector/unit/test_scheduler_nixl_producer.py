@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 import uuid
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
@@ -144,59 +145,8 @@ def _announce(s, mm_hash, length=2):
     return s.request_finished(_Request([_Feature(mm_hash, length=length)]))
 
 
-def test_announced_encoding_is_not_evictable(monkeypatch):
-    """Announcing publishes an address the consumer uses on a later step.
-
-    By then the orchestrator has rewritten the media off the request, so an
-    eviction inside that window leaves the consumer nothing to fall back on.
-    """
-    s = _announcing_sched(monkeypatch)
-    entry = s._cache.alloc("h1", 2)
-    assert entry is not None
-    s._cache.mark_ready("h1")
-    assert entry.evictable
-
-    _delay, params = _announce(s, "h1")
-    assert "peer_host" in params["h1"]
-    assert not entry.evictable
-    s.shutdown()
-
-
-def test_hold_is_released_once_the_read_lands(monkeypatch):
-    s = _announcing_sched(monkeypatch)
-    entry = s._cache.alloc("h1", 2)
-    s._cache.mark_ready("h1")
-    _announce(s, "h1")
-    assert not entry.evictable
-
-    s._producer_session.served.append("h1")
-    s.build_connector_meta(scheduler_output=None)
-    assert entry.evictable
-    s.shutdown()
-
-
-def test_hold_lapses_when_no_consumer_ever_reads(monkeypatch):
-    """A consumer that never asks must not pin the pool forever."""
-    s = _announcing_sched(monkeypatch, lease=0.0)
-    entry = s._cache.alloc("h1", 2)
-    s._cache.mark_ready("h1")
-    _announce(s, "h1")
-    assert not entry.evictable
-
-    import time as _time
-
-    _time.sleep(0.01)
-    s.build_connector_meta(scheduler_output=None)
-    assert entry.evictable
-    s.shutdown()
-
-
 def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
-    """An entry announced mid-save is pinned when it becomes evictable.
-
-    A not-ready entry cannot be evicted, so the hold has to start at
-    mark_ready rather than at the announcement.
-    """
+    """A save completing after its announcement must acquire the pending pin."""
     from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
         ECCPUWorkerMetadata,
     )
@@ -220,16 +170,14 @@ def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
 
 
 def test_each_announcement_keeps_its_own_hold(monkeypatch):
-    """Two consumers told to read the same encoding each need it to survive.
-
-    Releasing on the first read would let the entry be evicted while the
-    second consumer, whose media has already been rewritten to a remote
-    reference, has not started its read.
-    """
+    """An announced encoding stays pinned until both consumers have read it."""
     s = _announcing_sched(monkeypatch)
     entry = s._cache.alloc("h1", 2)
+    assert entry is not None
     s._cache.mark_ready("h1")
+    assert entry.evictable
     _announce(s, "h1")
+    assert not entry.evictable
     _announce(s, "h1")
 
     s._producer_session.served.append("h1")
@@ -243,14 +191,7 @@ def test_each_announcement_keeps_its_own_hold(monkeypatch):
 
 
 def test_a_reannouncement_does_not_extend_the_earlier_hold(monkeypatch):
-    """Each announcement waits out its own lease, not the newest one.
-
-    An encoding announced again before its lease expires, to consumers that
-    never read, would otherwise keep a pin that no read and no expiry ever
-    releases, leaving the entry non-evictable for as long as it stays hot.
-    """
-    import time
-
+    """Unread announcements expire independently, eventually freeing the entry."""
     clock = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 

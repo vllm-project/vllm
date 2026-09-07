@@ -153,19 +153,16 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
     s.shutdown()
 
 
-def test_no_params_is_ready(monkeypatch):
+@pytest.mark.parametrize("params", [None, {"x": 123}])
+def test_no_remote_announcement_is_ready(monkeypatch, params):
     s = _consumer_sched(monkeypatch)
-    assert s.ensure_cache_available(_Request([_Feature("x")], params=None), 0) is True
+    assert s.ensure_cache_available(_Request([_Feature("x")], params=params), 0)
+    assert s.take_unavailable_requests() == set()
     s.shutdown()
 
 
 def test_tombstoned_read_fails_the_request(monkeypatch):
-    """A failed remote read must fail the request, not admit it.
-
-    The media reached the producer only, so an admitted request has no
-    embedding and no way to compute one: the model would receive an empty
-    multimodal batch and assert.
-    """
+    """A failed remote read must not admit a request with no local media."""
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
@@ -231,60 +228,31 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
     s.shutdown()
 
 
-def test_size_mismatch_fails_the_request(monkeypatch):
-    """A bad announcement is terminal: there is no second source to try."""
+@pytest.mark.parametrize(
+    "size_fields",
+    [{"size_bytes": 999}, {"size_bytes": None}, {"size_bytes": "big"}, {}],
+    ids=["mismatch", "null-size", "text-size", "no-size"],
+)
+def test_invalid_remote_size_fails_the_request(monkeypatch, size_fields):
+    """Invalid remote sizes fail the request without raising in the scheduler."""
     s = _consumer_sched(monkeypatch)
-    # Advertised size disagrees with pos.length * hidden_dim * element_size.
-    bad = {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}
-    req = _Request([_Feature("h1", 1)], params=bad)
+    announced = {"peer_host": "h", "peer_port": 1, **size_fields}
+    req = _Request([_Feature("h1", 1)], params={"h1": announced})
     assert s.ensure_cache_available(req, 0) is False
+    assert s.take_unavailable_requests() == {"r1"}
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
-    assert s.take_unavailable_requests() == {"r1"}
     s.shutdown()
 
 
-@pytest.mark.parametrize(
-    "announced",
-    [
-        {"peer_host": "h", "peer_port": 1, "size_bytes": None},
-        {"peer_host": "h", "peer_port": 1, "size_bytes": "big"},
-        {"peer_host": "h", "peer_port": 1},
-        123,
-    ],
-    ids=["null-size", "text-size", "no-size", "not-a-mapping"],
-)
-def test_unusable_announcement_fails_the_request(monkeypatch, announced):
-    """`ec_transfer_params` arrives on the request, so it may be anything.
-
-    Raising here would propagate out of Scheduler.schedule() and take the
-    engine down, which is the failure this whole path exists to prevent.
-    """
+@pytest.mark.parametrize("pool_full", [False, True], ids=["not-ready", "full-pool"])
+def test_deferral_budget_is_per_request(monkeypatch, pool_full):
+    """Transient failures defer until each request exhausts its own budget."""
     s = _consumer_sched(monkeypatch)
-    req = _Request([_Feature("h1", 1)], params={"h1": announced})
-    admitted = s.ensure_cache_available(req, 0)
-    if announced == 123:
-        # Not a mapping at all: indistinguishable from "never remote", so the
-        # encoder runs locally rather than the request failing.
-        assert admitted is True
-        assert s.take_unavailable_requests() == set()
+    if pool_full:
+        monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
     else:
-        assert admitted is False
-        assert s.take_unavailable_requests() == {"r1"}
-    assert "h1" not in s._in_flight
-    s.shutdown()
-
-
-def test_deferral_budget_is_per_request(monkeypatch):
-    """A request must not inherit an earlier one's clock for a shared item.
-
-    Two requests needing the same encoding hit the same transient condition;
-    the newcomer gets its own budget, so the one that has actually waited too
-    long is the one that fails.
-    """
-    s = _consumer_sched(monkeypatch)
-    # A not-ready orphan entry defers every request that needs it.
-    assert s._cache.alloc("h1", 1) is not None
+        assert s._cache.alloc("h1", 1) is not None
     params = _params("h1", 1)
     old = _Request([_Feature("h1", 1)], params=params, req_id="old")
     new = _Request([_Feature("h1", 1)], params=params, req_id="new")
@@ -302,6 +270,7 @@ def test_deferral_budget_is_per_request(monkeypatch):
     assert s.take_unavailable_requests() == set()
     assert s.ensure_cache_available(old, 0) is False
     assert s.take_unavailable_requests() == {"old"}
+    assert "h1" not in s._in_flight
     s.shutdown()
 
 
@@ -350,35 +319,6 @@ def test_orphan_not_ready_entry_defers_no_realloc(monkeypatch):
     assert s._cache.get("h1") is entry
     assert not entry.ready
     assert s.take_unavailable_requests() == set()
-    s.shutdown()
-
-
-def test_full_pool_defers_then_fails_the_request(monkeypatch):
-    """A full pool is transient, so defer — but not forever.
-
-    Deferring without a budget would hold the request until the client gave
-    up, with no record of why.
-    """
-    import time as _time
-
-    s = _consumer_sched(monkeypatch)
-
-    # Force the cache to reject the allocation.
-    monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
-
-    t0 = _time.monotonic()
-    monkeypatch.setattr(_time, "monotonic", lambda: t0)
-    assert s.ensure_cache_available(req, 0) is False
-    assert "h1" not in s._in_flight
-    assert s.take_unavailable_requests() == set()
-
-    # Still full once the budget has elapsed: fail rather than defer again.
-    monkeypatch.setattr(
-        _time, "monotonic", lambda: t0 + sched_mod._ADMIT_DEFER_TIMEOUT_S + 1
-    )
-    assert s.ensure_cache_available(req, 0) is False
-    assert s.take_unavailable_requests() == {"r1"}
     s.shutdown()
 
 
