@@ -94,7 +94,6 @@ def _fake_params(num_layers: int, bytes_per_block: int = 512) -> BatchMemcpyPara
         bpb=np.full(num_layers, bytes_per_block, dtype=np.uint64),
         num_layers=num_layers,
         attrs=_CUmemcpyAttributes(),
-        attrs_idx=ctypes.c_size_t(0),
         num_attrs=0,
         fail_idx=ctypes.c_size_t(0),
         stream_handle=0,
@@ -143,3 +142,36 @@ def test_copy_blocks_noop_on_empty(monkeypatch):
     monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 8192)
     copy_blocks([], [], _fake_params(num_layers=4))
     assert counts == []
+
+
+def test_copy_blocks_passes_one_attr_idx_per_descriptor(monkeypatch):
+    """``attrIdxs`` must hold one index per descriptor, not a single scalar.
+
+    ``cuMemcpyBatchAsync`` and ``hipMemcpyBatchAsync`` read ``count`` entries
+    from ``attrIdxs``, so passing ``byref()`` of one ``c_size_t`` lets the
+    driver read past that stack slot. The buffer is inspected inside the
+    patched entry point, while it is still alive.
+    """
+    seen: list[list[int] | None] = []
+
+    def fake_fn(dst, src, sizes, count, *rest):
+        # rest = (attrs, attrIdxs, numAttrs, failIdx, stream)
+        attr_idxs = rest[1]
+        if not isinstance(attr_idxs, int):
+            seen.append(None)
+            return 0
+        seen.append(list((ctypes.c_uint64 * count).from_address(attr_idxs)))
+        return 0
+
+    monkeypatch.setattr(cuda_mem_ops, "_batch_memcpy", (fake_fn, 0))
+    monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 0)
+
+    num_layers, num_blocks = 4, 64
+    ids = list(range(num_blocks))
+    copy_blocks(ids, ids, _fake_params(num_layers))
+
+    assert len(seen) == 1
+    idxs = seen[0]
+    assert idxs is not None, "attrIdxs must be an array pointer, not a scalar"
+    assert len(idxs) == num_layers * num_blocks
+    assert set(idxs) == {0}
