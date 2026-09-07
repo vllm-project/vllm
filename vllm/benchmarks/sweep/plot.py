@@ -338,9 +338,10 @@ def _plot_fig(
     if curve_by:
         df = df.sort_values(by=curve_by)
 
+    group_labels = {k: df[k].map(str) for k in row_by + col_by + curve_by}
     df["row_group"] = (
         pd.concat(
-            [k + "=" + df[k].astype(str) for k in row_by],
+            [k + "=" + group_labels[k] for k in row_by],
             axis=1,
         ).agg("\n".join, axis=1)
         if row_by
@@ -349,7 +350,7 @@ def _plot_fig(
 
     df["col_group"] = (
         pd.concat(
-            [k + "=" + df[k].astype(str) for k in col_by],
+            [k + "=" + group_labels[k] for k in col_by],
             axis=1,
         ).agg("\n".join, axis=1)
         if col_by
@@ -357,7 +358,9 @@ def _plot_fig(
     )
 
     if len(curve_by) <= 3:
-        hue, style, size, *_ = (*curve_by, None, None, None)
+        # Seaborn drops null grouping values; label them without changing axes.
+        curve_values = [group_labels[k] if df[k].isna().any() else k for k in curve_by]
+        hue, style, size, *_ = (*curve_values, None, None, None)
 
         g = sns.relplot(
             df,
@@ -376,7 +379,7 @@ def _plot_fig(
     else:
         df["curve_group"] = (
             pd.concat(
-                [k + "=" + df[k].astype(str) for k in curve_by],
+                [k + "=" + group_labels[k] for k in curve_by],
                 axis=1,
             ).agg("\n".join, axis=1)
             if curve_by
