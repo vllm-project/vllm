@@ -23,6 +23,7 @@ NC='\033[0m' # No Color
 # Default configuration
 PIPELINE="ci"
 DRY_RUN=true
+TORCH_NIGHTLY=false
 
 usage() {
     cat <<EOF
@@ -34,12 +35,14 @@ Sets RUN_ALL=1 and NIGHTLY=1 environment variables.
 SAFETY: Dry-run by default. Use --execute to actually trigger a build.
 
 Options:
-    --execute       Actually trigger the build (default: dry-run)
-    --pipeline      Buildkite pipeline slug (default: ${PIPELINE})
-    --commit        Override commit SHA (default: current HEAD)
-    --branch        Override branch name (default: current branch)
-    --message       Custom build message (default: auto-generated)
-    --help          Show this help message
+    --execute        Actually trigger the build (default: dry-run)
+    --pipeline       Buildkite pipeline slug (default: ${PIPELINE})
+    --commit         Override commit SHA (default: current HEAD)
+    --branch         Override branch name (default: current branch)
+    --message        Custom build message (default: auto-generated)
+    --torch-nightly  Also build and run the full suite against torch nightly
+                     (sets TORCH_NIGHTLY=1)
+    --help           Show this help message
 
 Prerequisites:
     - bk CLI installed: brew tap buildkite/buildkite && brew install buildkite/buildkite/bk
@@ -49,6 +52,7 @@ Examples:
     $(basename "$0")                        # Dry-run, show what would happen
     $(basename "$0") --execute              # Actually trigger the build
     $(basename "$0") --pipeline ci-shadow   # Dry-run with different pipeline
+    $(basename "$0") --torch-nightly        # Dry-run a full torch-nightly run
 EOF
     exit 1
 }
@@ -95,6 +99,10 @@ while [[ $# -gt 0 ]]; do
         --message)
             MESSAGE="$2"
             shift 2
+            ;;
+        --torch-nightly)
+            TORCH_NIGHTLY=true
+            shift
             ;;
         --help|-h)
             usage
@@ -171,11 +179,17 @@ if [[ $(echo "$REMOTE_BRANCHES" | wc -l) -gt 5 ]]; then
 fi
 echo ""
 
+# Environment variables passed to the build.
+BUILD_ENV=("RUN_ALL=1" "NIGHTLY=1")
+if [[ "$TORCH_NIGHTLY" == true ]]; then
+    BUILD_ENV+=("TORCH_NIGHTLY=1")
+fi
+
 log_info "Pipeline: ${PIPELINE}"
 log_info "Branch: ${BRANCH}"
 log_info "Commit: ${COMMIT}"
 log_info "Message: ${MESSAGE}"
-log_info "Environment: RUN_ALL=1, NIGHTLY=1"
+log_info "Environment: ${BUILD_ENV[*]}"
 echo ""
 
 # Build the command
@@ -187,9 +201,10 @@ CMD=(bk build create
     --commit "${COMMIT}"
     --branch "${BRANCH}"
     --message "${MESSAGE}"
-    --env "RUN_ALL=1"
-    --env "NIGHTLY=1"
 )
+for env_var in "${BUILD_ENV[@]}"; do
+    CMD+=(--env "${env_var}")
+done
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "=========================================="
@@ -210,8 +225,14 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "    --commit '$(escape_for_shell "${COMMIT}")' \\"
     echo "    --branch '$(escape_for_shell "${BRANCH}")' \\"
     echo "    --message '$(escape_for_shell "${MESSAGE}")' \\"
-    echo "    --env 'RUN_ALL=1' \\"
-    echo "    --env 'NIGHTLY=1'"
+    last_idx=$(( ${#BUILD_ENV[@]} - 1 ))
+    for i in "${!BUILD_ENV[@]}"; do
+        if [[ $i -eq $last_idx ]]; then
+            echo "    --env '$(escape_for_shell "${BUILD_ENV[$i]}")'"
+        else
+            echo "    --env '$(escape_for_shell "${BUILD_ENV[$i]}")' \\"
+        fi
+    done
     echo ""
     echo "=========================================="
     echo -e "${YELLOW}To actually trigger this build, run:${NC}"

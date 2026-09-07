@@ -26,6 +26,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
@@ -106,6 +107,8 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
         hf_processor: NVLMProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -138,14 +141,18 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
 
             repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-            return PromptUpdateDetails.select_text(
-                repl.full + "\n", hf_processor.ctx_image_token
+            # `repl.full` ends in the special `</Image>` token, so there is
+            # no BPE merge across the boundary with the newline
+            newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
+
+            return PromptUpdateDetails.select_token_id(
+                repl.full + newline_ids, hf_processor.ctx_image_token_id
             )
 
         # See note in dummy data regarding why we have the extra newline
         return PromptReplacement(
             modality="image",
-            target="<image>\n",
+            target=cached_encode(tokenizer, "<image>\n", add_special_tokens=False),
             replacement=get_replacement_nvlm,
         )
 
@@ -177,27 +184,22 @@ class NVLM_D_Model(InternVLChatModel):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
-        is_mono: bool,
         prefix: str,
     ):
-        if not is_mono:
-            vision_feature_layer = config.select_layer
-            if vision_feature_layer < 0:
-                num_hidden_layers = (
-                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
-                )
-            else:
-                num_hidden_layers = vision_feature_layer + 1
-
-            # We added additional dummy heads to the original num of heads to
-            # make the number of heads divisible by 8.
-            return InternVisionModel(
-                config.vision_config,
-                quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers,
-                num_dummy_heads=7,
-                prefix=prefix,
+        vision_feature_layer = config.select_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = (
+                config.vision_config.num_hidden_layers + vision_feature_layer + 1
             )
         else:
-            msg = "Monolith mode is not applicable to NVLM_D"
-            raise NotImplementedError(msg)
+            num_hidden_layers = vision_feature_layer + 1
+
+        # We added additional dummy heads to the original num of heads to
+        # make the number of heads divisible by 8.
+        return InternVisionModel(
+            config.vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            num_dummy_heads=7,
+            prefix=prefix,
+        )

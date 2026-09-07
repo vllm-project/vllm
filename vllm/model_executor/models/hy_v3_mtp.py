@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only HY V3 MTP model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import regex as re
 import torch
@@ -32,7 +32,9 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -49,8 +51,12 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from .hy_v3 import HYV3DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .hy_v3 import HYV3DecoderLayer
+from .utils import (
+    get_spec_layer_idx_from_weight_name,
+    is_pp_missing_parameter,
+    maybe_prefix,
+)
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -264,6 +270,10 @@ class HYV3MTP(nn.Module):
         return torch.concat((q, k, v))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if self.quant_config is not None and (
+            cache_scale_mapper := self.quant_config.get_cache_scale_mapper()
+        ):
+            weights = cache_scale_mapper.apply(weights)
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -278,7 +288,15 @@ class HYV3MTP(nn.Module):
         num_kv_heads = getattr(
             self.config, "num_key_value_heads", self.config.num_attention_heads
         )
-        split_params_mapping = [
+        split_params_mapping: list[
+            tuple[
+                str,
+                str,
+                int,
+                list[tuple[str | int, int]],
+                Callable[[torch.Tensor], torch.Tensor] | None,
+            ]
+        ] = [
             (".gate_up_proj", ".gate_and_up_proj", 2, [(1, 1), (0, 1)], None),
             (
                 ".qkv_proj",
@@ -290,7 +308,7 @@ class HYV3MTP(nn.Module):
         ]
 
         if _is_moe(self.config):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
@@ -298,7 +316,7 @@ class HYV3MTP(nn.Module):
                 num_experts=self.config.num_experts,
             )
         else:
-            expert_params_mapping = {}
+            expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
 
@@ -336,14 +354,6 @@ class HYV3MTP(nn.Module):
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -352,9 +362,10 @@ class HYV3MTP(nn.Module):
             if name == "__skip__":
                 continue
             if "scale" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
             is_found = False
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -9,10 +8,7 @@ from xml.parsers.expat import ParserCreate
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,9 +16,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.utils import safe_literal_eval
 
 logger = init_logger(__name__)
 
@@ -1016,7 +1016,7 @@ class StreamingXMLToolCallParser:
                         raw_for_parse = raw_text + "\n"
                     else:
                         raw_for_parse = raw_text
-                    parsed_value = ast.literal_eval(raw_for_parse)
+                    parsed_value = safe_literal_eval(raw_for_parse)
                     output_arguments = json.dumps(parsed_value, ensure_ascii=False)
                 except Exception:
                     # Fallback: output as string as-is

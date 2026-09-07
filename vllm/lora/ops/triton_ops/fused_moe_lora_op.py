@@ -10,7 +10,8 @@ from vllm.distributed import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
 from .utils import supports_pdl, supports_tma
 
@@ -432,6 +433,14 @@ def _run_fused_moe_lora_one_shot(
         block_n, nw, ns = 128, 8, 3
     else:
         block_n, nw, ns = 128, 4, 3
+
+    # Devices with max shmem size less than 68KB can't support 3-stage
+    # pipeline. Fall back to a 2-stage on such devices
+    if current_platform.is_cuda_alike():
+        max_shmem_bytes = 68 * 1024
+        if get_max_shared_memory_bytes(device.index) < max_shmem_bytes:
+            ns = min(ns, 2)
+
     # BLOCK_K choice: for hidden-sized K (≥256, i.e. the K=hidden_size
     # shrink input on w13) force BLOCK_K=128 -- the wider tile halves the
     # K-loop trip count and removes the scoreboard stalls that dominated
@@ -857,7 +866,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     tensor_ptrs = []
     for lora_weight in lora_weights:
         tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+    ptr_tensor = async_tensor_h2d(tensor_ptrs, dtype=torch.uint64, device=device)
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)
@@ -1653,136 +1662,23 @@ def _fused_moe_lora(
     )
 
 
-def _fused_moe_lora_fake(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    max_lora_rank: int,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    adapter_enabled: torch.Tensor,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
-    mul_routed_weight: bool = False,
-    fully_sharded: bool = False,
-    offset: int = 0,
-    add_inputs: bool = True,
-) -> None:
-    return
-
-
-def _fused_moe_lora_shrink_fake(
-    a_intermediate_cache1: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
-
-
-def _fused_moe_lora_expand_fake(
-    output: torch.Tensor,
-    a_intermediate_cache1: torch.Tensor,
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    max_lora_rank: int,
-    w1_output_dim_size: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    offset: int = 0,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="fused_moe_lora",
         op_func=_fused_moe_lora,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_shrink",
         op_func=_fused_moe_lora_shrink,
         mutates_args=["a_intermediate_cache1"],
-        fake_impl=_fused_moe_lora_shrink_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_expand",
         op_func=_fused_moe_lora_expand,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_expand_fake,
     )
 
     fused_moe_lora = torch.ops.vllm.fused_moe_lora

@@ -15,6 +15,10 @@ from vllm.transformers_utils.repo_utils import hf_api
 from .base import get_cache_dir
 
 
+def _sample_frame_indices(total_frames: int, num_frames: int) -> npt.NDArray:
+    return np.linspace(0, total_frames - 1, num_frames, dtype=int)
+
+
 @lru_cache
 def download_video_asset(filename: str) -> str:
     """
@@ -47,7 +51,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     frames = []
 
     num_frames = num_frames if num_frames > 0 else total_frames
-    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    frame_indices = _sample_frame_indices(total_frames, num_frames)
     for idx in range(total_frames):
         ok = cap.grab()  # next img
         if not ok:
@@ -86,13 +90,14 @@ def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
 
     if num_frames == -1 or num_frames > total_frames:
         num_frames = total_frames
+    frame_indices = _sample_frame_indices(total_frames, num_frames)
 
     metadata = {
         "total_num_frames": num_frames,
-        "fps": duration / num_frames,
+        "fps": fps,
         "duration": duration,
         "video_backend": "opencv",
-        "frames_indices": list(range(num_frames)),
+        "frames_indices": frame_indices.tolist(),
         # extra field used to control hf processor's video
         # sampling behavior
         "do_sample_frames": num_frames == total_frames,

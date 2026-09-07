@@ -55,9 +55,22 @@ class CPUWorker(Worker):
                 allowed_memory_nodes,
             )
 
-        torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
+        # On s390x, numa_node may be a synthetic book ID that doesn't
+        # correspond to a real memory node. Fall back to first visible node.
+        if cpu_core.numa_node in allowed_memory_nodes:
+            memory_node = cpu_core.numa_node
+        else:
+            logger.warning(
+                "CPU group key %s is not a valid memory node. "
+                "Falling back to memory node %s.",
+                cpu_core.numa_node,
+                allowed_memory_nodes[0],
+            )
+            memory_node = allowed_memory_nodes[0]
 
-        memory_status = get_memory_node_info(cpu_core.numa_node)
+        torch.ops._C.init_cpu_memory_env([memory_node])
+
+        memory_status = get_memory_node_info(memory_node)
         memory_fraction = vllm_config.cache_config.gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
@@ -108,7 +121,7 @@ class CPUWorker(Worker):
         self.device = torch.device("cpu")
 
         # Check whether critical libraries are loaded
-        def check_preloaded_libs(name: str):
+        def check_preloaded_libs(name: str) -> bool:
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 logger.warning(
@@ -119,11 +132,22 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries.",
                     name,
                 )
+                return False
+            return True
 
         if sys.platform.startswith("linux"):
             check_preloaded_libs("libtcmalloc")
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                check_preloaded_libs("libiomp")
+                iomp_loaded = check_preloaded_libs("libiomp")
+                if not iomp_loaded and self.vllm_config.speculative_config is not None:
+                    logger.warning(
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
+                    )
 
         def skip_set_num_threads(x: int):
             logger.warning(
@@ -133,8 +157,12 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        init_method = self.distributed_init_method
+        os.environ["VLLM_DIST_IDENT"] = (
+            os.path.basename(init_method.removeprefix("file://"))
+            if init_method.startswith("file://")
+            else init_method.split(":")[-1]
+        )
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,
@@ -143,6 +171,9 @@ class CPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 

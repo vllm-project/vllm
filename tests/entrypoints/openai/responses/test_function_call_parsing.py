@@ -5,7 +5,7 @@
 import json
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -328,3 +328,52 @@ def test_validator_handles_empty_iterator():
 
     request = ResponsesRequest(**mock_data)
     assert request.input == []
+
+
+def test_assistant_string_content_stays_easyinput():
+    """EasyInput assistant message with plain string content is not
+    coerced into a ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {"type": "message", "role": "assistant", "content": "hello"},
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, dict), (
+        "String-content assistant message should remain a dict (EasyInput), "
+        f"got {type(item)}"
+    )
+    assert item.get("content") == "hello"
+    assert "id" not in item
+    assert "status" not in item
+
+
+def test_assistant_output_style_content_coerced():
+    """Assistant message whose content is output-message-shaped (list of
+    output_text items) should be coerced to ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "world"}],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, ResponseOutputMessage), (
+        "Output-style assistant message should be coerced to "
+        f"ResponseOutputMessage, got {type(item)}"
+    )
+    assert item.content[0].text == "world"
+    assert item.content[0].annotations == []
+    assert item.status == "completed"
+    assert item.id.startswith("msg_")

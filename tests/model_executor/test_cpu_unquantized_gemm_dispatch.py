@@ -66,3 +66,26 @@ def test_dispatch_cpu_unquantized_gemm_zen_remove_weight(monkeypatch):
     utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     assert layer.weight.numel() == 0
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
+def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+    expected_prepacked = bool(utils.envs.VLLM_ZENTORCH_WEIGHT_PREPACK) and hasattr(
+        torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        utils.logger, "debug_once", lambda *args: log_calls.append(args)
+    )
+
+    layer = torch.nn.Linear(16, 8, bias=True)
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
+    assert log_calls == [
+        (
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
+            expected_prepacked,
+        )
+    ]

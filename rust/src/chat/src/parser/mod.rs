@@ -1,15 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 pub mod reasoning;
 pub mod tool;
+pub mod unified;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 
-use serde_with::DeserializeFromStr;
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 /// Specify which reasoning or tool-call parser implementation to use.
-#[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
 pub enum ParserSelection {
     /// Use model-based auto-detection.
     #[default]

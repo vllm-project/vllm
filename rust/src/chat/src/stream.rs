@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -8,21 +11,23 @@ use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs}
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
-use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
+use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatTokenUsage};
 
 /// Final structured assistant message plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
-    pub prompt_token_count: usize,
     pub prompt_token_ids: Arc<[u32]>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
-    pub output_token_count: usize,
+    pub usage: ChatTokenUsage,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 /// Per-request stream of chat events.
@@ -75,23 +80,23 @@ impl ChatEventStream {
                 }
                 ChatEvent::Done {
                     message: done,
-                    prompt_token_count,
-                    output_token_count,
+                    usage,
                     finish_reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
-                        prompt_token_count,
                         prompt_token_ids,
                         prompt_logprobs,
                         logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
                             positions: logprob_positions,
                         }),
                         token_ids,
-                        output_token_count,
+                        usage,
                         finish_reason,
                         kv_transfer_params,
+                        ec_transfer_params,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -135,7 +140,7 @@ mod tests {
 
     use super::{ChatEventStream, CollectedAssistantMessage};
     use crate::error::Error;
-    use crate::event::ChatEvent;
+    use crate::event::{ChatEvent, ChatTokenUsage};
 
     #[tokio::test]
     async fn collect_message_requires_terminal_done_event() {
@@ -190,10 +195,14 @@ mod tests {
                 }),
                 Ok(ChatEvent::Done {
                     message: Default::default(),
-                    prompt_token_count: 2,
-                    output_token_count: 1,
+                    usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 1,
+                        cached_token_count: 0,
+                    }),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             ]),
         );
@@ -203,7 +212,6 @@ mod tests {
             collected,
             CollectedAssistantMessage {
                 message: Default::default(),
-                prompt_token_count: 2,
                 prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
                     first_token_id: 0,
@@ -228,9 +236,14 @@ mod tests {
                     }],
                 }),
                 token_ids: vec![],
-                output_token_count: 1,
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 2,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }
         );
     }

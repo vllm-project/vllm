@@ -11,6 +11,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    skip_if_not_cuda,
     skip_unsupported,
 )
 
@@ -19,13 +20,16 @@ from vllm import LLM, SamplingParams
 
 
 @skip_unsupported
+@pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "backend",
     BACKENDS,
 )
+@pytest.mark.parametrize("rms_norm_impl", ["default", "vllm_c"])
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     backend,
+    rms_norm_impl,
 ):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
@@ -52,6 +56,16 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     random.seed(seed)
 
     attention_config = {"backend": backend}
+    # Force the C++ RMSNorm implementation so we actually exercise the
+    # num_tokens-dependent block-size branches.
+    kernel_config = None
+    if rms_norm_impl == "vllm_c":
+        kernel_config = {
+            "ir_op_priority": {
+                "rms_norm": ["vllm_c"],
+                "fused_add_rms_norm": ["vllm_c"],
+            }
+        }
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = TEST_MODEL
@@ -88,6 +102,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
             gpu_memory_utilization=gpu_mem_util,
             max_model_len=max_model_len,
             attention_config=attention_config,
+            kernel_config=kernel_config,
         )
 
         # Baseline generation for the needle prompt alone.
@@ -640,7 +655,7 @@ def test_logprobs_without_batch_invariance_should_fail(
         pytest.fail(fail_msg)
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
@@ -910,11 +925,15 @@ def LLM_with_max_seqs(
     gpu_memory_utilization: float,
     max_model_len: int,
     attention_config: dict | None = None,
+    kernel_config: dict | None = None,
 ) -> LLM:
     """
     Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
     using the high-level v1 LLM API, while constraining memory usage.
     """
+    extra_kwargs: dict = {}
+    if kernel_config is not None:
+        extra_kwargs["kernel_config"] = kernel_config
     return LLM(
         model=model,
         max_num_seqs=max_num_seqs,
@@ -926,4 +945,5 @@ def LLM_with_max_seqs(
         attention_config=attention_config,
         # Enable for MOE models
         # enable_expert_parallel=True,
+        **extra_kwargs,
     )

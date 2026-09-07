@@ -38,11 +38,11 @@ class CompressedTensorsScheme(ABC):
         Run the forward pass for the particular scheme. This is where
         scheme-specific dequant/quant steps/kernels should be applied.
 
-        :param layer: torch.nn.Module with the registered weights and
-            other parameters relevant to the particular scheme.
-        :param x: input to the layer
-        :param bias: bias parameter
-
+        Args:
+            layer: torch.nn.Module with the registered weights and
+                other parameters relevant to the particular scheme.
+            x: input to the layer
+            bias: bias parameter
         """
         raise NotImplementedError()
 

@@ -29,25 +29,37 @@ enum ActivationKind : int64_t {
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
-    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
-    int64_t I2, int64_t group_size, bool apply_router_weight_on_input,
-    int64_t activation_kind) {
+    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t hidden_size,
+    int64_t intermediate_size, int64_t group_size,
+    bool apply_router_weight_on_input, int64_t activation_kind) {
   TORCH_CHECK(x.dim() == 2, "x must be 2D");
   TORCH_CHECK(topk_ids.dim() == 2 && topk_weights.dim() == 2,
               "topk tensors must be [T, K]");
   TORCH_CHECK(
       w13_packed.size(0) == w2_packed.size(0),
       "w13_packed and w2_packed must have same number of experts in dim 0");
-  TORCH_CHECK(I2 == 2 * I, "I2 must equal 2*I");
 
   const int64_t T = x.size(0);
   const int64_t K = topk_ids.size(1);
   const int64_t E = w13_packed.size(0);
   const int64_t N = T * K;
+  const int64_t w13_out_features = 2 * intermediate_size;
 
   auto x_c = x.contiguous();
+  // _dyn_quant_matmul_4bit kernel natively supports these pre-quant activation
+  // dtypes:
+  // - fp32: with channelwise and groupwise
+  // - bf16: with channelwise -> upcast to fp32 for groupwise
+  // - fp16: not supported -> upcast to fp32 for groupwise & channelwise
+  const auto output_dtype = x_c.scalar_type();
+  const bool should_cast_input =
+      ((group_size != -1) && output_dtype == at::kBFloat16) ||
+      output_dtype == at::kHalf;
+  if (should_cast_input) {
+    x_c = x_c.to(at::kFloat);
+  }
   auto ids_c = topk_ids.contiguous();
-  auto gates_c = topk_weights.to(at::kFloat).contiguous();
+  auto gates_c = topk_weights.to(x_c.scalar_type()).contiguous();
 
   // bucketing tokens -> experts
   c10::SmallVector<int64_t, 64> counts(
@@ -63,35 +75,42 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
   c10::SmallVector<int64_t, 65> offsets(E + 1, 0);  // ( E +1 )
   for (int64_t e = 0; e < E; ++e) offsets[e + 1] = offsets[e] + counts[e];
 
+  // expert_tokens = [tokens indices for expert 0, ...]
+  // expert_gates = [router weights for tokens assigned to expert 0, ...]
   auto expert_tokens = at::empty({offsets[E]}, ids_c.options());
   auto expert_gates = at::empty({offsets[E]}, gates_c.options());
   {
     c10::SmallVector<int64_t, 64> cursor(E, 0);
-    const auto* ids_ptr = ids_c.data_ptr<int64_t>();
-    const auto* gts_ptr = gates_c.data_ptr<float>();
-    auto* tok_ptr = expert_tokens.data_ptr<int64_t>();
-    auto* gate_ptr = expert_gates.data_ptr<float>();
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::BFloat16, at::ScalarType::Half, gates_c.scalar_type(),
+        "bucket_expert_tokens_and_gates", [&] {
+          const auto* ids_ptr = ids_c.data_ptr<int64_t>();
+          const auto* gts_ptr = gates_c.data_ptr<scalar_t>();
+          auto* tok_ptr = expert_tokens.data_ptr<int64_t>();
+          auto* gate_ptr = expert_gates.data_ptr<scalar_t>();
 
-    for (int64_t t = 0; t < T; ++t) {
-      const int64_t base = t * K;
-      for (int64_t k = 0; k < K; ++k) {
-        const int64_t idx = base + k;
-        const int64_t e = ids_ptr[idx];
-        const int64_t p = offsets[e] + (cursor[e]++);
-        tok_ptr[p] = t;
-        gate_ptr[p] = gts_ptr[idx];
-      }
-    }
+          for (int64_t t = 0; t < T; ++t) {
+            const int64_t base = t * K;
+            for (int64_t k = 0; k < K; ++k) {
+              const int64_t idx = base + k;
+              const int64_t e = ids_ptr[idx];
+              const int64_t p = offsets[e] + (cursor[e]++);
+              tok_ptr[p] = t;
+              gate_ptr[p] = gts_ptr[idx];
+            }
+          }
+        });
   }
 
-  const int64_t g_eff_13 = (group_size != -1) ? group_size : H;
-  const int64_t g_eff_2 = (group_size != -1) ? group_size : I;
+  const int64_t g_eff_13 = (group_size != -1) ? group_size : hidden_size;
+  const int64_t g_eff_2 = (group_size != -1) ? group_size : intermediate_size;
 
+  // X_all [num_tokens * K, hidden_size]
   auto X_all = x_c.index_select(/*dim=*/0, expert_tokens);
   if (apply_router_weight_on_input) {
     X_all = X_all.mul(expert_gates.unsqueeze(1));
   }
-  auto Y_all = at::empty({offsets[E], H}, x_c.options());
+  auto Y_all = at::empty({offsets[E], hidden_size}, x_c.options());
 
   at::parallel_for(0, offsets[E], 0, [&](int64_t idx_begin, int64_t idx_end) {
     c10::InferenceMode guard;
@@ -109,11 +128,13 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
       auto w2_e = w2_packed.select(/*dim=*/0, e);
 
       // W13
-      auto y13 =
-          mm(x_e, w13_e, g_eff_13, /*in_features=*/H, /*out_features=*/I2);
+      auto y13 = mm(x_e, w13_e, g_eff_13, /*in_features=*/hidden_size,
+                    /*out_features=*/w13_out_features);
 
-      auto g_part = y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/I);
-      auto u_part = y13.narrow(/*dim=*/1, /*start=*/I, /*length=*/I);
+      auto g_part =
+          y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/intermediate_size);
+      auto u_part = y13.narrow(/*dim=*/1, /*start=*/intermediate_size,
+                               /*length=*/intermediate_size);
 
       torch::Tensor act;
       if (activation_kind == ActivationKind::SwiGLUOAI) {  // SwiGLUOAI
@@ -128,7 +149,8 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
       }
 
       // W2
-      auto y = mm(act, w2_e, g_eff_2, /*in_features=*/I, /*out_features=*/H);
+      auto y = mm(act, w2_e, g_eff_2, /*in_features=*/intermediate_size,
+                  /*out_features=*/hidden_size);
 
       // Store per-expert result
       Y_all.narrow(/*dim=*/0, /*start=*/start, /*length=*/te).copy_(y);
@@ -138,8 +160,11 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
   if (!apply_router_weight_on_input) {
     Y_all = Y_all.mul(expert_gates.unsqueeze(1));
   }
+  if (Y_all.scalar_type() != output_dtype) {
+    Y_all = Y_all.to(output_dtype);
+  }
 
-  auto out = at::zeros({T, H}, x.options());
+  auto out = at::zeros({T, hidden_size}, x.options());
   out =
       at::index_add(out, /*dim=*/0, /*index=*/expert_tokens, /*source=*/Y_all);
 

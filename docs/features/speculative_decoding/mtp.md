@@ -24,10 +24,11 @@ vllm serve google/gemma-4-E2B-it \
     --speculative-config '{"method":"mtp","model":"gg-hf-am/gemma-4-E2B-it-assistant","num_speculative_tokens":1}'
 ```
 
-The E2B, E4B, 26B-A4B, and 31B Gemma 4 IT assistant checkpoints are supported
-when their configuration uses `model_type: gemma4_assistant`. vLLM maps those
-checkpoints to `Gemma4MTPModel` internally and wires the assistant layers to
-share KV cache with the target model.
+The E2B, E4B, 12B, 26B-A4B, and 31B Gemma 4 IT assistant checkpoints are supported.
+Tower-based variants use `model_type: gemma4_assistant` and the encoder-free
+Gemma 4 Unified variant (12B) uses `model_type: gemma4_unified_assistant`.
+vLLM maps both to `Gemma4MTPModel` internally and wires the assistant layers
+to share KV cache with the target model.
 
 If an older vLLM release logs `SpeculativeConfig(method='draft_model', ...)`
 for a Gemma 4 assistant checkpoint, that release is treating the assistant as a

@@ -367,7 +367,7 @@ We use this concept for the `vllm:cache_config_info` metric:
 ```text
 # HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
 # TYPE vllm:cache_config_info gauge
-vllm:cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
+vllm:cache_config_info{block_size="16",cache_dtype="auto",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
 ```
 
 However, `prometheus_client` has
@@ -685,7 +685,7 @@ documentation for this option states:
 > use of possibly costly and or blocking operations and hence might
 > have a performance impact.
 
-The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and who up in an OpenTelemetry trace
+The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and show up in an OpenTelemetry trace
 as:
 
 ```text

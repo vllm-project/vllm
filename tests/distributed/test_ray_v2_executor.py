@@ -7,16 +7,22 @@ Validates executor initialization, placement group support, RPC calls,
 and distributed execution with various TP/PP configurations.
 """
 
+import errno
 import gc
+import socket
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 import ray
+from torch.distributed import TCPStore
 
 from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.v1.executor import ray_executor_v2
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
 pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
@@ -83,7 +89,13 @@ def assert_executor(executor, tp_size, pp_size):
     assert executor._get_output_rank() == expected_output_rank
 
     if pp_size > 1:
-        assert executor.vllm_config.max_concurrent_batches == pp_size
+        expected_concurrent_batches = pp_size + int(
+            executor.vllm_config.scheduler_config.async_scheduling
+            and executor.vllm_config.use_v2_model_runner
+        )
+        assert (
+            executor.vllm_config.max_concurrent_batches == expected_concurrent_batches
+        )
 
     executor.check_health()
     assert not executor.is_failed
@@ -93,6 +105,58 @@ def assert_executor(executor, tp_size, pp_size):
 
     for handle in executor.ray_worker_handles:
         assert handle.node_id is not None
+
+
+def _detached_rank0_worker() -> ray_executor_v2.RayWorkerProc:
+    """A RayWorkerProc that can create its dist-init store without Ray."""
+    worker = ray_executor_v2.RayWorkerProc.__new__(ray_executor_v2.RayWorkerProc)
+    worker._parallel_config = SimpleNamespace(world_size=1)
+    return worker
+
+
+def _assert_port_held(port: int):
+    with socket.socket() as contender, pytest.raises(OSError) as exc_info:
+        contender.bind(("127.0.0.1", port))
+    assert exc_info.value.errno == errno.EADDRINUSE
+
+
+def test_dist_init_store_owns_port(monkeypatch):
+    """The rank-0 actor keeps the selected TCPStore port bound."""
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    worker = _detached_rank0_worker()
+
+    init_method = worker.create_dist_init_method()
+    port = urlsplit(init_method).port
+    assert port is not None and port != 0
+    _assert_port_held(port)
+
+    reused_store = TCPStore(
+        "127.0.0.1",
+        port,
+        world_size=1,
+        is_master=True,
+        wait_for_workers=False,
+        multi_tenant=True,
+    )
+    worker._dist_init_store.set("key", "value")
+    assert reused_store.get("key") == b"value"
+
+
+def test_colocated_dist_init_stores_hold_distinct_ports(monkeypatch):
+    """Replicas sharing a host must never publish the same TCPStore port.
+
+    Each rank-0 store binds a kernel-assigned ephemeral port and keeps it
+    for the actor's lifetime, so concurrently live replicas cannot collide.
+    """
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    workers = [_detached_rank0_worker() for _ in range(3)]
+
+    ports = [urlsplit(w.create_dist_init_method()).port for w in workers]
+    assert len(set(ports)) == len(workers)
+    for worker, port in zip(workers, ports):
+        assert port == worker._dist_init_store.port
+        assert port >= 1024
+        _assert_port_held(port)
 
 
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])

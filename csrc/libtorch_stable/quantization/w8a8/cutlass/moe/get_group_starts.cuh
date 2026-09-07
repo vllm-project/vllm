@@ -74,6 +74,8 @@ void run_get_group_gemm_starts(
   bool per_act_token = a_scales.numel() != 1;
   bool per_out_ch = b_scales.numel() != num_experts;
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a_tensors.get_device_index());
   auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
   if (false) {

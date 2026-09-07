@@ -5,7 +5,7 @@ import json
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
@@ -91,6 +91,51 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
         )
 
 
+@router.post("/abort_requests")
+async def abort_requests(raw_request: Request) -> JSONResponse:
+    """Abort in-flight requests without pausing the scheduler.
+
+    Empty/missing ``request_ids`` aborts all in-flight requests.
+    """
+
+    engine = engine_client(raw_request)
+
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+
+    request_ids = body.get("request_ids")
+
+    try:
+        if request_ids:
+            # Body ids are external (user-supplied) request ids.
+            await engine.abort(request_ids)
+        else:
+            # The dev RL server runs AsyncLLM; abort everything it is tracking.
+            # request_states is keyed by internal ids; parent_requests holds
+            # parallel-sampling parents. Abort both as internal ids.
+            from vllm.v1.engine.async_llm import AsyncLLM
+
+            assert isinstance(engine, AsyncLLM)
+            op = engine.output_processor
+            request_ids = [
+                *op.request_states.keys(),
+                *op.parent_requests.keys(),
+            ]
+            await engine.abort(request_ids, internal=True)
+        return JSONResponse(
+            content={"status": "aborted", "aborted": len(request_ids)},
+            status_code=HTTPStatus.OK.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to abort requests")
+        return JSONResponse(
+            content={"error": f"Failed to abort requests: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
@@ -129,15 +174,14 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-    is_checkpoint_format = body.get("is_checkpoint_format", True)
-    await engine_client(raw_request).start_weight_update(
-        is_checkpoint_format=is_checkpoint_format
-    )
+    await engine_client(raw_request).start_weight_update()
     return JSONResponse(content={"message": "Weight update started"})
+
+
+@router.post("/start_draft_weight_update")
+async def start_draft_weight_update(raw_request: Request):
+    await engine_client(raw_request).start_draft_weight_update()
+    return JSONResponse(content={"message": "Draft weight update started"})
 
 
 @router.post("/update_weights")
@@ -159,9 +203,27 @@ async def update_weights(raw_request: Request):
 
 
 @router.post("/finish_weight_update")
-async def finish_weight_update(raw_request: Request):
-    await engine_client(raw_request).finish_weight_update()
+async def finish_weight_update(
+    raw_request: Request,
+    weight_version: Annotated[str | None, Body(embed=True)] = None,
+):
+    await engine_client(raw_request).finish_weight_update(weight_version)
     return JSONResponse(content={"message": "Weight update finished"})
+
+
+@router.post("/update_weight_version")
+async def update_weight_version(
+    raw_request: Request,
+    new_version: Annotated[str, Body(embed=True)],
+):
+    await engine_client(raw_request).update_weight_version(new_version)
+    return JSONResponse(content={"success": True, "new_version": new_version})
+
+
+@router.get("/weight_info")
+async def weight_info(raw_request: Request):
+    weight_version = await engine_client(raw_request).get_weight_version()
+    return JSONResponse(content={"weight_version": weight_version})
 
 
 @router.get("/get_world_size")

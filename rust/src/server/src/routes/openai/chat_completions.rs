@@ -1,4 +1,7 @@
-pub mod convert;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+pub(crate) mod convert;
 mod types;
 mod validate;
 
@@ -19,26 +22,38 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
-    CollectedAssistantMessage, FinishReason,
+    ChatRequest, CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 
-use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::chat_completions::convert::prepare_chat_request;
+use self::convert::{ResponseOptions, prepare_chat_request};
+pub(crate) use self::types::ChatCompletionRequest;
+use crate::config::ApiServerOptions;
+use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
-    ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
-    ChatMessageDelta,
+    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
+    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
-    decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
+    decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
+    ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
+    ToolCallDelta, Usage,
 };
+use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
+
+pub(crate) fn lower_chat_request(
+    request: ChatCompletionRequest,
+    lora_resolution: &LoraModelResolution,
+    ctx: ResolvedRequestContext,
+) -> Result<ChatRequest, ApiError> {
+    prepare_chat_request(request, lora_resolution, ctx).map(|prepared| prepared.chat_request)
+}
 
 /// Validate one chat completion request and proxy it into the shared
 /// `vllm-chat` stack.
@@ -49,8 +64,10 @@ pub async fn chat_completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = match prepare_chat_request(body, state.served_model_names(), request_context) {
+    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -61,17 +78,13 @@ pub async fn chat_completions(
     );
 
     let created = unix_timestamp();
-    let log_request = state.enable_log_requests;
+    let api_server_options = state.api_server_options;
 
     let chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
-                return server_error!(
-                    "failed to submit chat request: {}",
-                    error.to_report_string()
-                )
-                .into_response();
+                return chat_submit_error("failed to submit chat request", error).into_response();
             }
         };
 
@@ -81,12 +94,8 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
-            prepared.include_usage,
-            prepared.requested_logprobs,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            api_server_options,
+            prepared.options,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -97,11 +106,8 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.requested_logprobs,
-            prepared.include_prompt_logprobs,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            api_server_options,
+            prepared.options,
         )
         .instrument(request_span.clone())
         .await
@@ -109,18 +115,6 @@ pub async fn chat_completions(
             Ok(response) => response,
             Err(error) => return error.into_response(),
         };
-
-        if log_request {
-            let usage = response.usage.as_ref();
-            info!(
-                parent: &request_span,
-                model = %response.model,
-                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
-                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
-                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
-                "chat completion finished"
-            );
-        }
 
         Json(response).into_response()
     }
@@ -131,11 +125,25 @@ async fn collect_chat_completion(
     request_id: String,
     response_model: String,
     created: u64,
-    requested_logprobs: bool,
-    include_prompt_logprobs: bool,
-    echo: Option<String>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        // Ignored: non-streaming responses always include usage.
+        include_usage: _,
+        // Ignored: non-streaming responses are collected before usage is attached.
+        include_continuous_usage: _,
+        requested_logprobs,
+        output_top_logprobs,
+        include_prompt_logprobs,
+        include_reasoning,
+        echo,
+        return_token_ids,
+        return_tokens_as_token_ids,
+        is_named_tool_choice,
+    }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -145,18 +153,25 @@ async fn collect_chat_completion(
     })?;
     let CollectedAssistantMessage {
         message,
-        prompt_token_count,
         prompt_token_ids,
         prompt_logprobs,
         logprobs,
         token_ids,
-        output_token_count,
+        usage,
         finish_reason,
         kv_transfer_params,
+        ec_transfer_params,
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
-    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
+    let reasoning = message.reasoning();
+    // Output logprobs and token IDs cover the complete generated token stream.
+    // When reasoning is hidden, omit them rather than leaking hidden reasoning
+    // tokens through per-token metadata.
+    let include_output_metadata = include_reasoning || reasoning.is_none();
+    let finish_reason =
+        chat_finish_reason_to_openai(&finish_reason, saw_tool_calls && !is_named_tool_choice)?
+            .to_string();
     let tool_calls = message
         .tool_calls()
         .map(|call| ToolCall {
@@ -168,29 +183,36 @@ async fn collect_chat_completion(
             },
         })
         .collect::<Vec<_>>();
-    let logprobs = if requested_logprobs {
+    let logprobs = if requested_logprobs && include_output_metadata {
         Some(decoded_logprobs_to_openai_chat(
             logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
             })?,
+            output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
     } else {
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(decoded_prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref().ok_or_else(|| {
-                server_error!(
-                    "chat response requested prompt_logprobs but generation returned none"
-                )
-            })?,
-            return_tokens_as_token_ids,
-        ))
+        Some(prompt_logprobs_to_maps(
+            prompt_logprobs.as_ref(),
+            &prompt_token_ids,
+        )?)
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
+    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+
+    if enable_log_requests {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            finish_reason = %finish_reason,
+            "chat completion finished"
+        );
+    }
 
     Ok(ChatCompletionResponse {
         id: request_id,
@@ -205,19 +227,20 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
-                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
-                reasoning: message.reasoning(),
+                tool_calls,
+                reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
-            token_ids: return_token_ids.then_some(token_ids),
+            token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
         }],
         usage: Some(usage),
         system_fingerprint: None,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         kv_transfer_params,
+        ec_transfer_params,
     })
 }
 
@@ -228,91 +251,155 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
-    log_request: bool,
-    include_usage: bool,
-    requested_logprobs: bool,
-    echo: Option<String>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        include_usage,
+        include_continuous_usage,
+        requested_logprobs,
+        output_top_logprobs,
+        // Ignored: chat streaming prompt logprobs are rejected for Python parity.
+        include_prompt_logprobs: _,
+        include_reasoning,
+        echo,
+        return_token_ids,
+        return_tokens_as_token_ids,
+        is_named_tool_choice,
+    }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let envelope = Arc::new(StreamResponseEnvelope::new(
+        request_id,
+        "chat.completion.chunk",
+        created,
+        response_model,
+    ));
     let mut saw_tool_calls = false;
+    // `LogprobsDelta` is emitted after all chat events for one decoded update.
+    // If that update contains hidden reasoning, including delimiter-only block
+    // starts or ends, omit its token metadata as well as its visible delta.
+    let mut inside_hidden_reasoning = false;
+    let mut suppress_current_update_metadata = false;
+    let mut continuous_usage = ContinuousUsage::default();
+
+    /// Yield a chunk with optional continuous usage attached.
+    macro_rules! yield_chunk {
+        ($chunk:expr) => {{
+            let mut chunk = $chunk;
+            if include_continuous_usage {
+                chunk.usage = Some(continuous_usage.to_usage());
+            }
+            y.yield_ok(chunk).await;
+        }};
+    }
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until
     // we receive the separate `LogprobsDelta` event, so that we can emit one
     // combined chunk with both the semantic delta and its per-update metadata.
-    let mut pending_chunk =
-        (requested_logprobs || return_token_ids).then(PendingChatChunk::default);
+    // Continuous usage also buffers so the token count from `LogprobsDelta` can
+    // be attached to the matching semantic chunk.
+    let mut pending_chunk = (requested_logprobs || return_token_ids || include_continuous_usage)
+        .then(PendingChatChunk::default);
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start {
                 prompt_token_ids, ..
             }) => {
-                let mut chunk = start_chunk(&request_id, &response_model, created);
+                continuous_usage.set_prompt_tokens(prompt_token_ids.len());
+                let mut chunk = start_chunk(&envelope);
                 if return_token_ids {
                     chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
                 }
-                y.yield_ok(chunk).await;
+                yield_chunk!(chunk);
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
-                    y.yield_ok(block_delta_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
+                    yield_chunk!(block_delta_chunk(
+                        &envelope,
                         AssistantBlockKind::Text,
                         echo_text.clone(),
-                    ))
-                    .await;
+                    ));
                 }
             }
-            Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
-                if let Some(pending_chunk) = pending_chunk.as_mut() {
-                    pending_chunk.push_block_delta(kind, delta);
+            Ok(ChatEvent::BlockDelta {
+                kind,
+                delta,
+                token_count,
+                ..
+            }) => {
+                // The count is per-delta and follows the decoder clock; it is
+                // fed even when the reasoning delta itself is hidden from the
+                // client (`include_reasoning=false`).
+                if matches!(kind, AssistantBlockKind::Reasoning)
+                    && let Some(token_count) = token_count
+                {
+                    continuous_usage.add_reasoning_tokens(token_count);
+                }
+                let include_delta =
+                    include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning);
+                if include_delta {
+                    if let Some(pending_chunk) = pending_chunk.as_mut() {
+                        pending_chunk.push_block_delta(kind, delta);
+                    } else {
+                        yield_chunk!(block_delta_chunk(&envelope, kind, delta));
+                    }
                 } else {
-                    y.yield_ok(block_delta_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        kind,
-                        delta,
-                    ))
-                    .await;
+                    suppress_current_update_metadata = true;
                 }
             }
             Ok(ChatEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
             }) => {
-                let openai_logprobs = logprobs
-                    .as_ref()
-                    .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
-                    .transpose()?;
-                let openai_token_ids =
-                    return_token_ids.then_some(token_ids).filter(|t| !t.is_empty());
+                let delta_token_count = token_ids.len();
+                continuous_usage.add_output_tokens(delta_token_count);
+                let include_metadata =
+                    !suppress_current_update_metadata && !inside_hidden_reasoning;
+                suppress_current_update_metadata = false;
+                let openai_logprobs = if include_metadata {
+                    logprobs
+                        .as_ref()
+                        .map(|lp| {
+                            decoded_logprobs_to_openai_chat(
+                                lp,
+                                output_top_logprobs,
+                                return_tokens_as_token_ids,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                let openai_token_ids = include_metadata
+                    .then_some(token_ids)
+                    .and_then(|token_ids| return_token_ids.then_some(token_ids))
+                    .filter(|t| !t.is_empty());
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
-                    if let Some(chunk) =
-                        pending_chunk.take_chunk(&request_id, &response_model, created)
-                    {
-                        y.yield_ok(chunk).await;
+                    if let Some(chunk) = pending_chunk.take_chunk(&envelope) {
+                        yield_chunk!(chunk);
                     }
                 } else if let Some(logprobs) = openai_logprobs {
-                    y.yield_ok(logprobs_only_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        logprobs,
-                    ))
-                    .await;
+                    yield_chunk!(logprobs_only_chunk(&envelope, logprobs));
                 }
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
                 debug!(?kind, "starting new block");
+                if !include_reasoning && matches!(kind, AssistantBlockKind::Reasoning) {
+                    inside_hidden_reasoning = true;
+                    suppress_current_update_metadata = true;
+                }
             }
             Ok(ChatEvent::BlockEnd { .. }) => {
                 debug!("ending current block");
+                if inside_hidden_reasoning {
+                    inside_hidden_reasoning = false;
+                    suppress_current_update_metadata = true;
+                }
             }
             Ok(ChatEvent::ToolCallStart { index, id, name }) => {
                 let tool_index = index as u32;
@@ -325,15 +412,7 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_start(tool_index, id, name);
                 } else {
-                    y.yield_ok(tool_call_start_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        tool_index,
-                        id,
-                        name,
-                    ))
-                    .await;
+                    yield_chunk!(tool_call_start_chunk(&envelope, tool_index, id, name));
                 }
             }
             Ok(ChatEvent::ToolCallArgumentsDelta { index, delta }) => {
@@ -341,51 +420,48 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_arguments(tool_index, delta);
                 } else {
-                    y.yield_ok(tool_call_arguments_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        tool_index,
-                        delta,
-                    ))
-                    .await;
+                    yield_chunk!(tool_call_arguments_chunk(&envelope, tool_index, delta));
                 }
             }
             Ok(ChatEvent::ToolCallEnd { .. }) => {
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
-                prompt_token_count,
+                usage: final_usage,
                 finish_reason,
-                output_token_count,
                 ..
             }) => {
-                if log_request {
+                if enable_log_requests {
                     info!(
                         stream = true,
-                        model = %response_model,
-                        prompt_tokens = prompt_token_count,
-                        output_tokens = output_token_count,
+                        model = %envelope.model(),
+                        prompt_tokens = final_usage.prompt_token_count,
+                        output_tokens = final_usage.output_token_count,
                         finish_reason = finish_reason.as_str(),
                         "chat completion finished"
                     );
                 }
 
+                continuous_usage.set_final_counts(
+                    final_usage.prompt_token_count,
+                    final_usage.output_token_count,
+                );
+                // Converge the running reasoning count onto the authoritative
+                // terminal value.
+                continuous_usage.set_reasoning_tokens(final_usage.reasoning_tokens);
+
                 if let Some(pending_chunk) = pending_chunk.as_mut()
-                    && let Some(chunk) =
-                        pending_chunk.take_chunk(&request_id, &response_model, created)
+                    && let Some(chunk) = pending_chunk.take_chunk(&envelope)
                 {
-                    y.yield_ok(chunk).await;
+                    yield_chunk!(chunk);
                 }
 
                 match final_chunk(
-                    &request_id,
-                    &response_model,
-                    created,
+                    &envelope,
                     finish_reason,
-                    saw_tool_calls,
+                    saw_tool_calls && !is_named_tool_choice,
                 ) {
-                    Ok(chunk) => y.yield_ok(chunk).await,
+                    Ok(chunk) => yield_chunk!(chunk),
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
@@ -397,10 +473,8 @@ async fn chat_completion_chunk_stream(
 
                 if include_usage {
                     y.yield_ok(usage_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
+                        &envelope,
+                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
                     ))
                     .await;
                 }
@@ -420,12 +494,10 @@ async fn chat_completion_chunk_stream(
 }
 
 fn usage_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
 ) -> ChatCompletionStreamResponse {
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk
 }
@@ -504,9 +576,7 @@ impl PendingChatChunk {
     /// necessarily with a visible/chat-semantic delta.
     fn take_chunk(
         &mut self,
-        request_id: &str,
-        response_model: &str,
-        created: u64,
+        envelope: &Arc<StreamResponseEnvelope>,
     ) -> Option<ChatCompletionStreamResponse> {
         let has_delta = self.delta.content.is_some()
             || self.delta.reasoning.is_some()
@@ -517,7 +587,7 @@ impl PendingChatChunk {
             return None;
         }
 
-        let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+        let mut chunk = ChatCompletionStreamResponse::new(envelope);
         chunk.choices.push(ChatCompletionStreamChoice {
             delta: self.take_delta(),
             logprobs,
@@ -575,18 +645,19 @@ async fn chat_completion_sse_stream(
 
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.
 fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
-    let payload =
-        serde_json::to_string(chunk).expect("ChatCompletionStreamResponse must serialize to JSON");
-    trace!(payload, "chat completion emitting chunk");
-    Event::default().data(payload)
+    trace!(?chunk, "chat completion emitting chunk");
+    Event::default()
+        .json_data(chunk)
+        .expect("ChatCompletionStreamResponse must serialize to JSON")
 }
 
 /// Serialize one OpenAI error payload into one SSE `data:` event.
 fn to_error_sse_event(error: &ApiError) -> Event {
-    let payload = serde_json::to_string(&error.to_error_response())
-        .expect("ErrorResponse must serialize to JSON");
-    trace!(payload, "chat completion emitting error");
-    Event::default().data(payload)
+    let response = error.to_error_response();
+    trace!(?response, "chat completion emitting error");
+    Event::default()
+        .json_data(response)
+        .expect("ErrorResponse must serialize to JSON")
 }
 
 /// Build the terminal OpenAI SSE sentinel event.
@@ -597,12 +668,8 @@ fn done_sse_event() -> Event {
 
 /// Build the initial assistant-role SSE chunk required by the OpenAI streaming
 /// protocol.
-fn start_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
-) -> ChatCompletionStreamResponse {
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+fn start_chunk(envelope: &Arc<StreamResponseEnvelope>) -> ChatCompletionStreamResponse {
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             role: Some(AssistantRole),
@@ -615,9 +682,7 @@ fn start_chunk(
 
 /// Build one content-delta SSE chunk from one internal assistant block delta.
 fn block_delta_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     kind: AssistantBlockKind,
     delta: String,
 ) -> ChatCompletionStreamResponse {
@@ -635,7 +700,7 @@ fn block_delta_chunk(
         }
     };
 
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta,
         ..Default::default()
@@ -644,14 +709,12 @@ fn block_delta_chunk(
 }
 
 fn tool_call_start_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     tool_index: u32,
     id: String,
     name: String,
 ) -> ChatCompletionStreamResponse {
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
@@ -671,13 +734,11 @@ fn tool_call_start_chunk(
 }
 
 fn tool_call_arguments_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     tool_index: u32,
     delta: String,
 ) -> ChatCompletionStreamResponse {
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
@@ -697,12 +758,10 @@ fn tool_call_arguments_chunk(
 }
 
 fn logprobs_only_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     logprobs: ChatLogProbs,
 ) -> ChatCompletionStreamResponse {
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         logprobs: Some(logprobs),
         ..Default::default()
@@ -712,14 +771,12 @@ fn logprobs_only_chunk(
 
 /// Build the terminal SSE chunk carrying the OpenAI finish reason.
 fn final_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
-    saw_tool_calls: bool,
+    use_tool_calls_finish_reason: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
-    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?;
+    let finish_reason = chat_finish_reason_to_openai(&finish_reason, use_tool_calls_finish_reason)?;
 
     debug!(
         finish_reason = %finish_reason,
@@ -727,7 +784,7 @@ fn final_chunk(
         "chat stream finished"
     );
 
-    let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
@@ -738,14 +795,14 @@ fn final_chunk(
 
 fn chat_finish_reason_to_openai(
     finish_reason: &FinishReason,
-    saw_tool_calls: bool,
+    use_tool_calls_finish_reason: bool,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
-        FinishReason::Stop(_) if saw_tool_calls => Ok("tool_calls"),
+        FinishReason::Stop(_) if use_tool_calls_finish_reason => Ok("tool_calls"),
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
@@ -760,23 +817,49 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use futures::{StreamExt as _, stream};
     use serde_json::json;
-    use vllm_chat::{AssistantBlockKind, AssistantToolCall, ChatEvent, FinishReason};
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_chat::{
+        AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, ChatTokenUsage,
+        FinishReason,
+    };
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{block_delta_chunk, chat_completion_chunk_stream, final_chunk};
+    use super::{
+        ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
+        block_delta_chunk, chat_completion_chunk_stream, final_chunk,
+    };
+
+    /// Terminal usage with the given engine-level counts and zero reasoning tokens.
+    fn done_usage(
+        prompt_tokens: usize,
+        output_tokens: usize,
+        cached_tokens: usize,
+    ) -> ChatTokenUsage {
+        vllm_llm::TokenUsage {
+            prompt_token_count: prompt_tokens,
+            output_token_count: output_tokens,
+            cached_token_count: cached_tokens,
+        }
+        .into()
+    }
+
+    fn stream_envelope() -> Arc<StreamResponseEnvelope> {
+        Arc::new(StreamResponseEnvelope::new(
+            "chatcmpl-1".to_string(),
+            "chat.completion.chunk",
+            1,
+            "model".to_string(),
+        ))
+    }
 
     #[test]
     fn text_chunk_uses_content_only_delta() {
-        let chunk = block_delta_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
-            AssistantBlockKind::Text,
-            "hello".to_string(),
-        );
+        let envelope = stream_envelope();
+        let chunk = block_delta_chunk(&envelope, AssistantBlockKind::Text, "hello".to_string());
         assert_eq!(chunk.choices[0].delta.role, None);
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
         assert_eq!(chunk.choices[0].delta.reasoning, None);
@@ -784,10 +867,9 @@ mod tests {
 
     #[test]
     fn reasoning_chunk_uses_reasoning_only_delta() {
+        let envelope = stream_envelope();
         let chunk = block_delta_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
+            &envelope,
             AssistantBlockKind::Reasoning,
             "thinking".to_string(),
         );
@@ -801,10 +883,9 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason_and_stop_reason() {
+        let envelope = stream_envelope();
         let chunk = final_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
+            &envelope,
             FinishReason::Stop(Some(StopReason::Text("stop".to_string()))),
             false,
         )
@@ -816,7 +897,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Length, false)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false)
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
@@ -825,7 +906,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, false)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false)
             .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
@@ -834,12 +915,12 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, false).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error, false).is_err());
     }
 
     #[test]
     fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::stop_eos(), true)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), true)
             .expect("finish reason is valid");
 
         assert_eq!(
@@ -863,6 +944,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -879,10 +961,10 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: done_usage(1, 1, 1),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -891,12 +973,16 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            None,
-            false,
-            false,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions {
+                include_usage: true,
+                requested_logprobs: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -904,11 +990,22 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .expect("stream chunks");
 
-        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.windows(2).all(|pair| Arc::ptr_eq(&pair[0].envelope, &pair[1].envelope)));
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let logprobs = chunks[1].choices[0].logprobs.as_ref().expect("logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "hi");
+        assert_eq!(
+            chunks[3]
+                .usage
+                .as_ref()
+                .expect("usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -926,6 +1023,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -942,10 +1040,10 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: done_usage(1, 1, 0),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -954,12 +1052,12 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            None,
-            false,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -973,6 +1071,291 @@ mod tests {
             Some("think")
         );
         assert!(chunks[1].choices[0].logprobs.is_some());
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_omits_reasoning_delta_when_disabled() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 2, 0),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks[1].choices[0].delta.content.as_deref(),
+            Some("answer")
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.choices.iter().all(|choice| choice.delta.reasoning.is_none()))
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_omits_logprobs_for_suppressed_reasoning() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 11,
+                            token: "think".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![11],
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 22,
+                            token: "answer".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![22],
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 2, 0),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                return_token_ids: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(chunks.len(), 3);
+        let choice = &chunks[1].choices[0];
+        assert_eq!(choice.delta.content.as_deref(), Some("answer"));
+        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
+        let content = logprobs.content.as_ref().expect("logprobs content");
+        assert_eq!(content[0].token, "answer");
+        assert!(chunks.iter().all(|chunk| {
+            chunk.choices.iter().all(|choice| {
+                choice.delta.reasoning.is_none()
+                    && choice.token_ids.as_deref() != Some(&[11][..])
+                    && choice
+                        .logprobs
+                        .as_ref()
+                        .and_then(|logprobs| logprobs.content.as_ref())
+                        .is_none_or(|content| content.iter().all(|entry| entry.token != "think"))
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_omits_logprobs_for_hidden_reasoning_delimiters() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockStart {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 11,
+                            token: "<think>".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![11],
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 12,
+                            token: "think".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![12],
+            }),
+            Ok(ChatEvent::BlockEnd {
+                index: 0,
+                block: AssistantContentBlock::Reasoning {
+                    text: "think".to_string(),
+                },
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 13,
+                            token: "</think>".to_string(),
+                            logprob: -0.3,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![13],
+            }),
+            Ok(ChatEvent::BlockStart {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 22,
+                            token: "answer".to_string(),
+                            logprob: -0.4,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![22],
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 4, 0),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                return_token_ids: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(chunks.len(), 3);
+        let choice = &chunks[1].choices[0];
+        assert_eq!(choice.delta.content.as_deref(), Some("answer"));
+        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
+        let content = logprobs.content.as_ref().expect("logprobs content");
+        assert_eq!(content[0].token, "answer");
+        assert!(chunks.iter().all(|chunk| {
+            chunk.choices.iter().all(|choice| {
+                choice.delta.reasoning.is_none()
+                    && !choice
+                        .token_ids
+                        .as_ref()
+                        .is_some_and(|ids| matches!(ids.as_slice(), [11] | [12] | [13]))
+                    && choice
+                        .logprobs
+                        .as_ref()
+                        .and_then(|logprobs| logprobs.content.as_ref())
+                        .is_none_or(|content| {
+                            content.iter().all(|entry| {
+                                !matches!(entry.token.as_str(), "<think>" | "think" | "</think>")
+                            })
+                        })
+            })
+        }));
     }
 
     #[tokio::test]
@@ -1001,10 +1384,10 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: done_usage(1, 1, 0),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -1013,12 +1396,11 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            false,
-            None,
-            false,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -1042,5 +1424,206 @@ mod tests {
             chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
             None
         );
+    }
+
+    /// Measured reasoning-token count of one chunk's continuous usage.
+    fn chunk_reasoning_tokens(chunk: &ChatCompletionStreamResponse) -> Option<usize> {
+        chunk
+            .usage
+            .as_ref()
+            .map(|usage| usage.completion_tokens_details.reasoning_tokens)
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_reasoning_tokens_with_continuous_usage() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![7, 8, 9].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(2),
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: None,
+                token_ids: vec![20, 21],
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                // A stray text-side count must not pollute reasoning usage.
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 3,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 2,
+                },
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // Role, reasoning delta, text delta, finish-reason chunk, usage chunk.
+        assert_eq!(chunks.len(), 5);
+        // The role chunk reports reasoning tokens from 0 onwards.
+        let role_usage = chunks[0].usage.as_ref().expect("role chunk usage");
+        assert_eq!(role_usage.prompt_tokens, 3);
+        assert_eq!(role_usage.completion_tokens, Some(0));
+        assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
+        // The reasoning delta contributes its per-delta measured count, fed by
+        // the `BlockDelta` itself rather than the sampled-clock `LogprobsDelta`.
+        assert_eq!(chunk_reasoning_tokens(&chunks[1]), Some(2));
+        assert_eq!(
+            chunks[1].usage.as_ref().and_then(|usage| usage.completion_tokens),
+            Some(2)
+        );
+        // The text delta's own count does not pollute reasoning usage, and the
+        // terminal usage chunk converges onto the authoritative final counts.
+        assert_eq!(chunk_reasoning_tokens(&chunks[2]), Some(2));
+        let final_usage = chunks[4].usage.as_ref().expect("final usage chunk");
+        assert_eq!(final_usage.prompt_tokens, 3);
+        assert_eq!(final_usage.completion_tokens, Some(3));
+        assert_eq!(chunk_reasoning_tokens(&chunks[4]), Some(2));
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_reasoning_tokens_when_reasoning_hidden() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(2),
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 1,
+                        output_token_count: 2,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 2,
+                },
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // The reasoning text stays hidden...
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.choices.iter().all(|choice| choice.delta.reasoning.is_none()))
+        );
+        // ...but the count is still reported, from 0 on the role chunk up to
+        // the converged final usage.
+        assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
+        let final_usage = chunks.last().unwrap().usage.as_ref().expect("final usage chunk");
+        assert_eq!(final_usage.completion_tokens, Some(2));
+        assert_eq!(final_usage.completion_tokens_details.reasoning_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_zero_reasoning_tokens_without_reasoning() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 1, 0),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // Reasoning-token details are always reported; a stream without
+        // reasoning simply reports 0 on every usage payload.
+        for chunk in &chunks {
+            let usage = chunk.usage.as_ref().expect("usage");
+            assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
+            let json = serde_json::to_value(usage).expect("usage serializes");
+            assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+        }
     }
 }

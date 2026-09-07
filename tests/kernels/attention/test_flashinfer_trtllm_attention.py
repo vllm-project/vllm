@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     nvfp4_kv_cache_full_dim,
-    nvfp4_kv_cache_split_views,
+    nvfp4_split_data_scale,
     set_random_seed,
 )
 
@@ -74,17 +74,18 @@ def make_nvfp4_kv_cache(
         kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
     )
 
-    # Allocate in HND physical order, permute to NHD logical order.
-    # hnd_order swaps dims 2↔3; it is its own inverse.
+    # layout: (B, 2*H, N, full_dim)
+    #   where K heads occupy the first H heads and V heads occupy the second H heads.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
-    hnd_order = (0, 1, 3, 2, 4)
-    kv_cache = torch.zeros(
-        (num_blocks, 2, num_kv_heads, block_size, full_dim),
+    kv_cache_hnd = torch.zeros(
+        (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=kv_bf16_hnd.device,
-    ).permute(*hnd_order)
+    )
+    kv_cache_nhd = kv_cache_hnd.permute(0, 2, 1, 3)
+    k_view_nhd, v_view_nhd = kv_cache_nhd.split(num_kv_heads, dim=-2)
 
-    # Flatten NHD [N, T, H, D] → token tensors [N*T, H, D] for the kernel.
+    # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
     num_tokens = num_blocks * block_size
     k_tokens = (
         kv_bf16_hnd[:, 0]
@@ -98,22 +99,21 @@ def make_nvfp4_kv_cache(
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_bf16_hnd.device)
 
-    # reshape_and_cache_flash: kernel receives kv_cache[:, 0] and [:, 1]
-    # (full K/V buffers containing both data and scale).
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         k_tokens,
         v_tokens,
-        kv_cache[:, 0],
-        kv_cache[:, 1],
+        k_view_nhd,
+        v_view_nhd,
         slot_mapping,
         "nvfp4",
         kv_scale_tensor,
         kv_scale_tensor,
     )
 
-    # Split in HND order for trtllm kernel (expects HND numTokensPerPage).
-    kv_cache_hnd = kv_cache.permute(*hnd_order)
-    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(kv_cache_hnd)
+    # Split into data/scale views in HNC order for trtllm kernel.
+    k_cache_hnc, v_cache_hnc = kv_cache_hnd.split(num_kv_heads, dim=1)
+    k_data, k_scales = nvfp4_split_data_scale(k_cache_hnc)
+    v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(
@@ -356,6 +356,99 @@ def test_flashinfer_trtllm_decode_with_baseline(
         torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - output_trtllm))}",
     )
+
+
+@pytest.mark.parametrize("quant_dtypes", [(None, None, None), (None, FP8_DTYPE, None)])
+@pytest.mark.parametrize("q_lens_cfg", [[1, 3, 2, 4], [2, 2, 1, 5, 3]])
+@torch.inference_mode
+def test_flashinfer_trtllm_decode_varlen(
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
+    q_lens_cfg: list[int],
+) -> None:
+    """Ragged decode via cum_seq_lens_q must match the varlen baseline."""
+    dtype = torch.bfloat16
+    num_qo_heads, num_kv_heads = 40, 8
+    head_size = 128
+    block_size = 16
+    max_kv_len = 4096
+    torch.set_default_device("cuda")
+    set_random_seed(42)
+
+    _, kv_quant_dtype, _ = quant_dtypes
+    kv_quant_dtype = kv_quant_dtype or dtype
+    sm_scale = float(1.0 / (head_size**0.5))
+    batch_size = len(q_lens_cfg)
+
+    q_lens = torch.tensor(q_lens_cfg, dtype=torch.int32)
+    q_indptr = torch.cat(
+        [
+            torch.tensor([0], dtype=torch.int32),
+            torch.cumsum(q_lens, dim=0, dtype=torch.int32),
+        ]
+    )
+    query = torch.randn(int(q_lens.sum()), num_qo_heads, head_size, dtype=dtype)
+
+    kv_lens = torch.randint(1, max_kv_len, (batch_size,), dtype=torch.int32)
+    kv_lens[-1] = max_kv_len
+    seq_lens = kv_lens + q_lens
+    max_seq_len = int(seq_lens.max())
+
+    kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, block_size, head_size)
+    kv_cache = torch.randn(kv_cache_shape, dtype=dtype)
+    kv_cache, kv_cache_sf, kv_scale, ref_kv_cache, _ = make_quantized_kv_cache(
+        kv_cache, kv_quant_dtype, block_size, head_size
+    )
+
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (batch_size, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    kv_indptr, kv_indices, kv_last_page_lens = build_paged_kv_metadata(
+        seq_lens, block_tables, block_size
+    )
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
+
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        float_workspace_buffer=workspace_buffer, kv_layout="HND", backend="fa2"
+    )
+    wrapper.plan(
+        qo_indptr=q_indptr,
+        paged_kv_indptr=kv_indptr,
+        paged_kv_indices=kv_indices,
+        paged_kv_last_page_len=kv_last_page_lens,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim_qk=head_size,
+        page_size=block_size,
+        causal=True,
+        sm_scale=sm_scale,
+        window_left=-1,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+    output = torch.empty(query.shape, dtype=dtype)
+    wrapper.run(query, ref_kv_cache, out=output)
+
+    output_trtllm = torch.empty(query.shape, dtype=dtype)
+    flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+        query=query,
+        kv_cache=kv_cache,
+        workspace_buffer=workspace_buffer,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        max_seq_len=max_seq_len,
+        bmm1_scale=kv_scale * sm_scale,
+        bmm2_scale=kv_scale,
+        window_left=-1,
+        out=output_trtllm,
+        q_len_per_req=None,
+        max_q_len=int(q_lens.max()),
+        cum_seq_lens_q=q_indptr,
+        kv_cache_sf=kv_cache_sf,
+    )
+
+    rtol, atol = (4e-2, 6e-2) if kv_quant_dtype == FP8_DTYPE else (1e-2, 1e-2)
+    torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", DTYPE)

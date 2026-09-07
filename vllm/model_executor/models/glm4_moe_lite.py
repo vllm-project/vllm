@@ -34,7 +34,6 @@ from torch import nn
 if TYPE_CHECKING:
     from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -43,6 +42,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -70,8 +72,8 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -129,6 +131,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
 
+        attn_cls: Callable[..., Glm4MoeLiteMLAAttention | Glm4MoeLiteAttention]
         if model_config.use_mla:
             attn_cls = Glm4MoeLiteMLAAttention
         else:
@@ -142,7 +145,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+            q_lora_rank=getattr(config, "q_lora_rank", None),
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
@@ -184,7 +187,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -253,13 +256,16 @@ class Glm4MoeLiteModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Glm4MoeLite,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -319,9 +325,6 @@ class Glm4MoeLiteModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -344,7 +347,7 @@ class Glm4MoeLiteModel(nn.Module):
             num_experts=self.config.n_routed_experts
             + (
                 self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
+                if self.is_fused_shared_expert_enabled
                 else 0
             ),
         )
@@ -360,7 +363,7 @@ class Glm4MoeLiteModel(nn.Module):
                 continue  # skip spec decode layers for main model
 
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -448,7 +451,9 @@ class Glm4MoeLiteModel(nn.Module):
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, mapping_expert_id, mapping_shard_id = (
+                            mapping
+                        )
                         if weight_name not in chunk_name:
                             continue
 
@@ -474,8 +479,8 @@ class Glm4MoeLiteModel(nn.Module):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                            shard_id=mapping_shard_id,
+                            expert_id=mapping_expert_id,
                             return_success=True,
                         )
                         if success:
@@ -496,9 +501,10 @@ class Glm4MoeLiteModel(nn.Module):
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         if is_pp_missing_parameter(name, self):
                             continue
@@ -573,8 +579,6 @@ class Glm4MoeLiteForCausalLM(
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.num_expert_groups = getattr(self.config, "n_group", 1)
 
         self.moe_layers = []
@@ -630,16 +634,3 @@ class Glm4MoeLiteForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: "Glm4MoeLiteConfig", weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (
-        config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if f"layers.{layer_idx + i}." in weight_name:
-                return layer_idx + i
-    return None

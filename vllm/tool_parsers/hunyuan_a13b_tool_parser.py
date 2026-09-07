@@ -8,16 +8,16 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -144,7 +144,7 @@ class HunyuanA13BToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),

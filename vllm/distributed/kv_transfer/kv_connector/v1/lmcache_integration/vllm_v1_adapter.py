@@ -439,13 +439,12 @@ def _init_lmcache_engine(
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
+    Args:
+        lmcache_config: The LMCache configuration.
+        vllm_config: The vLLM configuration.
 
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
+    Returns:
+        The initialized LMCache engine
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -483,10 +482,11 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.accelerator.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch.accelerator.set_device_index(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    from vllm.distributed.parallel_state import get_world_group
+
+    device_index = get_world_group().device_index
+    torch.accelerator.set_device_index(device_index)
+    device = torch.device(f"cuda:{device_index}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -783,6 +783,17 @@ class LMCacheConnectorV1Impl:
     ####################
     # Worker side APIs
     ####################
+    def bind_connector_metadata(self, metadata: "KVConnectorMetadata") -> None:
+        """Per-step init, called when the runner binds this step's metadata.
+
+        The layerwise hooks fire during every forward once metadata is
+        bound, while start_load_kv may run after the forward launch on
+        steps without sync loads (SchedulerOutput.has_sync_kv_loads), so
+        the per-step state they consume must be reset here.
+        """
+        self.current_layer = 0
+        self.layerwise_retrievers = []
+
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         logger.info("Registering KV caches")
@@ -806,8 +817,6 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        self.current_layer = 0
-
         if len(self.kv_caches) == 0:
             self._init_kv_caches_from_forward_context(forward_context)
 
@@ -825,8 +834,6 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         self.lmcache_engine.post_init(kvcaches=kvcaches)
-
-        self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:

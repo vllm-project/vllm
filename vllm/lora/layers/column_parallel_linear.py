@@ -22,10 +22,10 @@ from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
 def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
-    """
-    For `ColumnParallelLinearWithLoRA` or classes that inherit from
-    `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
-    """
+    """Fully-sharded (S-LoRA) apply path for column-parallel LoRA layers."""
+    assert layer.lora_config.fully_sharded_loras, (
+        "_mcp_apply is only used for fully sharded LoRA"
+    )
     assert (
         layer.n_slices
         == len(layer.lora_a_stacked)
@@ -33,7 +33,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         == len(layer.output_slices)
     )
 
-    output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
+    output = layer._get_quant_method().apply(layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -73,6 +73,8 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     )
 
     if not current_platform.can_update_inplace():
+        if lora_output is None:
+            raise RuntimeError("LoRA expand must return an output tensor.")
         output = lora_output
 
     output = output.view(*out_orig_shape)
@@ -263,17 +265,36 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     def expand_packed_lora(
         self,
-        lora_a: list[torch.Tensor],
-        lora_b: list[torch.Tensor],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+    ) -> tuple[list[torch.Tensor | None], list[torch.Tensor | None]]:
         """
         Expand packed adapter groups when they don't match n_slices.
-        E.g. in_proj_qkv (covers Q+K+V) + in_proj_z
+        E.g. in_proj_qkv (covers Q+K+V) + in_proj_z.
+
+        A None group member means that member was not adapted; the slice(s)
+        it covers are emitted as None placeholders so subsequent groups stay
+        aligned and those slices are left at base weights. This matches the
+        None-tolerance already present in slice_lora_b() and the set_lora()
+        stacking loop.
         """
-        expanded_a: list[torch.Tensor] = []
-        expanded_b: list[torch.Tensor] = []
+        expanded_a: list[torch.Tensor | None] = []
+        expanded_b: list[torch.Tensor | None] = []
         start_idx = 0
         for a_i, b_i in zip(lora_a, lora_b):
+            if b_i is None:
+                # Unadapted group member: its row count is unknown (the tensor
+                # is missing), so infer its coverage as the remaining slices.
+                # This is exact for the only layout that reaches this path,
+                # the fused GDN in_proj_qkvz group, whose sole multi-slice
+                # member (in_proj_qkv, Q+K+V) leads and whose only optional
+                # member (in_proj_z) trails.
+                covered = self.n_slices - start_idx
+                for _ in range(covered):
+                    expanded_a.append(None)
+                    expanded_b.append(None)
+                start_idx += covered
+                continue
             # Determine which output slices this b_i covers.
             b_rows, cu_rows, covered = b_i.shape[0], 0, 0
             for i in range(start_idx, self.n_slices):
@@ -327,15 +348,19 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
+        base_forward = getattr(type(self.base_layer), "forward", None)
+        merged_forward = getattr(merged_cls, "forward", None)
         # Effectively unsharded subclasses can safely reuse their custom
         # forward() implementation before applying the LoRA delta.
         if (
             self.tp_size == 1
             and type(self.base_layer) is not merged_cls
-            and type(self.base_layer).forward is not merged_cls.forward
+            and base_forward is not None
+            and merged_forward is not None
+            and base_forward is not merged_forward
         ):
             return self._apply_base_forward(x)
-        return _mcp_apply(x, bias, self)
+        return super().apply(x, bias)
 
     @classmethod
     def can_replace_layer(
@@ -482,6 +507,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
         return (
             type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
@@ -523,6 +549,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -565,6 +592,7 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -650,6 +678,7 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -678,6 +707,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
         # Support MergedColumnParallelLinear with 3 or more slices
         # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
@@ -727,7 +757,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
             start_idx = 0
             for output_size in output_sizes:
                 end_idx = start_idx + output_size
-                lora_b_list.append(lora_b[start_idx:end_idx, :])
+                lora_b_list.append(lora_b[start_idx:end_idx])
                 start_idx = end_idx
             lora_b = lora_b_list
 

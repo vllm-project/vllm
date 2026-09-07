@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -18,9 +21,8 @@ use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
 };
-use crate::protocol::{
-    EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
-};
+use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
+use crate::protocol::{decode_msgpack, encode_msgpack};
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.
@@ -64,8 +66,8 @@ impl EngineId {
 
     /// Construct an engine id from the Python-compatible engine index encoding
     /// (two-byte little-endian).
-    pub fn from_engine_index(value: u32) -> Self {
-        Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
+    pub fn from_engine_index(value: u16) -> Self {
+        Self(Bytes::copy_from_slice(&value.to_le_bytes()))
     }
 }
 
@@ -327,11 +329,28 @@ pub async fn connect_handshake(
 pub async fn connect_bootstrapped(
     input_address: &str,
     output_address: &str,
+    engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
     if engine_count == 0 {
         bail_unexpected_handshake_message!("expected engine_count >= 1");
+    }
+    let engine_start_index =
+        u16::try_from(engine_start_index).map_err(|_| Error::UnexpectedHandshakeMessage {
+            message: "engine_start_index exceeds the two-byte engine identity limit".to_string(),
+        })?;
+    let engine_end_index =
+        usize::from(engine_start_index).checked_add(engine_count).ok_or_else(|| {
+            Error::UnexpectedHandshakeMessage {
+                message: "engine_start_index + engine_count overflows".to_string(),
+            }
+        })?;
+    if engine_end_index > usize::from(u16::MAX) + 1 {
+        return Err(Error::UnexpectedHandshakeMessage {
+            message: "engine_start_index + engine_count exceeds the two-byte engine identity limit"
+                .to_string(),
+        });
     }
 
     let mut input_socket = RouterSocket::new();
@@ -342,8 +361,10 @@ pub async fn connect_bootstrapped(
 
     let engines = wait_for_input_registrations(
         &mut input_socket,
-        // TODO: follow start rank
-        (0..engine_count).map(|index| EngineId::from((index as u16).to_le_bytes().to_vec())),
+        (0..engine_count).map(|offset| {
+            let offset = u16::try_from(offset).expect("validated engine offset fits u16");
+            EngineId::from_engine_index(engine_start_index + offset)
+        }),
         ready_timeout,
     )
     .await?;
@@ -509,14 +530,14 @@ pub async fn send_message(
     input_send: &mut RouterSendHalf,
     engine_id: &EngineId,
     request_type: Bytes,
-    payload: Vec<u8>,
+    payload: Bytes,
+    aux_frames: Vec<Bytes>,
 ) -> Result<()> {
-    let message = ZmqMessage::try_from(vec![
-        engine_id.to_frame(),
-        request_type,
-        Bytes::from(payload),
-    ])
-    .expect("router messages must contain identity and payload");
+    let mut frames = Vec::with_capacity(3 + aux_frames.len());
+    frames.extend([engine_id.to_frame(), request_type, payload]);
+    frames.extend(aux_frames);
+    let message =
+        ZmqMessage::try_from(frames).expect("router messages must contain identity and payload");
 
     trace!(
         ?engine_id,

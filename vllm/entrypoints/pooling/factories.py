@@ -21,12 +21,12 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.logger import RequestLogger
-    from vllm.entrypoints.sagemaker.api_router import (
+    from vllm.entrypoints.serve.sagemaker.api_router import (
         EndpointFn,
         GetHandlerFn,
         RequestType,
     )
+    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 else:
     RequestLogger = object
@@ -65,10 +65,16 @@ def init_pooling_io_processors(
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
-    if has_io_processor(
+    if pooling_task == "embed&token_classify":
+        from .pooling.io_processor import UnsupportedCombinedTaskIOProcessor
+
+        processors[pooling_task] = UnsupportedCombinedTaskIOProcessor
+
+    has_plugin = has_io_processor(
         vllm_config,
         model_config.io_processor_plugin,
-    ):
+    )
+    if has_plugin:
         from .pooling.io_processor import PluginWithIOProcessorPlugins
 
         processors["plugin"] = PluginWithIOProcessorPlugins

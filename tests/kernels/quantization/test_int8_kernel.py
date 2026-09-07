@@ -7,6 +7,7 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.quant_utils import native_per_token_group_quant_int8
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -15,7 +16,15 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        "INT8 Triton kernels require a CUDA-alike or XPU device",
+        allow_module_level=True,
+    )
+
+if current_platform.is_cuda_alike() and not current_platform.has_device_capability(
+    (7, 0)
+):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 
@@ -82,12 +91,6 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, topk, topk_weight, topk_ids
     ).sum(dim=1)
 
 
-@pytest.fixture(autouse=True, scope="module")
-def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
-    torch.set_default_device("cuda")
-
-
 DTYPES = [torch.half, torch.bfloat16]
 M = [1, 33]
 N = [128, 1024]
@@ -104,6 +107,7 @@ SEEDS = [0]
 @torch.inference_mode()
 def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
+    device = current_platform.device_type
     # Initialize int8 quantization parameters
     factor_for_scale = 1e-2
     int8_max = 127
@@ -111,19 +115,26 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
 
     # Input tensor
     # M * K
-    a = torch.randn((M, K), dtype=dtype) / 10
+    a = torch.randn((M, K), dtype=dtype, device=device) / 10
 
     # Generate int8 weights
-    w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
+    w1_fp32 = (
+        torch.rand(
+            (E, 2 * N, K),
+            dtype=torch.float32,
+            device=device,
+        )
+        - 0.5
+    ) * 2
     w1 = (w1_fp32 * int8_max).clamp(min=int8_min, max=int8_max).to(torch.int8)
 
-    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
+    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32, device=device) - 0.5) * 2
     w2 = (w2_fp32 * int8_max).clamp(min=int8_min, max=int8_max).to(torch.int8)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale
     w2_s = torch.rand(E, K, device=w2_fp32.device) * factor_for_scale
-    score = torch.randn((M, E), dtype=dtype)
+    score = torch.randn((M, E), dtype=dtype, device=device)
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weights, topk_ids = torch.topk(score, topk)
 
@@ -153,3 +164,25 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.05
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 64])
+@pytest.mark.parametrize("hidden_dim", [128, 1024])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_per_token_quant_int8(num_tokens, hidden_dim, dtype):
+    """Covers the round_int8 Triton kernel via per_token_quant_int8."""
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    x = torch.randn((num_tokens, hidden_dim), dtype=dtype, device=device) * 8
+
+    q, s = per_token_quant_int8(x)
+    # Per-token int8 quant is per-token-group quant with group_size = hidden_dim.
+    ref_q, ref_s = native_per_token_group_quant_int8(x, hidden_dim)
+
+    assert q.dtype == torch.int8
+    assert q.shape == (num_tokens, hidden_dim)
+    assert s.shape == (num_tokens, 1)
+    assert torch.allclose(s.float(), ref_s.float(), atol=1e-3, rtol=1e-3)
+    # Quantized values may differ by at most 1 ULP due to rounding.
+    assert torch.all((q.float() - ref_q.float()).abs() <= 1)

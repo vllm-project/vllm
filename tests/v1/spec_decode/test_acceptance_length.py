@@ -132,9 +132,9 @@ def get_available_attention_backends() -> list[str]:
     )
 
     return [
-        backend.name
-        for backend, _ in valid_backends
-        if backend not in EXCLUDED_BACKENDS
+        candidate.backend.name
+        for candidate in valid_backends
+        if candidate.backend not in EXCLUDED_BACKENDS
     ]
 
 

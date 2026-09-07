@@ -19,6 +19,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
@@ -72,7 +73,10 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     err_queue.close()
     err_queue.join_thread()
     if errors:
-        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
+        combined = "\n---\n".join(errors)
+        if "NCCL GIN" in combined:
+            pytest.skip("NCCL GIN not available on this system")
+        pytest.fail("Worker(s) failed:\n" + combined)
 
 
 def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
@@ -194,11 +198,45 @@ requires_ptrace = pytest.mark.skipif(
     not _has_sys_ptrace(),
     reason="SYS_PTRACE required (docker run --cap-add=SYS_PTRACE)",
 )
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(),
+    reason="DeepEP v2 (ElasticBuffer) not available or NCCL < 2.30.4",
+)
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
 # their own @requires_two_sided / @requires_one_sided decorators, and
 # test_args_dispatch_combine uses only standard torch.distributed ops and
 # should run even when FlashInfer NVLink backends are not installed.
+
+
+@pytest.mark.parametrize("supports_output", [False, True])
+def test_one_sided_combine_into_compatibility(supports_output):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    class FakeMoeAlltoAll:
+        def combine(
+            self,
+            payload,
+            runtime_max_tokens_per_rank,
+            output=None,
+        ):
+            result = payload + runtime_max_tokens_per_rank
+            if output is None:
+                return result
+            output.copy_(result)
+            return output
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = supports_output
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    torch.testing.assert_close(output, payload + 2)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +342,8 @@ def _one_sided_lifecycle_worker(rank, world_size):
         top_k=2,
         num_experts=world_size * 8,
         hidden_size=4096,
+        x_bytes_per_token=4096 * 2,
+        x_sf_bytes_per_token=0,
     )
 
     # Initialize
@@ -371,12 +411,12 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         hidden_size=4096,
     )
     nvfp4_kwargs = dict(
-        dispatch_dtype_bytes_per_elem=0,
-        dispatch_scale_bytes_per_token=base_kwargs["hidden_size"] // 16,
+        x_bytes_per_token=base_kwargs["hidden_size"] // 2,
+        x_sf_bytes_per_token=base_kwargs["hidden_size"] // 16,
     )
     bf16_kwargs = dict(
-        dispatch_dtype_bytes_per_elem=2,
-        dispatch_scale_bytes_per_token=0,
+        x_bytes_per_token=base_kwargs["hidden_size"] * 2,
+        x_sf_bytes_per_token=0,
     )
 
     # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
@@ -742,6 +782,12 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
+        x_bytes_per_token=hidden_size // 2,
+        # Account for the fp8 block-scale payload (x_sf: hidden//16 bytes
+        # per token) that is dispatched alongside the nvfp4 hidden states.
+        # Without this the dispatch region is under-reserved and the combine
+        # payload overflows the per-rank workspace.
+        x_sf_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
@@ -755,17 +801,17 @@ def _one_sided_data_worker(rank, world_size):
 
             # Create test data with raw tensors matching the nvfp4 payload
             # sizes the workspace was allocated for:
-            #   a1q: (tokens, hidden_size // 2) — nvfp4 hidden states
-            #   a1q_scale: (tokens, hidden_size // 16) — fp8 scaling factors
+            #   x: (tokens, hidden_size // 2) — nvfp4 hidden states
+            #   x_sf: (tokens, hidden_size // 16) — fp8 scaling factors
             torch.manual_seed(rank + 42)
-            a1q = torch.randint(
+            x = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 2),
                 device=device,
                 dtype=torch.uint8,
             )
-            a1q_scale = torch.randint(
+            x_sf = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 16),
@@ -787,15 +833,16 @@ def _one_sided_data_worker(rank, world_size):
             )
 
             # --- One-sided dispatch ---
-            payloads = [a1q, a1q_scale, topk_ids, topk_weights]
+            payloads = [x, x_sf, topk_ids, topk_weights]
             recv_payloads = manager.moe_alltoall.dispatch(
                 token_selected_experts=topk_ids,
                 input_payloads=payloads,
                 runtime_max_tokens_per_rank=runtime_max_tokens,
             )
             assert len(recv_payloads) == 4
-            recv_a1q, recv_scale, recv_ids, recv_weights = recv_payloads
-            assert recv_a1q.numel() > 0
+            recv_x, recv_x_sf, recv_ids, recv_weights = recv_payloads
+            assert recv_x.numel() > 0
+            assert recv_x_sf.numel() > 0
             assert recv_ids.numel() > 0
 
             # --- Round-trip exact verification ---
@@ -856,3 +903,79 @@ def _one_sided_data_worker(rank, world_size):
 def test_one_sided_dispatch_combine(world_size):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
     _spawn_workers(_one_sided_data_worker, world_size, dp_size=world_size)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: DeepEP v2 (ElasticBuffer) manager lifecycle
+# ---------------------------------------------------------------------------
+#
+# Tests DeepEPV2All2AllManager which wraps DeepEP's ElasticBuffer API using
+# the NCCL GIN backend. Requires DeepEP >= 2.0 and NCCL >= 2.30.4.
+#
+# Uses EP group because the DeepEP v2 manager is constructed with an
+# EP-scoped communicator in production. With tp=world_size the EP group
+# spans all ranks.
+# ---------------------------------------------------------------------------
+
+
+def _deepep_v2_lifecycle_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPV2All2AllManager,
+    )
+
+    ep_group = get_ep_group()
+    manager = DeepEPV2All2AllManager(
+        ep_group.cpu_group,
+        device_group=ep_group.device_group,
+    )
+
+    assert manager.rank == rank
+    assert manager.world_size == world_size
+    assert manager._num_sms is None
+
+    hidden_size = 7168
+    num_experts = world_size * 32
+    num_topk = 8
+    max_tokens = 256
+
+    handle_kwargs = dict(
+        num_max_tokens_per_rank=max_tokens,
+        hidden=hidden_size,
+        num_topk=num_topk,
+        num_experts=num_experts,
+        use_fp8_dispatch=False,
+    )
+
+    handle = manager.get_handle(handle_kwargs)
+    assert handle is not None
+    assert manager._num_sms is not None
+    assert manager._num_sms > 0
+
+    torch.distributed.barrier()
+
+    # get_handle again with same args should return cached handle
+    handle2 = manager.get_handle(dict(handle_kwargs))
+    assert handle2 is handle
+
+    torch.distributed.barrier()
+
+    # Destroy clears the cache
+    manager.destroy()
+    assert len(manager.handle_cache._cache) == 0
+
+    torch.distributed.barrier()
+
+    # Re-create after destroy
+    handle3 = manager.get_handle(dict(handle_kwargs))
+    assert handle3 is not None
+
+    torch.distributed.barrier()
+    manager.destroy()
+
+
+@requires_multi_gpu
+@requires_deep_ep_v2
+@pytest.mark.parametrize("world_size", [2])
+def test_deepep_v2_manager_lifecycle(world_size):
+    """Test DeepEP v2 ElasticBuffer manager init, caching, and destroy."""
+    _spawn_workers(_deepep_v2_lifecycle_worker, world_size)

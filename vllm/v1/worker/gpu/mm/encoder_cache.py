@@ -12,6 +12,9 @@ class EncoderCache:
         # MM hash -> encoder outputs
         self.encoder_outputs: dict[str, torch.Tensor] = {}
 
+    def __len__(self) -> int:
+        return len(self.encoder_outputs)
+
     def add_request(
         self, req_id: str, mm_features: list[MultiModalFeatureSpec]
     ) -> None:
@@ -25,7 +28,7 @@ class EncoderCache:
         Clear the multi-modal cache that was used during profiling,
         but no longer needed during inference.
         """
-        # TODO: Implement MM budget for encoder dummy run
+        # NOTE: v2 encoder cache profiling skips the multi-modal cache
         pass
 
     def reset_encoder_cache(self) -> None:

@@ -11,7 +11,7 @@ parser_name = "glm45"
 start_token = "<think>"
 end_token = "</think>"
 
-REASONING_MODEL_NAME = "zai-org/GLM-4.5"
+REASONING_MODEL_NAME = "zai-org/GLM-4.7"
 
 
 @pytest.fixture(scope="module")
@@ -35,16 +35,30 @@ WITH_THINK_STREAM = {
 
 WITHOUT_THINK = {
     "output": "This is the rest",
-    "reasoning": None,
-    "content": "This is the rest",
+    "reasoning": "This is the rest",
+    "content": None,
     "is_reasoning_end": False,
 }
 
 WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
-    "reasoning": None,
-    "content": "This is the rest",
+    "reasoning": "This is the rest",
+    "content": None,
     "is_reasoning_end": False,
+}
+
+WITHOUT_OPEN_THINK = {
+    "output": "This is a reasoning section</think>This is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+
+WITHOUT_OPEN_THINK_STREAM = {
+    "output": "This is a reasoning section</think>This is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
 }
 
 COMPLETE_REASONING = {
@@ -61,8 +75,8 @@ MULTILINE_REASONING = {
 }
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
-    "reasoning": None,
-    "content": "<think>This is a reasoning section",
+    "reasoning": "This is a reasoning section",
+    "content": None,
     "is_reasoning_end": False,
 }
 
@@ -93,6 +107,16 @@ TEST_CASES = [
         True,
         WITHOUT_THINK_STREAM,
         id="without_think_stream",
+    ),
+    pytest.param(
+        False,
+        WITHOUT_OPEN_THINK,
+        id="without_open_think",
+    ),
+    pytest.param(
+        True,
+        WITHOUT_OPEN_THINK_STREAM,
+        id="without_open_think_stream",
     ),
     pytest.param(
         False,

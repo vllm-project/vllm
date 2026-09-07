@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Hashable
 from fractions import Fraction
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -42,10 +43,9 @@ class BasevLLMParameter(Parameter):
         """
         Initialize the BasevLLMParameter
 
-        :param data: torch tensor with the parameter data
-        :param weight_loader: weight loader callable
-
-        :returns: a torch.nn.parameter
+        Args:
+            data: torch tensor with the parameter data
+            weight_loader: weight loader callable
         """
 
         # During weight loading, we often do something like:
@@ -445,15 +445,16 @@ class SharedWeightParameter(BasevLLMParameter):
                 "currently support tensor parallelism"
             )
 
-    def add_partition(self, index: int, data_key: Hashable, *args, **kwargs):
+    def add_partition(self, index: int, data_key: Hashable, *args: Any, **kwargs: Any):
         """
         Add a partition to the weight parameter. Partitions whose `data_key`
         is the same will share tensor data
 
-        :param index: index of partition to add
-        :param data_key: hashable key used to key shared tensors
-        :param *args: arguments for `torch.empty`
-        :param **kwargs: keyword arguments for `torch.empty`
+        Args:
+            index: index of partition to add
+            data_key: hashable key used to key shared tensors
+            *args: arguments for `torch.empty`
+            **kwargs: keyword arguments for `torch.empty`
         """
         # load (shared) tensor using `data_key`
         if data_key not in self.tensors_registry:

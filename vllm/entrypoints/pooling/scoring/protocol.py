@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
@@ -139,7 +139,7 @@ class RerankRequest(ScoringRequestMixin):
     # --8<-- [start:rerank-request-params]
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
-    top_n: int = Field(default_factory=lambda: 0)
+    top_n: int = Field(default=0, ge=0)
     # --8<-- [end:rerank-request-params]
 
 

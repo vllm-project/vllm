@@ -51,6 +51,8 @@ class PEFTHelper:
         return error_msg
 
     def __post_init__(self):
+        if self.r <= 0:
+            raise ValueError(f"LoRA rank `r` must be a positive integer, got {self.r}.")
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
@@ -91,9 +93,11 @@ class PEFTHelper:
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
 
-            lora_config_path = os.path.join(
-                tensorizer_config.tensorizer_dir, "adapter_config.json"
-            )
+            tensorizer_dir = tensorizer_config.tensorizer_dir
+            if tensorizer_dir is None:
+                raise ValueError("tensorizer_dir must be set in tensorizer config.")
+
+            lora_config_path = os.path.join(tensorizer_dir, "adapter_config.json")
             with open_stream(
                 lora_config_path, mode="rb", **tensorizer_args.stream_kwargs
             ) as f:

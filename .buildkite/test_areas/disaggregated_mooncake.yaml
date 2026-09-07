@@ -1,0 +1,21 @@
+group: Disaggregated Mooncake
+depends_on:
+  - image-build
+steps:
+- label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
+  key: distributed-mooncakeconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/tests"
+  # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
+  # transfers: its pods are the only ones granted IPC_LOCK, which RDMA needs to
+  # pin memory, and the only ones using host networking. Elsewhere topology
+  # discovery finds no usable HCA and the tcp fallback then advertises the
+  # docker bridge address, so every transfer fails to connect.
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+    - tests/v1/kv_connector/mooncake_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh

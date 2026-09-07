@@ -27,7 +27,7 @@ In the example above, the KV cache in the first block can be uniquely identified
     For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
     - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
     - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
-    - `xxhash`: `Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
+    - `xxhash`: Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
     - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
 
 **A hashing example with multi-modality inputs**  
@@ -197,7 +197,7 @@ As can be seen, block 3 is a new full block and is cached. However, it is redund
 
 When a request is finished, we free all its blocks if no other requests are using them (reference count = 0). In this example, we free request 1 and block 2, 3, 4, 8 associated with it. We can see that the freed blocks are added to the tail of the free queue in the *reverse* order. This is because the last block of a request must hash more tokens and is less likely to be reused by other requests. As a result, it should be evicted first.
 
-![Free queue after a request us freed](../assets/design/prefix_caching/free.png)
+![Free queue after a request is freed](../assets/design/prefix_caching/free.png)
 
 ### Eviction (LRU)
 

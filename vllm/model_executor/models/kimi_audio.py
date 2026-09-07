@@ -17,7 +17,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -38,6 +37,7 @@ from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityData,
     ModalityDataItems,
+    MultiModalDataItems,
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
@@ -81,6 +81,14 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+        },
+    )
+
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
     ):
@@ -102,37 +110,8 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 # -----------------------------------------------------------------------------
@@ -223,7 +202,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
     "whisper_input_features": MultiModalFieldConfig.batched("audio"),
-    "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
+    "feature_attention_mask": MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
 }
 
 
@@ -248,14 +227,20 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Call the HuggingFace processor."""
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -275,11 +260,13 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             mm_data["audio"] = audio_arrays
 
         # Use the context's call_hf_processor for proper handling
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -402,6 +389,12 @@ class KimiAudioForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
+            # MIMO/TTS weights and any `model.` residue no rule above
+            # claimed: this model only does ASR (speech-to-text).
+            "model.": None,
+            "mimo_layers.": None,
+            "mimo_output.": None,
+            "mimo_norm.": None,
         },
         orig_to_new_substr={
             ".fc1.": ".mlp.fc1.",
@@ -595,21 +588,8 @@ class KimiAudioForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights, skipping MIMO layers (TTS-only) for ASR."""
-        # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
-        skipped_patterns = [
-            # Audio tower
-            "model.",
-            # MIMO/TTS
-            "mimo_layers.",
-            "mimo_output.",
-            "mimo_norm.",
-        ]
-
-        # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_speech_to_text_config(

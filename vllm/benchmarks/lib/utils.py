@@ -15,7 +15,7 @@ def extract_field(
     if field_name in extra_info:
         return extra_info[field_name]
 
-    v = args
+    v: Any = args
     # For example, args.compilation_config.mode
     for nested_field in field_name.split("."):
         if not hasattr(v, nested_field):
@@ -43,7 +43,7 @@ def convert_to_pytorch_benchmark_format(
     on metric per record
     https://github.com/pytorch/pytorch/wiki/How-to-integrate-with-PyTorch-OSS-benchmark-database
     """
-    records = []
+    records: list[Any] = []
     if not os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT", False):
         return records
 
