@@ -13,6 +13,7 @@
 #   MODEL                    HF model id (default: Qwen/Qwen2.5-VL-3B-Instruct)
 #   GPU_SINGLE / GPU_E / GPU_PD   GPU ids (defaults 0 / 0 / 1)
 #   ENDPOINT_PORT, ENCODE_PORT, PREFILL_DECODE_PORT
+#   EC_MOONCAKE_RESERVATION_HOST  consumer control host (default 127.0.0.1)
 #   MOONCAKE_EC_PROTOCOL        tcp | rdma (default tcp)
 #   USE_MM_PROMPTS              1 (default) or 0 for text-only quick sanity
 #   TIMEOUT_SECONDS             wait_for_server timeout (default 1200)
@@ -44,8 +45,10 @@ PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19537}"
 ENDPOINT_PORT="${ENDPOINT_PORT:-10002}"
 BASELINE_PORT="${BASELINE_PORT:-10003}"
 
+EC_MOONCAKE_RESERVATION_HOST="${EC_MOONCAKE_RESERVATION_HOST:-127.0.0.1}"
 EC_MOONCAKE_RESERVATION_PORT="${EC_MOONCAKE_RESERVATION_PORT:-19019}"
 MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-tcp}"
+export EC_MOONCAKE_RESERVATION_HOST
 export EC_MOONCAKE_RESERVATION_PORT
 export MOONCAKE_EC_PROTOCOL
 if [[ "$MOONCAKE_EC_PROTOCOL" == "tcp" ]]; then
@@ -81,12 +84,24 @@ import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
-    "ec_ip": os.environ.get("EC_MOONCAKE_RESERVATION_HOST", "127.0.0.1"),
+    "ec_ip": os.environ["EC_MOONCAKE_RESERVATION_HOST"],
     "ec_port": int(os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")),
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
     },
 }, separators=(",", ":")))
+PY
+)
+
+EC_MOONCAKE_RESERVATION_ADDR=$("$PYTHON_BIN" <<'PY'
+import os
+
+from vllm.utils.network_utils import make_zmq_path
+
+print(make_zmq_path(
+    "tcp", os.environ["EC_MOONCAKE_RESERVATION_HOST"],
+    int(os.environ["EC_MOONCAKE_RESERVATION_PORT"]),
+))
 PY
 )
 
@@ -234,7 +249,7 @@ run_epd_mooncake() {
     --prefill-servers-urls "disable" \
     --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
     --ec-consumer-zmq-addrs \
-      "tcp://localhost:$EC_MOONCAKE_RESERVATION_PORT" \
+      "$EC_MOONCAKE_RESERVATION_ADDR" \
     >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
   local PROXY_PID=$!
   PIDS+=("$PROXY_PID")
