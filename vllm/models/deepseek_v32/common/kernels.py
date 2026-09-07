@@ -533,6 +533,109 @@ def fused_norm_rope(
     return q_c_out
 
 
+def fused_indexer_k_store(
+    positions: torch.Tensor,
+    index_k: torch.Tensor,
+    index_k_layer_norm_w: torch.Tensor,
+    index_k_layer_norm_bias: torch.Tensor,
+    index_k_layer_norm_eps: float,
+    index_k_rope_cos_sin_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    indexer_k_cache: torch.Tensor,
+    index_rope_interleave: bool = True,
+) -> None:
+    """Indexer-K store fuse used by ``deepseek_v2.Indexer`` (GLM-5.2 DSA).
+
+    Runs only pid 0 of ``_fused_norm_rope_kernel``: LayerNorm + RoPE (GLM
+    interleaved or DeepSeek NeoX) + UE8M0 FP8 quant + indexer cache write.
+    Q-RMS / MLA / top-k fill pids are not launched.
+
+    ``index_k`` is the raw GEMM output (before LN). After this returns, the
+    caller must pass ``skip_k_cache_insert=True`` into ``sparse_attn_indexer``.
+    """
+    assert positions.ndim == 1
+    assert index_k.ndim == 2
+    assert slot_mapping.ndim == 1
+    assert indexer_k_cache.ndim == 3
+    num_tokens = positions.shape[0]
+    assert index_k.shape[0] == num_tokens
+    assert slot_mapping.shape[0] == num_tokens
+    device = positions.device
+    dtype = index_k.dtype
+    index_k_dim = index_k.shape[-1]
+
+    idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
+    idx_cache_block_size = indexer_k_cache.shape[1]
+    idx_cache_stride = indexer_k_cache.shape[2]
+    cache = indexer_k_cache
+    if cache.dtype == torch.uint8:
+        cache = cache.view(torch.float8_e4m3fn)
+
+    # Unused pids (Q / MLA / topk fill) still need typed pointers.
+    q_dummy = _dummy((1, 128), dtype, device)
+    kv_dummy = _dummy((1, 128), dtype, device)
+    kpe_dummy = _dummy((1, 64), dtype, device)
+    w_dummy = _dummy((128,), torch.float32, device)
+    topk_dummy = _dummy((1, 8), torch.int32, device)
+    mla_dummy = torch.empty(0, dtype=torch.bfloat16, device=device)
+    mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
+    empty_f32 = torch.empty(0, dtype=torch.float32, device=device)
+    empty_bf16 = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    _fused_norm_rope_kernel[(1, num_tokens)](
+        positions,
+        q_dummy,
+        q_dummy.stride(0),
+        w_dummy,
+        1e-6,
+        q_dummy,
+        q_dummy.stride(0),
+        128,
+        128,
+        kv_dummy,
+        kv_dummy.stride(0),
+        w_dummy,
+        1e-6,
+        128,
+        kpe_dummy,
+        kpe_dummy.stride(0),
+        index_k_rope_cos_sin_cache,
+        index_k_rope_cos_sin_cache.stride(0),
+        index_k_rope_cos_sin_cache.shape[-1] // 2,
+        index_k,
+        index_k.stride(0),
+        index_k_layer_norm_w,
+        index_k_layer_norm_bias,
+        index_k_layer_norm_eps,
+        index_k_dim,
+        triton.next_power_of_2(index_k_dim),
+        index_k_rope_cos_sin_cache,
+        index_k_rope_cos_sin_cache.stride(0),
+        index_k_rope_cos_sin_cache.shape[-1] // 2,
+        slot_mapping,
+        cache,
+        idx_cache_scale_view,
+        idx_cache_block_size,
+        idx_cache_stride,
+        mla_dummy,
+        0,
+        0,
+        False,
+        mla_k_scale,
+        empty_f32,
+        empty_bf16,
+        False,
+        1,
+        1,
+        topk_dummy,
+        topk_dummy.stride(0),
+        8,
+        TOPK_BLOCK_SIZE=1024,
+        HAS_INDEXER=True,
+        INDEX_ROPE_INTERLEAVE=index_rope_interleave,
+    )
+
+
 @triton.jit
 def _fused_q_kernel(
     pos_ptr,

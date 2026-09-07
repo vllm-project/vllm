@@ -45,6 +45,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, RSWAAttention
@@ -93,7 +94,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import _resolve_layer_name, direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
@@ -724,6 +725,53 @@ class Indexer(nn.Module):
             and self.rope_dim == 64
             and self.scale_fmt is not None
         )
+        # G001: reuse DeepSeek V3.2 indexer-K store fuse (LN+RoPE+FP8 cache).
+        # Disabled on PCP/DCP because cache insert owns gather in those modes.
+        self.use_fused_indexer_k_store = (
+            self.use_fused_indexer_q
+            and self.indexer_op.dcp_world_size <= 1
+            and not self.indexer_op.use_pcp
+        )
+
+    def _try_fused_indexer_k_store(
+        self, k_raw: torch.Tensor, positions: torch.Tensor, rotary_emb
+    ) -> bool:
+        """Write indexer K cache via fused LN+RoPE+FP8 store. Fail closed."""
+        if not self.use_fused_indexer_k_store:
+            return False
+        kv_cache = self.k_cache.kv_cache
+        if kv_cache is None or kv_cache.numel() == 0:
+            return False
+        try:
+            forward_context = get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+        except Exception:
+            return False
+        if not isinstance(attn_metadata, dict):
+            return False
+        layer_md = attn_metadata.get(_resolve_layer_name(self.k_cache.prefix))
+        if layer_md is None:
+            return False
+        slot_mapping = getattr(layer_md, "slot_mapping", None)
+        if slot_mapping is None:
+            return False
+        from vllm.models.deepseek_v32.common.kernels import fused_indexer_k_store
+
+        num_tokens = slot_mapping.shape[0]
+        fused_indexer_k_store(
+            positions[:num_tokens],
+            k_raw[:num_tokens],
+            self.k_norm.weight,
+            self.k_norm.bias,
+            self.k_norm.eps,
+            rotary_emb.cos_sin_cache,
+            slot_mapping,
+            kv_cache,
+            index_rope_interleave=getattr(
+                self.config, "indexer_rope_interleave", False
+            ),
+        )
+        return True
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -754,11 +802,6 @@ class Indexer(nn.Module):
             k = kw[:, : self.head_dim]
             weights = kw[:, self.head_dim :]
 
-            k = self.k_norm(k)
-            k_pe, k_nope = torch.split(
-                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-            )
-
             q_fp8, weights = fused_indexer_q_rope_quant(
                 positions,
                 q,
@@ -767,6 +810,18 @@ class Indexer(nn.Module):
                 self.softmax_scale,
                 self.n_head_scale,
                 rotary_emb.is_neox_style,
+            )
+
+            # Prefer V3.2-style store fuse: k_norm + k_rope + fp8 cache write.
+            # Do not half-fuse: skip_k_cache_insert only after a successful store.
+            if self._try_fused_indexer_k_store(k, positions, rotary_emb):
+                self.indexer_op.skip_k_cache_insert = True
+                return self.indexer_op(hidden_states, q_fp8, k, weights)
+
+            self.indexer_op.skip_k_cache_insert = False
+            k = self.k_norm(k)
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
             )
 
             # rotate only the MQA K

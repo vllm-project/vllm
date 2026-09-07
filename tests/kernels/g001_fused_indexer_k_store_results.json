@@ -1,0 +1,94 @@
+{
+  "accuracy": [
+    {
+      "tokens": 1,
+      "interleave": true,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 1,
+      "interleave": false,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 4,
+      "interleave": true,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 4,
+      "interleave": false,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 17,
+      "interleave": true,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 17,
+      "interleave": false,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 128,
+      "interleave": true,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 128,
+      "interleave": false,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 512,
+      "interleave": true,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    },
+    {
+      "tokens": 512,
+      "interleave": false,
+      "fp8_ulp": 0,
+      "scale_exact": true,
+      "pass": true
+    }
+  ],
+  "microbench": [
+    {
+      "tokens": 128,
+      "fused_ms": 0.0401,
+      "unfused_ref_ms": 0.1777,
+      "speedup": 4.43
+    },
+    {
+      "tokens": 1024,
+      "fused_ms": 0.0388,
+      "unfused_ref_ms": 0.1857,
+      "speedup": 4.785
+    },
+    {
+      "tokens": 4096,
+      "fused_ms": 0.0432,
+      "unfused_ref_ms": 0.1721,
+      "speedup": 3.983
+    }
+  ]
+}
