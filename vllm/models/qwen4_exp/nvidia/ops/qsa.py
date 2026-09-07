@@ -12,13 +12,14 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
 @lru_cache(maxsize=1)
 def _is_sm120() -> bool:
     """True on sm_120 (RTX PRO 6000 Blackwell): selects the sm_120 tuning table."""
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)
+    return current_platform.get_device_capability() == (12, 0)
 
 
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
@@ -32,8 +33,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
-    k_scale_ptr,
-    v_scale_ptr,
+    softmax_scale,
+    output_scale,
     stride_q_row,
     stride_q_head,
     stride_k_block,
@@ -66,11 +67,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     split_id = tl.program_id(2)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
-    if IS_FP8:
-        # Per-tensor dequant scales read from device buffers, so a cudagraph
-        # replay stays valid if the scales are ever recalibrated.
-        k_scale = tl.load(k_scale_ptr).to(tl.float32)
-        v_scale = tl.load(v_scale_ptr).to(tl.float32)
 
     # The packed selection buffer carries one TRAILING COUNT COLUMN per row
     # (column TOPK of a TOPK+1-wide buffer): the row's valid-entry count,
@@ -94,10 +90,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
-    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
-    # For fp8 caches, fold the per-tensor K dequant scale into the softmax
-    # scale so it is applied once here, not to every tile's logits in the loop.
-    score_scale = k_scale * softmax_scale_log2 if IS_FP8 else softmax_scale_log2
+    # softmax_scale is the host-side attention scale (1/sqrt(head_dim), with the
+    # fp8 K dequant scale already pre-multiplied in); convert to log2 units once
+    # here for the exp2-based online softmax.
+    score_scale = softmax_scale * 1.4426950408889634
 
     tile_end = tl.minimum(NUM_TILES, tl.cdiv(tl.minimum(valid_count, TOPK), BLOCK_N))
 
@@ -156,7 +152,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             values = values.to(tl.float16)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
-        # caches the K dequant scale is already folded into score_scale above.
+        # caches the K dequant scale is already folded into softmax_scale on the
+        # host.
         scores *= score_scale
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
@@ -179,8 +176,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         0.0,
     )
     if IS_FP8:
-        # Fold the per-tensor V dequant scale into the (partial) output.
-        normalized_output = normalized_output * v_scale
+        # output_scale is the host-side V dequant scale; fold it into the
+        # (partial) output.
+        normalized_output = normalized_output * output_scale
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
         tl.store(
@@ -443,6 +441,45 @@ def _compress_qsa_groups_kernel(
     )
 
 
+def _select_sm120_config(
+    base_programs: int, use_prefill_config: bool, is_fp8: bool
+) -> tuple[int, int, int]:
+    """(block_n, target_splits, num_warps) retuned on sm_120 (RTX PRO 6000
+    Blackwell), split by cache dtype: bf16 and fp8 favour different configs on
+    sm_120, most visibly on the large-prefill region. Each entry is the fastest
+    config that stays correct on its own path; the main win is more warps."""
+    if is_fp8:
+        if base_programs > 2048:
+            return (32, 2, 1) if use_prefill_config else (64, 1, 2)
+        if base_programs <= 24:
+            return 64, 64, 8
+        if base_programs <= 32:
+            return 128, 8, 4
+        if base_programs <= 64:
+            return 64, 8, 4
+        if base_programs <= 128:
+            return 32, 4, 4
+        if base_programs <= 256:
+            return 128, 4, 4
+        if base_programs <= 512:
+            return 64, 4, 4
+        return 32, 2, 1
+    # bf16 K/V cache.
+    if base_programs > 2048:
+        return 64, 2, 2
+    if base_programs <= 24:
+        return 64, 64, 8
+    if base_programs <= 64:
+        return 64, 8, 8
+    if base_programs <= 128:
+        return 32, 8, 8
+    if base_programs <= 256:
+        return 32, 8, 1
+    if base_programs <= 512:
+        return 64, 4, 2
+    return 32, 4, 1
+
+
 def _select_config(
     num_rows: int,
     num_kv_heads: int,
@@ -454,47 +491,14 @@ def _select_config(
 
     Keyed on base_programs = num_rows * num_kv_heads. The bp > 2048 region splits
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
-    the uniform decode/verify length). The default table was tuned on GB300;
-    sm_120 (RTX PRO 6000 Blackwell) has its own tables, retuned per region and
-    split by cache dtype (bf16 vs fp8 favour different configs on sm_120, most
-    visibly on the large-prefill region), all correctness-checked on their path.
+    the uniform decode/verify length). This default table was tuned on GB300;
+    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead.
     """
     base_programs = num_rows * num_kv_heads
-    if _is_sm120() and is_fp8:
-        if base_programs > 2048:
-            BLOCK_N, target_splits, num_warps = (
-                (32, 2, 1) if use_prefill_config else (64, 1, 2)
-            )
-        elif base_programs <= 24:
-            BLOCK_N, target_splits, num_warps = 64, 64, 8
-        elif base_programs <= 32:
-            BLOCK_N, target_splits, num_warps = 128, 8, 4
-        elif base_programs <= 64:
-            BLOCK_N, target_splits, num_warps = 64, 8, 4
-        elif base_programs <= 128:
-            BLOCK_N, target_splits, num_warps = 32, 4, 4
-        elif base_programs <= 256:
-            BLOCK_N, target_splits, num_warps = 128, 4, 4
-        elif base_programs <= 512:
-            BLOCK_N, target_splits, num_warps = 64, 4, 4
-        else:
-            BLOCK_N, target_splits, num_warps = 32, 2, 1
-    elif _is_sm120():
-        # bf16 K/V cache: the big win here is the large-prefill region.
-        if base_programs > 2048:
-            BLOCK_N, target_splits, num_warps = 64, 2, 2
-        elif base_programs <= 24:
-            BLOCK_N, target_splits, num_warps = 64, 64, 8
-        elif base_programs <= 64:
-            BLOCK_N, target_splits, num_warps = 64, 8, 8
-        elif base_programs <= 128:
-            BLOCK_N, target_splits, num_warps = 32, 8, 8
-        elif base_programs <= 256:
-            BLOCK_N, target_splits, num_warps = 32, 8, 1
-        elif base_programs <= 512:
-            BLOCK_N, target_splits, num_warps = 64, 4, 2
-        else:
-            BLOCK_N, target_splits, num_warps = 32, 4, 1
+    if _is_sm120():
+        BLOCK_N, target_splits, num_warps = _select_sm120_config(
+            base_programs, use_prefill_config, is_fp8
+        )
     elif base_programs > 2048:
         BLOCK_N, target_splits, num_warps = (
             (32, 1, 1) if use_prefill_config else (64, 1, 2)
@@ -528,13 +532,15 @@ def qsa_sparse_paged_attention(
     token_to_req: torch.Tensor,
     use_prefill_config: bool,
     out: torch.Tensor | None = None,
-    k_scale: torch.Tensor | None = None,
-    v_scale: torch.Tensor | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
     With fp8 caches, k_scale/v_scale are the layer's per-tensor dequant scales
-    (1-element device tensors); the kernel dequantizes on load.
+    as host floats (e.g. layer._k_scale_float/_v_scale_float): k_scale is
+    pre-multiplied into the softmax scale and v_scale becomes the kernel's
+    output scale, so the kernel needs no device scale buffers.
 
     logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
     with the trailing column holding each row's valid-entry count (written by
@@ -563,11 +569,14 @@ def qsa_sparse_paged_attention(
     is_fp8 = k_cache.dtype == torch.float8_e4m3fn
     if is_fp8:
         assert k_scale is not None and v_scale is not None
-        assert k_scale.numel() == 1 and v_scale.numel() == 1
-        assert k_scale.is_cuda and v_scale.is_cuda
-        assert k_scale.device == q.device and v_scale.device == q.device
+        # Host pre-multiply: fold the K dequant scale into the attention scale
+        # and pass V's dequant scale as the kernel's output scale.
+        softmax_scale = (head_dim**-0.5) * float(k_scale)
+        output_scale = float(v_scale)
     else:
         assert k_cache.dtype == torch.bfloat16
+        softmax_scale = head_dim**-0.5
+        output_scale = 1.0
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -620,9 +629,8 @@ def qsa_sparse_paged_attention(
         partial_output,
         partial_lse,
         out,
-        # Dummy pointers when bf16: IS_FP8=False compiles the loads out.
-        k_scale if is_fp8 else q,
-        v_scale if is_fp8 else q,
+        softmax_scale,
+        output_scale,
         q.stride(0),
         q.stride(1),
         k_cache.stride(0),
@@ -717,7 +725,6 @@ def warmup_qsa_sparse_paged_attention(
         shape=tuple(value_cache.shape),
         strides=tuple(value_cache.stride()),
     )
-    scale_ptr = TritonWarmupTensor(torch.float32, shape=(1,))
     # +1: the packed buffer's trailing count column.
     indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
     block_table_ptr = TritonWarmupTensor(
@@ -756,8 +763,8 @@ def warmup_qsa_sparse_paged_attention(
             partial_output_ptr,
             partial_lse_ptr,
             output_ptr,
-            scale_ptr if is_fp8 else q_ptr,
-            scale_ptr if is_fp8 else q_ptr,
+            1.0,
+            1.0,
             row_stride,
             head_stride,
             key_cache.stride(0),

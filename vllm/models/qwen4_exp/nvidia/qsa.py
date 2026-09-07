@@ -180,8 +180,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             # (same itemsize, so shape and strides are preserved).
             key_cache = key_cache.view(torch.float8_e4m3fn)
             value_cache = value_cache.view(torch.float8_e4m3fn)
-            k_scale = layer._k_scale
-            v_scale = layer._v_scale
+            # Host-side per-tensor dequant scales (Python floats), as used by
+            # other host-scale backends; folded into the kernel's scales.
+            k_scale = layer._k_scale_float
+            v_scale = layer._v_scale_float
         if query.dtype != torch.bfloat16 or key_cache.dtype not in (
             torch.bfloat16,
             torch.float8_e4m3fn,
