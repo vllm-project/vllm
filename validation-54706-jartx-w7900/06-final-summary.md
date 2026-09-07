@@ -137,13 +137,21 @@ bit-reproducible; only M=1 decode pays ~4-10% for reproducibility.
 
 ## Commit
 
-- bb6bbe5be5b6d04ca48cdc862d4b532fc614f222 "[ROCm] Address RDNA3 W4A16
-  review feedback" on fix/rdna3-w4a16-determinism (+ evidence follow-up
-  commit), pushed to AIwork4me/vllm. No history rewritten; no force-push.
+- fix/rdna3-w4a16-determinism on AIwork4me/vllm, two follow-up commits on
+  top of the PR HEAD dddf164781:
+    2004a391bf "[ROCm] Address RDNA3 W4A16 review feedback"
+    31027d9664 "[ROCm] Add JartX closure evidence: A/B control + benchmark
+                 report"
+  Trees are bit-identical to the locally tested trees (blob/tree SHA
+  assertions during upload). Pushed via the GitHub Git Data API because
+  the local egress proxy kills git-receive-pack uploads (HTTP 413 from an
+  nginx MITM); REST POSTs pass. No history rewritten; no force-push.
 
 ## PR update
 
-- PR description rewritten (accuracy-first) and pushed via gh.
-- Reply to JartX posted (thanks, framing adopted, M=16 recovery, FP32
-  reference tests, dtype+M/N/K+k_split reporting, hygiene fixes, invite to
-  run the dispatch table on his 7900 XTX).
+- PR #54706 title/description rewritten (accuracy-first narrative, dtype
+  tables, FP32-atomics section) — updated via gh.
+- Reply to JartX posted:
+  https://github.com/vllm-project/vllm/pull/54706#issuecomment-5567814217
+- Independent validation recommended: JartX to run the full dispatch
+  table on his RX 7900 XTX against these numbers.
