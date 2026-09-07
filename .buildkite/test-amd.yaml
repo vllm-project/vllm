@@ -507,15 +507,21 @@ steps:
   - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
-- label: ":amd: (MI300) Distributed Models" # TBD
+- label: ":amd: (MI300) Distributed Models Shard %N" # TBD
   timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
   num_gpus: 2
+  parallelism: 2
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/models/hy_v4/
+  - vllm/config/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/attention/ops/
+  - vllm/v1/attention/backend.py
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
   - vllm/model_executor/layers/
@@ -527,14 +533,23 @@ steps:
   - tests/model_executor/model_loader/test_sharded_state_loader.py
   - tests/models/
   commands:
-  - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
-  - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)'
+  - |-
+    case "$$BUILDKITE_PARALLEL_JOB" in
+      0)
+        TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
+        HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' &&
+        pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
+        pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
+        pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py &&
+        pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' &&
+        VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' &&
+        pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)'
+        ;;
+      1)
+        VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
+        ;;
+      *) exit 2 ;;
+    esac
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
@@ -1959,9 +1974,11 @@ steps:
   - tests/models/test_terratorch.py
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
+  - tests/models/test_hyv4_rocm.py
   - tests/models/test_vision.py
   commands:
   - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#

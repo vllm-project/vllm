@@ -18,21 +18,23 @@ steps:
   - |
     case "$$BUILDKITE_PARALLEL_JOB" in
       0)
-        TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+        TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
         CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
         ;;
       1)
         pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
-        pytest models/language -v -s -m 'distributed(num_gpus=2)'
         ;;
       2)
-        pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
-        pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
+        pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' &&
+        pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py &&
         VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+        ;;
+      3)
+        pytest models/language -v -s -m 'distributed(num_gpus=2)'
         ;;
       *) exit 2 ;;
     esac
-  parallelism: 3
+  parallelism: 4
   mirror:
     amd:
       label: ":amd: (MI300) Distributed Models Shard %N"
@@ -42,6 +44,11 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/hy_v4/
+      - vllm/config/
+      - vllm/v1/worker/gpu/
+      - vllm/v1/attention/ops/
+      - vllm/v1/attention/backend.py
       - vllm/model_executor/model_loader/sharded_state_loader.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
@@ -53,20 +60,23 @@ steps:
       - tests/model_executor/model_loader/test_sharded_state_loader.py
       - tests/models/
       commands:
-      - |
+      - |-
         case "$$BUILDKITE_PARALLEL_JOB" in
           0)
-            TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+            TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
             HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
             ;;
           1)
-            pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
+            pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
             pytest models/language -v -s -m 'distributed(num_gpus=2)'
             ;;
           2)
-            pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
-            pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
+            pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py &&
+            pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' &&
             VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+            ;;
+          3)
+            VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
             ;;
           *) exit 2 ;;
         esac
