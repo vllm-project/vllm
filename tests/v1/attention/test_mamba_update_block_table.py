@@ -14,10 +14,16 @@ buffers.
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from tests.v1.attention.utils import MockMambaBuilder
+from tests.v1.attention.utils import (
+    BatchSpec,
+    MockMambaBuilder,
+    create_common_attn_metadata,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -70,6 +76,92 @@ def test_mamba_single_token_prompt_runs_as_prefill():
     assert metadata.num_decodes == 2
     assert metadata.num_prefills == 1
     assert metadata.has_initial_states_p.tolist() == [False]
+
+
+def _build_mamba2_recovery_metadata(computed, query_lens, prompt_lens):
+    config = _make_vllm_config(2048, len(computed), block_size=16)
+    config.cache_config.mamba_cache_mode = "none"
+    config.model_config.get_mamba_chunk_size = lambda: 256
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    builder = Mamba2AttentionMetadataBuilder(
+        spec, ["layer0"], config, torch.device("cpu")
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[c + q for c, q in zip(computed, query_lens)],
+            query_lens=query_lens,
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+        arange_block_indices=True,
+    )
+    # The worker considers generated history to be prefill after preemption.
+    common = common.replace(
+        is_prefilling=torch.tensor(
+            [q > 1 or c == 0 for c, q in zip(computed, query_lens)]
+        )
+    )
+    return builder.build(
+        0,
+        common,
+        mamba_prompt_lens_cpu=(
+            None
+            if prompt_lens is None
+            else torch.tensor(prompt_lens, dtype=torch.int32)
+        ),
+    )
+
+
+def test_mamba2_mixed_prompt_and_history_groups(monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    metadata = _build_mamba2_recovery_metadata(
+        [20, 0, 513, 530, 512, 257],
+        [1, 256, 8, 17, 2, 31],
+        [5, 600, 513, 513, 514, 257],
+    )
+    assert metadata.num_decodes == 1
+    assert metadata.num_prefills == 5
+    assert metadata.ssm_groups is not None
+    assert [
+        (g.row_start, g.row_end, g.token_start, g.token_end, g.replay)
+        for g in metadata.ssm_groups
+    ] == [
+        (0, 1, 0, 256, False),
+        (1, 3, 256, 281, True),
+        (3, 4, 281, 283, False),
+        (4, 5, 283, 314, True),
+    ]
+    assert [g.query_start_loc.tolist() for g in metadata.ssm_groups] == [
+        [0, 256],
+        [0, 8, 25],
+        [0, 2],
+        [0, 31],
+    ]
+    for group in metadata.ssm_groups:
+        if group.replay:
+            assert group.cu_chunk_seqlens is None
+        else:
+            assert group.cu_chunk_seqlens.tolist() == group.query_start_loc.tolist()
+            assert group.last_chunk_indices.tolist() == [0]
+            assert group.seq_idx.tolist() == [0]
+
+
+@pytest.mark.parametrize("bi", ["0", "1"])
+def test_mamba2_prompt_only_keeps_ssd_path(monkeypatch, bi):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", bi)
+    metadata = _build_mamba2_recovery_metadata([0, 256], [256, 2], [513, 258])
+    assert metadata.ssm_groups is None
+
+
+def test_mamba2_recovery_metadata_requires_prompt_boundary(monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with pytest.raises(ValueError, match="original prompt lengths"):
+        _build_mamba2_recovery_metadata([513], [8], None)
+    with pytest.raises(ValueError, match="crosses the original prompt boundary"):
+        _build_mamba2_recovery_metadata([512], [17], [513])
+    # BI-off retains the existing history-as-SSD behavior.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    assert _build_mamba2_recovery_metadata([512], [17], None).ssm_groups is None
 
 
 def test_update_block_table_copies_block_idx_to_persistent_buffers():

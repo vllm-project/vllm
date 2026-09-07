@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
@@ -36,6 +37,12 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    selective_state_update as triton_state_update,
+)
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    try_get_optimal_ssm_config,
+)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
@@ -520,6 +527,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             else None
         )
         self.mamba_config = vllm_config.mamba_config
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
@@ -694,7 +702,134 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 )
 
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
+        if envs.VLLM_BATCH_INVARIANT:
+            # Warm each launch configuration reachable by a recovery batch.
+            warmed_configs = set()
+            for batch in range(1, self.max_num_seqs + 1):
+                config = try_get_optimal_ssm_config(
+                    headdim,
+                    dstate,
+                    batch,
+                    nheads,
+                    str(ssm_state_dtype).removeprefix("torch."),
+                    self.is_blackwell,
+                )
+                if config in warmed_configs:
+                    continue
+                warmed_configs.add(config)
+                # One- and multi-token strides can specialize separately.
+                for length in (1, 2):
+                    tokens = batch * length
+                    state = torch.zeros(
+                        batch,
+                        nheads,
+                        headdim,
+                        dstate,
+                        dtype=ssm_state_dtype,
+                        device=device,
+                    )
+                    replay_x = torch.zeros(
+                        tokens, nheads, headdim, dtype=dtype, device=device
+                    )
+                    replay_dt = torch.zeros(tokens, nheads, dtype=dtype, device=device)
+                    replay_B = torch.zeros(
+                        tokens, ngroups, dstate, dtype=dtype, device=device
+                    )
+                    starts = (
+                        torch.arange(batch + 1, device=device, dtype=torch.int32)
+                        * length
+                    )
+                    self._replay_ssu(
+                        state,
+                        replay_x,
+                        replay_dt,
+                        replay_B,
+                        replay_B,
+                        torch.empty_like(replay_x),
+                        starts,
+                    )
         torch.accelerator.empty_cache()
+
+    def _replay_ssu(
+        self,
+        state: torch.Tensor,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        out: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> None:
+        """Replay generated tokens with the cache rounding of single-token decode."""
+        # Canonical strides keep startup warmup representative of recovery calls.
+        triton_state_update(
+            state,
+            x.contiguous(),
+            dt.contiguous()[:, :, None].expand(-1, -1, self.head_dim),
+            self.A[:, None, None].expand(-1, self.head_dim, self.ssm_state_size),
+            B.contiguous(),
+            C.contiguous(),
+            self.D[:, None].expand(-1, self.head_dim),
+            self.dt_bias[:, None].expand(-1, self.head_dim),
+            dt_softplus=True,
+            out=out,
+            cu_seqlens=cu_seqlens,
+            is_blackwell=self.is_blackwell,
+            round_state_each_token=True,
+        )
+
+    def _prefill_ssm_with_recovery(
+        self,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        initial_states: torch.Tensor | None,
+        out: torch.Tensor,
+        metadata: Mamba2AttentionMetadata,
+    ) -> torch.Tensor:
+        """Use SSD for prompt rows and rounded SSU for generated history."""
+        assert initial_states is not None
+        assert metadata.ssm_groups is not None
+        states = torch.empty_like(initial_states)
+        for group in metadata.ssm_groups:
+            rows = slice(group.row_start, group.row_end)
+            tokens = slice(group.token_start, group.token_end)
+            initial = initial_states[rows]
+            if group.replay:
+                self._replay_ssu(
+                    initial,
+                    x[tokens],
+                    dt[tokens],
+                    B[tokens],
+                    C[tokens],
+                    out[tokens],
+                    group.query_start_loc,
+                )
+                states[rows] = initial
+            else:
+                states[rows] = mamba_chunk_scan_combined_varlen(
+                    x[tokens],
+                    dt[tokens],
+                    self.A,
+                    B[tokens],
+                    C[tokens],
+                    chunk_size=metadata.chunk_size,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    seq_idx=group.seq_idx,
+                    cu_seqlens=group.query_start_loc,
+                    cu_chunk_seqlens=group.cu_chunk_seqlens,
+                    last_chunk_indices=group.last_chunk_indices,
+                    initial_states=initial,
+                    return_intermediate_states=False,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    out=out[tokens],
+                    state_dtype=initial_states.dtype,
+                )
+        return states
 
     def conv_ssm_forward(
         self,
@@ -884,29 +1019,45 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
-            varlen_states = mamba_chunk_scan_combined_varlen(
-                hidden_states_p.view(
-                    num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
-                ),
-                dt_p,
-                self.A,
-                B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                chunk_size=chunk_size,
-                D=self.D,
-                z=None,
-                dt_bias=self.dt_bias,
-                seq_idx=seq_idx_p,
-                cu_seqlens=query_start_loc_p,
-                cu_chunk_seqlens=cu_chunk_seqlen_p,
-                last_chunk_indices=last_chunk_indices_p,
-                initial_states=initial_states,
-                return_intermediate_states=is_mamba_cache_all,
-                dt_softplus=True,
-                dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
-            )
+            if attn_metadata.ssm_groups is not None:
+                assert not is_mamba_cache_all
+                varlen_states = self._prefill_ssm_with_recovery(
+                    hidden_states_p.view(num_prefill_tokens, -1, self.head_dim),
+                    dt_p,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    initial_states,
+                    preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
+                    attn_metadata,
+                )
+            else:
+                varlen_states = mamba_chunk_scan_combined_varlen(
+                    hidden_states_p.view(
+                        num_prefill_tokens,
+                        self.num_heads // self.tp_size,
+                        self.head_dim,
+                    ),
+                    dt_p,
+                    self.A,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    chunk_size=chunk_size,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    seq_idx=seq_idx_p,
+                    cu_seqlens=query_start_loc_p,
+                    cu_chunk_seqlens=cu_chunk_seqlen_p,
+                    last_chunk_indices=last_chunk_indices_p,
+                    initial_states=initial_states,
+                    return_intermediate_states=is_mamba_cache_all,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    out=preallocated_ssm_out_p.view(
+                        num_prefill_tokens, -1, self.head_dim
+                    ),
+                    state_dtype=ssm_state.dtype,
+                )
 
             if is_mamba_cache_all:
                 assert mamba_block_size is not None

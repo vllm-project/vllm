@@ -490,10 +490,11 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_computed_tokens: int,
     ) -> int:
-        """Schedule at most one complete Mamba2 scan chunk per prefill."""
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        """Preserve original prompt chunks, then replay generated history with SSU."""
+        prefill_end = request.num_prompt_tokens
         if num_computed_tokens >= prefill_end:
-            return num_new_tokens
+            assert self.mamba_chunk_size is not None
+            return min(num_new_tokens, self.mamba_chunk_size)
 
         chunk_size = self.mamba_chunk_size
         assert chunk_size is not None
@@ -520,8 +521,7 @@ class Scheduler(SchedulerInterface):
     ) -> bool:
         if not self.need_mamba_chunk_invariant_split:
             return False
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
-        return num_computed_tokens < prefill_end
+        return num_computed_tokens < request.num_prompt_tokens
 
     def _mamba_chunk_invariant_budget(
         self,

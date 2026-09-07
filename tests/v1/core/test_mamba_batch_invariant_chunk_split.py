@@ -219,13 +219,40 @@ def test_decode_is_not_aligned_as_prefill() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("computed", "budget", "expected"),
+    [
+        (0, 768, 256),
+        (256, 512, 256),
+        (512, 256, 1),
+        (513, 255, 255),
+        (530, 17, 17),
+        (513, 512, 256),
+    ],
+)
+def test_recovery_preserves_prompt_boundary(computed, budget, expected) -> None:
+    # Generated history must not extend the original SSD prompt tail. After
+    # that boundary, SSU replay may resume at any token, unlike SSD prefill.
+    assert (
+        _split(
+            prompt_tokens=513,
+            request_tokens=1025,
+            computed_tokens=computed,
+            scheduled_tokens=budget,
+        )
+        == expected
+    )
+
+
 def _model_output(scheduler: Scheduler) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[request.request_id for request in scheduler.running],
         req_id_to_index={
             request.request_id: index for index, request in enumerate(scheduler.running)
         },
-        sampled_token_ids=[[1000]] * len(scheduler.running),
+        sampled_token_ids=[
+            [] if request.is_prefill_chunk else [1000] for request in scheduler.running
+        ],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
