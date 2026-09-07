@@ -867,7 +867,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             ]
             new_block_ids = cached_reqs.new_block_ids[i]
 
-            state.update_tokens_and_blocks(new_token_ids, new_block_ids)
+            state.update_tokens_and_blocks(
+                new_token_ids,
+                new_block_ids,
+                replace_block_ids=request_id in cached_reqs.resumed_req_ids,
+            )
 
             # Create save metadata
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(

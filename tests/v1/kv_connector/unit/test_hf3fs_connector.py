@@ -6,6 +6,7 @@
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -13,11 +14,17 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSConnectorMetadata,
+    RequestSchedulingState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
 )
+from vllm.v1.core.sched.output import CachedRequestData
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,6 +42,47 @@ def _make_cuda_event():
     if torch.cuda.is_available():
         return torch.cuda.Event()
     return MagicMock()
+
+
+def test_mrv1_resume_replaces_reallocated_block_table():
+    """A resumed request's full block table replaces its freed allocation."""
+    connector = object.__new__(HF3FSKVConnector)
+    connector._block_size = 4
+
+    request = SimpleNamespace(all_token_ids=list(range(12)))
+    state = RequestSchedulingState(
+        request_id="req",
+        request=request,
+        token_ids=list(range(8)),
+        allocated_block_ids=[10, 11],
+        num_saved_blocks=2,
+        phase="ACTIVE",
+    )
+    connector._scheduling_states = {"req": state}
+
+    cached_reqs = CachedRequestData(
+        req_ids=["req"],
+        resumed_req_ids={"req"},
+        new_token_ids=[],
+        all_token_ids={"req": request.all_token_ids},
+        new_block_ids=[([20, 21, 22],)],
+        num_computed_tokens=[0],
+        num_output_tokens=[0],
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=cached_reqs,
+        num_scheduled_tokens={"req": 12},
+    )
+    metadata = HF3FSConnectorMetadata()
+
+    connector._process_cached_requests(scheduler_output, metadata)
+
+    assert state.allocated_block_ids == [20, 21, 22]
+    assert len(metadata.requests) == 1
+    request_metadata = metadata.requests[0]
+    assert request_metadata.save_block_op is not None
+    skip = request_metadata.save_block_op.skip_leading_blocks
+    assert request_metadata.block_ids[skip : skip + 1] == [22]
 
 
 # ===========================================================================
