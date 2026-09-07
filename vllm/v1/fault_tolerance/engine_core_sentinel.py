@@ -274,7 +274,7 @@ class EngineCoreSentinel:
         """Rebuild dp_store when the old store master was removed."""
         timeout = self.parallel_config.cpu_distributed_timeout
         if timeout is None:
-            timeout = timedelta(seconds=self.engine_recovery_timeout_sec)
+            timeout = _get_default_timeout(Backend.GLOO)
         engine = cast("DPEngineCoreProc", self.engine)
         engine.dp_store = TCPStore(
             host,
@@ -412,17 +412,18 @@ class EngineCoreSentinel:
             )[0],
         }
 
-        stateless_destroy_torch_distributed_process_group(engine.dp_group)
         prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
         timeout = self.parallel_config.cpu_distributed_timeout
         if timeout is None:
             timeout = _get_default_timeout(Backend.GLOO)
-        engine.dp_group = init_gloo_process_group(
+        new_group = init_gloo_process_group(
             prefix_store=prefix_store,
             group_rank=dense_rank,
             group_size=dense_size,
             timeout=timeout,
         )
+        stateless_destroy_torch_distributed_process_group(engine.dp_group)
+        engine.dp_group = new_group
         return worker_params
 
     def _coordinate_ports(
