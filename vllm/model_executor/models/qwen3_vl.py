@@ -1861,7 +1861,10 @@ class Qwen3VLForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            or is_vit_use_data_parallel(config.vision_config.num_heads)
+        )
         self._init_video_pruning(multimodal_config)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):

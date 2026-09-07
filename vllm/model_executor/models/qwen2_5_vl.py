@@ -1348,7 +1348,10 @@ class Qwen2_5_VLForConditionalGeneration(
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            or is_vit_use_data_parallel(config.vision_config.num_heads)
+        )
         self.config = config
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config

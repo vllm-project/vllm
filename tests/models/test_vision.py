@@ -572,6 +572,9 @@ def test_is_vit_use_data_parallel_divisibility(num_heads, tp_size, expected):
     from unittest.mock import patch
 
     with patch(
+        "vllm.model_executor.models.vision.get_multimodal_config",
+        return_value=None,
+    ), patch(
         "vllm.model_executor.models.vision.get_tensor_model_parallel_world_size",
         return_value=tp_size,
     ):
@@ -583,6 +586,9 @@ def test_is_vit_use_data_parallel_no_num_heads():
     from unittest.mock import patch
 
     with patch(
+        "vllm.model_executor.models.vision.get_multimodal_config",
+        return_value=None,
+    ), patch(
         "vllm.model_executor.models.vision.get_tensor_model_parallel_world_size",
         return_value=3,
     ):
