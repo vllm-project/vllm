@@ -809,6 +809,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
         min_transformers_version="5.9.0",
     ),
+    "CohereCompassForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
+    ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
         extras={"super": "nvidia/Cosmos3-Super"},
