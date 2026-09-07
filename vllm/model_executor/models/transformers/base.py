@@ -613,13 +613,9 @@ class Base(
                 self.parallel_config, arch_config
             )
             head_size = arch_config.head_size
-            scale = attn_fuser.scale(attn_module)
-            # Default to Llama scale if AttentionFuser couldn't identify it
-            if scale is None:
+            if (scale := attn_fuser.scale(attn_module)) is None:
+                # Default to Llama scale if AttentionFuser couldn't identify it
                 scale = head_size**-0.5
-            num_kv_heads = self.model_config.get_num_kv_heads(
-                self.parallel_config, arch_config
-            )
 
             kwargs = dict(
                 num_heads=num_heads,
@@ -627,7 +623,6 @@ class Base(
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 prefix=f"{i}.attn",
-                sinks=attn_fuser.sinks(attn_module),
             )
 
             if attn_cls is MLAAttention:
@@ -651,13 +646,18 @@ class Base(
             else:
                 kwargs.update(
                     head_size=head_size,
-                    num_kv_heads=num_kv_heads,
+                    num_kv_heads=self.model_config.get_num_kv_heads(
+                        self.parallel_config, arch_config
+                    ),
                     logits_soft_cap=logits_soft_cap,
                 )
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                # Handle attention sinks
+                if (sinks := attn_fuser.sinks(attn_module)) is not None:
+                    kwargs["sinks"] = sinks
 
             attn_instance = attn_cls(**kwargs)
 
