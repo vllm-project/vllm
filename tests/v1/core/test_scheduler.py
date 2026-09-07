@@ -6623,3 +6623,54 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+def _schedule_with_mocked_common_prefix(scheduler, monkeypatch, cascade_enabled):
+    scheduler.disable_cascade_attn = not cascade_enabled
+    num_groups = len(scheduler.kv_cache_config.kv_cache_groups)
+    get_blocks = Mock(return_value=[7] * num_groups)
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "get_num_common_prefix_blocks", get_blocks
+    )
+    return scheduler.schedule(), get_blocks, num_groups
+
+
+def _scheduler_with_running_requests():
+    scheduler = create_scheduler()
+    for request in create_requests(num_requests=2, num_tokens=4):
+        scheduler.add_request(request)
+    scheduler.schedule()
+    assert scheduler.running
+    return scheduler
+
+
+def test_common_prefix_blocks_skipped_when_cascade_attention_disabled(monkeypatch):
+    scheduler = _scheduler_with_running_requests()
+    assert scheduler.disable_cascade_attn
+
+    output, get_blocks, num_groups = _schedule_with_mocked_common_prefix(
+        scheduler, monkeypatch, cascade_enabled=False
+    )
+
+    get_blocks.assert_not_called()
+    assert output.num_common_prefix_blocks == [0] * num_groups
+
+
+def test_common_prefix_blocks_computed_when_cascade_attention_enabled(monkeypatch):
+    scheduler = _scheduler_with_running_requests()
+
+    output, get_blocks, num_groups = _schedule_with_mocked_common_prefix(
+        scheduler, monkeypatch, cascade_enabled=True
+    )
+
+    get_blocks.assert_called_once_with(scheduler.running[0].request_id)
+    assert output.num_common_prefix_blocks == [7] * num_groups
+
+
+def test_common_prefix_blocks_zero_without_running_requests(monkeypatch):
+    output, get_blocks, num_groups = _schedule_with_mocked_common_prefix(
+        create_scheduler(), monkeypatch, cascade_enabled=True
+    )
+
+    get_blocks.assert_not_called()
+    assert output.num_common_prefix_blocks == [0] * num_groups
