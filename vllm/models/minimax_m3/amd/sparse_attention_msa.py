@@ -25,6 +25,7 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         output: torch.Tensor,
         *,
         query_fp8: torch.Tensor | None = None,
+        decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         from vllm.models.minimax_m3.amd.ops.sparse_pa import (
             minimax_m3_sparse_attn_decode_aiter,
@@ -70,19 +71,26 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 k_scale=k_scale,
                 v_scale=v_scale,
                 decode_query_len=d.decode_query_len,
+                sparse_block_table=(
+                    decode_sparse_table[0] if decode_sparse_table is not None else None
+                ),
+                sparse_context_lens=(
+                    decode_sparse_table[1] if decode_sparse_table is not None else None
+                ),
             )
 
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None
+            assert p.query_req_id is not None and p.query_abs_pos is not None
             minimax_m3_sparse_attn_prefill_aiter(
                 q[nd:],
                 k_cache,
                 v_cache,
                 topk[:, nd:num_tokens, :],
                 p.block_table,
-                p.cu_seqlens_q,
-                p.context_lens,
+                p.query_req_id,
+                p.query_abs_pos,
                 self.num_kv_heads,
                 self.scale,
                 out[nd:],

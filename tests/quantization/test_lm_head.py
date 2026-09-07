@@ -8,6 +8,7 @@ Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
 import pytest
 import torch
 
+from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
@@ -23,29 +24,24 @@ MODELS_QUANT = [
 
 @pytest.mark.parametrize("model_id, lm_head_quantized", MODELS_QUANT)
 def test_lm_head(
-    vllm_runner,
     model_id: str,
     lm_head_quantized: bool,
     monkeypatch,
+    dist_init,
+    workspace_init,
 ) -> None:
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(
-        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
-    ) as vllm_model:
-
-        def check_model(model):
-            lm_head_layer = model.lm_head
-            if lm_head_quantized:
-                assert isinstance(
-                    lm_head_layer.quant_method,
-                    AutoGPTQLinearMethod,
-                )
-            else:
-                assert isinstance(
-                    lm_head_layer.quant_method, UnquantizedEmbeddingMethod
-                )
-
-        vllm_model.apply_model(check_model)
-
-        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])
+    model, _ = load_model_without_vllm_runner(
+        model_id,
+        dtype=torch.float16,
+        model_config_kwargs={
+            "max_model_len": 2048,
+            "hf_overrides": {"num_hidden_layers": 3},
+        },
+    )
+    lm_head_layer = model.lm_head
+    if lm_head_quantized:
+        assert isinstance(lm_head_layer.quant_method, AutoGPTQLinearMethod)
+    else:
+        assert isinstance(lm_head_layer.quant_method, UnquantizedEmbeddingMethod)

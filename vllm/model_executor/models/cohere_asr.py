@@ -2177,9 +2177,15 @@ class CohereAsrForConditionalGeneration(
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
     ) -> int | None:
-        hop_length = model_config.hf_config.preprocessor.get("window_stride")
-        assert hop_length is not None
-        return math.ceil(audio_duration_s * stt_config.sample_rate / hop_length)
+        hf_config = model_config.hf_config
+        preprocessor = hf_config.preprocessor
+        sample_rate = preprocessor["sample_rate"]
+        window_stride = preprocessor["window_stride"]
+        hop_length = int(window_stride * sample_rate)
+        # Floor-divide to match get_seq_len.
+        num_frames = int(audio_duration_s * sample_rate) // hop_length
+        subsampling_factor = hf_config.encoder["subsampling_factor"]
+        return math.ceil(num_frames / subsampling_factor)
 
     def get_num_encoder_cross_attn_tokens(self, num_encoder_input_tokens: int) -> int:
         return self.model.encoder.get_num_encoder_cross_attn_tokens(
