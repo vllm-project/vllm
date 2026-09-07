@@ -159,7 +159,7 @@ def test_tool_only_serving_parser_preserves_bare_reasoning_end_tag():
     )
     assert parser_cls is not None
     parser = parser_cls(MOCK_TOKENIZER)
-    model_output = "Let me check.</think> " + build_tool_call(
+    model_output = "<think>Let me check.</think> " + build_tool_call(
         "get_weather", {"location": "Beijing"}
     )
 
@@ -170,7 +170,7 @@ def test_tool_only_serving_parser_preserves_bare_reasoning_end_tag():
     )
 
     assert reasoning is None
-    assert content == "Let me check.</think> "
+    assert content == "<think>Let me check.</think> "
     assert tool_calls is not None
     assert tool_calls[0].name == "get_weather"
 
@@ -184,7 +184,7 @@ def test_tool_only_serving_parser_streams_bare_reasoning_end_tag():
     assert parser_cls is not None
     parser = parser_cls(MOCK_TOKENIZER)
     request = make_request()
-    chunks = ["Let me check.", "</think>", " Here is the answer."]
+    chunks = ["<think>Let me check.", "</think>", " Here is the answer."]
     deltas = []
     for index, chunk in enumerate(chunks):
         delta = parser.parse_delta(
@@ -211,7 +211,7 @@ def test_combined_serving_parser_still_extracts_reasoning():
         MOCK_TOKENIZER,
         chat_template_kwargs={"thinking": True},
     )
-    model_output = "Let me check.</think> " + build_tool_call(
+    model_output = "<think>Let me check.</think> " + build_tool_call(
         "get_weather", {"location": "Beijing"}
     )
 
