@@ -1082,3 +1082,24 @@ def test_gfx11_launch_config_gfx1151_prefill_is_tuned(
     # head_size 256 with a single KV head is Gemma-2B: shallow on purpose.
     mqa = triton_ua._gfx11_launch_config(4096, 1, 256, 2, 64, 32, True)
     assert mqa == {"num_warps": 4, "num_stages": 1, "waves_per_eu": 4}
+
+
+@pytest.mark.parametrize("head_size", [64, 80, 128, 256, 512])
+@pytest.mark.parametrize("gfx11", [False, True])
+def test_use_swapped_grid_off_gfx1151_is_default_order(
+    monkeypatch: pytest.MonkeyPatch, head_size: int, gfx11: bool
+) -> None:
+    """Only gfx1151 was measured, so nothing else may reorder the grid."""
+    _patch_arch(monkeypatch, gfx11=gfx11)
+    assert not triton_ua._use_swapped_grid(head_size)
+
+
+@pytest.mark.parametrize(
+    "head_size,swapped", [(64, False), (80, True), (128, True), (256, True)]
+)
+def test_use_swapped_grid_gfx1151_excludes_head_size_64(
+    monkeypatch: pytest.MonkeyPatch, head_size: int, swapped: bool
+) -> None:
+    """head_size 64 regresses under the swapped order and must be excluded."""
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=True)
+    assert triton_ua._use_swapped_grid(head_size) is swapped

@@ -295,6 +295,9 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # Read the 2D grid as (kv_heads, q_blocks) rather than the default
+    # (q_blocks, kv_heads). See ``_use_swapped_grid`` for the gating.
+    USE_SWAPPED_GRID: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -308,8 +311,12 @@ def kernel_unified_attention(
             "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
         )
 
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
+    if USE_SWAPPED_GRID:
+        kv_head_idx = tl.program_id(0)
+        q_block_global_idx = tl.program_id(1)
+    else:
+        q_block_global_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2) if IS_3D else 0
 
     (
@@ -888,6 +895,16 @@ def _select_query_block(
     return block_m, block_m // num_queries_per_kv, False
 
 
+def _use_swapped_grid(head_size: int) -> bool:
+    """Whether to launch the 2D grid as ``(kv_heads, q_blocks)``.
+
+    gfx1151 schedules the 2D kernel better when the KV head is the fastest
+    varying axis, but head_size 64 regresses under that order, so it keeps the
+    default. Every other architecture keeps the default too.
+    """
+    return _ON_GFX1151 and head_size >= 80
+
+
 def _cap_num_stages_for_gfx11_lds(
     num_stages: int,
     block_m: int,
@@ -1260,9 +1277,15 @@ def unified_attention(
     segm_expsum_ptr = softmax_segm_expsum if use_3d else None
     num_segments = num_par_softmax_segments if use_3d else 1
 
+    use_swapped_grid = not use_3d and _use_swapped_grid(head_size)
+
     grid: tuple[Any, ...]
     if not use_3d:
-        grid = (total_num_q_blocks, num_kv_heads)
+        grid = (
+            (num_kv_heads, total_num_q_blocks)
+            if use_swapped_grid
+            else (total_num_q_blocks, num_kv_heads)
+        )
         tile_size = TILE_SIZE_PREFILL
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
@@ -1362,6 +1385,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        USE_SWAPPED_GRID=use_swapped_grid,
         **launch_kwargs,
     )
 
