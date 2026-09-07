@@ -3,7 +3,8 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
-from types import MethodType, SimpleNamespace
+import sys
+from types import MethodType, ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -45,6 +46,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
     _canonicalize_sparse_mla_kv_cache_dtype,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseFA4Backend,
+)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
@@ -79,6 +83,10 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 )
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
+)
+# Decode and long prefill requests exercise the whole-batch FlashInfer fallback.
+SPARSE_BACKEND_BATCH_SPECS["mixed_long_q"] = BatchSpec(
+    seq_lens=[64, 64, 1024, 1024], query_lens=[1, 1, 256, 256]
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -318,8 +326,12 @@ def _quantize_dequantize_nvfp4_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
-    ids=["FlashMLA", "FlashInferTRTLLM"],
+    [
+        FlashMLASparseBackend,
+        FlashInferMLASparseTRTLLMBackend,
+        FlashAttnMLASparseFA4Backend,
+    ],
+    ids=["FlashMLA", "FlashInferTRTLLM", "FlashAttnFA4"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize(
@@ -381,6 +393,19 @@ def test_sparse_backend_decode_correctness(
             device_capability
         ):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
+    elif backend_cls == FlashAttnMLASparseFA4Backend:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or not backend_cls.supports_compute_capability(
+            device_capability
+        ):
+            pytest.skip("FlashAttnMLASparseFA4Backend requires SM 10.x capability")
+        from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+            _fa4_cute_mla_available,
+        )
+
+        reason = _fa4_cute_mla_available()
+        if reason is not None:
+            pytest.skip(reason)
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
@@ -1512,6 +1537,349 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         original_valid = result_only[row][result_only[row] >= 0].sort().values
         torch.testing.assert_close(compact_valid, original_valid, rtol=0, atol=0)
         assert torch.all(result[row, num_valid:] == -1)
+
+
+def _fa4_stub_impl(**fields):
+    """Skip constructor dependencies while retaining the implementation methods."""
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+    )
+
+    stub = object.__new__(FlashAttnMLASparseFA4Impl)
+    stub.__dict__.update(fields)
+    return stub
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FA4 sparse MLA gather kernel requires SM 10.x",
+)
+def test_fa4_sparse_passes_topk_valid_length(monkeypatch):
+    """The backend must always hand FA4 the per-row top-k length.
+
+    It is what stops every row from walking the full top-k width, and it is
+    part of FA4's compile key, so it may not be passed only sometimes.
+    """
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+    )
+
+    device = torch.device(DEVICE_TYPE)
+    block_size, num_blocks, num_heads, topk = 64, 4, 128, 128
+    kv_lora_rank, rope_dim = 512, 64
+    num_tokens = 3
+
+    kv_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        kv_lora_rank + rope_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    topk_indices = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
+    expected_counts = [5, 0, 1]
+    topk_indices[0, :5] = torch.arange(5, dtype=torch.int32, device=device)
+    topk_indices[2, 0] = 3
+
+    captured = {}
+
+    def fake_flash_attn_varlen_func(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(
+            num_tokens, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        )
+
+    monkeypatch.setattr(
+        fa4_sparse, "flash_attn_varlen_func", fake_flash_attn_varlen_func
+    )
+
+    stub_metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            1, num_blocks
+        ),
+        block_size=block_size,
+        num_decode_tokens=num_tokens,
+    )
+    stub_impl = _fa4_stub_impl(
+        topk_indices_buffer=topk_indices,
+        kv_lora_rank=kv_lora_rank,
+        scale=1.0,
+        max_varlen_tokens=num_tokens,
+    )
+    q = (
+        torch.zeros(
+            num_tokens, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        ),
+        torch.zeros(
+            num_tokens, num_heads, rope_dim, dtype=torch.bfloat16, device=device
+        ),
+    )
+
+    with torch.inference_mode():
+        FlashAttnMLASparseFA4Impl.forward_mqa(
+            stub_impl, q, kv_cache, stub_metadata, None
+        )
+
+    valid_length = captured["gather_kv_valid_length"]
+    assert valid_length.tolist() == expected_counts
+    assert valid_length.shape == captured["gather_kv_indices"].shape[:-1]
+    assert valid_length.dtype == torch.int32
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FA4 sparse MLA gather kernel requires SM 10.x",
+)
+def test_fa4_sparse_valid_length_block_boundaries():
+    """Per-row top-k lengths that straddle the kernel's 128-wide index block.
+
+    The sweep above runs at index_topk=128 with fewer than 128 valid entries, so
+    every row walks exactly one block and the early exit never truncates. These
+    counts make it walk 1..16 blocks and land on both sides of each boundary,
+    which is where an off-by-one in the round-up would drop real entries.
+    """
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+        _fa4_cute_mla_available,
+    )
+
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    block_size, num_blocks, num_heads, topk = 64, 64, 128, 2048
+    kv_lora_rank, rope_dim = 512, 64
+    counts = [0, 1, 127, 128, 129, 255, 256, 257, 1023, 1024, 1025, 2048]
+    num_tokens = len(counts)
+    num_rows = num_blocks * block_size
+
+    kv_cache = (
+        torch.rand(
+            num_blocks,
+            block_size,
+            kv_lora_rank + rope_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        - 0.5
+    )
+    # Valid entries are a prefix and the padding is -1: the layout the indexer
+    # produces and the only one the per-row length is defined for.
+    topk_indices = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
+    for tok, count in enumerate(counts):
+        if count:
+            topk_indices[tok, :count] = torch.randperm(num_rows, device=device)[
+                :count
+            ].to(torch.int32)
+
+    ql_nope = (
+        torch.rand(
+            num_tokens, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        )
+        - 0.5
+    )
+    q_pe = (
+        torch.rand(num_tokens, num_heads, rope_dim, dtype=torch.bfloat16, device=device)
+        - 0.5
+    )
+    scale = (kv_lora_rank + rope_dim) ** -0.5
+
+    stub_metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            1, num_blocks
+        ),
+        block_size=block_size,
+        num_decode_tokens=num_tokens,
+    )
+    stub_impl = _fa4_stub_impl(
+        topk_indices_buffer=topk_indices,
+        kv_lora_rank=kv_lora_rank,
+        scale=scale,
+        max_varlen_tokens=num_tokens,
+    )
+
+    with torch.inference_mode():
+        out, lse = FlashAttnMLASparseFA4Impl.forward_mqa(
+            stub_impl, (ql_nope, q_pe), kv_cache, stub_metadata, None
+        )
+
+    assert lse is None
+
+    kv_flat = kv_cache.view(-1, kv_lora_rank + rope_dim).float()
+    q_full = torch.cat([ql_nope, q_pe], dim=-1).float()
+    for tok, count in enumerate(counts):
+        if count == 0:
+            # The kernel's sentinel masking produces this zero row, not any
+            # post-masking in the backend.
+            assert (out[tok] == 0).all()
+            continue
+        keys = kv_flat[topk_indices[tok, :count].long()]
+        probs = torch.softmax(q_full[tok] @ keys.T * scale, dim=-1)
+        torch.testing.assert_close(
+            out[tok].float(),
+            probs @ keys[:, :kv_lora_rank],
+            rtol=0.01,
+            atol=0.01,
+            msg=lambda m, count=count: f"top-k length {count}: {m}",
+        )
+
+
+def _run_fa4_route(monkeypatch, num_tokens, num_decode_tokens):
+    """Drive FA4's forward_mqa with both kernels replaced by recorders.
+
+    Token ``i`` gets ``i + 1`` valid top-k entries, so the per-row lengths each
+    kernel receives identify exactly which rows it was handed.
+    """
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+    )
+
+    device = torch.device("cpu")
+    block_size, blocks_per_req, num_heads, topk = 64, 4, 16, 128
+    kv_lora_rank, rope_dim = 512, 64
+    num_reqs = 1
+    num_blocks = num_reqs * blocks_per_req
+
+    kv_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        kv_lora_rank + rope_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    topk_indices = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
+    for tok in range(num_tokens):
+        topk_indices[tok, : tok + 1] = torch.arange(
+            tok + 1, dtype=torch.int32, device=device
+        )
+
+    fa4_calls: list[dict] = []
+    trtllm_calls: list[dict] = []
+
+    def fake_fa4(**kwargs):
+        fa4_calls.append(kwargs)
+        rows = kwargs["q"].shape[0]
+        return torch.ones(
+            rows, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        )
+
+    def fake_trtllm(**kwargs):
+        trtllm_calls.append(kwargs)
+        rows = kwargs["query"].shape[0]
+        return torch.full(
+            (rows, 1, num_heads, kv_lora_rank),
+            2.0,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+
+    monkeypatch.setattr(
+        fa4_sparse,
+        "triton_convert_req_index_to_global_index",
+        lambda *args, **kwargs: (
+            topk_indices,
+            torch.arange(1, num_tokens + 1, dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(fa4_sparse, "flash_attn_varlen_func", fake_fa4)
+    fake_flashinfer_decode = ModuleType("flashinfer.decode")
+    monkeypatch.setattr(
+        fake_flashinfer_decode,
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fake_trtllm,
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "flashinfer.decode", fake_flashinfer_decode)
+
+    stub_metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            num_reqs, blocks_per_req
+        ),
+        block_size=block_size,
+        num_decode_tokens=num_decode_tokens,
+        topk_tokens=topk // 2,  # index_kpool can widen the buffer beyond metadata.
+    )
+    stub_impl = _fa4_stub_impl(
+        topk_indices_buffer=topk_indices,
+        kv_lora_rank=kv_lora_rank,
+        num_heads=num_heads,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=rope_dim,
+        scale=1.0,
+        max_varlen_tokens=num_tokens,
+        _workspace_buffer=torch.zeros(1, dtype=torch.int8, device=device),
+    )
+    q = (
+        torch.zeros(
+            num_tokens, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        ),
+        torch.zeros(
+            num_tokens, num_heads, rope_dim, dtype=torch.bfloat16, device=device
+        ),
+    )
+
+    with torch.inference_mode():
+        out, lse = FlashAttnMLASparseFA4Impl.forward_mqa(
+            stub_impl, q, kv_cache, stub_metadata, None
+        )
+    assert lse is None
+    return out, fa4_calls, trtllm_calls
+
+
+@pytest.mark.parametrize("num_decode_tokens", [7, 0, 3])
+def test_fa4_sparse_routes_whole_batches(monkeypatch, num_decode_tokens):
+    """A uniform decode batch -- a multi-token spec-decode request included --
+    goes to FA4 whole, and a batch with any prefill row goes to FlashInfer's
+    kernel whole."""
+    num_tokens = 7
+    out, fa4_calls, trtllm_calls = _run_fa4_route(
+        monkeypatch, num_tokens, num_decode_tokens
+    )
+
+    expected_lengths = list(range(1, num_tokens + 1))
+    if num_decode_tokens == num_tokens:
+        (fa4,) = fa4_calls
+        assert trtllm_calls == []
+        assert fa4["q"].shape[0] == num_tokens
+        assert fa4["gather_kv_valid_length"].tolist() == expected_lengths
+        # Every token is its own one-row FA4 sequence, spec-decode rows included.
+        assert fa4["max_seqlen_q"] == 1
+        assert fa4["cu_seqlens_q"].tolist() == list(range(num_tokens + 1))
+        assert (out == 1.0).all()
+    else:
+        (trtllm,) = trtllm_calls
+        assert fa4_calls == []
+        assert trtllm["query"].shape[0] == num_tokens
+        assert trtllm["seq_lens"].tolist() == expected_lengths
+        assert trtllm["block_tables"].shape[0] == num_tokens
+        assert trtllm["max_seq_len"] == 128
+        assert trtllm["sparse_mla_top_k"] == 128
+        assert (out == 2.0).all()
+
+    assert out.shape == (num_tokens, 16, 512)
+
+
+def test_fa4_sparse_requires_flashinfer(monkeypatch):
+    """FlashInfer serves the prefill batches, so it is a hard dependency."""
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: False)
+    reason = FlashAttnMLASparseFA4Backend.supports_combination(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=64,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=True,
+        use_mm_prefix=False,
+        device_capability=current_platform.get_device_capability(),
+    )
+    assert reason is not None and "FlashInfer" in reason
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
