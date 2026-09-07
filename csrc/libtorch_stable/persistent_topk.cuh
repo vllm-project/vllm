@@ -1285,6 +1285,11 @@ struct FilteredTopKTraits<float> {
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
+// 128 KB: the size of the two candidate buffers this path used to carry. Those
+// buffers are gone, and the shared memory now caches the row for
+// det_select_row, so the useful size is a function of the row width and the
+// device -- not a constant. Kept as the minimum request so the request never
+// shrinks below what the old code asked for.
 constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
     sizeof(int) * 2 * FILTERED_TOPK_SMEM_INPUT_SIZE;  // 128KB
 
@@ -1302,7 +1307,8 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               IdType* __restrict__ output,
                               const IdType* __restrict__ lengths,
                               uint32_t num_rows, uint32_t top_k,
-                              uint32_t max_len, uint32_t max_seq_len) {
+                              uint32_t max_len, uint32_t max_seq_len,
+                              uint32_t smem_bytes) {
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
 
   const uint32_t bid = blockIdx.x;
@@ -1342,7 +1348,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   vllm::persistent::det_select_row<static_cast<int>(MAX_K),
                                    static_cast<int>(BLOCK_SIZE)>(
       reinterpret_cast<const float*>(score), length,
-      reinterpret_cast<int32_t*>(dst), _smem_reg, FILTERED_TOPK_SMEM_DYNAMIC);
+      reinterpret_cast<int32_t*>(dst), _smem_reg, smem_bytes);
 }
 
 // Helper to compute GCD for VEC_SIZE selection
@@ -1372,13 +1378,32 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         uint32_t num_rows, uint32_t top_k_val,
                                         uint32_t max_len, uint32_t max_seq_len,
                                         cudaStream_t stream = 0) {
-  constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
   constexpr int MAX_VEC = 16 / sizeof(DType);
+
+  // det_select_row re-reads the row from GLOBAL memory on each of its four
+  // radix passes unless the row fits in shared memory. The old fixed 128 KB
+  // request caches rows up to ~32K keys; every device that reaches this path
+  // offers more (A100 163 KiB, H100/H200 227 KiB), and asking for it moves the
+  // cutoff to ~41K / ~57K. Ask for what the widest row needs, capped by the
+  // device, floored at the historical request.
+  int device = 0;
+  FLASHINFER_CUDA_CALL(cudaGetDevice(&device));
+  static constexpr int kMaxDevices = 32;
+  static int cached_optin[kMaxDevices] = {};  // 0 = not yet queried
+  int device_optin = (device >= 0 && device < kMaxDevices) ? cached_optin[device] : 0;
+  if (device_optin == 0) {
+    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(
+        &device_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    if (device >= 0 && device < kMaxDevices) cached_optin[device] = device_optin;
+  }
+  const uint32_t row_width = max_len < max_seq_len ? max_len : max_seq_len;
+  size_t want = vllm::persistent::det_select_row_bytes<
+      static_cast<int>(MAX_K), static_cast<int>(FILTERED_TOPK_BLOCK_THREADS)>(
+      row_width);
+  if (want < FILTERED_TOPK_SMEM_DYNAMIC) want = FILTERED_TOPK_SMEM_DYNAMIC;
 
   dim3 grid(num_rows);
   dim3 block(FILTERED_TOPK_BLOCK_THREADS);
-  void* args[] = {&input,     &output_indices, &lengths,    &num_rows,
-                  &top_k_val, &max_len,        &max_seq_len};
 
   const int vec_size = ComputeFilteredTopKVecSize<DType>(max_len);
 
@@ -1386,6 +1411,14 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
   if (vec_size == VS) {                                                       \
     auto kernel =                                                             \
         FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K, (VS != MAX_VEC)>; \
+    cudaFuncAttributes fa{};                                                  \
+    FLASHINFER_CUDA_CALL(cudaFuncGetAttributes(&fa, kernel));                 \
+    size_t cap = static_cast<size_t>(device_optin) > fa.sharedSizeBytes       \
+                     ? static_cast<size_t>(device_optin) - fa.sharedSizeBytes \
+                     : 0;                                                     \
+    uint32_t smem_size = static_cast<uint32_t>(want < cap ? want : cap);      \
+    void* args[] = {&input,     &output_indices, &lengths,    &num_rows,      \
+                    &top_k_val, &max_len,        &max_seq_len, &smem_size};   \
     FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                                \
         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));     \
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, grid, block, args,   \
