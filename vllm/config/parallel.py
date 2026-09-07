@@ -508,6 +508,21 @@ class ParallelConfig:
                 "supported on CUDA. Use 'allgather_reducescatter' on ROCm."
             )
 
+        if (
+            self.all2all_backend == "flashinfer_nvlink_one_sided"
+            and not self.enable_expert_parallel
+        ):
+            # Without expert parallel, MoE layers take the naive
+            # AllGather+ReduceScatter path, which dispatches through the
+            # generic all2all manager interface. The one-sided manager only
+            # implements its own FlashInfer path, so it would raise there.
+            logger.debug(
+                "Expert parallel is disabled; using the "
+                "'allgather_reducescatter' all2all backend instead of "
+                "'flashinfer_nvlink_one_sided'."
+            )
+            self.all2all_backend = "allgather_reducescatter"
+
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "

@@ -776,19 +776,39 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 
 @pytest.mark.parametrize(
-    ("is_cuda", "expected_backend"),
+    ("is_cuda", "enable_expert_parallel", "expected_backend"),
     [
-        (True, "flashinfer_nvlink_one_sided"),
-        (False, "allgather_reducescatter"),
+        (True, True, "flashinfer_nvlink_one_sided"),
+        # Without expert parallel the naive AllGather+ReduceScatter path
+        # dispatches through the generic manager interface, which the
+        # one-sided manager does not implement.
+        (True, False, "allgather_reducescatter"),
+        (False, True, "allgather_reducescatter"),
+        (False, False, "allgather_reducescatter"),
     ],
 )
-def test_all2all_backend_default_is_platform_dependent(
-    monkeypatch, is_cuda, expected_backend
+def test_all2all_backend_default_needs_cuda_and_expert_parallel(
+    monkeypatch, is_cuda, enable_expert_parallel, expected_backend
 ):
-    """Non-CUDA platforms must keep the portable default (#53952); CUDA opts
-    into the faster one-sided backend."""
+    """Only CUDA with expert parallel gets the one-sided backend; everything
+    else keeps the portable default (#53952)."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
-    assert ParallelConfig().all2all_backend == expected_backend
+    config = ParallelConfig(enable_expert_parallel=enable_expert_parallel)
+    assert config.all2all_backend == expected_backend
+
+
+def test_all2all_backend_explicit_one_sided_downgrades_without_expert_parallel(
+    monkeypatch,
+):
+    """Without expert parallel, DP deployments reach naive_dp_ep.prepare(),
+    which dispatches through the generic manager interface, so an explicit
+    request must be downgraded rather than crash there."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    config = ParallelConfig(
+        all2all_backend="flashinfer_nvlink_one_sided",
+        enable_expert_parallel=False,
+    )
+    assert config.all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
