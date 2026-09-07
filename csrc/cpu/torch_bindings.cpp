@@ -4,8 +4,9 @@
 
 #include <torch/library.h>
 
-// Note: overwrite the external definition for sharing same name between
-// libraries use different ISAs.
+// ISA-specific libs (_C_AVX512, _C_AVX2) must register under the same _C
+// namespace so torch.ops._C.* dispatch works uniformly from Python.
+#undef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME _C
 
 void release_dnnl_matmul_handler(int64_t handler);
@@ -255,6 +256,11 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const at::Tensor& cu_seqlens);
 
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
+
+void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p);
+void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k);
+void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
+                            const torch::Tensor& p);
 
 namespace cpu_utils {
 void eagle_prepare_inputs_padded_kernel_impl(
@@ -675,6 +681,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  ops.def("cpu_topp_sampling(Tensor! logits, Tensor p) -> ()");
+  ops.impl("cpu_topp_sampling", torch::kCPU, &cpu_topp_sampling);
+
+  ops.def("cpu_topk_sampling(Tensor! logits, Tensor k) -> ()");
+  ops.impl("cpu_topk_sampling", torch::kCPU, &cpu_topk_sampling);
+
+  ops.def("cpu_topk_topp_sampling(Tensor! logits, Tensor k, Tensor p) -> ()");
+  ops.impl("cpu_topk_topp_sampling", torch::kCPU, &cpu_topk_topp_sampling);
 
   // Speculative decoding kernels
   ops.def(
