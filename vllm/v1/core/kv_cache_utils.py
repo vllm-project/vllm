@@ -15,6 +15,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
@@ -1177,18 +1178,27 @@ def _fit_specs_under_page(
     so that block-aligned prefix-cache lookups can still line up across the
     groups; a non-dividing block would silently make every lookup miss.
     Returns None if no such block exists."""
+    if not current_platform.is_cuda():
+        # A padded page needs the attention kernel to run the fitted block as
+        # is (no kernel block splitting); backends with a fixed set of kernel
+        # block sizes (e.g. ROCm AITER) cannot, so keep the previous behaviour.
+        return None
     fitted: dict[str, KVCacheSpec] = {}
     for name, spec in specs.items():
         assert isinstance(spec, AttentionSpec)
         per_token = spec.unpadded_page_size_bytes // spec.block_size
-        max_block = (page // per_token) // _ATTN_BLOCK_GRANULARITY
-        max_block *= _ATTN_BLOCK_GRANULARITY
+        # Multiples of the spec's own block (itself kernel-granular), so the
+        # layer's sliding-window / alignment semantics are only ever coarsened.
+        step = spec.block_size
+        if step % _ATTN_BLOCK_GRANULARITY:
+            step = _ATTN_BLOCK_GRANULARITY
+        max_block = (page // per_token) // step * step
         block_size = 0
-        for candidate in range(max_block, 0, -_ATTN_BLOCK_GRANULARITY):
+        for candidate in range(max_block, 0, -step):
             if ref_block_size % candidate == 0:
                 block_size = candidate
                 break
-        if block_size < _ATTN_BLOCK_GRANULARITY:
+        if block_size < spec.block_size or block_size < _ATTN_BLOCK_GRANULARITY:
             return None
         if block_size != spec.block_size:
             logger.info_once(
@@ -1233,6 +1243,10 @@ def _get_kv_cache_groups_glm5_next(
         if name not in attn_specs and not isinstance(spec, (MambaSpec, KpoolTailSpec))
     }
     if not mamba_specs or not attn_specs:
+        return None
+    if extra_specs and vllm_config.speculative_config is None:
+        # Only a drafter brings foreign attention layers next to GLM-5.3;
+        # anything else keeps the previous behaviour (generic grouping).
         return None
     if not all(
         isinstance(spec, AttentionSpec) and not isinstance(spec, MLAAttentionSpec)
@@ -1300,6 +1314,14 @@ def _get_kv_cache_groups_glm5_next(
         if extra_uniform is None:
             return None
         extra_group = KVCacheGroupSpec(list(fitted), extra_uniform)
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.use_eagle_block_drop():
+            # This is the drafter's group: flag it so the coordinator applies
+            # the EAGLE last-block drop here only. Left unflagged, the
+            # coordinator flags every group, which widens the Mamba groups'
+            # lookup window past what align-mode checkpointing produces and
+            # silently drops prefix-cache reuse to zero.
+            extra_group.is_eagle_group = True
     return (
         [KVCacheGroupSpec(list(attn_specs), uniform_spec)]
         + ([tail_group] if tail_group is not None else [])
@@ -2461,7 +2483,7 @@ def _max_memory_usage_bytes_from_groups(
         ) = glm5_layout
         uniform_spec = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
         total_blocks = uniform_spec.max_memory_usage_pages(vllm_config)
-        if extra_group is not None:
+        if extra_group is not None and extra_group.layer_names:
             total_blocks += cast(
                 UniformTypeKVCacheSpecs, extra_group.kv_cache_spec
             ).max_memory_usage_pages(vllm_config)

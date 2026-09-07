@@ -2447,7 +2447,7 @@ def _glm5_like_kv_cache_spec_with_gqa_drafter(
     kv_cache_spec = _glm5_like_kv_cache_spec_with_tail()
     for i in range(num_draft_layers):
         kv_cache_spec[f"draft.layers.{i}.attn"] = SlidingWindowSpec(
-            block_size=1024,
+            block_size=16,
             num_kv_heads=4,
             head_size=128,
             dtype=torch.bfloat16,
@@ -2464,11 +2464,18 @@ def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
     kv_cache_spec = _glm5_like_kv_cache_spec_with_gqa_drafter()
+
+    # Without a speculative config the foreign layers are not a drafter and
+    # the GLM-5.3 path declines (previous behaviour).
+    assert (
+        kv_cache_utils._get_kv_cache_groups_glm5_next(vllm_config, kv_cache_spec)
+        is None
+    )
+    vllm_config.speculative_config = SimpleNamespace(use_eagle_block_drop=lambda: True)
     mla_spec = cast(MLAAttentionSpec, kv_cache_spec["layers.3.attn"])
     mla_page = mla_spec.page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
     draft_spec = cast(SlidingWindowSpec, kv_cache_spec["draft.layers.0.attn"])
-    assert draft_spec.page_size_bytes > mla_page
 
     groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
     draft_group = next(
@@ -2487,9 +2494,17 @@ def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
         SlidingWindowSpec,
         draft_group.kv_cache_spec.kv_cache_specs["draft.layers.0.attn"],
     )
+    # At the shared block size the drafter's page would exceed the MLA page;
+    # the fit enlarges the block only up to what fits under it.
+    assert (
+        draft_spec.page_size_bytes // draft_spec.block_size * mla_spec.block_size
+        > mla_page
+    )
     per_token = draft_spec.page_size_bytes // draft_spec.block_size
-    assert fitted.block_size % 16 == 0
+    assert fitted.block_size % draft_spec.block_size == 0
     assert mla_spec.block_size % fitted.block_size == 0
+    # The drafter's group is the one the coordinator treats as the draft group.
+    assert draft_group.is_eagle_group
     assert fitted.block_size * per_token <= mla_page
     assert fitted.page_size_padded == mla_page
     assert fitted.page_size_bytes == mla_page
