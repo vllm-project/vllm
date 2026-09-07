@@ -39,6 +39,8 @@ from vllm.distributed import (
     init_distributed_environment,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -52,6 +54,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_peer_is_owner,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -113,6 +116,30 @@ def export_entries(
     return entries, aliases
 
 
+def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
+    """Load the daemon's model, composed from the configured loader.
+
+    Runs the quantization check after model creation but before the slow
+    weight load, so an unsupported method fails fast. Online quantization
+    always fails the check, so load_model's finalize step for it is
+    unnecessary here.
+    """
+    model_config = vllm_config.model_config
+    load_config = vllm_config.load_config
+    loader = get_model_loader(load_config)
+    device_config = vllm_config.device_config
+    target_device = torch.device(
+        device_config.device if load_config.device is None else load_config.device
+    )
+    with set_default_torch_dtype(model_config.dtype):
+        with target_device:
+            model = loader.create_model(vllm_config, model_config)
+        check_ipc_quant_support(model)
+        loader.load_weights(model, model_config)
+        process_weights_after_loading(model, model_config, target_device)
+    return model.eval()
+
+
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
 
@@ -139,8 +166,6 @@ class WeightCacheDaemon:
         )
 
     def load_model(self) -> None:
-        from vllm.model_executor.model_loader import get_model
-
         tp_size = self.cache_config.tp_size
         torch.accelerator.set_device_index(self.tp_rank)
         init_distributed_environment(
@@ -152,7 +177,7 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
-            self.model = get_model(vllm_config=self.vllm_config)
+            self.model = get_daemon_model(self.vllm_config)
         self._export_entries()
         logger.info(
             "Weight cache daemon rank %d cached %d tensors",
@@ -190,9 +215,6 @@ class WeightCacheDaemon:
         server.listen()
         logger.info(
             "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
-        )
-        print(
-            f"Weight cache daemon rank {self.tp_rank} ready: serving on {socket_path}"
         )
         if ready_callback is not None:
             ready_callback()
@@ -342,9 +364,6 @@ def main() -> None:
             "The weight cache daemon itself must load from disk; use the "
             "default --load-format"
         )
-    # Checked before loading anything: an unsupported quantization method would
-    # otherwise only surface in the engine, after a full load.
-    check_ipc_quant_support(vllm_config.model_config, where="daemon")
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
