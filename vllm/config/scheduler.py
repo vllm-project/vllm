@@ -76,7 +76,13 @@ class SchedulerConfig:
     at the same time, or None for no limit. When the limit is reached, new
     requests are rejected with HTTP 503 so the client can retry on another
     instance. This bounds vLLM's otherwise unbounded request queue and is
-    primarily a coarse capacity valve."""
+    primarily a coarse capacity valve.
+
+    Unlike ``max_num_seqs``, which applies per data-parallel rank, this
+    limit is enforced in the API server process and counts in-flight
+    requests across all DP ranks it routes to. Size it as roughly
+    ``data_parallel_size * max_num_seqs`` plus the desired queue depth if
+    it should not bind before per-rank admission does."""
 
     max_num_queued_tokens: int | None = Field(default=None, ge=0)
     """Maximum total prompt tokens of requests currently in the prefill
@@ -88,6 +94,11 @@ class SchedulerConfig:
     prefill backlog would exceed the latency target.  In a disaggregated
     prefill-decode setup this maps directly to the prefill pool's
     capacity.
+
+    Like ``max_num_queued_reqs``, this limit is enforced in the API
+    server process and covers the prefill backlog across all DP ranks it
+    routes to, so ``prefill_throughput`` in the formula above is the
+    aggregate throughput of the deployment.
 
     Note: the count is conservative.  A partially prefilled request
     still contributes its full ``prompt_len`` until it transitions out
