@@ -42,7 +42,11 @@ pytestmark = pytest.mark.skipif(
         (128, True, 1),
         (256, False, 1),
         (512, True, 2),  # Gemma 4 global head — two (qk=512, vo=256) passes
-        (512, False, 2),  # the split is dtype-independent
+        # bf16 / FP8 keep head_dim_vo=512: FA2 handles it, and splitting would
+        # cost them the decode CUDA-graph path for no reason. The split is
+        # introduced for NVFP4 and must not leak into other dtypes.
+        (512, False, 1),
+        (768, False, 1),
     ],
 )
 def test_vo_split_factor(head_size, is_nvfp4, expected, monkeypatch):
@@ -195,9 +199,14 @@ def _sm12x_nvfp4_cg_support(head_size, monkeypatch, cache_dtype="nvfp4"):
     monkeypatch.setattr(
         fi.current_platform, "is_device_capability_family", lambda fam: fam == 120
     )
+    # Non-NVFP4 dtypes fall through to the trtllm-support probe; pin it so the
+    # path is deterministic without a GPU.
+    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda **kw: False)
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        model_config=SimpleNamespace(get_num_attention_heads=lambda _pc: 8),
+        attention_config=SimpleNamespace(use_non_causal=False),
     )
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.uint8
@@ -227,17 +236,14 @@ def test_cudagraph_support_uniform_head_nvfp4_sm12x_keeps_decode(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("cache_dtype", ["nvfp4", "auto", "fp8"])
-def test_cudagraph_support_vo_split_never_regardless_of_kv_dtype(
-    cache_dtype, monkeypatch
-):
-    # _vo_split_factor() keys on head_size alone, so a 512-wide head takes the
-    # two-pass VO split for bf16 and FP8 KV as well as NVFP4 -- and with it the
-    # reorder_batch_threshold = 0 routing that makes a captured decode graph
-    # replay stale plan data. The refusal must not be conditioned on the dtype.
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8"])
+def test_cudagraph_support_wide_head_non_nvfp4_keeps_capture(cache_dtype, monkeypatch):
+    # Only NVFP4 takes the VO split, so a 512-wide head on bf16 / FP8 KV still
+    # uses the real decode wrapper and must keep its capture support. Refusing
+    # here would be exactly the side effect the NVFP4 work should not impose.
     from vllm.v1.attention.backend import AttentionCGSupport
 
     assert (
         _sm12x_nvfp4_cg_support(512, monkeypatch, cache_dtype=cache_dtype)
-        == AttentionCGSupport.NEVER
+        != AttentionCGSupport.NEVER
     )

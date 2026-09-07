@@ -125,15 +125,24 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
     the 512-wide V cache (and, for NVFP4, of its per-16-element scale
     factors).
 
-    The split is dtype-independent (the guard counts only accumulator
-    fragments). For NVFP4 it additionally requires linear (non-swizzled)
-    V scale factors, which the sm12x cache writer stores, so the V data
-    and scale views slice cleanly along the head dim; the trtllm-gen
-    4-token V-scale swizzle does not commute with head-dim slicing.
+    The split exists for the NVFP4 path only. The HEAD_DIM_VO <= 256
+    conditions in FlashInfer's FA2 prefill are the 1-byte-KV shared-smem
+    specialisation, which excludes FP4 outright; 16-bit and FP8 KV reach
+    the CTA_TILE_Q=32 configuration that handles HEAD_DIM_VO >= 512
+    directly. Splitting those would be a behaviour change for models this
+    path was never meant to touch: it forces
+    ``reorder_batch_threshold = 0``, routing decode through the
+    per-step-planned prefill wrapper and giving up the decode CUDA-graph
+    path. So bf16 and FP8 keep ``head_dim_vo = head_size``.
+
+    NVFP4 additionally requires linear (non-swizzled) V scale factors,
+    which the sm12x cache writer stores, so the V data and scale views
+    slice cleanly along the head dim; the trtllm-gen 4-token V-scale
+    swizzle does not commute with head-dim slicing.
     """
-    if head_size <= 256:
+    if head_size <= 256 or not is_fa2_nvfp4:
         return 1
-    if is_fa2_nvfp4 and not _vllm_nvfp4_kv_vosplit_requested():
+    if not _vllm_nvfp4_kv_vosplit_requested():
         raise ValueError(
             f"NVFP4 KV with head_size={head_size} on the SM12x FA2 path "
             "needs the two-pass VO split (the FA2 kernel caps HEAD_DIM_VO "
@@ -141,7 +150,7 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
             "these layers on a different KV dtype."
         )
     split = -(-head_size // 256)  # ceil(head_size / 256)
-    if head_size % split != 0 or (is_fa2_nvfp4 and (head_size // split) % 16 != 0):
+    if head_size % split != 0 or (head_size // split) % 16 != 0:
         raise ValueError(
             "The VO split needs head_size divisible into <=256-wide chunks"
             f"{' of whole 16-element scale blocks' if is_fa2_nvfp4 else ''}; "
@@ -1234,24 +1243,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # dedicated-XQA API rejects the packed fp4 cache), and that path is not
         # wired for uniform multi-token capture. Advertise single-token only
         # rather than promising UNIFORM_BATCH the decode route cannot honour.
-        # head_size > 256 (Gemma 4 global layers) runs the two-pass VO split:
-        # the builder sets reorder_batch_threshold = 0, so every request,
-        # decode included, goes through the per-step-planned prefill wrapper,
-        # which has no cudagraph buffers. A FULL decode graph captured around
-        # it replays stale plan data and produces garbage. _vo_split_factor()
-        # keys on head_size alone, so this holds for bf16 and FP8 KV as well as
-        # NVFP4 -- refuse capture whenever the split is in play and let the
-        # runner fall back to PIECEWISE.
-        for spec in iter_layer_specs(kv_cache_spec):
-            if isinstance(spec, AttentionSpec) and spec.head_size > 256:
-                return AttentionCGSupport.NEVER
-
         cache_config = vllm_config.cache_config
         if (
             is_sm12x
             and cache_config is not None
             and cache_config.cache_dtype.startswith("nvfp4")
         ):
+            # head_size > 256 (Gemma 4 global layers) runs the two-pass VO
+            # split, and only NVFP4 does -- see _vo_split_factor(). The builder
+            # then sets reorder_batch_threshold = 0, so every request, decode
+            # included, goes through the per-step-planned prefill wrapper,
+            # which has no cudagraph buffers: a FULL decode graph captured
+            # around it replays stale plan data and produces garbage. Refuse
+            # capture for these groups and let the runner fall back to
+            # PIECEWISE.
+            for spec in iter_layer_specs(kv_cache_spec):
+                if isinstance(spec, AttentionSpec) and spec.head_size > 256:
+                    return AttentionCGSupport.NEVER
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
