@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -681,6 +682,44 @@ async def test_register_worker_raises_after_max_attempts(monkeypatch):
         await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
 
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_failure_propagates_to_caller(monkeypatch):
+    """A terminal registration failure must surface via the Future rather than
+    leaving register_kv_caches blocked on its ready event."""
+
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "0.1")
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "1")
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    async def failing_listener(ready_event):
+        raise RuntimeError("simulated terminal registration failure")
+
+    try:
+        ready_event = threading.Event()
+        fut = asyncio.run_coroutine_threadsafe(failing_listener(ready_event), loop)
+
+        deadline = time.monotonic() + 10.0
+        raised = None
+        while not ready_event.wait(timeout=0.1):
+            if fut.done():
+                try:
+                    fut.result()
+                except RuntimeError as e:
+                    raised = e
+                break
+            assert time.monotonic() < deadline, "caller blocked past its deadline"
+
+        assert raised is not None
+        assert "simulated terminal registration failure" in str(raised)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
 
 
 @pytest.mark.parametrize(

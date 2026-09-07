@@ -1105,6 +1105,8 @@ class MooncakeConnectorWorker:
                 return
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 # Rank 0 may be busy registering a large memory segment.
+                if attempt == max_attempts:
+                    break
                 logger.warning(
                     "Bootstrap registration attempt %d/%d for %s failed with %s: %s. "
                     "Retrying in %.1fs.",
@@ -1749,9 +1751,12 @@ class MooncakeConnectorWorker:
         if self.is_kv_consumer:
             return
 
-        ready_timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS * (
-            envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT + 10.0
-        )
+        # httpx applies the timeout to each phase (connect, read, write, pool)
+        # rather than to the whole request, so budget for all four.
+        register_timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
+        max_attempts = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS
+        backoff_total = sum(min(2.0**i, 10.0) for i in range(max_attempts - 1))
+        ready_timeout = max_attempts * 4 * register_timeout + backoff_total + 30.0
         ready_event = threading.Event()
         fut = asyncio.run_coroutine_threadsafe(
             self._mooncake_sender_listener(ready_event), self.sender_loop
