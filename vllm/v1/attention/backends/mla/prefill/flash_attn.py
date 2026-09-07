@@ -327,7 +327,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 qk_rope_head_dim=64,
                 v_head_dim=128,
             ),
-            # GLM-5.x NoPE layout: qk_head_dim 256 + 0 and v_head_dim 256 run
+            # GLM5Next NoPE layout: qk_head_dim 256 + 0 and v_head_dim 256 run
             # the same kernels as the (192, 64, 256) DeepSeek-V3.2 layout.
             MLADimensions(
                 qk_nope_head_dim=256,
