@@ -2843,7 +2843,11 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
+        from vllm.platforms import current_platform
+
+        # CPU runs the model runner's kernels through torch fallbacks instead
+        # of launching them, so Triton is not required there.
+        if not HAS_TRITON and not current_platform.is_cpu():
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
