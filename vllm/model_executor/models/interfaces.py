@@ -1274,6 +1274,18 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        """Return the stateful post-processor class used for realtime deltas.
+
+        A fresh instance is created for every audio segment, since each
+        segment is a separate generation that may repeat the structured
+        header.
+        """
+        return StreamingTranscriptionPostProcessor
+
+    @classmethod
     async def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
