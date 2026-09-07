@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from tests.reasoning.utils import as_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
@@ -338,7 +339,7 @@ def _content_types(tag_json: str) -> set[str]:
 def parser(tokenizer: MockCohereTokenizer) -> CohereCommand4ReasoningParser:
     """Parser configured with a supported Cohere architecture."""
     return CohereCommand4ReasoningParser(
-        tokenizer,
+        as_tokenizer(tokenizer),
         model_config=_model_config("Cohere2ForCausalLM"),
     )
 
@@ -348,7 +349,7 @@ def parser_no_model_config(
     tokenizer: MockCohereTokenizer,
 ) -> CohereCommand4ReasoningParser:
     """Parser with no ``model_config`` (cannot resolve architecture)."""
-    return CohereCommand4ReasoningParser(tokenizer, model_config=None)
+    return CohereCommand4ReasoningParser(as_tokenizer(tokenizer), model_config=None)
 
 
 @pytest.fixture(scope="module")
@@ -357,7 +358,7 @@ def parser_unsupported_arch(
 ) -> CohereCommand4ReasoningParser:
     """Parser configured with an architecture that has no structural tag style."""
     return CohereCommand4ReasoningParser(
-        tokenizer,
+        as_tokenizer(tokenizer),
         model_config=_model_config("LlamaForCausalLM"),
     )
 
@@ -522,7 +523,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
 
     def test_json_userdict_mapping_unwrapped(self) -> None:
         inner = {"type": "object", "properties": {"u": {"type": "number"}}}
-        so = StructuredOutputsParams(json=UserDict(inner))
+        so = StructuredOutputsParams(json=UserDict(inner))  # type: ignore[arg-type]
         assert _schema_dict_from_structured_outputs(so) == inner
 
     @pytest.mark.parametrize(

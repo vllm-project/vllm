@@ -4,7 +4,7 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.reasoning.utils import run_reasoning_extraction
+from tests.reasoning.utils import as_tokenizer, run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "olmo3"
@@ -153,7 +153,7 @@ def test_reasoning(
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser: ReasoningParser = parser_cls(tokenizer)
+    parser: ReasoningParser = parser_cls(as_tokenizer(tokenizer))
 
     reasoning, content = run_reasoning_extraction(
         reasoning_parser=parser, model_output=model_output, streaming=streaming

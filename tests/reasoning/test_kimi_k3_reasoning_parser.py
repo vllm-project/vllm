@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from transformers import PreTrainedTokenizerBase
 
+from tests.reasoning.utils import as_tokenizer
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -21,11 +23,17 @@ THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
 
 
-class DummyTokenizer:
+class DummyTokenizer(PreTrainedTokenizerBase):
+    def __init__(self) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return 1
+
     def get_vocab(self) -> dict[str, int]:
         return {}
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+    def encode(self, text: str, *args, **kwargs) -> list[int]:
         if text == THINK_OPEN:
             return [1, 2, 3]
         if text == THINK_CLOSE:
@@ -81,7 +89,7 @@ def test_extract_reasoning_with_generation_prefix_consumed():
 
 
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
-    parser = ReasoningOnlyParser(DummyTokenizer())
+    parser = ReasoningOnlyParser(as_tokenizer(DummyTokenizer()))
     request = ChatCompletionRequest(model="test-model", messages=[])
 
     reasoning, content, tool_calls = parser.parse(
@@ -202,7 +210,8 @@ def test_thinking_disabled_streams_content():
 
 def test_delegating_parser_thinking_false_streams_response_content():
     parser = ReasoningOnlyParser(
-        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+        as_tokenizer(DummyTokenizer()),
+        chat_template_kwargs={"thinking": False},
     )
     request = ChatCompletionRequest(
         model="test-model",
