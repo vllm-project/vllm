@@ -34,7 +34,7 @@ def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
 
     outputs = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         backend=NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        layer=layer,
+        layer=layer,  # type: ignore[arg-type]
         w13=w13,
         w13_scale=w13_scale,
         w13_scale_2=weight_scale,
