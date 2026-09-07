@@ -224,9 +224,10 @@ class KVCacheSpec:
         """
         Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
         """
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All layers in the same KV cache group must be the same."
-        )
+        if not all(spec == specs[0] for spec in specs[1:]):
+            raise AssertionError(
+                "All layers in the same KV cache group must be the same."
+            )
         return copy.deepcopy(specs[0])
 
     def is_uniform_with_collection(
@@ -558,7 +559,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     storage_block_size: int | None = None
     """Token width used to view storage when it differs from the kernel block."""
-    # Marks draft groups that flatten a non-causal query block into decode rows.
+    # Group capability enabled when any member flattens a non-causal query block
+    # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -586,11 +588,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             "quantization method, tokens per state, model version, and storage "
             "block size."
         )
-        non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
-        assert len(non_causal_mtd_set) == 1, (
-            "All attention layers in the same KV cache group must agree on "
-            "non_causal_multi_token_decode."
-        )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -604,7 +601,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             storage_block_size=storage_block_size_set.pop(),
-            non_causal_multi_token_decode=non_causal_mtd_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -891,6 +890,7 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
     num_prefill_checkpoint_blocks: int = 0
+    prefill_checkpoint_alignment: int | None = None
     num_heads: int = 1
     tokens_per_state: int = -1
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
@@ -951,10 +951,47 @@ class MambaSpec(KVCacheSpec):
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
+            and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
+
+
+def get_mamba_prefill_checkpoint_position(
+    num_tokens: int,
+    hash_block_size: int,
+    drop_eagle_block: bool,
+) -> int:
+    """Return the reusable Mamba checkpoint boundary for a prefill."""
+    checkpoint_position = (num_tokens - 1) // hash_block_size * hash_block_size
+    if drop_eagle_block:
+        checkpoint_position -= hash_block_size
+    return max(checkpoint_position, 0)
+
+
+def is_mamba_prefill_checkpoint_valid(
+    query_start: int,
+    query_end: int,
+    checkpoint_position: int,
+    hash_block_size: int,
+    mamba_block_size: int,
+    checkpoint_alignment: int | None,
+) -> bool:
+    """Whether a backend can export the checkpoint in this query."""
+    if checkpoint_alignment is None:
+        return False
+    assert checkpoint_alignment > 0
+
+    initial_state_col = (query_start - 1) // mamba_block_size
+    checkpoint_col = cdiv(query_end, mamba_block_size) - 2
+    return (
+        query_start % hash_block_size == 0
+        and checkpoint_col > initial_state_col
+        and query_start + hash_block_size <= checkpoint_position
+        and query_start < checkpoint_position < query_end
+        and (checkpoint_position - query_start) % checkpoint_alignment == 0
+    )
 
 
 @dataclass(frozen=True)
