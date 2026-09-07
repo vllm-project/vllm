@@ -131,8 +131,8 @@ def check_cgroup_memory_available(
         )
         return
 
-    raise RuntimeError(
-        f"Insufficient cgroup memory for {allocation_name}: "
+    logger.warning(
+        f"Low cgroup memory headroom for {allocation_name}: "
         f"{required_bytes / mib:.0f} MiB required, "
         f"{cgroup_available / mib:.0f} MiB available under the "
         f"{cgroup_limit / mib:.0f} MiB limit "
