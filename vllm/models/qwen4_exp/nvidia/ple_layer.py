@@ -211,6 +211,9 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
 class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     """Quantization interface shared by resident and pinned PLE tables."""
 
+    # PLE post-load processing only validates scales in their current storage.
+    requires_device_loading: bool = False
+
     @staticmethod
     def from_quant_config(
         quant_config: QuantizationConfig | None,
@@ -483,8 +486,6 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
             layer_name=layer_name,
         )
-        # The generic quant post-load path would stage the complete table on GPU.
-        del self.quant_method
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._block_d = triton.next_power_of_2(self.embedding_dim)
         self._prefetch_stream = torch.cuda.Stream(device=self._uva_weight.device)

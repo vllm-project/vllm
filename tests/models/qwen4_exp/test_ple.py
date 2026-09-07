@@ -298,6 +298,57 @@ def test_ple_fp8_embedding_rejects_missing_global_scale(monkeypatch) -> None:
         layer.quant_method.process_weights_after_loading(layer)
 
 
+@pytest.mark.parametrize("requires_device_loading", [False, True])
+@pytest.mark.parametrize("load_scale", [False, True])
+def test_pinned_ple_post_load_validates_scale_without_staging(
+    monkeypatch: pytest.MonkeyPatch, requires_device_loading: bool, load_scale: bool
+) -> None:
+    """Validate scales through the loader while honoring the staging policy."""
+    from contextlib import nullcontext
+
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+    from vllm.model_executor.model_loader import utils as loader_utils
+
+    source = _make_fp8_embedding_layer(monkeypatch, load_scale=load_scale)
+    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.weight = source.weight
+    embedding.weight_scale = source.weight_scale
+    embedding.embedding_method = source.embedding_method
+    embedding.quant_method = source.embedding_method
+    embedding.tp_rank = source.tp_rank
+    embedding.tp_size = source.tp_size
+    assert QuantizeMethodBase.requires_device_loading
+    assert not embedding.quant_method.requires_device_loading
+    if requires_device_loading:
+        embedding.quant_method.requires_device_loading = True
+    model = nn.Module()
+    model.embedding = embedding
+    weight_ptr = embedding.weight.data_ptr()
+    staged_modules = []
+
+    def track_staging(module, target_device):
+        staged_modules.append(module)
+        return nullcontext()
+
+    monkeypatch.setattr(loader_utils, "device_loading_context", track_staging)
+    monkeypatch.setattr(loader_utils, "maybe_retie_word_embeddings", lambda *args: None)
+    monkeypatch.setattr(
+        loader_utils, "release_device_memory_under_pressure", lambda *args: None
+    )
+    config = SimpleNamespace(quantization="fp8")
+    if load_scale:
+        loader_utils.process_weights_after_loading(model, config, torch.device("cuda"))
+    else:
+        with pytest.raises(ValueError, match="missing its global scale"):
+            loader_utils.process_weights_after_loading(
+                model, config, torch.device("cuda")
+            )
+    assert embedding.weight.device.type == "cpu"
+    assert embedding.weight.data_ptr() == weight_ptr
+    assert staged_modules == ([embedding] if requires_device_loading else [])
+
+
 def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
@@ -593,13 +644,16 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     output = embedding._lookup(input_ids)
     if fp8_checkpoint:
         embedding.weight_scale.data.fill_(0.25)
+    weight_ptr = embedding.weight.data_ptr()
+    embedding.quant_method.process_weights_after_loading(embedding)
+    assert embedding.weight.data_ptr() == weight_ptr
     dequantized = embedding.dequantize(output, torch.bfloat16)
 
     assert copied == 4
     assert embedding.weight.device.type == "cpu"
     assert embedding.weight.is_pinned()
     assert embedding.embedding_method is embedding_method
-    assert not hasattr(embedding, "quant_method")
+    assert embedding.quant_method is embedding_method
     assert embedding._uva_weight.device.type == "cuda"
     assert embedding.supports_prefetch
     assert embedding._prefetch_stream.device == embedding._uva_weight.device
