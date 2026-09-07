@@ -190,9 +190,9 @@ def test_tombstoned_read_fails_the_request(monkeypatch):
     assert s.ensure_cache_available(req, 0) is False
     assert s._cache.get("h1") is None
     assert "h1" not in s._in_flight
-    assert s.get_unrecoverable_requests() == {"r1"}
+    assert s.take_unavailable_requests() == {"r1"}
     # Drained by the read, so the scheduler cannot abort it twice.
-    assert s.get_unrecoverable_requests() == set()
+    assert s.take_unavailable_requests() == set()
     s.shutdown()
 
 
@@ -240,7 +240,7 @@ def test_size_mismatch_fails_the_request(monkeypatch):
     assert s.ensure_cache_available(req, 0) is False
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
-    assert s.get_unrecoverable_requests() == {"r1"}
+    assert s.take_unavailable_requests() == {"r1"}
     s.shutdown()
 
 
@@ -267,10 +267,10 @@ def test_unusable_announcement_fails_the_request(monkeypatch, announced):
         # Not a mapping at all: indistinguishable from "never remote", so the
         # encoder runs locally rather than the request failing.
         assert admitted is True
-        assert s.get_unrecoverable_requests() == set()
+        assert s.take_unavailable_requests() == set()
     else:
         assert admitted is False
-        assert s.get_unrecoverable_requests() == {"r1"}
+        assert s.take_unavailable_requests() == {"r1"}
     assert "h1" not in s._in_flight
     s.shutdown()
 
@@ -294,14 +294,14 @@ def test_deferral_budget_is_per_request(monkeypatch):
     assert s.ensure_cache_available(old, 0) is False
     now[0] += sched_mod._ADMIT_DEFER_TIMEOUT_S - 1
     assert s.ensure_cache_available(new, 0) is False
-    assert s.get_unrecoverable_requests() == set()
+    assert s.take_unavailable_requests() == set()
 
     now[0] += 2
     # `old` is now past its budget; `new` is not.
     assert s.ensure_cache_available(new, 0) is False
-    assert s.get_unrecoverable_requests() == set()
+    assert s.take_unavailable_requests() == set()
     assert s.ensure_cache_available(old, 0) is False
-    assert s.get_unrecoverable_requests() == {"old"}
+    assert s.take_unavailable_requests() == {"old"}
     s.shutdown()
 
 
@@ -349,7 +349,7 @@ def test_orphan_not_ready_entry_defers_no_realloc(monkeypatch):
     assert calls == []
     assert s._cache.get("h1") is entry
     assert not entry.ready
-    assert s.get_unrecoverable_requests() == set()
+    assert s.take_unavailable_requests() == set()
     s.shutdown()
 
 
@@ -371,14 +371,14 @@ def test_full_pool_defers_then_fails_the_request(monkeypatch):
     monkeypatch.setattr(_time, "monotonic", lambda: t0)
     assert s.ensure_cache_available(req, 0) is False
     assert "h1" not in s._in_flight
-    assert s.get_unrecoverable_requests() == set()
+    assert s.take_unavailable_requests() == set()
 
     # Still full once the budget has elapsed: fail rather than defer again.
     monkeypatch.setattr(
         _time, "monotonic", lambda: t0 + sched_mod._ADMIT_DEFER_TIMEOUT_S + 1
     )
     assert s.ensure_cache_available(req, 0) is False
-    assert s.get_unrecoverable_requests() == {"r1"}
+    assert s.take_unavailable_requests() == {"r1"}
     s.shutdown()
 
 

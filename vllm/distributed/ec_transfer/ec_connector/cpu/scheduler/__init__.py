@@ -8,6 +8,7 @@ for the ECCPUConnector.
 """
 
 from collections import deque
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -122,7 +123,7 @@ class ECCPUScheduler:
         # as the encoding lands.
         self._deferred_since: dict[tuple[str, str], float] = {}
         # Requests needing a remote encoding that will not arrive. Drained by
-        # get_unrecoverable_requests(); the scheduler aborts them.
+        # take_unavailable_requests(); the scheduler aborts them.
         self._unrecoverable: set[str] = set()
         # Announcing an encoding publishes an address a consumer will use on a
         # later step, by which time the orchestrator has rewritten the media
@@ -238,7 +239,10 @@ class ECCPUScheduler:
         return entry is not None and entry.ready
 
     def ensure_cache_available(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         if not self._nixl_enabled:
             return True  # CPU offload never blocks.
@@ -377,7 +381,7 @@ class ECCPUScheduler:
             why,
         )
 
-    def get_unrecoverable_requests(self) -> set[str]:
+    def take_unavailable_requests(self) -> set[str]:
         if not self._unrecoverable:
             return set()
         failed = self._unrecoverable
