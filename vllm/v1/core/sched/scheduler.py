@@ -2108,10 +2108,7 @@ class Scheduler(SchedulerInterface):
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
-                if (
-                    finish_reason is not None
-                    and self.enable_return_routed_experts
-                ):
+                if finish_reason is not None and self.enable_return_routed_experts:
                     prompt_start = (
                         request.sampling_params.routed_experts_prompt_start
                         if request.sampling_params is not None
