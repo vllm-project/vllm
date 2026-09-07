@@ -46,6 +46,17 @@ Now you can send requests to the proxy server through port 8000.
     - For headless instances, must be the same as the master instance
     - Each instance needs a unique port on its host; using the same port number across different hosts is fine
 
+- `VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT`: Per-request timeout (in seconds) for a prefiller worker registering itself with the bootstrap server. (Optional)
+    - Default: 30.0
+    - Only relevant for prefiller instances
+    - Global rank 0 hosts the bootstrap server in the same process that registers its Mooncake memory segment, so a large `MOONCAKE_GLOBAL_SEGMENT_SIZE` can delay responses for several seconds during startup
+    - Raise this if worker registration warnings appear during startup on hosts with very large host-memory segments
+
+- `VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS`: Number of registration attempts before a worker treats bootstrap registration as fatal. (Optional)
+    - Default: 10
+    - Attempts use exponential backoff capped at 10 seconds, and connection errors and timeouts are both retried
+    - Once the attempts are exhausted, the worker raises instead of blocking, so startup fails cleanly rather than hanging
+
 - `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
     - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
     - Set to 0 to use the DMA-BUF path, which does not need that module. Required on hosts where `nvidia-peermem` is not loaded, such as GB200

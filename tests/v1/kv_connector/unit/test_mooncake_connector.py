@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import torch
 import zmq.asyncio
@@ -504,9 +505,16 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert data["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
         assert data["0"]["worker_addr"]["0"]["1"] == "tcp://2.2.2.2:2222"
 
-    # Test failure: re-registering the same worker
+    # Re-registering the identical payload is idempotent.
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base_url}/register", json=payload1)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    # Test failure: same ranks, conflicting address
+    payload1_conflict = dict(payload1, addr="tcp://9.9.9.9:9999")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{base_url}/register", json=payload1_conflict)
         assert response.status_code == 400
         assert "is already registered" in response.text
 
@@ -541,6 +549,81 @@ def _make_bootstrap_vllm_config(
             data_parallel_master_ip="data-parallel-master",
         )
     )
+
+
+def _make_register_worker_stub():
+    return SimpleNamespace(
+        vllm_config=_make_bootstrap_vllm_config(),
+        hostname="127.0.0.1",
+        side_channel_port=1234,
+        engine_id="eng-1",
+        dp_rank=0,
+        tp_rank=0,
+        pp_rank=0,
+    )
+
+
+class _FlakyAsyncClient:
+    """httpx.AsyncClient stub that read-times-out `failures` times first."""
+
+    def __init__(self, failures: int, calls: list[int], **kwargs):
+        self.failures = failures
+        self.calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, json=None):
+        self.calls.append(1)
+        if len(self.calls) <= self.failures:
+            raise httpx.ReadTimeout("simulated slow bootstrap server")
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        return response
+
+
+@pytest.mark.asyncio
+async def test_register_worker_retries_on_read_timeout(monkeypatch):
+    """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
+
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "5")
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: _FlakyAsyncClient(2, calls),
+    )
+
+    worker = _make_register_worker_stub()
+    await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_register_worker_raises_after_max_attempts(monkeypatch):
+    """Terminal registration failure must raise, not loop forever."""
+
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "3")
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: _FlakyAsyncClient(99, calls),
+    )
+
+    worker = _make_register_worker_stub()
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize(

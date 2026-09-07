@@ -256,6 +256,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT: float = 30.0
+    VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS: int = 10
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1700,6 +1702,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # via `ec_transfer_params.peer_port` on the producer's response.
     "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+    ),
+    # Per-request timeout (seconds) when a prefiller worker registers with
+    # the Mooncake bootstrap server.
+    "VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT": lambda: float(
+        os.getenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "30.0")
+    ),
+    # Attempts before bootstrap registration is treated as fatal.
+    "VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS": lambda: int(
+        os.getenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "10")
     ),
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(

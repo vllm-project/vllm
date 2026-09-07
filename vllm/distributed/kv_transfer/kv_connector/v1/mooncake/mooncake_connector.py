@@ -1093,24 +1093,42 @@ class MooncakeConnectorWorker:
             pp_rank=self.pp_rank,
             addr=worker_addr,
         )
-        while True:
+        timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
+        max_attempts = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS
+        backoff = 1.0
+        for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
-                break
-            except httpx.ConnectError:
-                # Bootstrap server not ready, wait for a while and retry.
-                await asyncio.sleep(1)
+                return
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                # Rank 0 may be busy registering a large memory segment.
+                logger.warning(
+                    "Bootstrap registration attempt %d/%d for %s failed with %s: %s. "
+                    "Retrying in %.1fs.",
+                    attempt,
+                    max_attempts,
+                    payload,
+                    type(e).__name__,
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
             except Exception as e:
                 err_msg = (
                     e.response.text if isinstance(e, httpx.HTTPStatusError) else str(e)
                 )
-                logger.error(
+                logger.exception(
                     "Error registering %s with bootstrap server: %s", payload, err_msg
                 )
-                raise e
+                raise
+        raise RuntimeError(
+            f"Failed to register {payload} with the Mooncake bootstrap server at "
+            f"{url} after {max_attempts} attempts."
+        )
 
     async def _mooncake_sender_listener(self, ready_event: threading.Event):
         """
@@ -1731,11 +1749,26 @@ class MooncakeConnectorWorker:
         if self.is_kv_consumer:
             return
 
+        ready_timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS * (
+            envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT + 10.0
+        )
         ready_event = threading.Event()
-        asyncio.run_coroutine_threadsafe(
+        fut = asyncio.run_coroutine_threadsafe(
             self._mooncake_sender_listener(ready_event), self.sender_loop
         )
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+        deadline = time.monotonic() + ready_timeout
+        while not ready_event.wait(timeout=1.0):
+            if fut.done():
+                fut.result()
+                raise RuntimeError(
+                    "Mooncake sender listener exited before becoming ready."
+                )
+            if time.monotonic() > deadline:
+                fut.cancel()
+                raise RuntimeError(
+                    "Mooncake sender listener did not become ready within "
+                    f"{ready_timeout:.0f}s."
+                )
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
