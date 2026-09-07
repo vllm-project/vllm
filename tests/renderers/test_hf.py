@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import jinja2
 import pytest
 
 from vllm.config import ModelConfig
@@ -12,6 +13,7 @@ from vllm.renderers.hf import (
     _convert_developer_to_system,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
+    _template_error_reason,
     _try_extract_ast,
     resolve_chat_template,
     resolve_chat_template_content_format,
@@ -897,9 +899,11 @@ class TestApplyChatTemplateEffortTolerant:
                 tokenize=False,
                 reasoning_effort="high",
             )
-        # The template's own message tells the client which values are supported.
-        assert "Supported types are xhigh (default), medium, and low" in str(
-            excinfo.value
+        # The client sees exactly the template's own reason, with no wrapper
+        # noise. It tells them which values are supported.
+        assert str(excinfo.value) == (
+            "Unexpected reasoning effort high. Supported types are xhigh "
+            "(default), medium, and low."
         )
 
     def test_supported_effort_accepted(self, model_config, tokenizer):
@@ -925,6 +929,20 @@ class TestApplyChatTemplateEffortTolerant:
                 tokenize=False,
                 reasoning_effort="high",
             )
+
+
+def test_template_error_reason_prefers_template_error():
+    # Upstream wrappers must not hide the template's own reason from clients.
+    reason = jinja2.TemplateError("Unexpected reasoning effort high")
+    wrapper = ValueError(f"An error occurred while rendering the template: {reason}")
+    wrapper.__cause__ = reason
+    assert _template_error_reason(wrapper) == str(reason)
+    assert _template_error_reason(reason) == str(reason)
+
+
+def test_template_error_reason_falls_back_to_message():
+    err = ValueError("plain failure")
+    assert _template_error_reason(err) == "plain failure"
 
 
 class TestConsolidateSystemMessages:
