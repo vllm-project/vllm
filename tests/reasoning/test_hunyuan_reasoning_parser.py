@@ -4,7 +4,7 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.reasoning.utils import run_reasoning_extraction
+from tests.reasoning.utils import as_tokenizer, run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "hunyuan_a13b"
@@ -157,7 +157,7 @@ def test_reasoning(
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        tokenizer
+        as_tokenizer(tokenizer)
     )
 
     reasoning, content = run_reasoning_extraction(

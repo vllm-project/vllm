@@ -317,7 +317,7 @@ def test_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content = parser.extract_content_ids(output_ids)
+        content_ids = parser.extract_content_ids(output_ids)
         # Fixed expected token ids for specific test cases
         test_id = (
             request.node.callspec.id if hasattr(request.node, "callspec") else None
@@ -332,7 +332,7 @@ def test_reasoning(
             expected_content_ids = step3p5_tokenizer.convert_tokens_to_ids(
                 step3p5_tokenizer.tokenize(param_dict["content"])
             )
-            assert content == expected_content_ids
+            assert content_ids == expected_content_ids
     else:
-        content = parser.extract_content_ids(output_ids)
-        assert content == []
+        content_ids = parser.extract_content_ids(output_ids)
+        assert content_ids == []
