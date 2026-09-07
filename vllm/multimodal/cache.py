@@ -795,6 +795,18 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         )
 
     @override
+    def get_and_update_features(
+        self, mm_features: list["MultiModalFeatureSpec"]
+    ) -> list["MultiModalFeatureSpec"]:
+        # strip_covered_mm_data preserves address items, so None here represents
+        # a stripped uncached payload and has no SHM reference to acknowledge.
+        features_with_data = [
+            feature for feature in mm_features if feature.data is not None
+        ]
+        super().get_and_update_features(features_with_data)
+        return mm_features
+
+    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalKwargsItem | None,

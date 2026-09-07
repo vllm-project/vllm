@@ -79,14 +79,18 @@ class KVConnectorModelRunnerMixin:
         assert scheduler_output.kv_connector_metadata is not None
         kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
-        # Background KV cache transfers happen here.
-        # These transfers are designed to be async and the requests
-        # involved may be disjoint from the running requests.
-        # Do this here to save a collective_rpc.
-        kv_connector.start_load_kv(get_forward_context())
+        # Start this step's KV loads, ordered after any in-flight KV block
+        # zeroing. Sync loads feed this step's forward so must precede it;
+        # otherwise start (async) loads after the forward launch, keeping
+        # their host-side submission cost off the critical path.
+        start_after_forward = not scheduler_output.has_sync_kv_loads
+        if not start_after_forward:
+            kv_connector.start_load_kv(get_forward_context())
         try:
             yield output
         finally:
+            if start_after_forward:
+                kv_connector.start_load_kv(get_forward_context())
             if wait_for_save and not defer_finalize:
                 kv_connector.wait_for_save()
 

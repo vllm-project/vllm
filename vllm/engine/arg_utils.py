@@ -367,6 +367,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "max_num_queued_tokens",
             }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
@@ -507,6 +508,7 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
+    dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
@@ -544,6 +546,8 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_queued_reqs: int | None = None
+    max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
@@ -707,6 +711,7 @@ class EngineArgs:
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
+    enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -928,6 +933,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
+        )
+        model_group.add_argument(
+            "--enable-nccl-comm-suspend",
+            **model_kwargs["enable_nccl_comm_suspend"],
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
@@ -1181,6 +1190,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
+        )
+        parallel_group.add_argument(
+            "--dp-sync-interval",
+            **parallel_kwargs["dp_sync_interval"],
         )
         parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
@@ -1555,6 +1568,13 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
+            "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
+        )
+        scheduler_group.add_argument(
+            "--max-num-queued-tokens",
+            **scheduler_kwargs["max_num_queued_tokens"],
+        )
+        scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
@@ -1813,6 +1833,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
+            enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
@@ -2105,21 +2126,19 @@ class EngineArgs:
             )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
-            world_size = (
-                self.data_parallel_size
-                * self.pipeline_parallel_size
-                * self.tensor_parallel_size
-            )
             world_size_within_dp = (
-                self.pipeline_parallel_size * self.tensor_parallel_size
+                self.pipeline_parallel_size
+                * self.tensor_parallel_size
+                * self.prefill_context_parallel_size
             )
+            world_size = self.data_parallel_size * world_size_within_dp
             if world_size % self.nnodes != 0:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
                     f"`--nnodes {self.nnodes}` must evenly divide the total "
                     f"world size ({world_size}). Adjust `--nnodes`, "
-                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
-                    "`--tensor-parallel-size`."
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, "
+                    "`--tensor-parallel-size`, or `--prefill-context-parallel-size`."
                 )
             if not 0 <= self.node_rank < self.nnodes:
                 raise ValueError(
@@ -2293,6 +2312,7 @@ class EngineArgs:
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
+            dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
@@ -2348,6 +2368,8 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_queued_reqs=self.max_num_queued_reqs,
+            max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
@@ -2415,6 +2437,19 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
