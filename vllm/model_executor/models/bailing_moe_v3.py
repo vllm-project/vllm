@@ -115,23 +115,10 @@ def bailing_v3_kda_attention(
     )
 
 
-def bailing_v3_kda_attention_fake(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="bailing_v3_kda_attention",
     op_func=bailing_v3_kda_attention,
     mutates_args=["core_attn_out"],
-    fake_impl=bailing_v3_kda_attention_fake,
 )
 
 

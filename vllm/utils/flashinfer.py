@@ -708,19 +708,11 @@ if has_flashinfer():
 
         concat_mla_k(k, k_nope, k_pe)
 
-    def _flashinfer_concat_mla_k_fake(
-        k: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
-    ) -> None:
-        return
-
     # Register flashinfer concat_mla_k custom op
     direct_register_custom_op(
         op_name="flashinfer_concat_mla_k",
         op_func=_flashinfer_concat_mla_k,
         mutates_args=["k"],  # k tensor is modified in-place
-        fake_impl=_flashinfer_concat_mla_k_fake,
     )
 
     @torch.library.custom_op(

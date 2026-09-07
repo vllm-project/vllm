@@ -139,20 +139,8 @@ def _fp8_gemm_nt_op(
     )
 
 
-def _fp8_gemm_nt_op_fake(
-    q_input: torch.Tensor,
-    input_scale: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    output: torch.Tensor,
-    use_deep_gemm_e8m0: bool,
-) -> None:
-    return None
-
-
 direct_register_custom_op(
     "fp8_gemm_nt_op",
     _fp8_gemm_nt_op,
     mutates_args=["output"],
-    fake_impl=_fp8_gemm_nt_op_fake,
 )

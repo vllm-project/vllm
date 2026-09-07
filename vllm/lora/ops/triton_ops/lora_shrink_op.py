@@ -265,28 +265,11 @@ def _lora_shrink(
     return
 
 
-def _lora_shrink_fake(
-    inputs: torch.Tensor,
-    lora_a_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    scaling: float,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="lora_shrink",
         op_func=_lora_shrink,
         mutates_args=["output_tensor"],
-        fake_impl=_lora_shrink_fake,
     )
     lora_shrink = torch.ops.vllm.lora_shrink
 

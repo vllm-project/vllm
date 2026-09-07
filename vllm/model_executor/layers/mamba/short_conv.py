@@ -373,17 +373,8 @@ def short_conv(
         self.forward_native(hidden_states=hidden_states, output=output)
 
 
-def short_conv_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="short_conv",
     op_func=short_conv,
     mutates_args=["output"],
-    fake_impl=short_conv_fake,
 )

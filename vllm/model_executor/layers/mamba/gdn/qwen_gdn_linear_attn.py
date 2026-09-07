@@ -1949,23 +1949,10 @@ def qwen_gdn_attention_core(
         )
 
 
-def gdn_attention_core_fake(
-    qkv_or_qkvz: torch.Tensor,
-    b_or_ba: torch.Tensor,
-    a_or_z_out: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: LayerNameType,
-    use_aiter: bool = False,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
-    fake_impl=gdn_attention_core_fake,
 )
 
 
@@ -1985,20 +1972,10 @@ def qwen_gdn_attention_core_fused_norm_packed(
     )
 
 
-def gdn_attention_core_fused_norm_packed_fake(
-    mixed_qkvz: torch.Tensor,
-    ba: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
-    fake_impl=gdn_attention_core_fused_norm_packed_fake,
 )
 
 

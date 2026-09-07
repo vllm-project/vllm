@@ -1271,17 +1271,8 @@ def mamba_mixer2(
     self.conv_ssm_forward(projected_states=projected_states, output=output)
 
 
-def mamba_mixer2_fake(
-    projected_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="mamba_mixer2",
     op_func=mamba_mixer2,
     mutates_args=["output"],
-    fake_impl=mamba_mixer2_fake,
 )

@@ -445,23 +445,10 @@ def qwen4_exp_qsa_with_output(
     )
 
 
-def qwen4_exp_qsa_with_output_fake(
-    hidden_states: torch.Tensor,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    del hidden_states, positions, query, key, value, output, layer_name
-
-
 direct_register_custom_op(
     op_name="qwen4_exp_qsa_with_output",
     op_func=qwen4_exp_qsa_with_output,
     mutates_args=["output"],
-    fake_impl=qwen4_exp_qsa_with_output_fake,
 )
 
 
