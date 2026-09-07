@@ -180,7 +180,7 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 f"Failed to compile regex for lm-format-enforcer: {err}"
             ) from err
         return
-    elif so_params.json:
+    elif so_params.json is not None:
         if isinstance(so_params.json, str):
             try:
                 spec_dict = json.loads(so_params.json)

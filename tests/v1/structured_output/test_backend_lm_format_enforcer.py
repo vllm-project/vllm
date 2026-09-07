@@ -75,6 +75,22 @@ def test_json_schema_validation_still_rejects_invalid_json():
         validate_structured_output_request_lm_format_enforcer(params)
 
 
+def test_empty_json_object_schema_is_compiled():
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json={}))
+    with patch(
+        "vllm.v1.structured_output.backend_lm_format_enforcer.lmformatenforcer.JsonSchemaParser",
+        return_value=object(),
+    ) as mock_parser:
+        validate_structured_output_request_lm_format_enforcer(params)
+    mock_parser.assert_called_once_with({})
+
+
+def test_empty_json_string_is_rejected():
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=""))
+    with pytest.raises(VLLMValidationError, match="Invalid JSON grammar"):
+        validate_structured_output_request_lm_format_enforcer(params)
+
+
 def test_compile_grammar_json_uses_timeout_wrapper():
     vllm_config = MagicMock(speculative_config=None)
     with (
