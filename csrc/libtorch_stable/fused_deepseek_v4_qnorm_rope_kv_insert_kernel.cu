@@ -48,6 +48,7 @@
   #include <hip/hip_fp8.h>
 #endif
 #include <cuda_runtime.h>
+#include <limits>
 #include <type_traits>
 
 #ifndef FINAL_MASK
@@ -1258,14 +1259,16 @@ void fused_deepseek_v4_kv_rope_quant_insert(
   STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
                   "kv must be contiguous CUDA");
   STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
-  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() && slot_mapping.dim() == 1 &&
+                      slot_mapping.is_contiguous() &&
                       slot_mapping.scalar_type() ==
                           torch::headeronly::ScalarType::Long,
-                  "slot_mapping must be int64 CUDA");
-  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                  "slot_mapping must be contiguous 1D int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() && position_ids.dim() == 1 &&
+                      position_ids.is_contiguous() &&
                       position_ids.scalar_type() ==
                           torch::headeronly::ScalarType::Long,
-                  "position_ids must be int64 CUDA");
+                  "position_ids must be contiguous 1D int64 CUDA");
   STD_TORCH_CHECK(cos_sin_cache.device().is_cuda(), "cos_sin_cache must be CUDA");
   STD_TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
   STD_TORCH_CHECK(k_cache.scalar_type() == torch::headeronly::ScalarType::Byte,
@@ -1276,17 +1279,31 @@ void fused_deepseek_v4_kv_rope_quant_insert(
                       torch::headeronly::ScalarType::Float,
                   "cos_sin_cache must be float32");
 
+  int32_t const kv_device = kv.get_device_index();
+  STD_TORCH_CHECK(k_cache.get_device_index() == kv_device,
+                  "k_cache must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(slot_mapping.get_device_index() == kv_device,
+                  "slot_mapping must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(position_ids.get_device_index() == kv_device,
+                  "position_ids must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(cos_sin_cache.get_device_index() == kv_device,
+                  "cos_sin_cache must be on the same CUDA device as kv");
+
   int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
   STD_TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_insert &&
                       static_cast<int>(position_ids.size(0)) ==
                           num_tokens_insert,
                   "kv/position_ids row counts must match slot_mapping");
+  STD_TORCH_CHECK(
+      cache_block_size > 0 &&
+          cache_block_size <=
+              static_cast<int64_t>(std::numeric_limits<int>::max()),
+      "cache_block_size must be a positive int");
   int const cache_block_size_i = static_cast<int>(cache_block_size);
   int const kv_block_stride = static_cast<int>(k_cache.stride(0));
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      kv.get_device_index());
-  const cudaStream_t stream = get_current_cuda_stream(kv.get_device_index());
+  const torch::stable::accelerator::DeviceGuard device_guard(kv_device);
+  const cudaStream_t stream = get_current_cuda_stream(kv_device);
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       kv.scalar_type(), "fused_deepseek_v4_kv_rope_quant_insert", [&] {
@@ -1311,12 +1328,14 @@ void fused_deepseek_v4_kv_norm_rope_quant_insert(
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(kv.device().is_cuda(), "kv must be CUDA");
   STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
-  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() && slot_mapping.dim() == 1 &&
+                      slot_mapping.is_contiguous() &&
                       slot_mapping.scalar_type() == ScalarType::Long,
-                  "slot_mapping must be int64 CUDA");
-  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                  "slot_mapping must be contiguous 1D int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() && position_ids.dim() == 1 &&
+                      position_ids.is_contiguous() &&
                       position_ids.scalar_type() == ScalarType::Long,
-                  "position_ids must be int64 CUDA");
+                  "position_ids must be contiguous 1D int64 CUDA");
   STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
                       cos_sin_cache.scalar_type() == ScalarType::Float &&
                       cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
@@ -1337,18 +1356,34 @@ void fused_deepseek_v4_kv_norm_rope_quant_insert(
                   "k_cache must be uint8");
   STD_TORCH_CHECK(k_cache.dim() == 2, "k_cache must be 2D [num_blocks, ...]");
 
+  int32_t const kv_device = kv.get_device_index();
+  STD_TORCH_CHECK(k_cache.get_device_index() == kv_device,
+                  "k_cache must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(slot_mapping.get_device_index() == kv_device,
+                  "slot_mapping must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(position_ids.get_device_index() == kv_device,
+                  "position_ids must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(cos_sin_cache.get_device_index() == kv_device,
+                  "cos_sin_cache must be on the same CUDA device as kv");
+  STD_TORCH_CHECK(norm_weight.get_device_index() == kv_device,
+                  "norm_weight must be on the same CUDA device as kv");
+
   int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
   STD_TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_insert &&
                       static_cast<int>(position_ids.size(0)) ==
                           num_tokens_insert,
                   "kv/position_ids rows must equal slot_mapping length");
+  STD_TORCH_CHECK(
+      cache_block_size > 0 &&
+          cache_block_size <=
+              static_cast<int64_t>(std::numeric_limits<int>::max()),
+      "cache_block_size must be a positive int");
   int const cache_block_size_i = static_cast<int>(cache_block_size);
   int const kv_block_stride = static_cast<int>(k_cache.stride(0));
   int64_t const kv_row_stride = kv.stride(0);
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      kv.get_device_index());
-  const cudaStream_t stream = get_current_cuda_stream(kv.get_device_index());
+  const torch::stable::accelerator::DeviceGuard device_guard(kv_device);
+  const cudaStream_t stream = get_current_cuda_stream(kv_device);
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       kv.scalar_type(), "fused_deepseek_v4_kv_norm_rope_quant_insert", [&] {
