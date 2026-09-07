@@ -142,6 +142,8 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
     """Fixed port for data parallel messaging, shared by all nodes."""
+    dp_sync_interval: int = Field(default=16, ge=1)
+    """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -1063,6 +1065,17 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
+            )
+
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
             )
 
         return self
