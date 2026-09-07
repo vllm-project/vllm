@@ -124,19 +124,18 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = Field(init=False)
+    max_num_encoder_input_tokens: int = Field(default=None, ge=1)  # type: ignore[assignment]
     """Multimodal encoder compute budget, only used in V1.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    If not set, defaults to `max_num_batched_tokens`. The effective budget
+    may be increased to fit the model's largest multimodal item."""
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
+    encoder_cache_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
     """Multimodal encoder cache size, only used in V1.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    If not set, defaults to `max_num_batched_tokens`. The effective cache size
+    may be increased to fit the model's largest multimodal item. Increasing
+    this value allows more encoder outputs to remain resident concurrently."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
@@ -281,8 +280,10 @@ class SchedulerConfig:
                 " prefix caching; disabling both."
             )
 
-        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
+        if self.max_num_encoder_input_tokens is None:
+            self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        if self.encoder_cache_size is None:
+            self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info_once(

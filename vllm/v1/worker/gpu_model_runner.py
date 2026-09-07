@@ -6549,6 +6549,11 @@ class GPUModelRunner(
                 mm_budget = self.mm_budget
                 assert mm_budget is not None
 
+                if mm_budget.encoder_cache_size > 0:
+                    self._reserve_encoder_cache_for_profile(
+                        mm_budget.encoder_cache_size
+                    )
+
                 if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
                     if not mm_budget.mm_max_toks_per_item:
                         # All modality limits are 0 — embedding-only mode.
@@ -6610,6 +6615,13 @@ class GPUModelRunner(
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+
+    def _reserve_encoder_cache_for_profile(self, cache_size: int) -> None:
+        self.encoder_cache["tmp_profile_reservation"] = torch.empty(
+            (cache_size, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
