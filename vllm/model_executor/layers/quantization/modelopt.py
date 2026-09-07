@@ -2489,14 +2489,6 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer) -> None:
         if is_weights_pre_processed():
-            # Tensors already carry the runtime (swizzled/padded) layout; only
-            # rebuild the kernel's non-tensor padding metadata.
-            if not getattr(self.kernel, "ipc_pre_processed_safe", False):
-                raise RuntimeError(
-                    "weight cache IPC for NVFP4 linear is not verified with "
-                    f"{type(self.kernel).__name__}"
-                )
-            self.kernel.process_weights_after_loading(layer)
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
