@@ -2456,7 +2456,7 @@ def _glm5_like_kv_cache_spec_with_gqa_drafter(
     return kv_cache_spec
 
 
-def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
+def test_get_kv_cache_config_glm5_carries_gqa_drafter_group(monkeypatch):
     """A GQA drafter next to GLM-5.3 gets its own group inside the GLM-5.3
     layout: block fitted under the MLA page, on a divisor of the model block
     (so block-aligned prefix-cache lookups still line up), page padded to the
@@ -2472,6 +2472,8 @@ def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
         is None
     )
     vllm_config.speculative_config = SimpleNamespace(use_eagle_block_drop=lambda: True)
+    # The padded-page fit is CUDA-only; the grouping logic itself is not.
+    monkeypatch.setattr(kv_cache_utils.current_platform, "is_cuda", lambda: True)
     mla_spec = cast(MLAAttentionSpec, kv_cache_spec["layers.3.attn"])
     mla_page = mla_spec.page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
