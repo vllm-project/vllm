@@ -352,9 +352,11 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        assert follow_up[0]["content"][0]["image_url"]["url"] == (
-            "data:image/jpeg;base64,QUFB"
-        )
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        image = content[0]
+        assert image["type"] == "image_url"
+        assert image["image_url"]["url"] == ("data:image/jpeg;base64,QUFB")
 
     def test_tool_result_with_multiple_images(self):
         request = self._make_tool_result_request(
@@ -384,7 +386,12 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        urls = [p["image_url"]["url"] for p in follow_up[0]["content"]]
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        urls = []
+        for part in content:
+            assert part["type"] == "image_url"
+            urls.append(part["image_url"]["url"])
         assert urls == [
             "data:image/png;base64,IMG1",
             "https://example.com/img2.jpg",
@@ -581,7 +588,8 @@ class TestThinkingBlockConversion:
         asst = asst_msgs[0]
 
         assert asst.get("reasoning") == "I need to call the calculator."
-        tool_calls = list(asst.get("tool_calls", []))
+        tool_calls = asst.get("tool_calls")
+        assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "calculator"
         # No text content alongside reasoning + tool_use.

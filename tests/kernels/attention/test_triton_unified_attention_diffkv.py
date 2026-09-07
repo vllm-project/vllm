@@ -100,6 +100,7 @@ def test_triton_unified_attn_diffkv_vs_fa(
     if not is_flash_attn_varlen_func_available() or fa_version not in (3, 4):
         pytest.skip(f"FA DiffKV needs FA3/FA4 (got version {fa_version}).")
 
+    assert fa_version is not None
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
     torch.set_default_device(DEVICE_TYPE)

@@ -139,7 +139,11 @@ def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> f
     token_ids = completion_output.token_ids
     logprobs = completion_output.logprobs
     assert logprobs is not None
-    return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
+    values: list[float] = []
+    for tok_id, lp in zip(token_ids, logprobs):
+        assert lp is not None
+        values.append(lp[tok_id].logprob)
+    return sum(values)
 
 
 def create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:

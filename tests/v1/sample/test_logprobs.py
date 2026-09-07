@@ -22,6 +22,7 @@ from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
+from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
@@ -141,7 +142,7 @@ def _repeat_logprob_config(
 def _run_and_validate(
     vllm_model: VllmRunner,
     test_prompts: list[str],
-    vllm_sampling_params: SamplingParams,
+    vllm_sampling_params: SamplingParams | list[SamplingParams],
     hf_logprobs: list[list[torch.Tensor]],
     hf_outputs: list[tuple[list[int], str]],
     logprob_prompt_logprob_list: BatchLogprobsSpecType,
@@ -159,11 +160,12 @@ def _run_and_validate(
         # Extract request-level (prompt)logprobs config
         num_top_logprobs, num_top_prompt_logprobs = logprob_prompt_logprob
 
+        assert vllm_result.prompt_token_ids is not None
         # Test whether sampled token output is consistent between vLLM and HF
         # vLLM prompt+completion should match HF output
         if temperature == 0.0:
             assert (
-                vllm_result.prompt_token_ids + vllm_result.outputs[0].token_ids
+                vllm_result.prompt_token_ids + list(vllm_result.outputs[0].token_ids)
                 == hf_output[0]
             )
         else:
@@ -187,7 +189,9 @@ def _run_and_validate(
 
                 # Confirm that the output token appears among the logprobs
                 assert token_id in logprobs
-                token_in_topk = logprobs[token_id].rank <= num_top_logprobs
+                rank = logprobs[token_id].rank
+                assert rank is not None
+                token_in_topk = rank <= num_top_logprobs
 
                 # If the output token is not included in the top K
                 # logprob, it can return 1 more data
@@ -203,8 +207,10 @@ def _run_and_validate(
 
             output_text = vllm_result.outputs[0].text
             output_string_from_most_likely_tokens_lst: list[str] = []
-            for top_logprobs in vllm_result.outputs[0].logprobs:
-                top_logprob = next(iter(top_logprobs.values()))
+            for output_logprobs in vllm_result.outputs[0].logprobs:
+                assert output_logprobs is not None
+                top_logprob = next(iter(output_logprobs.values()))
+                assert top_logprob.decoded_token is not None
                 output_string_from_most_likely_tokens_lst.append(
                     top_logprob.decoded_token
                 )
@@ -222,8 +228,9 @@ def _run_and_validate(
 
             # Compare vLLM sample logprobs to HF
             vllm_sample_logprobs = vllm_result.outputs[0].logprobs
-            for i, top_logprobs in enumerate(vllm_sample_logprobs):
-                for token_id, sample_logprob in top_logprobs.items():
+            for i, sample_logprobs in enumerate(vllm_sample_logprobs):
+                assert sample_logprobs is not None
+                for token_id, sample_logprob in sample_logprobs.items():
                     if temperature == 0.0 or i == 0:
                         logprob = sample_logprob.logprob
                         torch.testing.assert_close(
@@ -267,9 +274,9 @@ def _run_and_validate(
 
                 # Confirm that the prompt token appears among the logprobs
                 assert prompt_token_id in prompt_logprobs
-                token_in_topk = (
-                    prompt_logprobs[prompt_token_id].rank <= num_top_prompt_logprobs
-                )
+                prompt_rank = prompt_logprobs[prompt_token_id].rank
+                assert prompt_rank is not None
+                token_in_topk = prompt_rank <= num_top_prompt_logprobs
 
                 # If the prompt token is not included in the top K
                 # logprob, it can return 1 more data
@@ -290,9 +297,10 @@ def _run_and_validate(
             # 1:.
             vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
             for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
-                for token_id, logprob in vllm_prompt_logprob_dict.items():
+                assert vllm_prompt_logprob_dict is not None
+                for token_id, prompt_lp in vllm_prompt_logprob_dict.items():
                     torch.testing.assert_close(
-                        logprob.logprob,
+                        prompt_lp.logprob,
                         hf_logprob[0][i][token_id].item(),
                         atol=2e-2,
                         rtol=2e-2,
@@ -548,7 +556,9 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         total_token_with_logprobs = 0
         positive_values = 0
         for output in results[0].outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 for token_id in logprobs:
                     logprob = logprobs[token_id]
                     if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
@@ -589,6 +599,7 @@ def test_prompt_logprobs_mode():
             )
             assert results[0].prompt_logprobs is not None
             assert results[0].prompt_logprobs[1] is not None
+            assert results[0].prompt_token_ids is not None
             tok_id = results[0].prompt_token_ids[1]
             values[mode] = results[0].prompt_logprobs[1][tok_id].logprob
         finally:
@@ -1168,10 +1179,12 @@ def test_spec_decode_logprobs(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
     # Collect logprobs outputs from reference LLM.
-    ref_logprobs = []
+    ref_logprobs: list[Logprob] = []
     for results in ref_results:
         for output in results.outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 ref_logprobs.extend(logprobs.values())
     del ref_llm
     torch.accelerator.empty_cache()
@@ -1189,10 +1202,12 @@ def test_spec_decode_logprobs(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
     # Collect logprobs outputs from spec decode LLM.
-    spec_logprobs = []
+    spec_logprobs: list[Logprob] = []
     for results in spec_results:
         for output in results.outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 spec_logprobs.extend(logprobs.values())
     del spec_llm
     torch.accelerator.empty_cache()
@@ -1267,6 +1282,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
                 "Unexpected number of prompt logprob positions"
             )
 
+            assert sampling_params.prompt_logprobs is not None
             # Each position should have the requested number of logprobs
             for pos, logprobs_dict in enumerate(prompt_logprobs):
                 if logprobs_dict is not None:  # First token may be None

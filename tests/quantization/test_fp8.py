@@ -524,7 +524,7 @@ def test_kv_cache_scale_sync_to_host_copies():
     set_default_quant_scales(layer, register_buffer=True)
     layer.kv_cache_dtype = "fp8"
 
-    method = BaseKVCacheMethod(quant_config=None)
+    method = BaseKVCacheMethod(quant_config=None)  # type: ignore[arg-type]  # Scale synchronization does not use quant_config.
     method.create_weights(layer)
     # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
     checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)

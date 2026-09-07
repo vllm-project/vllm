@@ -19,7 +19,7 @@ class _MockReasoningConfig:
 
 def _make_holder() -> ThinkingBudgetStateHolder:
     return ThinkingBudgetStateHolder(
-        _MockReasoningConfig(),
+        _MockReasoningConfig(),  # type: ignore[arg-type]
         8,
         0,
         torch.device("cpu"),

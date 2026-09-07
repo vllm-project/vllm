@@ -1662,7 +1662,9 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     )
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
-    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
+    layouts = backend.supported_kv_cache_layouts()
+    assert layouts is not None
+    assert KVCacheLayout.LHBNC in layouts
 
     nb, h = 7, 1
     spec = FullAttentionSpec(

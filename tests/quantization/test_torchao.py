@@ -13,6 +13,7 @@ from vllm.config.load import LoadConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
@@ -186,6 +187,7 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
 
         def load_weights(model):
             model_loader = get_model_loader(load_config)
+            assert isinstance(model_loader, DefaultModelLoader)
             weights_iterator = model_loader.get_all_weights(model_config, model)
             model.load_weights(weights_iterator)
 

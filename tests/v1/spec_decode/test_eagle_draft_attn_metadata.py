@@ -66,7 +66,7 @@ def _run_build(fake, *, num_reqs, num_reqs_padded, num_tokens_padded, base, step
 
     with patch.object(base_speculator, "build_attn_metadata", fake_build_attn_metadata):
         EagleSpeculator._build_draft_attn_metadata(
-            fake,  # type: ignore[arg-type]
+            fake,
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,

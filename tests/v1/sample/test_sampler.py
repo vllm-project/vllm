@@ -336,6 +336,7 @@ def test_sampler_repetition_penalty(
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()
         penalized_token_id = logits[batch_idx].argmin().item()
+        assert sampling_metadata.prompt_token_ids is not None
         prompt_tokens = sampling_metadata.prompt_token_ids[batch_idx][:].tolist()
         output_tokens = sampling_metadata.output_token_ids[batch_idx]
         if repetition_penalty > 1.0:

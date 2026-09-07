@@ -149,11 +149,13 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
 
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
     method = object.__new__(MoeWNA16Method)
-    method.experts_cls = object
+    method.experts_cls = object  # type: ignore[assignment]  # Opaque mocked-expert sentinel.
     method.wna16_backend = WNA16MoEBackend.HUMMING
-    method.moe = object()
+    method.moe = object()  # type: ignore[assignment]  # Opaque mocked-config sentinel.
     quant_config = object()
-    method.get_fused_moe_quant_config = lambda layer: quant_config
+    monkeypatch.setattr(
+        method, "get_fused_moe_quant_config", lambda layer: quant_config
+    )
     layer = SimpleNamespace(_expert_routing_tables=lambda: (None, None, None))
     captured = {}
     kernel = object()
@@ -164,7 +166,7 @@ def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
 
     monkeypatch.setattr(moe_wna16, "make_wna16_moe_kernel", fake_make_wna16_moe_kernel)
 
-    method._setup_kernel(layer)
+    method._setup_kernel(layer)  # type: ignore[arg-type]  # Routing-table stub.
 
     assert method.moe_kernel is kernel
     assert captured["backend"] == WNA16MoEBackend.HUMMING
@@ -209,7 +211,7 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
         ),
     )
 
-    assert method.get_fused_moe_quant_config(layer) is quant_config
+    assert method.get_fused_moe_quant_config(layer) is quant_config  # type: ignore[arg-type]  # Identity sentinel.
 
 
 @pytest.mark.skipif(
