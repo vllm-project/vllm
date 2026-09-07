@@ -6,8 +6,97 @@ import json
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
+from openai.types.responses.response_item import AdditionalTools
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+
+def make_function_tool(name: str) -> dict:
+    return {
+        "type": "function",
+        "name": name,
+        "description": f"Call {name}.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    }
+
+
+def test_additional_tools_are_promoted_out_of_input():
+    """Additional tools configure the request and are not chat messages."""
+    request = ResponsesRequest(
+        model="gpt-oss",
+        input=[
+            {
+                "id": "at_123",
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [make_function_tool("exec")],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Run pwd"}],
+            },
+        ],
+        tool_choice="required",
+    )
+
+    assert len(request.input) == 1
+    assert request.input[0]["type"] == "message"
+    assert [tool.name for tool in request.tools] == ["exec"]
+    assert request.tool_choice == "required"
+
+
+def test_additional_tools_extend_top_level_tools_in_input_order():
+    request = ResponsesRequest(
+        model="gpt-oss",
+        tools=[make_function_tool("top_level")],
+        input=[
+            {
+                "id": "at_123",
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [make_function_tool("first_additional")],
+            },
+            {
+                "id": "at_456",
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [make_function_tool("second_additional")],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}],
+            },
+        ],
+    )
+
+    assert len(request.input) == 1
+    assert [tool.name for tool in request.tools] == [
+        "top_level",
+        "first_additional",
+        "second_additional",
+    ]
+
+
+def test_typed_additional_tools_are_promoted():
+    additional_tools = AdditionalTools(
+        id="at_123",
+        type="additional_tools",
+        role="developer",
+        tools=[make_function_tool("exec")],
+    )
+
+    request = ResponsesRequest(
+        model="gpt-oss",
+        input=[additional_tools, {"role": "user", "content": "Run pwd"}],
+    )
+
+    assert len(request.input) == 1
+    assert [tool.name for tool in request.tools] == ["exec"]
 
 
 def test_function_call_dict_converted_to_object():
