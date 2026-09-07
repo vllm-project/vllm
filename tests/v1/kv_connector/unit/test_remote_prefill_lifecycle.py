@@ -248,6 +248,37 @@ def test_interleaved_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
+def test_async_load_admitted_after_token_budget_exhausted():
+    batch_size = 16
+    vllm_config = create_vllm_config(
+        max_num_batched_tokens=batch_size,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+
+    local_request = create_request(request_id=1, num_tokens=batch_size)
+    remote_request = create_request(
+        request_id=2,
+        num_tokens=batch_size * 2,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(local_request)
+    scheduler.add_request(remote_request)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(0, False), (batch_size, True)],
+    ):
+        scheduler_output = scheduler.schedule()
+
+    assert scheduler_output.num_scheduled_tokens == {
+        local_request.request_id: batch_size
+    }
+    assert remote_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert remote_request in scheduler.skipped_waiting
+
+
 def test_no_spurious_prefix_caching():
     """
     With P/D, blocks can be allocated but uncomputed for
