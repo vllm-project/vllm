@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
@@ -38,7 +38,7 @@ impl ReasoningParser for SeedOssReasoningParser {
         Ok(())
     }
 
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
 
@@ -53,17 +53,20 @@ mod tests {
 
     use super::SeedOssReasoningParser;
     use crate::reasoning::ReasoningParser;
-    use crate::reasoning::tests::{SEED_THINK_END_ID, SEED_THINK_START_ID, fake_tokenizer};
+    use crate::reasoning::tests::{
+        SEED_THINK_END_ID, SEED_THINK_START_ID, content_str, fake_tokenizer, push_str,
+        reasoning_str,
+    };
 
     #[test]
     fn without_prompt_markers_expects_start_token() {
         let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
-        let delta = parser.push("implicit reasoning</seed:think>answer").unwrap();
+        let delta = push_str(&mut parser, "implicit reasoning</seed:think>answer");
         assert_eq!(delta.reasoning, None);
         assert_eq!(
-            delta.content.as_deref(),
+            content_str(&delta),
             Some("implicit reasoning</seed:think>answer")
         );
     }
@@ -75,9 +78,9 @@ mod tests {
         // Prompt prefills `<seed:think>`, opening reasoning before the stream.
         parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
-        let delta = parser.push("reason</seed:think>answer").unwrap();
-        assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-        assert_eq!(delta.content.as_deref(), Some("answer"));
+        let delta = push_str(&mut parser, "reason</seed:think>answer");
+        assert_eq!(reasoning_str(&delta), Some("reason"));
+        assert_eq!(content_str(&delta), Some("answer"));
     }
 
     #[test]
@@ -87,9 +90,9 @@ mod tests {
         // Prompt already closed reasoning with `</seed:think>`.
         parser.initialize(&[SEED_THINK_END_ID]).unwrap();
 
-        let delta = parser.push("answer").unwrap();
+        let delta = push_str(&mut parser, "answer");
         assert_eq!(delta.reasoning, None);
-        assert_eq!(delta.content.as_deref(), Some("answer"));
+        assert_eq!(content_str(&delta), Some("answer"));
     }
 
     #[test]
@@ -98,9 +101,9 @@ mod tests {
         let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
-        let delta = parser.push("<seed:think>reason</seed:think>answer").unwrap();
-        assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-        assert_eq!(delta.content.as_deref(), Some("answer"));
+        let delta = push_str(&mut parser, "<seed:think>reason</seed:think>answer");
+        assert_eq!(reasoning_str(&delta), Some("reason"));
+        assert_eq!(content_str(&delta), Some("answer"));
     }
 
     #[test]
@@ -121,12 +124,12 @@ mod tests {
             "Final ",
             "answer",
         ] {
-            let delta = parser.push(delta_str).unwrap();
+            let delta = push_str(&mut parser, delta_str);
             if let Some(r) = delta.reasoning {
-                reasoning.push_str(&r);
+                reasoning.push_str(&r.text);
             }
             if let Some(c) = delta.content {
-                content.push_str(&c);
+                content.push_str(&c.text);
             }
         }
         assert_eq!(reasoning, "Some reasoning content");
@@ -140,12 +143,12 @@ mod tests {
         parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
         // Closing delimiter `</seed:think>` arrives in two halves.
-        let first = parser.push("reason</seed:").unwrap();
-        assert_eq!(first.reasoning.as_deref(), Some("reason"));
+        let first = push_str(&mut parser, "reason</seed:");
+        assert_eq!(reasoning_str(&first), Some("reason"));
         assert_eq!(first.content, None);
 
-        let second = parser.push("think>answer").unwrap();
+        let second = push_str(&mut parser, "think>answer");
         assert_eq!(second.reasoning, None);
-        assert_eq!(second.content.as_deref(), Some("answer"));
+        assert_eq!(content_str(&second), Some("answer"));
     }
 }
