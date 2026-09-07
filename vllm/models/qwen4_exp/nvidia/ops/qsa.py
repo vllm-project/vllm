@@ -565,6 +565,7 @@ def qsa_sparse_paged_attention(
         assert k_scale is not None and v_scale is not None
         assert k_scale.numel() == 1 and v_scale.numel() == 1
         assert k_scale.is_cuda and v_scale.is_cuda
+        assert k_scale.device == q.device and v_scale.device == q.device
     else:
         assert k_cache.dtype == torch.bfloat16
     assert logical_indices.dtype == block_table.dtype == torch.int32
