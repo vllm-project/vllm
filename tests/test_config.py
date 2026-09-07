@@ -780,7 +780,10 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    config = SimpleNamespace(model_config=model_config)
+    config = SimpleNamespace(
+        model_config=model_config,
+        attention_config=AttentionConfig(),
+    )
     config._get_v2_model_runner_unsupported_features = lambda: []
 
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
