@@ -324,7 +324,7 @@ def _insert_context_kv(
                 block_size,
             )
             return
-        kv = attn.kv_norm(kv)
+        kv = attn.kv_norm(kv).contiguous()
         torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
             kv,
             swa_2d,
@@ -335,7 +335,7 @@ def _insert_context_kv(
             block_size,
         )
         return
-    kv = attn.kv_norm(kv)
+    kv = attn.kv_norm(kv).contiguous()
     n_ctx = kv.shape[0]
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
