@@ -314,4 +314,54 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ || true'
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect="tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect="tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]" || true'
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly part1'
+  device: intel_gpu
+  timeout_in_minutes: 60
+  optional: false
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/conftest.py
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False] || true'
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly part2'
+  device: intel_gpu
+  timeout_in_minutes: 60
+  optional: false
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/conftest.py
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True] || true'
