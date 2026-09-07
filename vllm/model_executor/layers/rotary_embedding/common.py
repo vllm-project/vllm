@@ -119,6 +119,9 @@ class ApplyRotaryEmb(CustomOp):
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
+        """Resolve the optional flash_attn/XPU rotary kernels once so
+        forward_cuda/forward_xpu can dispatch to them without re-importing
+        on every call."""
         super().__init__(enforce_enable=enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
@@ -227,10 +230,6 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-
-        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
-
         """
         Arguments of apply_rotary_emb() in vllm_flash_attn:
             x: [batch_size, seq_len, nheads, headdim]
@@ -238,6 +237,10 @@ class ApplyRotaryEmb(CustomOp):
             interleaved: default as False (Neox-style).
             ...
         """
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+
         interleaved = not self.is_neox_style
         output = apply_rotary_emb(x, cos, sin, interleaved)
 
@@ -250,6 +253,8 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        """Dispatch to the vllm_xpu_kernels SYCL apply_rotary_emb op when
+        available, otherwise fall back to forward_native."""
         if self.apply_rotary_emb_xpu is None:
             return self.forward_native(x, cos, sin)
 
@@ -263,7 +268,6 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        _HIP_MAX_GRID_DIM = 65535
         """
         HIP/ROCm has a per-dim grid limit of 65535 on gridY/gridZ. The
         flash_attn triton rotary kernel uses
@@ -275,6 +279,7 @@ class ApplyRotaryEmb(CustomOp):
         `Triton Error [HIP]: Code: 1, invalid argument`. Fall back to the
         native PyTorch implementation in that case.
         """
+        _HIP_MAX_GRID_DIM = 65535
         if self.apply_rotary_emb_flash_attn is not None:
             x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
