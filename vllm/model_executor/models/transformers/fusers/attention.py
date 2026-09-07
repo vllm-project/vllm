@@ -121,7 +121,8 @@ class AttentionFuser(BaseFuser):
     ) -> nn.Module:
         if (sinks := self.sinks(module)) is not None:
             size = sinks.numel() // vllm_config.parallel_config.tensor_parallel_size
-            data = torch.empty(size, dtype=sinks.dtype, device=sinks.device)
+            device = vllm_config.device_config.device
+            data = torch.empty(size, dtype=sinks.dtype, device=device)
             sinks_tp = nn.Parameter(data, requires_grad=False)
             set_weight_attrs(sinks_tp, {"weight_loader": sharded_weight_loader(0)})
             setattr(module, self.s_aux_expr.attr, sinks_tp)
