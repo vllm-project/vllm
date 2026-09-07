@@ -111,6 +111,8 @@ def server(
         env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
         max_wait_seconds=timeout,
     ) as remote:
+        if not dummy_weights:
+            gen(remote.url_root, max_tokens=4, timeout=120)
         yield remote.url_root
 
 
