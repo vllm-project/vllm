@@ -16,6 +16,14 @@ EPS_VALUES = [1e-5, 1e-6]
 SEEDS = [13]
 PARTIAL_ROPE = [True, False]
 CUDA_DEVICES = ["cuda:0"]
+# (num_heads, num_kv_heads, head_dim). head_dim 256 exercises the Gemma4
+# geometry (32/16/256); 512 exercises the vecSize=8 packed-load path. Both were
+# previously uncovered — only head_dim=128 was tested.
+HEAD_CONFIGS = [
+    (16, 4, 128),
+    (32, 16, 256),
+    (16, 4, 512),
+]
 
 
 def _apply_qk_norm_rope(
@@ -57,6 +65,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
+@pytest.mark.parametrize("num_heads, num_kv_heads, head_dim", HEAD_CONFIGS)
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
     default_vllm_config,
@@ -66,10 +75,12 @@ def test_fused_qk_norm_rope_matches_reference(
     eps: float,
     seed: int,
     rotary_ratio: float,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
 ):
     torch.set_default_device(device)
     set_random_seed(seed)
-    num_heads, num_kv_heads, head_dim = 16, 4, 128
     num_tokens = 4
 
     total_dim = (num_heads + 2 * num_kv_heads) * head_dim

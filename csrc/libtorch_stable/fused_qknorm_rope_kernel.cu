@@ -71,6 +71,20 @@ struct packed_as<uint, 4> {
   using type = uint4;
 };
 
+// head_dim=512 gives vecSize = head_dim/64 = 8, i.e. a 32-byte per-thread
+// vector. No native vector type exceeds 16 bytes (uint4), so pack two uint4;
+// the kernel only reinterprets this as a raw byte buffer, and a 32-byte
+// aligned load/store lowers to two 128-bit accesses.
+struct alignas(16) uint8_pack {
+  uint4 x;
+  uint4 y;
+};
+
+template <>
+struct packed_as<uint, 8> {
+  using type = uint8_pack;
+};
+
 template <typename T>
 __inline__ __device__ T warpReduceSum(T val) {
 #pragma unroll
@@ -216,13 +230,27 @@ __global__ void fusedQKNormRopeKernel(
     // Compute RMS normalization factor
     float rms_rcp = rsqrtf(sumOfSquares / static_cast<float>(head_dim) + eps);
 
-    // Normalize elements
+    // Normalize elements, matching the unfused RMSNorm numerics exactly. The
+    // unfused path computes bf16(bf16(x * rsqrt(var + eps)) * weight): it
+    // rounds the normalized value to the input dtype BEFORE the weight
+    // multiply, and rounds the weighted result to the input dtype afterwards.
+    // Carrying fp32 through the weight multiply here diverges from the unfused
+    // path by a few ULPs per element; models with many attention layers and
+    // attention logit softcapping (e.g. Gemma4, 50 sliding-attention layers)
+    // accumulate that divergence into degenerate/garbage output.
 #pragma unroll
-    for (int i = 0; i < numElemsPerThread; i++) {
-      int dim = laneId * numElemsPerThread + i;
-      float weight = isQ ? Converter::convert(q_weight[dim])
-                         : Converter::convert(k_weight[dim]);
-      elements[i] *= rms_rcp * weight;
+    for (int i = 0; i < numElemsPerThread / 2; i++) {
+      float2 normed = Converter::convert(Converter::convert(make_float2(
+          elements[2 * i] * rms_rcp, elements[2 * i + 1] * rms_rcp)));
+      int const dim0 = laneId * numElemsPerThread + 2 * i;
+      float const w0 = isQ ? Converter::convert(q_weight[dim0])
+                           : Converter::convert(k_weight[dim0]);
+      float const w1 = isQ ? Converter::convert(q_weight[dim0 + 1])
+                           : Converter::convert(k_weight[dim0 + 1]);
+      float2 weighted = Converter::convert(
+          Converter::convert(make_float2(normed.x * w0, normed.y * w1)));
+      elements[2 * i] = weighted.x;
+      elements[2 * i + 1] = weighted.y;
     }
 
     // Apply RoPE to normalized elements
@@ -587,6 +615,14 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
                 k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
       });
       break;
+    case 512:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 512, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
+      });
+      break;
     default:
       STD_TORCH_CHECK(
           false, "Unsupported head dimension for fusedQKNormRope: ", head_dim);
@@ -682,6 +718,16 @@ void launchFusedQKNormRopeNTokenHeads(
       case 256:                                                              \
         DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                        \
           fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache, 256, \
+                                           INTERLEAVE, (N)>                  \
+              <<<gridDim, blockDim, smem_bytes, stream>>>(                   \
+                  qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight, \
+                  k_weight, cos_sin_cache, position_ids, num_tokens,         \
+                  rotary_dim);                                               \
+        });                                                                  \
+        break;                                                               \
+      case 512:                                                              \
+        DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                        \
+          fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache, 512, \
                                            INTERLEAVE, (N)>                  \
               <<<gridDim, blockDim, smem_bytes, stream>>>(                   \
                   qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight, \
