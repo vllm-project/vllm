@@ -12,6 +12,8 @@ class KvHintAction(msgspec.Struct, frozen=True):
     action_id: str
     action_type: str
     action_version: str
+    # `payload` must contain JSON-compatible values. Action-specific schemas are
+    # validated by the component implementing the action.
     payload: dict[str, Any]
 
 
