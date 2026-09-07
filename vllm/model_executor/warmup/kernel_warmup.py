@@ -274,107 +274,57 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 
-def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
-    max_tokens = runner.scheduler_config.max_num_batched_tokens
-    linear_backend = runner.vllm_config.kernel_config.linear_backend
-    if (
-        linear_backend == "flashinfer_cutedsl"
-        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    ):
-        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    return (max_tokens,)
-
-
-def _run_flashinfer_deferred_moe_autotune(runner: "GPUModelRunner") -> None:
-    """Tune the unfinalized decode path without another model forward."""
-    import vllm.utils.flashinfer as fi_utils
+def _flashinfer_deferred_moe_token_counts(
+    runner: "GPUModelRunner",
+) -> tuple[int, ...]:
+    """Return bounded token counts that exercise deferred MoE finalization."""
     from vllm.model_executor.layers.fused_moe import MoERunner
 
-    max_num_batched_tokens = runner.scheduler_config.max_num_batched_tokens
-    tuned: set[tuple] = set()
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    token_counts: list[int] = []
     for module in runner.get_model().modules():
         if not isinstance(module, MoERunner):
             continue
 
         moe_config = module.moe_config
-        if not moe_config.use_deferred_moe_finalize:
-            continue
-
         max_deferred_tokens = moe_config.defer_moe_finalize_max_num_tokens
-        num_tokens = max_num_batched_tokens
-        if max_deferred_tokens > 0:
-            num_tokens = min(num_tokens, max_deferred_tokens)
-        if not moe_config.should_defer_moe_finalize(num_tokens):
-            continue
+        if moe_config.use_deferred_moe_finalize and max_deferred_tokens > 0:
+            token_counts.append(min(max_tokens, max_deferred_tokens))
 
-        routed_experts = module.routed_experts
-        quant_method = routed_experts.quant_method
-        moe_kernel = getattr(quant_method, "moe_kernel", None)
-        if (
-            not quant_method.is_monolithic
-            or moe_kernel is None
-            or not moe_kernel.supports_deferred_moe_finalize()
-        ):
-            continue
+    return tuple(dict.fromkeys(token_counts))
 
-        # Layers agreeing on these properties produce identical autotune cache
-        # keys, so one dispatcher call already covers the rest.
-        signature = (
-            num_tokens,
-            moe_config.hidden_dim,
-            moe_config.num_experts,
-            moe_config.in_dtype,
-            moe_config.router_logits_dtype,
-            type(quant_method),
-            type(moe_kernel),
-            tuple(routed_experts.w13_weight.shape),
-            routed_experts.w13_weight.dtype,
-        )
-        if signature in tuned:
-            continue
-        tuned.add(signature)
 
-        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
-        logger.info(
-            "Running FlashInfer deferred MoE autotune with token buckets %s.",
-            tuning_buckets,
-        )
-        device = routed_experts.w13_weight.device
-        hidden_states = torch.randn(
-            num_tokens,
-            moe_config.hidden_dim,
-            dtype=moe_config.in_dtype,
-            device=device,
-        )
-        router_logits = torch.randn(
-            num_tokens,
-            moe_config.num_experts,
-            dtype=moe_config.router_logits_dtype,
-            device=device,
-        )
-        with fi_utils.autotune(tuning_buckets=tuning_buckets):
-            routed_experts.forward_monolithic(
-                x=hidden_states,
-                router_logits=router_logits,
-            )
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    # Tune the widest bucket set first so bounded passes reuse its configs.
+    token_counts = [max_tokens]
+    linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if (
+        linear_backend == "flashinfer_cutedsl"
+        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
+    token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
+    return tuple(dict.fromkeys(token_counts))
 
 
 def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
-    for num_tokens in _flashinfer_autotune_token_counts(runner):
-        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            randomize_inputs=True,
-        )
+    import vllm.utils.flashinfer as fi_utils
 
-    # Some decode consumers fuse the final top-k reduction, changing the
-    # FlashInfer MoE output from (tokens, hidden) to (tokens, 0). The generic
-    # full-model profile does not exercise that path. Invoke only each live
-    # deferred MoE dispatcher so its capture keys are tuned without repeating
-    # the whole model forward.
-    _run_flashinfer_deferred_moe_autotune(runner)
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+        logger.info(
+            "Running FlashInfer autotune with %d tokens and token buckets %s.",
+            num_tokens,
+            tuning_buckets,
+        )
+        with fi_utils.autotune(tuning_buckets=tuning_buckets):
+            runner._dummy_run(
+                num_tokens=num_tokens,
+                skip_eplb=True,
+                is_profile=True,
+                randomize_inputs=True,
+            )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
