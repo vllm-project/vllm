@@ -22,6 +22,20 @@ class KVConnectorStats:
     metrics or otherwise important telemetry from the connector.
     All sub-classes need to be serializable as stats are sent from worker to
     logger process.
+
+    Pipeline:
+    1. Worker calls `record_transfer()` / `record_failed_*()` on its local
+       stats object (per-engine).
+    2. Periodically, stats are sent to the logger process via `to_dict()`.
+    3. Logger calls `aggregate()` to combine stats from all workers into a
+       single cumulative `KVConnectorStats` object.
+    4. Logger calls `reduce()` to produce a summary dict for CLI logging.
+    5. Logger calls `log()` to print the summary.
+    6. Logger calls `reset()` to clear for the next interval.
+
+    For NIXL connector, aggregation uses `list.extend()` so the combined
+    pool contains observations from ALL TP ranks. Reduction then computes
+    statistics (mean, P90, throughput) over this combined pool.
     """
 
     data: dict[str, Any] = field(default_factory=dict)
@@ -37,15 +51,22 @@ class KVConnectorStats:
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         """
         Aggregate stats with another `KVConnectorStats` object.
+
+        The default expectation is list-wise concatenation (for NIXL this
+        combines observations from all TP ranks into a single list per metric).
         """
         raise NotImplementedError
 
     def reduce(self) -> dict[str, int | float]:
         """
         Reduce the observations collected during a time interval to one or
-        more representative values (eg avg/median/sum of the series).
+        more representative values (e.g., avg, P90, sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.
+
+        For NIXL, the input is already the **combined pool of all TP ranks'
+        observations** (see `aggregate()`). The reduction computes stats over
+        this combined pool, not per-rank or per-engine.
         """
         raise NotImplementedError
 
@@ -55,6 +76,25 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """
+    Manages the observe -> aggregate -> reduce -> log pipeline for KV
+    connector transfer metrics.
+
+    Pipeline per logging interval:
+    1. `observe()` - Called periodically when connector syncs with scheduler.
+       Receives `transfer_stats_data` already aggregated across ALL workers
+       (see `aggregate()` in KVConnectorStats). Builds a stats object via
+       connector's `build_kv_connector_stats()`.
+    2. `aggregate()` - Combines current interval stats with accumulator
+       (list-wise concatenation for NIXL, combining all TP ranks).
+    3. `log()` - Calls `reduce()` on accumulator to get summary dict,
+       formats and logs it, then calls `reset()`.
+
+    The `transfer_stats_data` passed to `observe()` is expected to be
+    pre-aggregated across all workers (for MultiConnector, this means
+    all TP ranks are already combined).
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
