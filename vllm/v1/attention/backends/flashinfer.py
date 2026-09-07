@@ -2227,10 +2227,9 @@ class FlashInferImpl(AttentionImpl):
                     )
 
                     # NVFP4 trtllm kernel only supports FP8 output.
-                    # Use a pre-allocated FP8 buffer and dequantize
-                    # afterwards.
-                    needs_fp8_out_prefill = (
-                        self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                    # Use a pre-allocated FP8 buffer and rescale afterwards.
+                    needs_fp8_out_prefill = self.is_kvcache_nvfp4 and (
+                        output.dtype not in (FP8_DTYPE, FP4_DTYPE)
                     )
                     if needs_fp8_out_prefill:
                         out_prefill = self._nvfp4_fp8_out[:num_prefill_tokens]
@@ -2300,8 +2299,10 @@ class FlashInferImpl(AttentionImpl):
                     out = output[num_decode_tokens:]
 
                 # NVFP4 trtllm kernel only supports FP8 output.
-                # Use a pre-allocated FP8 buffer and dequantize afterwards.
-                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                # Use a pre-allocated FP8 buffer and rescale afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and (
+                    output.dtype not in (FP8_DTYPE, FP4_DTYPE)
+                )
                 if needs_fp8_out:
                     out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
@@ -2405,9 +2406,11 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_for_fi = kv_cache_tuple
                 kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
 
-                # NVFP4 kernel only supports FP8 output.
-                # Use a pre-allocated FP8 buffer and dequantize afterwards.
-                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                # NVFP4 trtllm kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and rescale afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and (
+                    output.dtype not in (FP8_DTYPE, FP4_DTYPE)
+                )
                 if needs_fp8_out:
                     out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
                 else:
@@ -2535,8 +2538,10 @@ class FlashInferImpl(AttentionImpl):
                     out = output[:num_decode_tokens]
 
                 # NVFP4 trtllm kernel only supports FP8 output.
-                # Use a pre-allocated FP8 buffer and dequantize afterwards.
-                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                # Use a pre-allocated FP8 buffer and rescale afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and (
+                    output.dtype not in (FP8_DTYPE, FP4_DTYPE)
+                )
                 if needs_fp8_out:
                     out = self._nvfp4_fp8_out[:num_decode_tokens]
 
