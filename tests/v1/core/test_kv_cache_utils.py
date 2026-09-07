@@ -2438,6 +2438,97 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
 
 
+def _glm5_like_kv_cache_spec_with_gqa_drafter(
+    num_draft_layers: int = 5,
+) -> dict[str, KVCacheSpec]:
+    """GLM-5.3-like specs plus a GQA drafter (EAGLE-3 / DFlash style): a few
+    sliding-window layers whose bf16 K/V row is wider than the MLA row, so at
+    the shared block size their page would be the largest of all."""
+    kv_cache_spec = _glm5_like_kv_cache_spec_with_tail()
+    for i in range(num_draft_layers):
+        kv_cache_spec[f"draft.layers.{i}.attn"] = SlidingWindowSpec(
+            block_size=1024,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+    return kv_cache_spec
+
+
+def test_get_kv_cache_config_glm5_carries_gqa_drafter_group():
+    """A GQA drafter next to GLM-5.3 gets its own group inside the GLM-5.3
+    layout: block fitted under the MLA page, on a divisor of the model block
+    (so block-aligned prefix-cache lookups still line up), page padded to the
+    MLA page, and its layers sized, allocated and accounted for."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+    kv_cache_spec = _glm5_like_kv_cache_spec_with_gqa_drafter()
+    mla_spec = cast(MLAAttentionSpec, kv_cache_spec["layers.3.attn"])
+    mla_page = mla_spec.page_size_bytes
+    idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
+    draft_spec = cast(SlidingWindowSpec, kv_cache_spec["draft.layers.0.attn"])
+    assert draft_spec.page_size_bytes > mla_page
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    draft_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and all(
+            isinstance(spec, SlidingWindowSpec)
+            for spec in group.kv_cache_spec.kv_cache_specs.values()
+        )
+    )
+    assert sorted(draft_group.layer_names) == [
+        f"draft.layers.{i}.attn" for i in range(5)
+    ]
+    fitted = cast(
+        SlidingWindowSpec,
+        draft_group.kv_cache_spec.kv_cache_specs["draft.layers.0.attn"],
+    )
+    per_token = draft_spec.page_size_bytes // draft_spec.block_size
+    assert fitted.block_size % 16 == 0
+    assert mla_spec.block_size % fitted.block_size == 0
+    assert fitted.block_size * per_token <= mla_page
+    assert fitted.page_size_padded == mla_page
+    assert fitted.page_size_bytes == mla_page
+
+    # The layout detector returns the drafter group as its extra member and
+    # every consumer counts its layers at one MLA page each.
+    layout = kv_cache_utils._glm5_next_tensor_layout(groups)
+    assert layout is not None
+    assert layout[8] is draft_group
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    assert bytes_per_block == 11 * mla_page + 11 * idx_page + 5 * mla_page
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+    assert kv_cache_config.num_blocks == 100
+    tensors = _tensor_by_layer(kv_cache_config)
+    idx_end = (
+        max(tensors[f"layers.{4 * i + 3}.indexer"].offset for i in range(11))
+        + idx_page * 100
+    )
+    for i in range(5):
+        tensor = tensors[f"draft.layers.{i}.attn"]
+        assert tensor.block_stride == mla_page
+        assert tensor.offset >= idx_end
+    assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
+
+    # Memory accounting includes the drafter group.
+    without_drafter = kv_cache_utils.get_kv_cache_groups(
+        vllm_config, _glm5_like_kv_cache_spec_with_tail()
+    )
+    assert kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, groups
+    ) > kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, without_drafter)
+    # ...and the layout without a drafter is unchanged (no extra group).
+    layout_without = kv_cache_utils._glm5_next_tensor_layout(without_drafter)
+    assert layout_without is not None and layout_without[8] is None
+
+
 def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     """The tail's kpool-sized scratch block (4 tokens) must not constrain the
     prefix-cache hash granularity: participating groups alone decide it."""
