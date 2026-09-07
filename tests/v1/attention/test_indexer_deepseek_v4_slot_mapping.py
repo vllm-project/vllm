@@ -8,9 +8,15 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    CompressedSlotMappingKernel,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
     DeepseekV32IndexerMetadataBuilder,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    ConvertReqIndexToGlobalIndexKernel,
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.block_table import get_block_table_width
@@ -20,7 +26,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0], index_kpool=32)
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
@@ -30,23 +36,58 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
-    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
+    assert {key.compress_ratio for key in keys} == {1, 4, 32, 128}
+    assert {(key.query_slice_start, key.query_slice_stop) for key in keys} == {
+        (query_slice_start, query_slice_stop)
+        for query_slice_start in (1, 2, 16)
+        for query_slice_stop in (1, 2, 16)
+    }
+
+
+def test_compressed_slot_mapping_warmup_includes_index_kpool():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_kpool=32)),
+    )
+
+    keys = CompressedSlotMappingKernel().get_warmup_keys(config)
+    assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
+
+
+def test_index_conversion_warmup_uses_physical_block_stride():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64),
+        model_config=SimpleNamespace(
+            max_model_len=1024,
+            hf_config=SimpleNamespace(index_topk=2048),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = ConvertReqIndexToGlobalIndexKernel().get_warmup_keys(
+        config,
+        block_stride_rows=4096,
+    )
+    assert {key.block_stride_rows for key in keys} == {4096}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size():
+def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
     device = torch.device("cuda")
 
-    # storage_block_size = block_size // compress_ratio = 256 // 4 = 64
+    # num_states = block_size // tokens_per_state = 256 // 4 = 64
     kv_cache_spec = MLAAttentionSpec(
         block_size=256,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=4,
+        tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
     max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
@@ -95,7 +136,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
     valid_slots = md.slot_mapping[md.slot_mapping >= 0]
     assert valid_slots.numel() == 10  # 40 tokens / compress_ratio 4
 
-    storage_bs = kv_cache_spec.storage_block_size  # 64
+    storage_bs = kv_cache_spec.num_states  # 64
     # Compressed positions 60..63 land in block 5, positions 64..69 in block 7.
     expected = torch.tensor(
         [

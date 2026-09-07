@@ -5,10 +5,15 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
+from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
+from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    maybe_create_adaptive_verification_manager,
 )
+from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
 
 def make_manager(
@@ -28,6 +33,60 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
+    class Backend:
+        @classmethod
+        def supports_device_cpu_query_lens_mismatch(cls):
+            return True
+
+    class Builder:
+        def __init__(self, support):
+            self.support = support
+
+        def get_cudagraph_support(self, *_args):
+            return self.support
+
+    def group(layer_name, support):
+        builder = Builder(support)
+        return SimpleNamespace(
+            layer_names=[layer_name],
+            backend=Backend,
+            kv_cache_spec=None,
+            get_metadata_builder=lambda _index: builder,
+        )
+
+    groups = [
+        [
+            group("target", AttentionCGSupport.ALWAYS),
+            group("draft", AttentionCGSupport.UNIFORM_BATCH),
+        ]
+    ]
+    runner_support = AttentionCGSupportInfo(
+        AttentionCGSupport.UNIFORM_BATCH, "DraftBackend"
+    )
+    created = object()
+    monkeypatch.setattr(
+        adaptive_module,
+        "AdaptiveVerificationManager",
+        lambda *_args, **_kwargs: created,
+    )
+
+    manager = maybe_create_adaptive_verification_manager(
+        enable_adaptive_verification=True,
+        attn_groups=groups,
+        attn_cg_support=runner_support,
+        req_states=object(),
+        query_start_loc=object(),
+        num_bonus_tokens=1,
+        max_total_logits=1,
+        vllm_config=None,
+        target_layer_names={"target"},
+    )
+
+    assert manager is created
+    assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
@@ -168,3 +227,51 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+
+
+def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
+    # The scheduler sizes the grammar bitmask from the *scheduled* drafts
+    # (len(drafts) + 1 rows per request), but a zero budget rewrites
+    # cu_num_logits_np to bonus-only. Deriving the bitmask -> logits mapping
+    # from those rewritten offsets drops rows and trips the
+    # `num_masks == len(mapping)` assert in apply_grammar_bitmask.
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
+        np.ones(64),
+    )
+    manager.req_states.req_id_to_index["prefill"] = 2
+    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
+    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
+    manager._max_total_logits = 2  # < 3 requests * 1 bonus token
+
+    scheduled_spec_decode_tokens = {"low": [1, 2], "high": [3, 4]}
+    manager.get_num_tokens(
+        {"low": 3, "high": 3, "prefill": 40}, scheduled_spec_decode_tokens
+    )
+    assert manager._batch_budget[2] == 0
+
+    req_ids = ["low", "high", "prefill"]
+    num_draft_tokens_per_req = np.array([2, 2, 0], dtype=np.int32)
+    _, cu_num_logits_np = manager.compact_batch(
+        num_draft_tokens_per_req,
+        np.array([3, 3, 40], dtype=np.int32),
+        np.array([0, 3, 6, 7], dtype=np.int32),
+    )
+
+    mask_stride = manager.num_speculative_steps + manager.num_bonus_tokens
+    mapping = _build_grammar_mapping(
+        req_ids,
+        req_ids,
+        cu_num_logits_np,
+        num_draft_tokens_per_req,
+        manager.num_bonus_tokens,
+        mask_stride,
+    )
+
+    num_bitmask_rows = sum(
+        len(scheduled_spec_decode_tokens.get(req_id, ())) + 1 for req_id in req_ids
+    )
+    assert len(mapping) == num_bitmask_rows
+    # (request, position) keys, so the kernel can mask rows the compacted
+    # device layout no longer has room for.
+    assert mapping == [0, 1, 2, 3, 4, 5, 6]

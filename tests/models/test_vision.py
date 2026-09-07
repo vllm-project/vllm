@@ -102,7 +102,7 @@ def run_dp_sharded_vision_model_vs_direct(
     # Set random seed for reproducibility
     set_random_seed(0)
 
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -288,7 +288,7 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
     """
     # Set random seed for reproducibility
     set_random_seed(0)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -365,7 +365,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
 ):
     """Test run_dp_sharded_mrope_vision_model with empty input."""
     # Set up distributed environment
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -414,7 +414,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
     # Set up distributed environment
     set_random_seed(123)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 

@@ -38,7 +38,6 @@ class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
 
 
 class DeepseekV32MLAAttention(DeepseekV32Attention):
-    require_fp8_kv_cache: bool = False
     indexer_cls = DeepseekV32ROCmIndexer
 
     def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):

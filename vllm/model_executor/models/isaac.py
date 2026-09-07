@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -68,6 +69,7 @@ from vllm.transformers_utils.processors.isaac import (
     get_image_size_for_max_num_patches,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 from .vision import is_vit_use_data_parallel
 
@@ -440,7 +442,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            "image_grid_thw": MultiModalFieldConfig.batched("image"),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
@@ -450,6 +452,10 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        image_pad_token_ids = cached_encode(
+            tokenizer, "<|image_pad|>", add_special_tokens=False
+        )
 
         pixel_shuffle_scale = getattr(image_processor, "pixel_shuffle_scale", 2)
         merge_length = pixel_shuffle_scale**2
@@ -460,13 +466,13 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             feature_size = int(grid_thw.prod()) // merge_length
-            repl_full = "<|image_pad|>" * feature_size
-            return PromptUpdateDetails.select_text(repl_full, "<|image_pad|>")
+            repl_full = image_pad_token_ids * feature_size
+            return PromptUpdateDetails.select_token_ids(repl_full, image_pad_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement_isaac,
             )
         ]
@@ -896,7 +902,11 @@ class IsaacForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                mm_data = mm_feature.data
+                assert mm_data is not None
+                grid_thw = mm_data["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, h // spatial_merge_size, w // spatial_merge_size
             else:
@@ -907,7 +917,7 @@ class IsaacForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        llm_pos_ids_list = []
+        llm_pos_ids_list: list[np.ndarray] = []
         st = 0
         for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
             input_tokens, mm_features
@@ -961,7 +971,14 @@ class IsaacForConditionalGeneration(
         device = next(self.language_model.parameters()).device
         dtype = self.vision_embedding.linear_fc1.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
-        spatial_grids = image_grid_thw[:, 1:3].to(device, dtype=torch.int32)
+        # The [:, 1:3] column slice isn't densely laid out, so stage it with a
+        # single copy straight into pinned memory to keep the H2D non-blocking.
+        spatial_grids_cpu = torch.empty(
+            (image_grid_thw.shape[0], 2),
+            dtype=image_grid_thw.dtype,
+            pin_memory=PIN_MEMORY,
+        ).copy_(image_grid_thw[:, 1:3])
+        spatial_grids = async_tensor_h2d(spatial_grids_cpu, device, dtype=torch.int32)
 
         vision_embeddings = self.vision_embedding((pixel_values, spatial_grids))
         merge_size = self.config.vision_config.pixel_shuffle_scale_factor

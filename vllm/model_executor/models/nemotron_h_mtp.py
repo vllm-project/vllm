@@ -24,6 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -216,7 +217,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -312,6 +313,16 @@ class NemotronHMultiTokenPredictor(nn.Module):
 class NemotronHMTP(nn.Module, SupportsPP):
     """NemotronH MTP model."""
 
+    # Quant configs name modules in checkpoint space ("language_model.mtp.layers.0*"),
+    # but this draft is built under "mtp" (maybe_prefix below). SupportsQuant only
+    # re-roots exclude_modules when the model defines a mapper, so without one the
+    # exclusions never match and the MTP experts are wrongly quantized. Mirrors the
+    # prefix handling load_weights() already does by hand.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"language_model.": ""},
+        orig_to_new_substr={"embeddings": "embed_tokens"},
+    )
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -322,7 +333,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = vllm_config.quant_config
@@ -414,6 +425,10 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # MTP weights are nested in "language_model."
+            # in Multimodal Nemotron-H checkpoints.
+            name = name.removeprefix("language_model.")
+
             # Only process MTP weights - skip all non-MTP weights
             if not name.startswith("mtp.") and "embeddings" not in name:
                 continue

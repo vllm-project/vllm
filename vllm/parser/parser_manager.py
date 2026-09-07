@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 class ParserManager:
     """
-    Provides a unified Parser by composing individual reasoning and tool
-    parsers from their respective registries.
+    Provides a unified Parser by composing reasoning and tool parser adapters.
     """
 
     @classmethod
@@ -84,8 +83,7 @@ class ParserManager:
         """
         Get a Parser that handles both reasoning and tool parsing.
 
-        Composes individual reasoning and tool parsers into a single
-        DelegatingParser subclass.
+        Composes the individual parsers into a ``DelegatingParser`` subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
