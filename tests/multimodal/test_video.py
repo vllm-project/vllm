@@ -22,6 +22,7 @@ from vllm.multimodal.video import (
     DynamicVideoBackend,
     Glm5NextVideoBackend,
     GLM46VVideoBackend,
+    GLMGAVideoBackend,
     Molmo2VideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
@@ -1471,6 +1472,59 @@ def test_glm46v_duration_estimation_from_fps():
     assert len(indices) > 0
     assert len(indices) % 2 == 0
     assert all(0 <= idx < 90 for idx in indices)
+
+
+class TestGLMGASamplingCaps:
+    """Regression tests for GHSA-58v5-2m8f-94pr: request-controlled fps
+    and max_frames must not create intermediate allocations larger than
+    the actual frame count."""
+
+    @staticmethod
+    def _source(
+        total_frames: int, fps: float = 30.0, duration: float = 0
+    ) -> VideoSourceMetadata:
+        if duration == 0 and fps > 0 and total_frames > 1:
+            duration = round((total_frames - 1) / fps) + 1
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    def test_extreme_values_bounded_by_total_frames(self):
+        source = self._source(total_frames=2, fps=2.0, duration=1.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=500_000, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=500_000,
+        )
+        assert len(indices) <= 2
+
+    def test_class_cap_overrides_kwargs_max_frames(self):
+        source = self._source(total_frames=10_000, fps=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=30, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=100_000,
+        )
+        assert len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+
+    def test_class_cap_overrides_target_fps(self):
+        source = self._source(total_frames=10_000, fps=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=500_000, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+        )
+        assert len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+
+    def test_normal_operation_unchanged(self):
+        source = self._source(total_frames=1000, fps=30.0, duration=33.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+        )
+        assert 0 < len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+        assert all(0 <= idx < 1000 for idx in indices)
 
 
 def test_glm5next_backend_selected_for_processor():
