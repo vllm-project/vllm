@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
+from dataclasses import dataclass, field
 
 from typing_extensions import override
 
@@ -18,6 +19,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
@@ -25,6 +27,20 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+
+
+@dataclass(slots=True)
+class _RequestCacheAccess:
+    """Cache keys observed by one request, grouped in prefix order."""
+
+    owner: object
+    cache_generation: int
+    key_groups: dict[int, list[OffloadKey]] = field(default_factory=dict)
+    seen_keys: set[OffloadKey] = field(default_factory=set)
+    inserted_keys: set[OffloadKey] = field(default_factory=set)
+    reused_keys: set[OffloadKey] = field(default_factory=set)
+    store_miss_keys: set[OffloadKey] = field(default_factory=set)
+    finished: bool = False
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -66,6 +82,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
+        self._cache_generation = 0
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -124,10 +141,48 @@ class CPUOffloadingManager(OffloadingManager):
                 num_unprotected -= 1
             self.counts[key] = 1
 
+    def _get_request_cache_access(self, req_context: ReqContext) -> _RequestCacheAccess:
+        state = req_context.get_state(_RequestCacheAccess)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            state = _RequestCacheAccess(
+                owner=self, cache_generation=self._cache_generation
+            )
+            req_context.set_state(state)
+        return state
+
+    def _record_request_cache_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        inserted_keys: Iterable[OffloadKey] = (),
+        reused_keys: Iterable[OffloadKey] = (),
+    ) -> None:
+        state = self._get_request_cache_access(req_context)
+        for key in keys:
+            if key in state.seen_keys:
+                continue
+            assert not state.finished, (
+                "New cache keys observed after request finalization"
+            )
+            group_idx = get_offload_group_idx(key)
+            state.key_groups.setdefault(group_idx, []).append(key)
+            state.seen_keys.add(key)
+        state.inserted_keys.update(inserted_keys)
+        # Re-reading a chunk inserted by this request is an internal transfer
+        # (for example, a tiering cascade), not a second cache access.
+        state.reused_keys.update(
+            key for key in reused_keys if key not in state.inserted_keys
+        )
+
     # --- OffloadingManager interface ---
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        self._get_request_cache_access(req_context)
         return RequestOffloadingContext()
 
     @override
@@ -145,6 +200,15 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
+        return self._prepare_load(keys, req_context, record_access=True)
+
+    def _prepare_load(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        record_access: bool,
+    ) -> LoadStoreSpec:
         chunks = []
         for key in keys:
             chunk = self._policy.get(key)
@@ -156,6 +220,8 @@ class CPUOffloadingManager(OffloadingManager):
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
             chunks.append(chunk)
+        if record_access:
+            self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
 
     @override
@@ -186,10 +252,35 @@ class CPUOffloadingManager(OffloadingManager):
             self._record_accesses(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
             self.stores_skipped_in_current_batch += num_keys - len(keys)
-        # filter out chunks that are already stored
-        keys_to_store = [k for k in keys if self._policy.get(k) is None]
+        keys = list(keys)
+        # Partition keys once. Pending chunks owned by another request are
+        # present, but are not cache hits and must not affect frequency.
+        keys_to_store: list[OffloadKey] = []
+        ready_existing_keys: list[OffloadKey] = []
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is None:
+                keys_to_store.append(key)
+            else:
+                if chunk.is_ready:
+                    ready_existing_keys.append(key)
+
+        state = self._get_request_cache_access(req_context)
+        new_store_misses = [
+            key for key in keys_to_store if key not in state.store_miss_keys
+        ]
+        if new_store_misses:
+            # ARC learns from B1/B2 before insert() removes the ghost entry.
+            # Deduplication makes this one policy observation per request.
+            self._policy.touch(new_store_misses, req_context)
+            state.store_miss_keys.update(new_store_misses)
 
         if not keys_to_store:
+            self._record_request_cache_access(
+                ready_existing_keys,
+                req_context,
+                reused_keys=ready_existing_keys,
+            )
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
@@ -203,6 +294,11 @@ class CPUOffloadingManager(OffloadingManager):
         if num_chunks_to_evict > 0:
             if num_chunks_to_evict > self._num_evictable_cache_chunks:
                 # Eviction will fail.
+                self._record_request_cache_access(
+                    ready_existing_keys,
+                    req_context,
+                    reused_keys=ready_existing_keys,
+                )
                 return None
             # There is a still a chance for eviction failure as some of the
             # idle chunks might be in the protected list.
@@ -212,6 +308,11 @@ class CPUOffloadingManager(OffloadingManager):
             protected = set(keys)
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
+                self._record_request_cache_access(
+                    ready_existing_keys,
+                    req_context,
+                    reused_keys=ready_existing_keys,
+                )
                 return None
 
             # cache-policy removes only idle chunks.
@@ -239,6 +340,14 @@ class CPUOffloadingManager(OffloadingManager):
         for key, chunk in zip(keys_to_store, chunks):
             self._policy.insert(key, chunk)
         self._num_write_pending_chunks += len(keys_to_store)
+        recorded_keys = set(keys_to_store)
+        recorded_keys.update(ready_existing_keys)
+        self._record_request_cache_access(
+            (key for key in keys if key in recorded_keys),
+            req_context,
+            inserted_keys=keys_to_store,
+            reused_keys=ready_existing_keys,
+        )
 
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)
@@ -285,6 +394,35 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
     @override
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        state = req_context.get_state(_RequestCacheAccess)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+            or state.finished
+        ):
+            return
+        state.finished = True
+        key_groups = []
+        for group_idx in sorted(state.key_groups):
+            keys = state.key_groups[group_idx]
+            positions = {
+                key: position
+                for key in keys
+                if (position := req_context.get_offload_key_position(key)) is not None
+            }
+            if len(positions) == len(keys):
+                keys = sorted(keys, key=positions.__getitem__)
+            key_groups.append(tuple(keys))
+        self._policy.on_request_finished(
+            tuple(key_groups),
+            state.inserted_keys - state.reused_keys,
+            state.reused_keys,
+            req_context,
+        )
+
+    @override
     def reset_cache(self) -> None:
         # Clear ALL chunks unconditionally. The scheduler's _stale_job_threshold
         # guarantees that complete_load / complete_store are never called for
@@ -292,6 +430,7 @@ class CPUOffloadingManager(OffloadingManager):
         # flushes in-flight load job IDs to the workers before any new stores
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
+        self._cache_generation += 1
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
 

@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
+from vllm.v1.kv_offload.cpu.policies.base import (
+    CachePolicy,
+    ChunkStatus,
+    order_request_keys,
+)
 
 
 class ARCCachePolicy(CachePolicy):
@@ -24,12 +28,11 @@ class ARCCachePolicy(CachePolicy):
            Searches T1 and T2 for chunk hashes and counts consecutive hits
            until a miss or non-ready chunk is encountered.
 
-        2. Cache touch (touch) - Adaptive Learning:
-           For each key (in reverse order):
-           - If in T1: Move to T2 (promotion from recent to frequent).
-           - If in T2: Move to MRU position (end of queue).
-           - If in B1 ghost list: Increase target_t1_size.
-           - If in B2 ghost list: Decrease target_t1_size.
+        2. Request access - Adaptive Learning:
+           - Ready chunks reused by a request move from T1 to T2 once, or
+             move to the MRU end of T2.
+           - B1/B2 misses adjust target_t1_size once per request before
+             insertion removes their ghost entries.
 
         3. Chunk eviction (evict) - Adaptive Replacement:
            Determines eviction source based on adaptive target:
@@ -39,7 +42,7 @@ class ARCCachePolicy(CachePolicy):
 
         4. Chunk insertion (insert):
            New chunks are always inserted into T1 and removed from B1/B2 if
-           present. Chunks may later be promoted to T2 during touch operations.
+           present. A later request reuse may promote them to T2.
 
     Adaptive Behavior:
         The algorithm self-tunes the recency vs. frequency trade-off:
@@ -71,6 +74,19 @@ class ARCCachePolicy(CachePolicy):
         if self.t1.pop(key, None) is None:
             self.t2.pop(key, None)
 
+    def _adapt_to_ghost_hit(self, key: OffloadKey) -> bool:
+        if key in self.b1:
+            delta = max(1, len(self.b2) / len(self.b1))
+            self.target_t1_size = min(self.target_t1_size + delta, self.cache_capacity)
+            self.b1.move_to_end(key)
+            return True
+        if key in self.b2:
+            delta = max(1, len(self.b1) / len(self.b2))
+            self.target_t1_size = max(self.target_t1_size - delta, 0)
+            self.b2.move_to_end(key)
+            return True
+        return False
+
     @override
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
@@ -86,19 +102,33 @@ class ARCCachePolicy(CachePolicy):
             elif key in self.t2:
                 self.t2.move_to_end(key)
 
-            elif key in self.b1:
-                delta = max(1, len(self.b2) / len(self.b1))
-                self.target_t1_size = min(
-                    self.target_t1_size + delta, self.cache_capacity
-                )
-                # move to MRU position (end) to keep it fresh in the ghost list
-                self.b1.move_to_end(key)
+            else:
+                self._adapt_to_ghost_hit(key)
 
-            elif key in self.b2:
-                delta = max(1, len(self.b1) / len(self.b2))
-                self.target_t1_size = max(self.target_t1_size - delta, 0)
-                # move to MRU position (end) to keep it fresh in the ghost list
-                self.b2.move_to_end(key)
+    @override
+    def on_request_finished(
+        self,
+        key_groups: Sequence[Sequence[OffloadKey]],
+        insertion_only_keys: set[OffloadKey],
+        reused_keys: set[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        for key in reversed(order_request_keys(key_groups, req_context)):
+            if key in insertion_only_keys:
+                # A store is not a frequency hit. Preserve T1 membership
+                # while still restoring tail-to-head recency.
+                if key in self.t1:
+                    self.t1.move_to_end(key)
+                elif key in self.t2:
+                    self.t2.move_to_end(key)
+                continue
+
+            # Ready chunks reused by this request count as one access.
+            if key in reused_keys and key in self.t1:
+                chunk = self.t1.pop(key)
+                self.t2[key] = chunk
+            elif key in reused_keys and key in self.t2:
+                self.t2.move_to_end(key)
 
     @override
     def clear(self) -> None:

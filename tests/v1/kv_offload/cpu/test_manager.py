@@ -23,6 +23,7 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 
 def make_req_context(
@@ -430,31 +431,34 @@ def test_cpu_manager():
     assert cpu_manager.lookup(to_key(0), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare load [2, 3]
-    prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
+    load_ctx = make_req_context("load-2-3")
+    prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), load_ctx)
     verify_load_output(prepare_load_output, [1, 2])
 
     # prepare store with no space ([2, 3] is being loaded)
     assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
 
     # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
-    cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
+    cpu_manager.complete_load(to_keys([2, 3]), load_ctx)
+    cpu_manager.on_request_finished(load_ctx)
 
-    # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
+    # prepare store [6, 7, 8] -> evicts [4, 5, 3] (oldest). Within
+    # the accessed prefix [2, 3], the tail is less valuable than the head.
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[6, 7, 8],
-            store_chunk_ids=[1, 0, 3],
-            evicted_keys=[4, 5, 2],
+            store_chunk_ids=[2, 0, 3],
+            evicted_keys=[4, 5, 3],
         ),
     )
 
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [3, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([3, 6, 7]), _EMPTY_REQ_CTX)
+    # touch [2, 6, 7] (move to end of LRU order)
+    cpu_manager.touch(to_keys([2, 6, 7]), _EMPTY_REQ_CTX)
 
     # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
@@ -477,7 +481,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 2}, {8}),
+        expected_evictions=({4, 5, 3}, {8}),
     )
 
 
@@ -516,6 +520,65 @@ def test_prepare_load_preserves_key_order():
         key_to_chunk_id[key_a],
     ]
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
+
+
+def test_lru_batch_eviction_failure_is_atomic():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    policy = manager._policy
+    assert isinstance(policy, LRUCachePolicy)
+    keys = to_keys([1, 2, 3, 4])
+    assert manager.prepare_store(keys, _EMPTY_REQ_CTX) is not None
+    manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+    protected = set(keys[1:])
+    assert policy.evict(2, protected) is None
+    assert all(manager.lookup(key, _EMPTY_REQ_CTX) is LookupResult.HIT for key in keys)
+
+    evicted = policy.evict(1, protected)
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [keys[0]]
+
+
+def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+    policy = manager._policy
+    assert isinstance(policy, LRUCachePolicy)
+    key = to_key(1)
+    assert manager.prepare_store([key], _EMPTY_REQ_CTX) is not None
+    manager.complete_store([key], _EMPTY_REQ_CTX)
+
+    for _ in range(128):
+        manager.prepare_load([key], _EMPTY_REQ_CTX)
+        manager.complete_load([key], _EMPTY_REQ_CTX)
+
+    assert len(policy._heap) < 64
+    evicted = policy.evict(1, set())
+    assert evicted is not None
+    assert [evicted_key for evicted_key, _ in evicted] == [key]
+
+
+def test_reset_discards_stale_request_access_classification():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    key = to_key(1)
+    resumed_ctx = make_req_context("resumed")
+
+    assert manager.prepare_store([key], resumed_ctx) is not None
+    manager.complete_store([key], resumed_ctx)
+    manager.reset_cache()
+
+    replacement_ctx = make_req_context("replacement")
+    assert manager.prepare_store([key], replacement_ctx) is not None
+    manager.complete_store([key], replacement_ctx)
+    manager.on_request_finished(replacement_ctx)
+    assert key in policy.t1
+
+    manager.prepare_load([key], resumed_ctx)
+    manager.complete_load([key], resumed_ctx)
+    manager.on_request_finished(resumed_ctx)
+
+    assert key in policy.t2
 
 
 class TestARCPolicy:
@@ -1156,3 +1219,272 @@ def test_touch_forwards_req_context_to_policy(monkeypatch):
     assert len(received) == 1
     assert received[0][0] == keys
     assert received[0][1] is ctx
+
+
+@pytest.mark.parametrize("finish_before_completion", [False, True])
+def test_request_finish_orders_lru_prefix_independent_of_store_completion(
+    finish_before_completion: bool,
+):
+    """A transfer's completion order must not make the prefix head LRU."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    prefix = to_keys([1, 2, 3, 4])
+    ctx = make_req_context("prefix")
+
+    output = manager.prepare_store(prefix, ctx)
+    assert output is not None
+    if finish_before_completion:
+        manager.on_request_finished(ctx)
+    manager.complete_store(set(prefix), ctx)
+    if not finish_before_completion:
+        manager.on_request_finished(ctx)
+
+    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    assert output is not None
+    assert output.evicted_keys == to_keys([4])
+
+
+@pytest.mark.parametrize("finish_before_completion", [False, True])
+def test_request_finish_orders_lru_prefix_independent_of_load_completion(
+    finish_before_completion: bool,
+):
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    prefix = to_keys([1, 2, 3, 4])
+
+    seed_ctx = make_req_context("seed")
+    output = manager.prepare_store(prefix, seed_ctx)
+    assert output is not None
+    manager.complete_store(prefix, seed_ctx)
+
+    reuse_ctx = make_req_context("reuse")
+    manager.prepare_load(prefix, reuse_ctx)
+    if finish_before_completion:
+        manager.on_request_finished(reuse_ctx)
+    manager.complete_load(set(prefix), reuse_ctx)
+    if not finish_before_completion:
+        manager.on_request_finished(reuse_ctx)
+
+    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    assert output is not None
+    assert output.evicted_keys == to_keys([4])
+
+
+def test_late_old_completion_does_not_override_newer_request_recency():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    old_keys = to_keys([1, 2])
+    new_keys = to_keys([3, 4])
+
+    old_ctx = make_req_context("old")
+    assert manager.prepare_store(old_keys, old_ctx) is not None
+    manager.on_request_finished(old_ctx)
+
+    new_ctx = make_req_context("new")
+    assert manager.prepare_store(new_keys, new_ctx) is not None
+    manager.complete_store(new_keys, new_ctx)
+    manager.on_request_finished(new_ctx)
+
+    # Physical completion is late, but the logical access is still older.
+    manager.complete_store(old_keys, old_ctx)
+
+    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    assert output is not None
+    assert output.evicted_keys == [old_keys[-1]]
+
+
+def test_arc_counts_reuse_once_and_keeps_insertions_in_t1():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    prefix = to_keys([1, 2, 3, 4])
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store(prefix, seed_ctx) is not None
+    manager.complete_store(prefix, seed_ctx)
+    # Repeated store offers from the same request must not become ARC hits.
+    assert manager.prepare_store(prefix, seed_ctx) is not None
+    # Nor should an internal read used to cascade the new chunks to a tier.
+    manager.prepare_load(prefix, seed_ctx)
+    manager.complete_load(prefix, seed_ctx)
+    manager.on_request_finished(seed_ctx)
+
+    assert list(policy.t1) == list(reversed(prefix))
+    assert not policy.t2
+
+    reuse_ctx = make_req_context("reuse")
+    manager.prepare_load(prefix, reuse_ctx)
+    manager.complete_load(prefix, reuse_ctx)
+    # A duplicate internal pin, as used by tiering cascades, is deduplicated.
+    manager.prepare_load(prefix, reuse_ctx)
+    manager.complete_load(prefix, reuse_ctx)
+    manager.on_request_finished(reuse_ctx)
+
+    assert not policy.t1
+    assert list(policy.t2) == list(reversed(prefix))
+
+
+def test_arc_reuse_wins_if_same_request_later_reinserts_key():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    key_1, key_2 = to_keys([1, 2])
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store([key_1], seed_ctx) is not None
+    manager.complete_store([key_1], seed_ctx)
+    manager.on_request_finished(seed_ctx)
+
+    reuse_ctx = make_req_context("reuse-and-reinsert")
+    manager.prepare_load([key_1], reuse_ctx)
+    manager.complete_load([key_1], reuse_ctx)
+
+    other_ctx = make_req_context("evict-reused-key")
+    assert manager.prepare_store([key_2], other_ctx) is not None
+    manager.complete_store([key_2], other_ctx)
+    manager.on_request_finished(other_ctx)
+
+    assert manager.prepare_store([key_1], reuse_ctx) is not None
+    manager.complete_store([key_1], reuse_ctx)
+    manager.on_request_finished(reuse_ctx)
+
+    assert key_1 not in policy.t1
+    assert list(policy.t2) == [key_1]
+
+
+def test_request_finish_forwards_grouped_deduplicated_accesses(monkeypatch):
+    manager = make_cpu_manager(num_blocks=5)
+    existing = make_offload_key(b"existing", 0)
+    group_0_new = make_offload_key(b"group-0-new", 0)
+    group_1_head = make_offload_key(b"group-1-head", 1)
+    group_1_tail = make_offload_key(b"group-1-tail", 1)
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store([existing], seed_ctx) is not None
+    manager.complete_store([existing], seed_ctx)
+
+    ctx = make_req_context("grouped")
+    # Group 1 is observed first, but policy finalization follows group index.
+    offered = [group_1_head, existing, group_0_new]
+    assert manager.prepare_store(offered, ctx) is not None
+    # Later offers extend a group's prefix and may repeat earlier keys.
+    assert (
+        manager.prepare_store([group_0_new, group_1_head, group_1_tail], ctx)
+        is not None
+    )
+
+    received = []
+
+    def on_request_finished(key_groups, insertion_only_keys, reused_keys, req_context):
+        received.append((key_groups, insertion_only_keys, reused_keys, req_context))
+
+    monkeypatch.setattr(manager._policy, "on_request_finished", on_request_finished)
+    manager.on_request_finished(ctx)
+    manager.on_request_finished(ctx)
+
+    assert received == [
+        (
+            ((existing, group_0_new), (group_1_head, group_1_tail)),
+            {group_0_new, group_1_head, group_1_tail},
+            {existing},
+            ctx,
+        )
+    ]
+
+
+def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
+    manager = make_cpu_manager(num_blocks=2, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    keys = to_keys([1, 2, 3])
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store(keys[:2], seed_ctx) is not None
+    manager.complete_store(keys[:2], seed_ctx)
+    manager.on_request_finished(seed_ctx)
+
+    evict_ctx = make_req_context("create-ghost")
+    output = manager.prepare_store([keys[2]], evict_ctx)
+    assert output is not None
+    [ghost_key] = output.evicted_keys
+    manager.complete_store([keys[2]], evict_ctx)
+    manager.on_request_finished(evict_ctx)
+    assert ghost_key in policy.b1
+
+    resident_keys = [key for key in keys if key != ghost_key]
+    pin_ctx = make_req_context("pin-residents")
+    manager.prepare_load(resident_keys, pin_ctx)
+
+    ghost_ctx = make_req_context("ghost-hit")
+    target_before = policy.target_t1_size
+    assert manager.prepare_store([ghost_key], ghost_ctx) is None
+    target_after_first_offer = policy.target_t1_size
+    assert target_after_first_offer > target_before
+    assert manager.prepare_store([ghost_key], ghost_ctx) is None
+    assert policy.target_t1_size == target_after_first_offer
+
+    manager.complete_load(resident_keys, pin_ctx)
+    output = manager.prepare_store([ghost_key], ghost_ctx)
+    assert output is not None
+    assert policy.target_t1_size == target_after_first_offer
+    manager.complete_store([ghost_key], ghost_ctx)
+    manager.on_request_finished(ghost_ctx)
+    assert ghost_key in policy.t1
+    assert ghost_key not in policy.t2
+
+
+def test_arc_pending_block_is_not_a_frequency_hit():
+    manager = make_cpu_manager(num_blocks=2, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    key = to_key(1)
+
+    writer_ctx = make_req_context("writer")
+    assert manager.prepare_store([key], writer_ctx) is not None
+
+    observer_ctx = make_req_context("pending-observer")
+    output = manager.prepare_store([key], observer_ctx)
+    assert output is not None and not output.keys_to_store
+    manager.on_request_finished(observer_ctx)
+
+    chunk = policy.get(key)
+    assert chunk is not None and not chunk.is_ready
+    assert key in policy.t1
+    assert key not in policy.t2
+
+
+def test_request_key_positions_override_store_observation_order():
+    manager = make_cpu_manager(num_blocks=2, cache_policy="lru")
+    head, tail = to_keys([1, 2])
+    ctx = make_req_context("out-of-order-store")
+    ctx.set_offload_key_position(head, 16)
+    ctx.set_offload_key_position(tail, 32)
+
+    # A backfill or partial-tail path may offer a later key first.
+    assert manager.prepare_store([tail], ctx) is not None
+    assert manager.prepare_store([head], ctx) is not None
+    manager.on_request_finished(ctx)
+    manager.complete_store({head, tail}, ctx)
+
+    output = manager.prepare_store([to_key(3)], make_req_context("evict-tail"))
+    assert output is not None
+    assert output.evicted_keys == [tail]
+
+
+def test_request_key_positions_order_tails_across_kv_groups():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    group_0_head = make_offload_key(b"group-0-head", 0)
+    group_0_tail = make_offload_key(b"group-0-tail", 0)
+    group_1_head = make_offload_key(b"group-1-head", 1)
+    group_1_tail = make_offload_key(b"group-1-tail", 1)
+    keys = [group_0_head, group_0_tail, group_1_head, group_1_tail]
+    ctx = make_req_context("hybrid-groups")
+    for key in (group_0_head, group_1_head):
+        ctx.set_offload_key_position(key, 16)
+    for key in (group_0_tail, group_1_tail):
+        ctx.set_offload_key_position(key, 32)
+
+    assert manager.prepare_store(keys, ctx) is not None
+    manager.complete_store(keys, ctx)
+    manager.on_request_finished(ctx)
+
+    output = manager.prepare_store(to_keys([10, 11]), make_req_context("evict"))
+    assert output is not None
+    assert set(output.evicted_keys) == {group_0_tail, group_1_tail}
