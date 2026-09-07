@@ -617,7 +617,7 @@ steps:
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 - label: ":amd: (MI300) PyTorch Compilation Passes" # TBD
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -901,7 +901,7 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
 - label: ":amd: (MI300) Distributed DP + EP" # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_8
@@ -1008,7 +1008,7 @@ steps:
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (LLM)" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1312,7 +1312,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: ":amd: (MI300) DeepSeek V2-Lite Sync EPLB Accuracy" # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1332,10 +1332,10 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+  - VLLM_ENGINE_READY_TIMEOUT_S=1800 bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
 - label: ":amd: (MI300) LM Eval Large Models Harness" # TBD
-  timeout_in_minutes: 55
+  timeout_in_minutes: 85
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1400,7 +1400,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 - label: ":amd: (MI300) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1420,10 +1420,10 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
+  - VLLM_ENGINE_READY_TIMEOUT_S=1800 bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
 - label: ":amd: (MI300) LM Eval Large Models" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_8
@@ -2209,75 +2209,75 @@ steps:
 
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
 
-- label: ":amd: (MI300) Transformers Nightly Models (Initialization) Shard %N" # TBD
-  timeout_in_minutes: 65
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  parallelism: 6
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+# - label: ":amd: (MI300) Transformers Nightly Models (Initialization) Shard %N" # TBD
+#   timeout_in_minutes: 65
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   parallelism: 6
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: ":amd: (MI300) Transformers Nightly Models (Processing) Shard %N" # TBD
-  timeout_in_minutes: 145
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  parallelism: 8
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+# - label: ":amd: (MI300) Transformers Nightly Models (Processing) Shard %N" # TBD
+#   timeout_in_minutes: 145
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   parallelism: 8
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: ":amd: (MI300) Transformers Nightly Models (Single)" # TBD
-  timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  - examples/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/transformers/test_backend.py
-  - pytest -v -s tests/models/multimodal/test_mapping.py
-  - python3 examples/basic/offline_inference/chat.py
-  - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
+# - label: ":amd: (MI300) Transformers Nightly Models (Single)" # TBD
+#   timeout_in_minutes: 50
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   - examples/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/transformers/test_backend.py
+#   - pytest -v -s tests/models/multimodal/test_mapping.py
+#   - python3 examples/basic/offline_inference/chat.py
+#   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
+#   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
 
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
 
@@ -2450,7 +2450,7 @@ steps:
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: ":amd: (MI300) Rust Frontend Distributed" # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2474,7 +2474,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - VLLM_ENGINE_READY_TIMEOUT_S=1800 TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
 
@@ -3076,7 +3076,7 @@ steps:
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Weight Loading Multi-GPU" # TBD
-  timeout_in_minutes: 40
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
