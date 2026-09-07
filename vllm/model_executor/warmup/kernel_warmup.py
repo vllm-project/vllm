@@ -34,10 +34,12 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
 )
@@ -149,6 +151,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    qwen_vl_triton_warmup(worker.model_runner)
+    mamba_triton_warmup(worker.model_runner)
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
