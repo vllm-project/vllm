@@ -273,7 +273,6 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
   }
   const uint32_t pivot = prefix;
   const uint32_t fin = remaining;
-  const uint32_t gt_total = TopK - fin;
   uint32_t run_gt = 0, run_eq = 0;
   for (int base = 0; base < n; base += N_THREADS) {
     const int i = base + tx;
@@ -1305,8 +1304,6 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               uint32_t num_rows, uint32_t top_k,
                               uint32_t max_len, uint32_t max_seq_len) {
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
-  constexpr int RADIX = 256;
-  constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
 
   const uint32_t bid = blockIdx.x;
   const int tx = threadIdx.x;
