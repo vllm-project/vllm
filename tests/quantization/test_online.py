@@ -808,15 +808,15 @@ def test_online_quantization(
             else:
                 assert isinstance(o_proj.quant_method, expected_linear_cls)
 
-            if kv_cache_dtype == "fp8":
-                attn = model.model.layers[0].self_attn.attn
-                assert attn._k_scale == 1.0
-                assert attn._v_scale == 1.0
-
         for layer in model.model.layers:
             assert isinstance(
                 layer.self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
             )
+
+    if kv_cache_dtype == "fp8":
+        attn = model.model.layers[0].self_attn.attn
+        assert attn._k_scale == 1.0
+        assert attn._v_scale == 1.0
 
     if (
         model_name == GRANITE_MODEL_NAME
