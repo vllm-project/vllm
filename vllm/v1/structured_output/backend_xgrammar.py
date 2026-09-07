@@ -306,7 +306,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # properties, conflict under xgrammar.
         if (
             obj.get("type") == "object"
-            and "patternProperties" in obj
+            and isinstance(obj.get("patternProperties"), dict)
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
