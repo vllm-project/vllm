@@ -51,7 +51,7 @@ models:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
-      VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
     base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128 --language-model-only --kv-cache-dtype fp8"
     prefill:
