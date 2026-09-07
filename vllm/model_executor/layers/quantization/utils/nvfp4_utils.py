@@ -99,11 +99,9 @@ def pad_nvfp4_weight_for_cutlass(
 
 
 def nvfp4_weight_padding_bytes(layer: torch.nn.Module) -> int:
-    """K-dim padding (packed bytes) of an NVFP4 weight, derived from its shape.
-
-    Padding is a pure function of the packed weight width and the logical
-    input size, so it is computed on demand rather than stored on the layer —
-    no per-layer state has to survive weight export/import (weight cache IPC).
+    """
+    Compute K-dim padding (packed bytes) of an NVFP4 weight,
+    Aligned with `pad_nvfp4_weight_for_cutlass` above.
     """
     return layer.weight.shape[1] - layer.input_size_per_partition // 2
 

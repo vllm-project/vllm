@@ -15,10 +15,6 @@ _weights_pre_processed: ContextVar[bool] = ContextVar(
     "weights_pre_processed", default=False
 )
 
-_weight_cache_export: ContextVar[bool] = ContextVar(
-    "weight_cache_export", default=False
-)
-
 
 @contextmanager
 def weights_already_processed():
@@ -35,28 +31,6 @@ def weights_already_processed():
 
 def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
-
-
-@contextmanager
-def weight_cache_export_mode():
-    """Mark that the model is being loaded by the weight cache daemon solely to
-    export its tensors over CUDA IPC.
-
-    Post-load steps that discard raw parameters in favor of derived state that
-    tensor export cannot carry (e.g. MegaMoE ``finalize_weights``, which frees
-    the packed weights and keeps only plain-attribute DeepGEMM buffers) must
-    skip that rewrite so the exported tensors stay complete. The engine rebuilds
-    the derived state lazily from the shared raw tensors.
-    """
-    token = _weight_cache_export.set(True)
-    try:
-        yield
-    finally:
-        _weight_cache_export.reset(token)
-
-
-def is_weight_cache_export_mode() -> bool:
-    return _weight_cache_export.get()
 
 
 def set_weight_attrs(

@@ -88,7 +88,6 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.model_executor.utils import is_weight_cache_export_mode
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -416,16 +415,12 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 activation=self.activation,
             )
         )
-        # Loaded by the weight cache daemon: expose the transformed tensors as
-        # buffers so the engine maps them over IPC instead of recomputing them
-        # (recomputing would double the resident MoE weight memory).
-        if is_weight_cache_export_mode():
-            l1_packed, l1_scale = self._transformed_l1_weights
-            l2_packed, l2_scale = self._transformed_l2_weights
-            self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
-            self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
-            self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
-            self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
+        l1_packed, l1_scale = self._transformed_l1_weights
+        l2_packed, l2_scale = self._transformed_l2_weights
+        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
+        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
+        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
+        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
         self._drop_raw_mega_weights()
 
     def _drop_raw_mega_weights(self) -> None:

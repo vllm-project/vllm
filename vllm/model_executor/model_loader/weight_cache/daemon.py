@@ -50,7 +50,6 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
-from vllm.model_executor.utils import weight_cache_export_mode
 from vllm.platforms import current_platform
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
@@ -136,8 +135,7 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
-            with weight_cache_export_mode():
-                self.model = get_model(vllm_config=self.vllm_config)
+            self.model = get_model(vllm_config=self.vllm_config)
         self._export_entries()
         logger.info(
             "Weight cache daemon rank %d cached %d tensors",
