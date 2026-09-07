@@ -10,6 +10,8 @@ pytestmark = pytest.mark.cpu_test
 
 
 class DummyModelRunnerOutput(ModelRunnerOutput):
+    kv_connector_output: KVConnectorOutput
+
     def __init__(
         self,
         finished_sending: set[str] | None = None,
@@ -41,37 +43,37 @@ def test_aggregate_workers_output():
     output1 = DummyModelRunnerOutput()
     output2 = DummyModelRunnerOutput()
 
-    aggregated = aggregator.aggregate([output1, output2])
+    aggregated_output = aggregator.aggregate([output1, output2])
 
-    assert aggregated is output1
-    aggregated = aggregated.kv_connector_output
-    assert aggregated.finished_sending is None
-    assert aggregated.finished_recving is None
-    assert not aggregated.invalid_block_ids
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.finished_sending is None
+    assert aggregated_kv_output.finished_recving is None
+    assert not aggregated_kv_output.invalid_block_ids
 
     output1 = DummyModelRunnerOutput(
         finished_sending={"req1"}, finished_recving={"req2"}
     )
     output2 = DummyModelRunnerOutput(invalid_block_ids={1})
 
-    aggregated = aggregator.aggregate([output1, output2])
+    aggregated_output = aggregator.aggregate([output1, output2])
 
-    assert aggregated is output1
-    aggregated = aggregated.kv_connector_output
-    assert aggregated.finished_sending is None
-    assert aggregated.finished_recving is None
-    assert aggregated.invalid_block_ids == {1}
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.finished_sending is None
+    assert aggregated_kv_output.finished_recving is None
+    assert aggregated_kv_output.invalid_block_ids == {1}
 
     output1 = DummyModelRunnerOutput(invalid_block_ids={2})
     output2 = DummyModelRunnerOutput(finished_sending={"req1"})
 
-    aggregated = aggregator.aggregate([output1, output2])
+    aggregated_output = aggregator.aggregate([output1, output2])
 
-    assert aggregated is output1
-    aggregated = aggregated.kv_connector_output
-    assert aggregated.finished_sending == {"req1"}
-    assert aggregated.finished_recving is None
-    assert aggregated.invalid_block_ids == {2}
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.finished_sending == {"req1"}
+    assert aggregated_kv_output.finished_recving is None
+    assert aggregated_kv_output.invalid_block_ids == {2}
 
     output1 = DummyModelRunnerOutput(invalid_block_ids={3, 4})
     output2 = DummyModelRunnerOutput(
@@ -80,19 +82,21 @@ def test_aggregate_workers_output():
         failed_recving={"req3"},
     )
 
-    aggregated = aggregator.aggregate([output1, output2])
+    aggregated_output = aggregator.aggregate([output1, output2])
 
-    assert aggregated is output1
-    aggregated = aggregated.kv_connector_output
-    assert aggregated.finished_sending is None
-    assert aggregated.finished_recving == {"req2"}
-    assert aggregated.invalid_block_ids == {3, 4, 5}
-    assert not aggregated.failed_recving
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.finished_sending is None
+    assert aggregated_kv_output.finished_recving == {"req2"}
+    assert aggregated_kv_output.invalid_block_ids == {3, 4, 5}
+    assert not aggregated_kv_output.failed_recving
 
     output1 = DummyModelRunnerOutput(finished_recving={"req3"})
     output2 = DummyModelRunnerOutput(finished_recving={"req3"})
-    aggregated = aggregator.aggregate([output1, output2])
-    assert aggregated.kv_connector_output.failed_recving == {"req3"}
+    aggregated_output = aggregator.aggregate([output1, output2])
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.failed_recving == {"req3"}
 
 
 def test_aggregate_workers_output_with_expected_finished_count():
@@ -101,11 +105,13 @@ def test_aggregate_workers_output_with_expected_finished_count():
     assert aggregator._expected_finished_count == 4
     # Some request with default expected finished requests
     output1 = DummyModelRunnerOutput(finished_sending={"req1"})
-    aggregated = aggregator.aggregate([output1])
+    aggregated_output = aggregator.aggregate([output1])
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
     # still expecting to collect from 4 workers
     assert aggregator._send_remaining_count["req1"] == 3
-    assert not aggregated.kv_connector_output.finished_sending
-    assert not aggregated.kv_connector_output.finished_recving
+    assert not aggregated_kv_output.finished_sending
+    assert not aggregated_kv_output.finished_recving
 
     # Workers discover and find that in this setup they only need to
     # collect from 2
@@ -117,14 +123,16 @@ def test_aggregate_workers_output_with_expected_finished_count():
     )
     output3 = DummyModelRunnerOutput(finished_recving={"req2"})
     # Req2 only needs 2 acks
-    aggregated = aggregator.aggregate([output1, output2, output3])
-    assert aggregated.kv_connector_output.expected_finished_count == 2
+    aggregated_output = aggregator.aggregate([output1, output2, output3])
+    assert aggregated_output is output1
+    aggregated_kv_output = output1.kv_connector_output
+    assert aggregated_kv_output.expected_finished_count == 2
 
-    assert not aggregated.kv_connector_output.finished_sending
+    assert not aggregated_kv_output.finished_sending
 
     # Req2 is finished
     assert "req2" not in aggregator._recv_remaining_count
-    assert aggregated.kv_connector_output.finished_recving == {"req2"}
+    assert aggregated_kv_output.finished_recving == {"req2"}
 
     # Req1 is still waiting for 2 more acks (expected_finished_count has no effect)
     # NOTE: This is to showcase dynamic update. Workers are responsible for
