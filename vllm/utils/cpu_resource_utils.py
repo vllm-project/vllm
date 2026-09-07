@@ -115,29 +115,25 @@ def check_cgroup_memory_available(
 
     cgroup_available = max(0, cgroup_limit - cgroup_usage)
     mib = 1 << 20
-    if required_bytes <= cgroup_available:
-        logger.info(
-            "Cgroup memory preflight passed for %s: %.0f MiB required, %.0f MiB "
-            "current usage, %.0f MiB available under %.0f MiB limit, %.0f MiB "
-            "estimated remaining after allocation.",
-            allocation_name,
-            required_bytes / mib,
-            cgroup_usage / mib,
-            cgroup_available / mib,
-            cgroup_limit / mib,
-            (cgroup_available - required_bytes) / mib,
-        )
-        return
-
-    logger.warning(
-        "Low cgroup memory headroom for %s: %.0f MiB required, %.0f MiB "
-        "available under the %.0f MiB limit (%.0f MiB current usage). "
-        "Increase the container memory limit or reduce the allocation size.",
+    remaining_bytes = cgroup_available - required_bytes
+    log_fn = logger.info if remaining_bytes >= 0 else logger.warning
+    status = (
+        "current headroom meets the requested allocation"
+        if remaining_bytes >= 0
+        else "current headroom is below the requested allocation; allocation "
+        "will still be attempted because cgroup usage may be reclaimable"
+    )
+    log_fn(
+        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
+        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
+        "after allocation based on current usage; %s.",
         allocation_name,
         required_bytes / mib,
+        cgroup_usage / mib,
         cgroup_available / mib,
         cgroup_limit / mib,
-        cgroup_usage / mib,
+        remaining_bytes / mib,
+        status,
     )
 
 
