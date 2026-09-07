@@ -559,7 +559,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
         compress_ratio: int,
         head_dim: int,
         rope_head_dim: int,
-    ) -> CuTeDSLLaunchSpec["SparseAttnCompressNormRopeStoreC4Kernel.CompileKey"]:
+    ) -> CuTeDSLLaunchSpec[SparseAttnCompressNormRopeStoreC4Kernel.CompileKey]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             norm_weight_dtype=torch_to_cute_dtype(rms_norm_weight.dtype),
@@ -1050,7 +1050,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
         fp8_scale: torch.Tensor | None,
         head_dim: int,
         rope_head_dim: int,
-    ) -> CuTeDSLLaunchSpec["SparseAttnCompressNormRopeStoreFullC4Kernel.CompileKey"]:
+    ) -> CuTeDSLLaunchSpec[SparseAttnCompressNormRopeStoreFullC4Kernel.CompileKey]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             store_full_fp8=store_full_fp8,
@@ -1808,7 +1808,7 @@ class SparseAttnNormRopeStoreKernel(
         compress_ratio: int,
         head_dim: int,
         rope_head_dim: int,
-    ) -> CuTeDSLLaunchSpec["SparseAttnNormRopeStoreKernel.CompileKey"]:
+    ) -> CuTeDSLLaunchSpec[SparseAttnNormRopeStoreKernel.CompileKey]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             cache_block_size=kv_cache.shape[1] * compress_ratio,
@@ -2122,7 +2122,7 @@ class SparseAttnNormRopeStoreFullKernel(
         fp8_scale: torch.Tensor | None,
         head_dim: int,
         rope_head_dim: int,
-    ) -> CuTeDSLLaunchSpec["SparseAttnNormRopeStoreFullKernel.CompileKey"]:
+    ) -> CuTeDSLLaunchSpec[SparseAttnNormRopeStoreFullKernel.CompileKey]:
         compile_key = self.dispatch(
             compress_ratio=compress_ratio,
             store_full_fp8=store_full_fp8,
