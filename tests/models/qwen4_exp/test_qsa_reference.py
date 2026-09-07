@@ -950,11 +950,10 @@ def test_qsa_sparse_paged_attention_correctness(
 ) -> None:
     """QSA sparse paged attention matches the dense reference.
 
-    With fp8=True the K/V caches are e4m3 with per-tensor scales; the reference
-    dequantizes the same e4m3 cache with those scales, so the check compares the
-    production kernel against the reference on identical inputs and covers the
-    host-side scale folding. With fp8=False, unit scale arguments must leave the
-    bf16 path bit-identical.
+    fp8 only changes the K/V cache dtype (e4m3 with a per-tensor scale pair) and
+    the scales; the reference dequantizes the same cache with those scales, so
+    both paths compare the production kernel against the reference on identical
+    inputs. fp8=True additionally covers the host-side scale folding.
     """
     torch.manual_seed(2)
     # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
@@ -1005,9 +1004,9 @@ def test_qsa_sparse_paged_attention_correctness(
     context_lengths[short_requests] = request_row_counts[short_requests] + 8
     block_topk = indexer_budget // indexer_compress_ratio
     compressed_blocks_per_page = page_size // indexer_compress_ratio
-    block_selection = torch.arange(block_topk, device="cuda")
-    selected_pages = block_selection % num_selected_pages
-    selected_offsets = block_selection // num_selected_pages
+    selection = torch.arange(block_topk, device="cuda")
+    selected_pages = selection % num_selected_pages
+    selected_offsets = selection // num_selected_pages
     row_shifts = 2 * row_indices.unsqueeze(1)
     # Eight blocks per page; adjacent rows overlap by six of those eight.
     selected_offsets = (selected_offsets + row_shifts) % compressed_blocks_per_page
@@ -1040,50 +1039,25 @@ def test_qsa_sparse_paged_attention_correctness(
     )
 
     scale = head_dim**-0.5
-    selection = logical_indices[:, :selection_width]
 
-    if not fp8:
-        actual = qsa_ops.qsa_sparse_paged_attention(
-            q,
-            k_cache,
-            v_cache,
-            logical_indices,
-            block_table,
-            token_to_req,
-            use_prefill_config=use_prefill_config,
-        )
-        expected = _qsa_sparse_paged_attention_reference(
-            q, k_cache, v_cache, selection, block_table, token_to_req, scale
-        )
-        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-        scaled = qsa_ops.qsa_sparse_paged_attention(
-            q,
-            k_cache,
-            v_cache,
-            logical_indices,
-            block_table,
-            token_to_req,
-            use_prefill_config=use_prefill_config,
-            k_scale=1.0,
-            v_scale=1.0,
-        )
-        assert torch.equal(actual, scaled)
-        return
+    if fp8:
+        # A fixed non-unit pair (k != v) exercises the host-side scale folding
+        # and catches a k/v swap; scales are host floats, as the layer exposes
+        # them. vLLM stores quantized caches as uint8 and reinterprets the e4m3
+        # bytes right before the kernel, so the test quantizes the same way
+        # (stored values are the scaled ones, as reshape_and_cache does).
+        k_scale, v_scale = 0.5, 2.0
+        k_cache = (k_cache.float() / k_scale).to(torch.float8_e4m3fn)
+        v_cache = (v_cache.float() / v_scale).to(torch.float8_e4m3fn)
+        k_cache = k_cache.view(torch.uint8).view(torch.float8_e4m3fn)
+        v_cache = v_cache.view(torch.uint8).view(torch.float8_e4m3fn)
+    else:
+        k_scale, v_scale = 1.0, 1.0
 
-    # A fixed non-unit pair (k != v) exercises the host-side scale folding and
-    # catches a k/v swap; scales are host floats, as the layer exposes them.
-    k_scale, v_scale = 0.5, 2.0
-    # vLLM allocates quantized caches as uint8; the impl reinterprets the bytes
-    # as e4m3 right before the kernel, so the test takes the same detour. Stored
-    # values are the scaled ones, as reshape_and_cache does.
-    k_fp8 = (k_cache.float() / k_scale).to(torch.float8_e4m3fn)
-    v_fp8 = (v_cache.float() / v_scale).to(torch.float8_e4m3fn)
-    k_fp8 = k_fp8.view(torch.uint8).view(torch.float8_e4m3fn)
-    v_fp8 = v_fp8.view(torch.uint8).view(torch.float8_e4m3fn)
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
-        k_fp8,
-        v_fp8,
+        k_cache,
+        v_cache,
         logical_indices,
         block_table,
         token_to_req,
@@ -1093,9 +1067,9 @@ def test_qsa_sparse_paged_attention_correctness(
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
-        k_fp8,
-        v_fp8,
-        selection,
+        k_cache,
+        v_cache,
+        logical_indices[:, :selection_width],
         block_table,
         token_to_req,
         scale,

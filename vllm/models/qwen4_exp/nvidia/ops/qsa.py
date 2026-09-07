@@ -132,10 +132,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[None, :],
             other=0.0,
         )
-        if IS_FP8:
-            # e4m3 -> bf16 is exact; the QK dot stays bf16 (fp8 QK measured
-            # slower here and less accurate on sm_120).
-            keys = keys.to(tl.bfloat16)
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
@@ -146,10 +142,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=0.0,
         )
         if IS_FP8:
-            # Dequant V to fp16, not bf16: P <= 1 (online softmax) so fp16 has
-            # the range, its wider mantissa is more accurate, and the fp8->fp16
-            # upcast with the fp16 PV dot measured faster than bf16 on sm_120.
-            values = values.to(tl.float16)
+            # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
+            # measured slower here and less accurate).
+            keys = keys.to(query.dtype)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
         # caches the K dequant scale is already folded into softmax_scale on the
@@ -161,6 +156,11 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         probabilities = tl.where(
             valid[None, :], tl.math.exp2(scores - next_max[:, None]), 0.0
         )
+        if IS_FP8:
+            # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
+            # softmax) so fp16 has the range, its wider mantissa is more
+            # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
+            values = values.to(tl.float16)
         accumulator = tl.dot(
             probabilities.to(values.dtype),
             values,
@@ -170,15 +170,19 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         max_value = next_max
 
     has_values = normalizer > 0
+    # Fold the fp8 V dequant scale (output_scale) into the per-row normalizer
+    # rather than the full output: accumulator / (normalizer / output_scale) =
+    # output_scale * accumulator / normalizer, a per-row divide instead of a
+    # HEAD_DIM-wide multiply. The split-K LSE below keeps the unscaled
+    # normalizer, so the merge stays correct.
+    denominator = tl.maximum(normalizer, 1.0e-20)
+    if IS_FP8:
+        denominator = denominator / output_scale
     normalized_output = tl.where(
         has_values[:, None],
-        accumulator / tl.maximum(normalizer[:, None], 1.0e-20),
+        accumulator / denominator[:, None],
         0.0,
     )
-    if IS_FP8:
-        # output_scale is the host-side V dequant scale; fold it into the
-        # (partial) output.
-        normalized_output = normalized_output * output_scale
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
         tl.store(
