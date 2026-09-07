@@ -532,10 +532,12 @@ def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
 def test_registry_records_only_inside_model_setup_context() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
+    config = _config()
 
     kernel.register_warmup(3, _config())
     with registry.activate():
-        kernel.register_warmup(3, _config())
+        kernel.register_warmup(3, config)
+        kernel.register_warmup(3, config)
 
     assert len(registry) == 1
     assert kernel.compiled == []
