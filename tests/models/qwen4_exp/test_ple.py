@@ -516,6 +516,7 @@ def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
     torch.testing.assert_close(output.float(), embeddings.float())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_ple_device_embedding_allocates_on_active_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -546,6 +547,7 @@ def test_ple_device_embedding_allocates_on_active_device(
     assert not embedding.supports_prefetch
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("fp8_checkpoint", [False, True])
 def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     monkeypatch: pytest.MonkeyPatch,
