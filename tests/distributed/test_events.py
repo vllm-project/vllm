@@ -310,11 +310,15 @@ def test_snapshot_retains_removed_parent_for_active_child():
         [
             create_stored_event([101]),
             create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+    state.update(
+        [
             BlockRemoved(
                 block_hashes=[101],
                 medium=MEDIUM_GPU,
                 group_idx=0,
-            ),
+            )
         ]
     )
 
@@ -336,6 +340,71 @@ def test_snapshot_retains_removed_parent_for_active_child():
     )
 
     assert parent_idx < child_idx < remove_parent_idx
+
+
+def test_snapshot_does_not_remove_restored_part_of_multiblock_store():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101, 102]),
+            create_stored_event([101], session_id="restored"),
+        ]
+    )
+
+    events = state.snapshot_events()
+    removed_hashes = {
+        block_hash
+        for event in events
+        if isinstance(event, BlockRemoved)
+        for block_hash in event.block_hashes
+    }
+
+    assert 101 not in removed_hashes
+
+
+def test_snapshot_discards_fully_removed_dependency_chain():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+    state.update(
+        [
+            BlockRemoved(
+                block_hashes=[101, 102],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            )
+        ]
+    )
+
+    events = state.snapshot_events()
+
+    assert len(events) == 1
+    assert isinstance(events[0], AllBlocksCleared)
+
+
+def test_snapshot_rejects_missing_parent():
+    state = _KVCacheState()
+    state.update([create_stored_event([102], parent_block_hash=101)])
+
+    with pytest.raises(ValueError, match="parent block 101 is unavailable"):
+        state.snapshot_events()
+
+
+def test_snapshot_rejects_dependency_cycle():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101], parent_block_hash=102),
+            create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cyclic dependencies"):
+        state.snapshot_events()
 
 
 def test_snapshot_scopes_removal_by_ownership():
