@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
+    RegisterWorkerPayload,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
@@ -453,6 +454,41 @@ def bootstrap_server():
 
 
 @pytest.mark.asyncio
+async def test_register_worker_recovers_from_slow_bootstrap_server(monkeypatch):
+    """End-to-end: a real HTTP server that responds slower than the configured
+    timeout must be retried on the wire, not treated as fatal."""
+
+    original = MooncakeBootstrapServer.register_worker
+    first_call = {"done": False}
+
+    async def slow_register(self, payload: RegisterWorkerPayload):
+        if not first_call["done"]:
+            first_call["done"] = True
+            await asyncio.sleep(1.5)
+        return await original(self, payload)
+
+    monkeypatch.setattr(MooncakeBootstrapServer, "register_worker", slow_register)
+
+    port = get_open_port()
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(port))
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "0.5")
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "5")
+
+    server = MooncakeBootstrapServer("127.0.0.1", port)
+    server.start()
+    try:
+        worker = _make_local_register_worker_stub()
+        await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{port}/query")
+            assert response.status_code == 200
+            assert response.json()["0"]["engine_id"] == "eng-1"
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
     """
     Tests the bootstrap server's api for worker registration and querying.
@@ -548,6 +584,27 @@ def _make_bootstrap_vllm_config(
             master_addr="model-parallel-master",
             data_parallel_master_ip="data-parallel-master",
         )
+    )
+
+
+def _make_local_register_worker_stub():
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                local_engines_only=False,
+                data_parallel_rank_local=0,
+                data_parallel_index=0,
+                nnodes_within_dp=1,
+                master_addr="127.0.0.1",
+                data_parallel_master_ip="127.0.0.1",
+            )
+        ),
+        hostname="127.0.0.1",
+        side_channel_port=1234,
+        engine_id="eng-1",
+        dp_rank=0,
+        tp_rank=0,
+        pp_rank=0,
     )
 
 
