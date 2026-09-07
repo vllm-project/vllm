@@ -11,6 +11,8 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/
+  - tests/distributed/test_distributed_oot.py
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
@@ -60,6 +62,8 @@ steps:
       source_file_dependencies:
       - vllm/plugins/
       - tests/plugins/
+      - tests/plugins_tests/
+      - tests/distributed/test_distributed_oot.py
       - vllm/platforms/rocm.py
 
 

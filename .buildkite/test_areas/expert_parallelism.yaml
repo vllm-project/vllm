@@ -36,8 +36,11 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/eplb
+  - tests/distributed/test_eplb_events.py
   - tests/distributed/test_eplb_execute.py
+  - tests/distributed/test_eplb_spec_decode.py
   commands:
+  - pytest -v -s distributed/test_eplb_events.py
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
 

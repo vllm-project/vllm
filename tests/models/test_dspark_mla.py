@@ -14,6 +14,8 @@ from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
+pytestmark = pytest.mark.cpu_test
+
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
     assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
@@ -60,7 +62,6 @@ def test_dspark_mla_shares_frozen_target_weights_and_skips_training_head():
         assert mapper._map_name(name) is None
 
 
-@pytest.mark.cpu_test
 def test_dspark_markov_head_is_replicated(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -81,6 +82,7 @@ def test_dspark_markov_head_is_replicated(
     )
 
     head = DSparkMarkovHead(128, 128, 8, prefix="markov_head")
+    head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
@@ -102,7 +104,6 @@ def test_dspark_markov_head_is_replicated(
     assert bias.shape == (2, 128)
 
 
-@pytest.mark.cpu_test
 def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
     markov_head_calls = []
     context_kv_proj_calls = []

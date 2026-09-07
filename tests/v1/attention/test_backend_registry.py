@@ -95,9 +95,10 @@ def test_custom_is_not_alias_of_any_backend():
 
 def test_register_custom_backend_with_class_path():
     # Register with explicit class path
+    expected_class_path = f"{__name__}.CustomAttentionBackend"
     register_backend(
         backend=AttentionBackendEnum.CUSTOM,
-        class_path="tests.test_attention_backend_registry.CustomAttentionBackend",
+        class_path=expected_class_path,
         is_mamba=False,
     )
 
@@ -108,7 +109,7 @@ def test_register_custom_backend_with_class_path():
 
     # Get the registered class path
     class_path = AttentionBackendEnum.CUSTOM.get_path()
-    assert class_path == "tests.test_attention_backend_registry.CustomAttentionBackend"
+    assert class_path == expected_class_path
 
     # Get the backend class
     backend_cls = AttentionBackendEnum.CUSTOM.get_class()
@@ -137,9 +138,10 @@ def test_mamba_custom_is_not_alias_of_any_backend():
 
 def test_register_custom_mamba_backend_with_class_path():
     # Register with explicit class path
+    expected_class_path = f"{__name__}.CustomMambaAttentionBackend"
     register_backend(
         backend=MambaAttentionBackendEnum.CUSTOM,
-        class_path="tests.test_attention_backend_registry.CustomMambaAttentionBackend",
+        class_path=expected_class_path,
         is_mamba=True,
     )
 
@@ -148,10 +150,7 @@ def test_register_custom_mamba_backend_with_class_path():
 
     # Get the registered class path
     class_path = MambaAttentionBackendEnum.CUSTOM.get_path()
-    assert (
-        class_path
-        == "tests.test_attention_backend_registry.CustomMambaAttentionBackend"
-    )
+    assert class_path == expected_class_path
 
     # Get the backend class
     backend_cls = MambaAttentionBackendEnum.CUSTOM.get_class()

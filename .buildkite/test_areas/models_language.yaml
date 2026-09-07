@@ -221,3 +221,24 @@ steps:
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
+
+- label: ":nvidia: (H100) ReplaySSM Decode"
+  key: replayssm-decode-2xh100
+  timeout_in_minutes: 120
+  device: h100
+  num_devices: 2
+  optional: true
+  autorun_on_main: true
+  source_file_dependencies:
+  - csrc/mamba/
+  - vllm/config/cache.py
+  - vllm/engine/arg_utils.py
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/worker/gpu_input_batch.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - tests/v1/e2e/test_replayssm_decode.py
+  commands:
+  - pytest -v -s v1/e2e/test_replayssm_decode.py

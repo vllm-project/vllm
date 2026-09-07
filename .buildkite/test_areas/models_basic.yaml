@@ -46,10 +46,13 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/test_terratorch.py
-  - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
+  - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+  - tests/models/transformers/
+  - "!tests/models/transformers/fusers/"
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/test_registry.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+    - pytest -v -s models/transformers --ignore=models/transformers/fusers
   mirror:
     amd:
       label: ":amd: (MI300) Basic Models (Other)"
@@ -131,10 +134,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
-  - tests/models/test_adapters.py
+  - tests/models/test_
+  - tests/models/deepseek_v32/
   - tests/models/transformers/fusers/
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
+    - pytest -v -s -m cpu_test models --ignore-glob='models/*/*' --ignore=models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+    - pytest -v -s models/deepseek_v32 models/transformers/fusers

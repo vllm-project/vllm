@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
@@ -29,6 +30,7 @@ steps:
       - vllm/v1/attention/selector.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - tests/evals/gsm8k/test_gsm8k_correctness.py
 
 # - label: LM Eval Large Models (4xA100)
 #   key: lm-eval-large-models-4xa100

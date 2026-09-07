@@ -11,7 +11,10 @@ steps:
     VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
   - csrc/
+  - vllm/config/vllm.py
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/model_loader/weight_utils.py
+  - vllm/scalar_type.py
   - tests/quantization
   commands:
   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.

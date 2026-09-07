@@ -338,7 +338,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
     direct_a2a = MagicMock()
+    direct_a2a.max_num_tokens = 16
     direct_query = MagicMock()
+    direct_query.max_num_tokens = 16
     direct_kv = MagicMock()
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_a2a_workspace", MagicMock(return_value=direct_a2a)
@@ -368,7 +370,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     workspace = torch.empty(96, 8)
 
-    assert manager.query_gather == direct_query.gather
+    query = torch.empty(1, 2, 8)
+    manager.query_gather(query)
+    direct_query.gather.assert_called_once_with(query)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -385,9 +389,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     direct_a2a.lse_reduce.assert_called_once_with(
         output,
         lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        is_lse_base_on_e=False,
+        False,
+        seq_lens,
+        query_start_loc,
     )
 
 
@@ -940,7 +944,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             query_start_loc = torch.cat(
                 (
                     query_lens_tensor.new_zeros(1),
-                    query_lens_tensor.cumsum(0),
+                    query_lens_tensor.cumsum(0, dtype=torch.int32),
                 )
             )
             empty_rows = torch.repeat_interleave(seq_lens == 0, query_lens_tensor)
