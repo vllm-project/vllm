@@ -378,11 +378,36 @@ def test_resolve_chat_template_kwargs_with_template_name():
         ),
         (
             """
+            {% macro render_message(role, message_content) %}
+              {% for item in message_content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(
+                  role=message['role'],
+                  message_content=message['content'],
+              ) }}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
             {% for message in messages %}
               {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
             {% endfor %}
             """,
             "openai",
+        ),
+        (
+            """
+            {% macro render_message(content) %}
+              {% for item in content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(content=['text only']) }}
+            {% endfor %}
+            """,
+            "string",
         ),
         (
             """
@@ -395,6 +420,7 @@ def test_resolve_chat_template_kwargs_with_template_name():
 def test_detect_content_format(chat_template, expected_format):
     """Detect content format when content is passed through a macro."""
     assert _detect_content_format(chat_template, default="string") == expected_format
+
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
@@ -412,6 +438,7 @@ def test_detect_content_format(chat_template, expected_format):
     ],
 )
 def test_resolve_content_format_hf_defined(model, expected_format):
+    """Detect the chat template content format for built-in HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
@@ -463,6 +490,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     ("model", "expected_format"),
     [
         ("Salesforce/blip2-opt-2.7b", "string"),
+        ("facebook/chameleon-7b", "string"),
         ("deepseek-ai/deepseek-vl2-tiny", "string"),
         ("google/paligemma-3b-mix-224", "string"),
     ],
