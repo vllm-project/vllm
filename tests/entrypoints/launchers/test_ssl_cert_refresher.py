@@ -106,7 +106,10 @@ async def test_ssl_refresher():
 
 
 @pytest.mark.asyncio
-async def test_serve_http_stops_ssl_refresher_when_server_exits(monkeypatch):
+@pytest.mark.parametrize("server_error", [None, RuntimeError("server failed")])
+async def test_serve_http_stops_ssl_refresher_when_server_exits(
+    monkeypatch, server_error
+):
     config = SimpleNamespace(
         ssl=object(),
         ssl_keyfile="key.pem",
@@ -114,7 +117,7 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(monkeypatch):
         ssl_ca_certs="ca.pem",
         load=MagicMock(),
     )
-    server = SimpleNamespace(serve=AsyncMock())
+    server = SimpleNamespace(serve=AsyncMock(side_effect=server_error))
     ssl_cert_refresher = MagicMock()
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "add_signal_handler", lambda *_args: None)
@@ -128,11 +131,19 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(monkeypatch):
     monkeypatch.setattr(launcher, "watchdog_loop", AsyncMock())
     app = SimpleNamespace(routes=[], state=SimpleNamespace(engine_client=object()))
 
-    shutdown = await launcher.serve_http(
-        app, sock=None, enable_ssl_refresh=True, port=8000
-    )
+    shutdown = None
     try:
+        if server_error is None:
+            shutdown = await launcher.serve_http(
+                app, sock=None, enable_ssl_refresh=True, port=8000
+            )
+        else:
+            with pytest.raises(RuntimeError, match="server failed"):
+                await launcher.serve_http(
+                    app, sock=None, enable_ssl_refresh=True, port=8000
+                )
         ssl_cert_refresher.stop.assert_called_once_with()
     finally:
-        await shutdown
+        if shutdown is not None:
+            await shutdown
         await asyncio.sleep(0)
