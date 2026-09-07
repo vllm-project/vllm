@@ -193,24 +193,14 @@ def is_flashinfer_fused_kda_decode_supported(
     conv_state_dtype: torch.dtype,
     recurrent_state_dtype: torch.dtype,
 ) -> bool:
-    if (
-        not current_platform.is_cuda()
-        or not has_flashinfer_fused_kda_decode()
-        or torch.version.cuda is None
-    ):
+    if not has_flashinfer_fused_kda_decode():
         return False
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    try:
-        cuda_version = tuple(int(x) for x in torch.version.cuda.split(".")[:2])
-    except ValueError:
-        return False
     compute_capability = (capability.major, capability.minor)
-    minimum_cuda = (12, 9) if compute_capability == (10, 3) else (12, 8)
     return (
         compute_capability in ((10, 0), (10, 3))
-        and cuda_version >= minimum_cuda
         and num_heads in (12, 24, 32, 48, 96)
         and head_dim == 128
         and conv_width == 4
@@ -270,10 +260,9 @@ def resolve_kda_decode_backend(
         return "flashinfer"
     if backend == "flashinfer":
         raise RuntimeError(
-            "FlashInfer fused KDA decode requires CUDA SM100 with CUDA 12.8+ "
-            "or SM103 with CUDA 12.9+, bfloat16 activations and convolution "
-            "state, bfloat16 or float32 recurrent state, head_dim=128, "
-            "convolution width 4, no speculation."
+            "FlashInfer fused KDA decode requires CUDA SM100 or SM103, "
+            "bfloat16 activations and convolution state, bfloat16 or float32 "
+            "recurrent state, head_dim=128, convolution width 4, no speculation."
         )
     return "triton"
 
@@ -292,7 +281,7 @@ def is_flashkda_supported(
         and capability.major in (9, 10, 12)
         and head_dim == 128
         and input_dtype == torch.bfloat16
-        and recurrent_state_dtype == torch.float32
+        and recurrent_state_dtype in (torch.bfloat16, torch.float32)
         and lower_bound is not None
     )
 
@@ -306,17 +295,11 @@ def is_flashinfer_recurrent_kda_prefill_supported(
     if not current_platform.is_cuda() or not has_flashinfer_recurrent_kda():
         return False
     capability = current_platform.get_device_capability()
-    if capability is None or torch.version.cuda is None:
-        return False
-    try:
-        cuda_version = tuple(int(x) for x in torch.version.cuda.split(".")[:2])
-    except ValueError:
+    if capability is None:
         return False
     compute_capability = (capability.major, capability.minor)
-    minimum_cuda = (12, 9) if compute_capability == (10, 3) else (12, 8)
     return (
         compute_capability in ((10, 0), (10, 3))
-        and cuda_version >= minimum_cuda
         and head_dim == 128
         and input_dtype == torch.bfloat16
         and recurrent_state_dtype == torch.bfloat16
@@ -469,40 +452,6 @@ def _store_cache_checkpoints_kernel(
     )
 
 
-def _flashinfer_fused_kda_decode(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    conv_state: torch.Tensor,
-    raw_g: torch.Tensor,
-    raw_beta: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    state_indices: torch.Tensor,
-    state: torch.Tensor,
-    output_gate: torch.Tensor,
-    norm_weight: torch.Tensor,
-    lower_bound: float | None,
-    norm_eps: float,
-    out: torch.Tensor,
-) -> torch.Tensor:
-    return flashinfer_fused_kda_decode(
-        x=x,
-        weight=weight,
-        conv_state=conv_state,
-        raw_gate=raw_g,
-        raw_beta=raw_beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        state_indices=state_indices,
-        state=state,
-        output_gate=output_gate,
-        norm_weight=norm_weight,
-        lower_bound=lower_bound,
-        norm_eps=norm_eps,
-        output=out,
-    )
-
-
 def resolve_kda_prefill_backend(
     backend: str,
     head_dim: int,
@@ -526,15 +475,15 @@ def resolve_kda_prefill_backend(
     )
     if backend == "flashinfer" and not flashinfer_supported:
         raise RuntimeError(
-            "FlashInfer KDA prefill requires CUDA SM100 with CUDA 12.8+ or "
-            "SM103 with CUDA 12.9+, bfloat16 activations and recurrent state, "
-            "head_dim=128, a bounded KDA gate, and flashinfer-python 0.6.18 "
-            "or newer."
+            "FlashInfer KDA prefill requires CUDA SM100 or SM103, bfloat16 "
+            "activations and recurrent state, head_dim=128, a bounded KDA "
+            "gate, and flashinfer-python 0.6.18 or newer."
         )
     if backend == "flashkda" and not flashkda_supported:
         raise RuntimeError(
             "FlashKDA requires CUDA SM90/SM10x/SM12x, bfloat16 input, "
-            "float32 recurrent state, head_dim=128, and a bounded KDA gate."
+            "bfloat16 or float32 recurrent state, head_dim=128, and a bounded "
+            "KDA gate."
         )
     if flashinfer_supported and backend == "flashinfer":
         logger.info_once("Using FlashInfer KDA prefill backend.")
@@ -980,11 +929,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert non_spec_state_indices_tensor is not None
             state_indices = non_spec_state_indices_tensor[:num_actual_tokens]
             if self.kda_decode_backend == "flashinfer":
-                _flashinfer_fused_kda_decode(
+                flashinfer_fused_kda_decode(
                     x=mixed_qkv,
                     weight=self.decode_conv1d_weight,
                     conv_state=conv_state,
-                    raw_g=g1,
+                    raw_gate=g1,
                     raw_beta=beta,
                     A_log=self.A_log,
                     dt_bias=self.dt_bias,
@@ -994,7 +943,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     norm_weight=self.decode_norm_weight,
                     lower_bound=self.gate_lower_bound,
                     norm_eps=self.o_norm.eps,
-                    out=core_attn_out[:, :num_actual_tokens],
+                    output=core_attn_out[:, :num_actual_tokens],
                 )
             else:
                 ops.fused_kda_decode(
@@ -1258,18 +1207,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                 elif self.kda_prefill_backend == "flashinfer":
                     assert self.gate_lower_bound is not None
-                    assert non_spec_query_start_loc is not None
-                    if m.flashinfer_prefill_query_start_loc is None:
-                        flashinfer_query_start_loc = non_spec_query_start_loc.to(
-                            torch.int64
-                        )
-                        m.flashinfer_prefill_query_start_loc = (
-                            flashinfer_query_start_loc
-                        )
-                        if q_ns.shape[1] > initial_state.shape[0]:
-                            m.flashinfer_prefill_seq_order = torch.argsort(
-                                flashinfer_query_start_loc.diff(), descending=True
-                            ).to(torch.int32)
+                    assert m.flashinfer_prefill_query_start_loc is not None
+                    if q_ns.shape[1] > initial_state.shape[0]:
+                        assert m.flashinfer_prefill_seq_order is not None
                     flashinfer_out = core_attn_out[:, : q_ns.shape[1]]
                     if has_spec_decode:
                         assert self._flashinfer_kda_output_spec is not None
