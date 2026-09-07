@@ -181,13 +181,58 @@ class WeightsMapper:
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
         )
 
+    @staticmethod
+    def resolve_shared_param_name(
+        name: str,
+        params_dict: Mapping[str, Any] | set[str] | list[str],
+    ) -> str | None:
+        """Resolve a shared parameter name across layers (e.g. shared_transformer)
+        when the exact layer key does not exist in params_dict.
+
+        For example, if 'layers.11.shared_transformer.self_attn.qkv_proj.weight'
+        is not in params_dict, but another tied layer like
+        'layers.1.shared_transformer.self_attn.qkv_proj.weight' is,
+        returns the matching key from params_dict.
+        """
+        if name in params_dict:
+            return name
+
+        if "shared_transformer" in name:
+            match = re.search(r"(?:^|\.)layers\.(\d+)\.shared_transformer\.", name)
+            if match:
+                suffix = name[match.end() :]
+                for candidate in params_dict:
+                    cand_match = re.search(
+                        r"(?:^|\.)layers\.(\d+)\.shared_transformer\.", candidate
+                    )
+                    if cand_match and candidate[cand_match.end() :] == suffix:
+                        return candidate
+
+        return None
+
+    def resolve_param_name(
+        self,
+        name: str,
+        params_dict: Mapping[str, Any] | set[str] | list[str],
+    ) -> str | None:
+        """Map name through the mapper and resolve any shared parameter names."""
+        mapped = self._map_name(name)
+        lookup_name = mapped if mapped is not None else name
+        if lookup_name in params_dict:
+            return lookup_name
+        return self.resolve_shared_param_name(lookup_name, params_dict)
+
 
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
-    """Map each tied word embedding qualname to the first name it aliases."""
+    """Map each tied parameter qualname to the first name it aliases."""
     canonical = dict[int, str]()
     aliased = dict[str, str]()
     for prefix, submodule in module.named_modules(remove_duplicate=False):
-        if not isinstance(submodule, VocabParallelEmbedding):
+        if not (
+            isinstance(submodule, VocabParallelEmbedding)
+            or "shared_transformer" in prefix
+            or getattr(submodule, "is_shared", False)
+        ):
             continue
         for name, param in submodule.named_parameters(remove_duplicate=False):
             qualname = f"{prefix}.{name}" if prefix else name
@@ -448,12 +493,17 @@ class AutoWeightsLoader:
     def _filter_skipped(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        seen_canonicals: set[str] = set()
         for name, weight in weights:
             if (canonical := self.aliased_params.get(name)) is not None:
                 self._skipped_aliases[name] = canonical
-            if self._can_skip(name):
+                if canonical not in seen_canonicals:
+                    seen_canonicals.add(canonical)
+                    yield canonical, weight
+                    continue
                 continue
 
+            seen_canonicals.add(name)
             yield name, weight
 
     def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
