@@ -578,23 +578,10 @@ def _deepseek_v4_mega_moe_experts_op(
     )
 
 
-def _deepseek_v4_mega_moe_experts_op_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    return None
-
-
 direct_register_custom_op(
     op_name="deepseek_v4_mega_moe_experts",
     op_func=_deepseek_v4_mega_moe_experts_op,
     mutates_args=["out"],
-    fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
 )
 
 
@@ -1299,6 +1286,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         },
         orig_to_new_substr={
             ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
         },
     )
 
@@ -1364,7 +1352,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
         return loaded_params

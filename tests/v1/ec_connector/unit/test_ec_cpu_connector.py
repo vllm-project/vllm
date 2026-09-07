@@ -7,7 +7,7 @@ Verifies:
 - Accuracy: outputs from EC CPU cache match fresh encoder computation.
 - Latency: loading from EC CPU cache is faster than a cold encoder run.
 
-Requires a CUDA GPU and the Qwen2-VL-2B-Instruct model.
+Requires a CUDA or XPU GPU and the Qwen2-VL-2B-Instruct model.
 """
 
 import time
@@ -48,17 +48,18 @@ def _make_unique_image(base_image, iteration: int):
 def _wait_for_ec_ready(llm: LLM) -> None:
     """Send a dummy request to force a scheduler step.
 
-    After generate() returns, the EC entry's data is in the mmap but
-    readiness may not have fired yet (first-finish fires in the NEXT
-    scheduler step). This forces that step.
+    When generate() returns, the save copy has been issued to the GPU but its
+    completion event may fire on a later step, so the entry is not yet marked
+    ready. This extra step lets the scheduler poll the worker's completion
+    report and mark the entry ready.
     """
     llm.generate("hi", SamplingParams(max_tokens=1), use_tqdm=False)
 
 
 def _latency_test(llm: LLM) -> None:
     """Verify EC CPU cache hit is faster than cold encoder computation."""
-    if not current_platform.is_cuda():
-        pytest.skip("Latency test requires CUDA")
+    if not (current_platform.is_cuda() or current_platform.is_xpu()):
+        pytest.skip("Latency test requires an accelerator (CUDA or XPU)")
 
     sampling_params = SamplingParams(max_tokens=1, temperature=0)
     base_image = ImageAsset("stop_sign").pil_image
@@ -134,7 +135,10 @@ def _accuracy_test(llm: LLM) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Requires an accelerator (CUDA or XPU)",
+)
 def test_ec_cpu_offloading() -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""
     ec_transfer_config = ECTransferConfig(

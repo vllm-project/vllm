@@ -45,6 +45,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "nvfp4_ds_mla": torch.uint8,
     "turboquant_k8v4": torch.uint8,
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
@@ -117,6 +118,21 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
     return True
 
 
+def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
+    """Check if the tensor's elements cover one gapless, non-overlapping byte
+    range, in any dimension order (i.e. a permuted view of a contiguous
+    tensor); ``is_contiguous()`` additionally requires row-major order.
+    """
+    expected_stride = 1
+    for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
+        if size == 1:
+            continue
+        if stride != expected_stride:
+            return False
+        expected_stride *= size
+    return True
+
+
 def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
 
@@ -148,8 +164,10 @@ def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def _cgroup_cpu_limit() -> float | None:

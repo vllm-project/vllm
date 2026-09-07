@@ -329,6 +329,34 @@ def test_auto_mm_processor_device_leaves_an_explicit_request_alone():
     assert _resolve_mm_processor_device(ec_role="ec_producer", device="cpu") == "cpu"
 
 
+@pytest.mark.parametrize(
+    ("ec_role", "expected"),
+    [
+        (None, False),
+        ("ec_consumer", False),
+        ("ec_both", False),
+        ("ec_producer", True),
+    ],
+)
+def test_ec_producer_only_enables_mm_encoder_only(
+    ec_role: ECRole | None, expected: bool
+):
+    mm_config = MultiModalConfig()
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        None
+        if ec_role is None
+        else ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+    )
+
+    VllmConfig._resolve_mm_encoder_only(vllm_config)
+
+    assert mm_config.mm_encoder_only is expected
+
+
 def test_vllm_config_runs_the_mm_processor_device_check():
     """Startup must reach the check; the rule itself is covered above.
 

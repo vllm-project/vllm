@@ -5,7 +5,7 @@ import copy
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -16,6 +16,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -23,7 +24,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -608,3 +609,89 @@ def test_encoder_instance_zero_kv_cache(
         assert not engine_core.scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
+
+
+def _cadenced_dp_engine_core(
+    monkeypatch, results: list[tuple[bool, bool]], dp_sync_interval: int = 32
+):
+    """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
+    returns the core and the step numbers at which the all-reduce ran."""
+    core = object.__new__(DPEngineCoreProc)
+    core.dp_group = object()
+    core.dp_sync_interval = dp_sync_interval
+    core.step_counter = 0
+    core.pending_pause = False
+    core.ignore_start_dp_wave = False
+    synced: list[int] = []
+
+    def scripted_sync(dp_group, has_unfinished, pending_pause):
+        synced.append(core.step_counter)
+        return results.pop(0)
+
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
+    return core, synced
+
+
+def test_dp_sync_interval_default_is_16():
+    """Regression pin: lowering the default narrows the mid-wave pause tail
+    for async RL, where the engine is rarely idle when pause lands."""
+    assert ParallelConfig.dp_sync_interval == 16
+
+
+@pytest.mark.parametrize("dp_sync_interval", [32, 16])
+def test_dp_sync_interval_normal_wave(monkeypatch, dp_sync_interval: int):
+    """First all-reduce of a wave after one step, then every N."""
+    core, synced = _cadenced_dp_engine_core(
+        monkeypatch, [(True, False)] * 3, dp_sync_interval=dp_sync_interval
+    )
+    for _ in range(dp_sync_interval * 2 + 6):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True)
+    assert synced == [1, dp_sync_interval, dp_sync_interval * 2]
+
+
+def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
+    """A pause of an idle engine arms every rank before its kick-started
+    first step, so the step-1 sync reaches consensus after one dummy batch
+    regardless of the configured cadence."""
+    core, synced = _cadenced_dp_engine_core(
+        monkeypatch, [(False, True)], dp_sync_interval=32
+    )
+    core.pending_pause = True
+    assert DPEngineCoreProc._has_global_unfinished_reqs(core, False) is False
+    assert synced == [1]
+    assert core.ignore_start_dp_wave
+    assert not core.pending_pause
+
+
+def _pausable_engine_core_proc() -> EngineCoreProc:
+    """A bare EngineCoreProc holding just the state pause_scheduler touches."""
+    core = object.__new__(EngineCoreProc)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = False
+    core.batch_queue = None
+    core.engines_running = False
+    core._idle_state_callbacks = []
+    return core
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
+    """A resolved pause promises an idle device: the barrier must run before
+    caches are cleared and before the caller is unblocked."""
+    core = _pausable_engine_core_proc()
+    core.engines_running = deferred
+    order: list[str] = []
+    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+    core._reset_caches = lambda: order.append("reset_caches")
+
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
+    if deferred:
+        assert isinstance(result, Future)
+        assert not result.done() and order == []
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+        assert result.result(timeout=0) is None
+    else:
+        assert result is None
+    assert order == ["synchronize_device", "reset_caches"]
