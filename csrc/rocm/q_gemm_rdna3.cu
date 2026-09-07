@@ -780,8 +780,8 @@ void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
   constexpr int TILE_M = 64;  // single tile covers the scalar domain
   const int z_count = (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE;
   if (z_count == 1) {
-    launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c, size_m,
-                   size_n, size_k, groups, use_v2_format,
+    launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n,
+                   size_k, groups, use_v2_format,
                    /*partials=*/nullptr, stream);
     return;
   }

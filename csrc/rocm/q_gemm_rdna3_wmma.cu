@@ -2251,6 +2251,24 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
         compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
     const int groupsize = size_k / groups;
     dim3 block(256);
+    if (k_split == 1) {
+      // Single writer per cell: the kernel's direct-store path is already
+      // deterministic — no scratch, no reduce pass (same invariant as the
+      // 64x64 path below). No row tiling either: tiling exists only to
+      // bound the FP32 scratch, which is not allocated here; grid.y tiles
+      // M by 128 internally for any size_m.
+      dim3 grid((size_n + 63) / 64, (size_m + 127) / 128, 1);
+      if (size_k % 32 == 0 && groupsize >= 32) {
+        gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
+            a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
+            groups, zero_offset, /*partials=*/nullptr);
+      } else {
+        gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
+            a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
+            groups, zero_offset, /*partials=*/nullptr);
+      }
+      return;
+    }
     // Deterministic split-K, row-tiled so the FP32 scratch bound
     //   scratch_bytes = k_split * TILE_M * size_n * 4
     // stays independent of the caller's M (k_split <= 4 here).
