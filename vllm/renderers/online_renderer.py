@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
     PromptType,
@@ -246,7 +247,10 @@ class OnlineRenderer:
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
-            raise ValueError(f"Harmony does not support {reasoning_effort=}")
+            raise VLLMValidationError(
+                f"Harmony does not support {reasoning_effort=}",
+                parameter="reasoning_effort",
+            )
         tools = request.tools if should_include_tools else None
         messages.extend(
             build_harmony_preamble(
