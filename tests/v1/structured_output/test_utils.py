@@ -81,6 +81,59 @@ def unsupported_property_names_combinations():
             "type": "object",
             "propertyNames": {"pattern": "^a+$", "maxLength": 2},
         },
+        # xgrammar emits named `properties` separately from `propertyNames` and
+        # only applies `propertyNames` in its additional-properties branch, so a
+        # key declared in `properties` escapes the name constraint regardless of
+        # what `propertyNames` contains.
+        {
+            "type": "object",
+            "properties": {"Bad": {"type": "integer"}},
+            "required": ["Bad"],
+            "propertyNames": {"pattern": "^[a-z]+$"},
+        },
+        {
+            "type": "object",
+            "properties": {"Bad": {"type": "integer"}},
+            "propertyNames": {"enum": ["good"]},
+        },
+        # xgrammar's propertyNames-only branch falls back to an unconstrained
+        # value type, so it drops unevaluatedProperties whether it restricts
+        # values (a schema) or forbids them (false).
+        {
+            "type": "object",
+            "propertyNames": {"pattern": "^[a-z]+$"},
+            "unevaluatedProperties": {"type": "integer"},
+        },
+        {
+            "type": "object",
+            "propertyNames": {"pattern": "^[a-z]+$"},
+            "unevaluatedProperties": False,
+        },
+    ]
+
+
+@pytest.fixture
+def unsupported_pattern_properties_combinations():
+    return [
+        # JSON Schema requires a property matched by both `properties` and
+        # `patternProperties` to satisfy both (conjunction), but xgrammar
+        # compiles them as alternative branches, so satisfying either one is
+        # enough.
+        {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "patternProperties": {"^x$": {"type": "integer"}},
+        },
+        # The same alternative-branches problem applies to overlapping
+        # patternProperties patterns: a key matching both patterns only has to
+        # satisfy one of them.
+        {
+            "type": "object",
+            "patternProperties": {
+                "^a[a-z]*$": {"type": "string"},
+                "^[a-z]*z$": {"type": "integer"},
+            },
+        },
     ]
 
 
@@ -142,6 +195,7 @@ def pattern_properties_schema():
         "unsupported_number_schemas",
         "unsupported_array_schemas",
         "unsupported_property_names_combinations",
+        "unsupported_pattern_properties_combinations",
     ],
 )
 def test_unsupported_json_features_by_type(schema_type, request):
