@@ -20,7 +20,6 @@ class OnlineSharedExpertLoader(ABC):
     def load(
         self,
         layer: "RoutedExperts",
-        *,
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
@@ -51,7 +50,6 @@ class OnlineSharedExpertLoader(ABC):
     def _load(
         self,
         layer: "RoutedExperts",
-        *,
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
@@ -68,7 +66,6 @@ class UnimplementedOnlineSharedExpertLoader(OnlineSharedExpertLoader):
     def load(
         self,
         layer: "RoutedExperts",
-        *,
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
@@ -82,7 +79,6 @@ class UnimplementedOnlineSharedExpertLoader(OnlineSharedExpertLoader):
     def _load(
         self,
         layer: "RoutedExperts",
-        *,
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
@@ -127,7 +123,6 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
     def _load(
         self,
         layer: "RoutedExperts",
-        *,
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
@@ -156,6 +151,12 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
             unpacked_shape = (shard_size, weight.shape[1] * 2)
             weight_dst = weight.narrow(0, shard_index * shard_size, shard_size)
             scale_dst = scale.narrow(0, shard_index * shard_size, shard_size)
+
+            if loaded_weight.ndim == 2 and loaded_weight.shape[0] > shard_size:
+                raise NotImplementedError(
+                    "Online quantization does not support fused shared-expert "
+                    "gate_up_proj checkpoint weights. Please open an issue."
+                )
 
         padded_weight = torch.zeros(
             unpacked_shape,
