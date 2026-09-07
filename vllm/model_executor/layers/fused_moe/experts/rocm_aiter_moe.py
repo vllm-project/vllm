@@ -55,7 +55,7 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
-    GELU_TANH = 4  # aiter >= v0.1.21 (ActivationType.GeluTanh)
+    GELU_TANH = 4
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None

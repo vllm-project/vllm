@@ -863,7 +863,7 @@ def test_aiter_fused_moe_gelu_tanh_accuracy():
 
     _assert_aiter_supported()
     case = _make_moe_case(
-        num_tokens=32,
+        num_tokens=128,
         hidden_dim=512,
         intermediate_dim=1024,
         num_experts=4,
@@ -896,10 +896,12 @@ def test_aiter_fused_moe_gelu_tanh_accuracy():
         atol=0.05,
         rtol=0.0,
     )
-    # The tolerance above cannot tell tanh-GELU from exact GELU on its own: make
-    # sure the kernel actually applied the tanh variant by checking it sits closer
-    # to the tanh reference than to the exact-GELU reference on inputs where the
-    # two references measurably differ.
+    # The budget above cannot tell tanh-GELU from exact GELU: the two references
+    # differ by ~1e-4 per element while the bf16 kernel's own noise is ~1e-3. So
+    # project the kernel's deviation from the exact-GELU reference onto the
+    # (tanh - exact) direction. The least-squares coefficient is ~1 when the
+    # kernel applied tanh-GELU and ~0 when it applied exact GELU; with this many
+    # output elements its noise is well under 0.1.
     ref_exact = ref_moe_forward(
         case["hidden_states"],
         case["w1"],
@@ -908,13 +910,14 @@ def test_aiter_fused_moe_gelu_tanh_accuracy():
         case["topk_ids"],
         activation="gelu",
     )
-    ref_gap = (ref_out - ref_exact).abs().mean().item()
-    assert ref_gap > 1e-4, f"references indistinguishable (gap={ref_gap:.2e})"
-    err_tanh = (out.float() - ref_out).abs().mean().item()
-    err_exact = (out.float() - ref_exact).abs().mean().item()
-    assert err_tanh < err_exact, (
-        f"kernel closer to exact GELU ({err_exact:.3e}) "
-        f"than to tanh GELU ({err_tanh:.3e})"
+    direction = (ref_out - ref_exact).flatten()
+    assert direction.norm() > 0, "references identical"
+    coeff = torch.dot((out.float() - ref_exact).flatten(), direction) / torch.dot(
+        direction, direction
+    )
+    assert coeff.item() > 0.5, (
+        f"kernel does not follow tanh-GELU (coefficient {coeff.item():.2f}; "
+        "1 = tanh-GELU, 0 = exact GELU)"
     )
 
 
@@ -1059,6 +1062,148 @@ def test_aiter_fused_moe_gelu_tanh_padded_matches_unpadded_reference(quant: str)
         assert max_diff > atol, (
             f"garbage tail did not affect the output ({max_diff:.3e})"
         )
+
+
+def _make_fp8_routed_experts(hidden_size: int, intermediate_size: int):
+    """A small fp8-serialized RoutedExperts layer built the way the model
+    loader builds one (quant method selection, size round-up, create_weights)."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    num_experts, topk, max_num_tokens = 4, 2, 16
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.GELU_TANH,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_num_tokens,
+    )
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=max_num_tokens,
+        top_k=topk,
+        global_num_experts=num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    return RoutedExperts(
+        "experts",
+        torch.bfloat16,
+        moe_config,
+        quant_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"
+        ),
+        expert_map_manager=expert_map_manager,
+    )
+
+
+@pytest.mark.skipif(
+    not (on_gfx942() or on_gfx950()),
+    reason="AITER fp8 MoE is gfx942/gfx950 only",
+)
+def test_fp8_moe_create_weights_zeroes_rounded_up_experts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """End to end through the layer: with the AITER fp8 backend, RoutedExperts
+    rounds a 704 intermediate size up to 768, Fp8MoEMethod.create_weights hands
+    the loader zeroed expert weights, and after loading a 704-wide checkpoint the
+    real rows sit where the kernel expects them while the padding is still zero."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    _assert_aiter_supported()
+    hidden_size, intermediate_size, intermediate_size_padded = 512, 704, 768
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+        # Parameters land on the default device, as when a model is built on GPU.
+        with torch.device("cuda"):
+            layer = _make_fp8_routed_experts(hidden_size, intermediate_size)
+
+    assert isinstance(layer.quant_method, Fp8MoEMethod)
+    assert layer.quant_method.fp8_backend == Fp8MoeBackend.AITER
+    moe_config = layer.moe_config
+    assert moe_config.intermediate_size_per_partition_unpadded == intermediate_size
+    assert moe_config.intermediate_size_per_partition == intermediate_size_padded
+    assert moe_config.hidden_dim == moe_config.hidden_dim_unpadded == hidden_size
+
+    num_experts = moe_config.num_local_experts
+    w13, w2 = layer.w13_weight, layer.w2_weight
+    assert w13.device.type == w2.device.type == "cuda"
+    assert w13.shape == (num_experts, 2 * intermediate_size_padded, hidden_size)
+    assert w2.shape == (num_experts, hidden_size, intermediate_size_padded)
+    # create_weights must hand the loader zeroed tensors (fp8 zero is bit pattern
+    # 0), since the loader only writes the checkpoint's rows/columns.
+    assert not w13.view(torch.uint8).any()
+    assert not w2.view(torch.uint8).any()
+
+    # Load a checkpoint with the unpadded size the way the model loader does.
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(0)
+
+    def _rand_fp8(*shape: int) -> torch.Tensor:
+        return (torch.randn(*shape, generator=generator, device="cuda") / 4).to(
+            w13.dtype
+        )
+
+    checkpoint: dict[str, torch.Tensor] = {}
+    for expert_id in range(num_experts):
+        checkpoint[f"{expert_id}.gate_proj.weight"] = _rand_fp8(
+            intermediate_size, hidden_size
+        )
+        checkpoint[f"{expert_id}.up_proj.weight"] = _rand_fp8(
+            intermediate_size, hidden_size
+        )
+        checkpoint[f"{expert_id}.down_proj.weight"] = _rand_fp8(
+            hidden_size, intermediate_size
+        )
+    loaded = set(layer.load_weights(checkpoint.items()))
+    assert {"w13_weight", "w2_weight"} <= loaded
+
+    def _bits(t: torch.Tensor) -> torch.Tensor:
+        return t.view(torch.uint8)
+
+    up_rows = slice(
+        intermediate_size_padded, intermediate_size_padded + intermediate_size
+    )
+    for expert_id in range(num_experts):
+        gate = checkpoint[f"{expert_id}.gate_proj.weight"]
+        up = checkpoint[f"{expert_id}.up_proj.weight"]
+        down = checkpoint[f"{expert_id}.down_proj.weight"]
+        # gate rows at [0, 704), up rows at [768, 768 + 704): each half of w13 is
+        # padded on its own, which is where the kernel's N/2 split expects them.
+        assert torch.equal(_bits(w13[expert_id, :intermediate_size]), _bits(gate))
+        assert torch.equal(_bits(w13[expert_id, up_rows]), _bits(up))
+        assert not _bits(
+            w13[expert_id, intermediate_size:intermediate_size_padded]
+        ).any()
+        assert not _bits(
+            w13[expert_id, intermediate_size_padded + intermediate_size :]
+        ).any()
+        assert torch.equal(_bits(w2[expert_id, :, :intermediate_size]), _bits(down))
+        assert not _bits(w2[expert_id, :, intermediate_size:]).any()
 
 
 def test_aiter_fused_moe_determinism():
