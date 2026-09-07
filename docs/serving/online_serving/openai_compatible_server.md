@@ -134,6 +134,16 @@ completion = client.chat.completions.create(
 )
 ```
 
+Use `extra_headers={"X-KV-Cache-Report-Mode": "full"}` to select KV cache event
+reporting. Accepted values are `incremental` (default) and `full`, which also
+reports reused prefix-cache blocks. Event publishing requires `--kv-events-config`.
+An explicit body `vllm_xargs.kv_cache_report_mode` takes precedence. Invalid header
+values are ignored.
+
+Realtime audio uses the WebSocket handshake header. Rust gRPC uses
+`x-kv-cache-report-mode` metadata; Python `--grpc` requires separate support in
+`smg-grpc-servicer`.
+
 ## API Reference
 
 ### Completions API

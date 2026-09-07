@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from fastapi import Request
+
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,7 +19,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    resolve_kv_cache_report_mode,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -70,12 +75,16 @@ class ServingRender(BaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
         This is the authoritative implementation used directly by the
         GPU-less render server and delegated to by OpenAIServingChat.
         """
+        request.vllm_xargs = resolve_kv_cache_report_mode(
+            request.vllm_xargs, raw_request
+        )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -158,6 +167,7 @@ class ServingRender(BaseServing):
     async def render_messages_request(
         self,
         request: AnthropicMessagesRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess an Anthropic Messages request.
 
@@ -168,17 +178,21 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
-        return await self.render_chat_request(chat_req)
+        return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        raw_request: Request | None = None,
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
         This is the authoritative implementation used directly by the
         GPU-less render server and delegated to by OpenAIServingCompletion.
         """
+        request.vllm_xargs = resolve_kv_cache_report_mode(
+            request.vllm_xargs, raw_request
+        )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret

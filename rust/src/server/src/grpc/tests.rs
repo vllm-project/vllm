@@ -951,6 +951,48 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn kv_cache_report_metadata_reaches_engine_for_unary_and_streaming() {
+    for stream in [false, true] {
+        let (inference, control, health, engine_task) = setup_grpc_service_with_backend(
+            b"engine-grpc-kv-report",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend),
+            |request| {
+                assert_eq!(
+                    serde_json::to_value(&request.sampling_params.as_ref().unwrap().extra_args)
+                        .unwrap(),
+                    serde_json::json!({"kv_cache_report_mode": "full"}),
+                );
+            },
+        )
+        .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference,
+            control,
+            health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        let mut request = tonic::Request::new(pb::GenerateRequest {
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            ..Default::default()
+        });
+        request.metadata_mut().insert("x-kv-cache-report-mode", "full".parse().unwrap());
+        if stream {
+            let mut output = client.generate_stream(request).await.unwrap().into_inner();
+            while output.message().await.unwrap().is_some() {}
+        } else {
+            client.generate(request).await.unwrap();
+        }
+        engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_unconnected_data_parallel_rank_returns_invalid_argument() {
     let (mut client, server_task, _engine_task) = grpc_test_server(
         EngineId::from_engine_index(3),

@@ -25,6 +25,7 @@ from vllm.entrypoints.serve.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.utils.api_utils import resolve_kv_cache_report_mode
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
@@ -255,6 +256,7 @@ class ServingGenerativeScoring(BaseServing):
             logprobs=len(request.label_token_ids),
             logprob_token_ids=request.label_token_ids,
             n=1,
+            extra_args=resolve_kv_cache_report_mode(None, raw_request),
         )
 
         # Get trace headers

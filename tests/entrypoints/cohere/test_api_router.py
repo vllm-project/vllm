@@ -112,7 +112,7 @@ class _RenderHandler:
         self.result = result
         self.seen_request = None
 
-    async def render_chat_request(self, request):
+    async def render_chat_request(self, request, raw_request=None):
         self.seen_request = request
         if isinstance(self.result, Exception):
             raise self.result

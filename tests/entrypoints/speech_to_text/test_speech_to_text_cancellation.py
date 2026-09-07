@@ -71,6 +71,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
         max_completion_tokens=None,
         language="en",
         prompt="",
+        vllm_xargs=None,
         to_sampling_params=Mock(return_value=object()),
     )
     raw_request = SimpleNamespace(
@@ -143,6 +144,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
         max_completion_tokens=None,
         language="en",
         prompt="",
+        vllm_xargs=None,
         to_sampling_params=Mock(return_value=object()),
     )
     raw_request = SimpleNamespace(

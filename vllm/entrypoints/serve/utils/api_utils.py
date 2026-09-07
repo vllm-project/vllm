@@ -14,6 +14,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
+from starlette.requests import HTTPConnection
 
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
@@ -24,6 +25,22 @@ from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
+
+KV_CACHE_REPORT_MODE_HEADER = "X-KV-Cache-Report-Mode"
+
+
+def resolve_kv_cache_report_mode(
+    extra_args: dict[str, Any] | None,
+    raw_request: HTTPConnection | None,
+) -> dict[str, Any] | None:
+    """Apply the report-mode header as a fallback for the body parameter."""
+    if raw_request is None:
+        return extra_args
+    mode = raw_request.headers.get(KV_CACHE_REPORT_MODE_HEADER)
+    if mode not in ("incremental", "full"):
+        return extra_args
+    return {"kv_cache_report_mode": mode, **(extra_args or {})}
+
 
 VLLM_SUBCMD_PARSER_EPILOG = (
     "For full list:            vllm {subcmd} --help=all\n"

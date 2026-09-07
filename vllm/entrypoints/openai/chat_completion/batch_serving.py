@@ -18,7 +18,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    resolve_kv_cache_report_mode,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -114,6 +117,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             request.to_chat_completion_request(messages)
             for messages in request.messages
         ]
+        for single_request in single_requests:
+            single_request.vllm_xargs = resolve_kv_cache_report_mode(
+                single_request.vllm_xargs, raw_request
+            )
 
         parser: Parser | None = None
         if self.parser_cls is not None:

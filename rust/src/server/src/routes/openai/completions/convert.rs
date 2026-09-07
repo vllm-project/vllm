@@ -56,12 +56,16 @@ pub(super) struct ResponseOptions {
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
 pub(super) fn prepare_completion_request(
-    request: CompletionRequest,
+    mut request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    request.vllm_xargs = crate::utils::merge_kv_cache_report_mode(
+        request.vllm_xargs,
+        ctx.kv_cache_report_mode.as_deref(),
+    );
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,

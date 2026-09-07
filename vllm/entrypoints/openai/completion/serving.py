@@ -35,7 +35,11 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    resolve_kv_cache_report_mode,
+    should_include_usage,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
@@ -129,6 +133,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request: CompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        request.vllm_xargs = resolve_kv_cache_report_mode(
+            request.vllm_xargs, raw_request
+        )
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -200,6 +207,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    extra_args=request.vllm_xargs,
                 )
             else:
                 generator = self.engine_client.generate(

@@ -192,7 +192,7 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            result = await render_handler.render_chat_request(chat_request)
+            result = await render_handler.render_chat_request(chat_request, raw_request)
         except Exception as e:  # noqa: BLE001 - report as 500 for parity
             logger.exception("Error in /cohere/v2/chat/render: %s", e)
             return JSONResponse(

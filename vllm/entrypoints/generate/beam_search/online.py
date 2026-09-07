@@ -4,6 +4,7 @@
 import asyncio
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -33,6 +34,7 @@ class BeamSearchOnlineMixin(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        extra_args: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -63,6 +65,7 @@ class BeamSearchOnlineMixin(ABC):
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
+            extra_args=extra_args,
         )
         all_beams = [
             BeamSearchSequence(
