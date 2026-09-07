@@ -88,7 +88,7 @@ def _supports_fused_pre_indexer(
 
 
 class QSAIndexer(nn.Module):
-    """Replicated Q/K projection plus paged, weight-free QSA selection.
+    """QSA projection weights, side caches, and paged, weight-free selection.
 
     ``prefix`` must be the checkpoint's indexer prefix, normally
     ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
@@ -218,11 +218,11 @@ class QSAIndexer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Select each query row's token indices.
+        """Update side caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
         the leading ``output_width`` columns are ``-1``-padded
@@ -237,10 +237,10 @@ class QSAIndexer(nn.Module):
             if self.skip_topk and out is not None:
                 return out
             result = torch.full(
-                (hidden_states.shape[0], self.packed_output_width),
+                (projected_qk.shape[0], self.packed_output_width),
                 -1,
                 dtype=torch.int32,
-                device=hidden_states.device,
+                device=projected_qk.device,
             )
             # Inert rows carry a zero valid count (empty loop bound), not -1.
             result[:, -1] = 0
@@ -258,11 +258,9 @@ class QSAIndexer(nn.Module):
 
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
-        hidden_states = hidden_states[:num_tokens]
+        projected_qk = projected_qk[:num_tokens]
         positions = positions[..., :num_tokens]
 
-        # Q/K projection
-        projected_qk, _ = self.index_qk_proj(hidden_states)
         projected_q, raw_keys = projected_qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
