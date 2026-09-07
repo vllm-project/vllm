@@ -279,3 +279,63 @@ class TestResponseInputToHarmonyMessage:
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
+
+    # -----------------------------------------------------------------------
+    # Content type validation
+    # -----------------------------------------------------------------------
+
+    def test_input_file_raises_validation_error(self):
+        """Test that input_file content type is rejected with proper error."""
+        from vllm.exceptions import VLLMValidationError
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "file": {"file_data": "base64data"}}
+                    ],
+                },
+                prev_responses=[],
+            )
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'input_file'" in str(error)
+        assert error.parameter == "type"
+        assert error.value == "input_file"
+
+    def test_file_content_type_raises_validation_error(self):
+        """Test that file content type is rejected (not supported in Harmony)."""
+        from vllm.exceptions import VLLMValidationError
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "file", "file": {"file_data": "base64data"}}],
+                },
+                prev_responses=[],
+            )
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'file'" in str(error)
+        assert error.parameter == "type"
+
+    def test_supported_content_types_pass_validation(self):
+        """Test that supported content types are not affected by validation."""
+        msg = response_input_to_harmony(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "input_text", "text": "World"},
+                ],
+            },
+            prev_responses=[],
+        )
+        assert msg is not None
+        assert msg.author.role == Role.USER
+        assert len(msg.content) == 2
