@@ -41,7 +41,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
             logits.const_data_ptr<float>(), output.mutable_data_ptr<int32_t>(),
             lengths.const_data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
             static_cast<uint32_t>(TopK), static_cast<uint32_t>(stride),
-            static_cast<uint32_t>(max_seq_len), stream);
+            static_cast<uint32_t>(max_seq_len), max_smem_per_block, stream);
     STD_TORCH_CHECK(status == cudaSuccess,
                     "FilteredTopK failed: ", cudaGetErrorString(status));
   } else {
@@ -232,7 +232,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
                 lengths.const_data_ptr<int32_t>(),
                 static_cast<uint32_t>(num_rows), static_cast<uint32_t>(TopK),
                 static_cast<uint32_t>(stride),
-                static_cast<uint32_t>(max_seq_len), stream);
+                static_cast<uint32_t>(max_seq_len), max_smem_per_block, stream);
         STD_TORCH_CHECK(status == cudaSuccess, "FilteredTopK fallback failed: ",
                         cudaGetErrorString(status));
         return;

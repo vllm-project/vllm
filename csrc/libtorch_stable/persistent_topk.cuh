@@ -1377,6 +1377,7 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         const IdType* lengths,
                                         uint32_t num_rows, uint32_t top_k_val,
                                         uint32_t max_len, uint32_t max_seq_len,
+                                        int max_smem_per_block,
                                         cudaStream_t stream = 0) {
   constexpr int MAX_VEC = 16 / sizeof(DType);
 
@@ -1385,17 +1386,9 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
   // request caches rows up to ~32K keys; every device that reaches this path
   // offers more (A100 163 KiB, H100/H200 227 KiB), and asking for it moves the
   // cutoff to ~41K / ~57K. Ask for what the widest row needs, capped by the
-  // device, floored at the historical request.
-  int device = 0;
-  FLASHINFER_CUDA_CALL(cudaGetDevice(&device));
-  static constexpr int kMaxDevices = 32;
-  static int cached_optin[kMaxDevices] = {};  // 0 = not yet queried
-  int device_optin = (device >= 0 && device < kMaxDevices) ? cached_optin[device] : 0;
-  if (device_optin == 0) {
-    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(
-        &device_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
-    if (device >= 0 && device < kMaxDevices) cached_optin[device] = device_optin;
-  }
+  // device, floored at the historical request. The caller passes the device's
+  // sharedMemPerBlockOptin -- it already has it from get_device_prop().
+  const int device_optin = max_smem_per_block;
   const uint32_t row_width = max_len < max_seq_len ? max_len : max_seq_len;
   size_t want = vllm::persistent::det_select_row_bytes<
       static_cast<int>(MAX_K), static_cast<int>(FILTERED_TOPK_BLOCK_THREADS)>(
@@ -1445,9 +1438,11 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         const IdType* lengths,
                                         uint32_t num_rows, uint32_t top_k_val,
                                         uint32_t max_len, uint32_t max_seq_len,
+                                        int max_smem_per_block,
                                         cudaStream_t stream = 0) {
   return filtered_topk::FilteredTopKRaggedTransform<DType, IdType, MAX_K>(
       input, output_indices, lengths, num_rows, top_k_val, max_len, max_seq_len,
+      max_smem_per_block,
       stream);
 }
 
