@@ -133,7 +133,13 @@ class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
 
-_BlockKey = tuple[ExternalBlockHash, str | None, int | None, str | None]
+_BlockKey = tuple[
+    ExternalBlockHash,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+]
 
 
 @dataclass(slots=True)
@@ -150,6 +156,7 @@ class _KVCacheState:
         self._next_store_id = 0
         self._stores: dict[int, _StoredBlocks] = {}
         self._active_stores: dict[_BlockKey, int] = {}
+        self._latest_stores: dict[_BlockKey, int] = {}
         self._keys_by_hash: dict[ExternalBlockHash, set[_BlockKey]] = {}
 
     @staticmethod
@@ -158,8 +165,9 @@ class _KVCacheState:
         medium: str | None,
         group_idx: int | None,
         locality: str | None,
+        ownership: str | None,
     ) -> _BlockKey:
-        return block_hash, medium, group_idx, locality
+        return block_hash, medium, group_idx, locality, ownership
 
     def update(
         self,
@@ -172,32 +180,36 @@ class _KVCacheState:
                 self._store(event)
             elif isinstance(event, BlockRemoved):
                 self._remove(event)
+        self._collect_unused_stores()
 
     def clear(self) -> None:
         self._next_store_id = 0
         self._stores.clear()
         self._active_stores.clear()
+        self._latest_stores.clear()
         self._keys_by_hash.clear()
 
     def snapshot_events(
         self,
     ) -> list[BlockStored | BlockRemoved | AllBlocksCleared]:
+        ordered_stores = self._ordered_stores()
         events: list[BlockStored | BlockRemoved | AllBlocksCleared] = [
             AllBlocksCleared()
         ]
-        for stored in self._stores.values():
-            events.append(stored.event)
+        events.extend(stored.event for stored in ordered_stores)
+        for stored in ordered_stores:
+            event = stored.event
             removed_hashes = [
                 key[0] for key in stored.keys if key not in stored.active_keys
             ]
             if removed_hashes:
-                event = stored.event
                 events.append(
                     BlockRemoved(
                         block_hashes=removed_hashes,
                         medium=event.medium,
                         group_idx=event.group_idx,
                         locality=event.locality,
+                        ownership=event.ownership,
                     )
                 )
         return events
@@ -209,6 +221,7 @@ class _KVCacheState:
                 event.medium,
                 event.group_idx,
                 event.locality,
+                event.ownership,
             )
             for block_hash in event.block_hashes
         )
@@ -224,17 +237,20 @@ class _KVCacheState:
         self._stores[store_id] = stored
         for key in keys:
             self._active_stores[key] = store_id
+            self._latest_stores[key] = store_id
             self._keys_by_hash.setdefault(key[0], set()).add(key)
 
     def _remove(self, event: BlockRemoved) -> None:
         for block_hash in event.block_hashes:
             for key in tuple(self._keys_by_hash.get(block_hash, ())):
-                _, medium, group_idx, locality = key
+                _, medium, group_idx, locality, ownership = key
                 if event.medium is not None and medium != event.medium:
                     continue
                 if event.group_idx is not None and group_idx != event.group_idx:
                     continue
                 if event.locality is not None and locality != event.locality:
+                    continue
+                if event.ownership is not None and ownership != event.ownership:
                     continue
                 self._deactivate(key)
 
@@ -250,8 +266,64 @@ class _KVCacheState:
 
         stored = self._stores[store_id]
         stored.active_keys.remove(key)
-        if not stored.active_keys:
-            del self._stores[store_id]
+
+    def _parent_store_id(self, stored: _StoredBlocks) -> int | None:
+        event = stored.event
+        if event.parent_block_hash is None:
+            return None
+        parent_key = self._key(
+            event.parent_block_hash,
+            event.medium,
+            event.group_idx,
+            event.locality,
+            event.ownership,
+        )
+        return self._latest_stores.get(parent_key)
+
+    def _collect_unused_stores(self) -> None:
+        required = set(self._active_stores.values())
+        pending = list(required)
+        while pending:
+            store_id = pending.pop()
+            parent_id = self._parent_store_id(self._stores[store_id])
+            if parent_id is not None and parent_id not in required:
+                required.add(parent_id)
+                pending.append(parent_id)
+
+        for store_id in tuple(self._stores):
+            if store_id in required:
+                continue
+            stored = self._stores.pop(store_id)
+            for key in stored.keys:
+                if self._latest_stores.get(key) == store_id:
+                    del self._latest_stores[key]
+
+    def _ordered_stores(self) -> list[_StoredBlocks]:
+        roots: deque[int] = deque()
+        children: dict[int, list[int]] = {}
+        for store_id, stored in self._stores.items():
+            parent_id = self._parent_store_id(stored)
+            if stored.event.parent_block_hash is None:
+                roots.append(store_id)
+            elif parent_id is None:
+                raise ValueError(
+                    "Cannot build KV cache snapshot: parent block "
+                    f"{stored.event.parent_block_hash!r} is unavailable"
+                )
+            elif parent_id == store_id:
+                raise ValueError("Cannot build KV cache snapshot: self dependency")
+            else:
+                children.setdefault(parent_id, []).append(store_id)
+
+        ordered_ids: list[int] = []
+        while roots:
+            store_id = roots.popleft()
+            ordered_ids.append(store_id)
+            roots.extend(children.get(store_id, ()))
+
+        if len(ordered_ids) != len(self._stores):
+            raise ValueError("Cannot build KV cache snapshot: cyclic dependencies")
+        return [self._stores[store_id] for store_id in ordered_ids]
 
 
 class KVEventAggregator:
