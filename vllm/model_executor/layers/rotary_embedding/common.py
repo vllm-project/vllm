@@ -130,9 +130,6 @@ class ApplyRotaryEmb(CustomOp):
                     "flash_attn.ops.triton.rotary"
                 ).apply_rotary
 
-        # XPU: vllm_xpu_kernels (pinned in requirements/xpu.txt) ships a SYCL
-        # apply_rotary_emb kernel; without this the CustomOp default
-        # forward_xpu falls back to the ~8-kernel elementwise forward_native.
         self.apply_rotary_emb_xpu = None
         if current_platform.is_xpu():
             with suppress(ImportError):
