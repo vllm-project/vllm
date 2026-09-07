@@ -244,3 +244,44 @@ def test_videos_kwargs_max_pixels_does_not_leak_into_image_budget(model_id: str)
     )
     assert flat_video == _SCOPED_MAX_PIXELS
     assert flat_image == _SCOPED_MAX_PIXELS
+
+
+# Well below any stock GLM-4.1V image budget, so a leak into the shared
+# upper bound is unmistakable.
+_SMALL_MAX_PIXELS = 1_003_520
+
+
+def _probe_budgets(model_id: str, mm_processor_kwargs: dict | None) -> dict:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    return {
+        "size_bound": tuple(info.get_image_size_with_most_features()),
+        "video_frames": info._get_max_video_frames(30_000),
+        "image_tokens": info.get_max_image_tokens(),
+    }
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
+def test_images_kwargs_max_pixels_does_not_leak_into_video_budget(model_id: str):
+    """An image-scoped override must not move the shared size upper bound.
+
+    ``get_image_size_with_most_features`` feeds the video frame budget and the
+    dummy data as well as the image budget. Scoping it to ``image`` would let
+    an image-only override shrink the profiled video budget, which no override
+    of that modality should touch.
+    """
+    stock = _probe_budgets(model_id, None)
+    scoped = _probe_budgets(
+        model_id, {"images_kwargs": {"max_pixels": _SMALL_MAX_PIXELS}}
+    )
+
+    assert scoped["size_bound"] == stock["size_bound"]
+    assert scoped["video_frames"] == stock["video_frames"]
+
+    # The override still reaches the per-item read it is meant for.
+    assert scoped["image_tokens"] < stock["image_tokens"]

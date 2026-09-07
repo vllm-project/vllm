@@ -1083,7 +1083,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
-    def _get_image_max_pixels(self) -> int:
+    def _get_image_max_pixels(self, modality: str | None = "image") -> int:
         """Read max_pixels from the HF image processor config.
 
         Despite the name, ``longest_edge`` is a pixel **area** (total pixel
@@ -1091,7 +1091,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
         """
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="image")
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality=modality)
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             return int(override_max_pixels)
 
@@ -1129,11 +1129,15 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         # underestimating the spatial budget for a single image and
         # causing encoder cache overflow for large images
         # (see https://github.com/vllm-project/vllm/issues/34040).
+        # The pixel bound is deliberately unscoped: it is shared by the image
+        # budget, the video budget and the dummy data, so a modality-scoped
+        # override must not move it. get_num_image_tokens and
+        # _get_max_video_frames re-resize it with their own cap.
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
             num_frames=1,
-            max_image_pixels=self._get_image_max_pixels(),
+            max_image_pixels=self._get_image_max_pixels(modality=None),
         )
         return max_image_size
 

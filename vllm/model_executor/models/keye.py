@@ -1043,12 +1043,15 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
 
+        # Unscoped on purpose: this bound is shared by the image budget,
+        # the video budget and the dummy data, so a modality-scoped override
+        # must not move it. get_num_{image,video}_tokens re-resize it with
+        # the cap for their own modality.
         max_image_size, _ = self._get_vision_info(
             image_width=self.get_max_image_size(),
             image_height=self.get_max_image_size(),
             image_processor=image_processor,
             mm_kwargs={},
-            modality="image",
         )
         return max_image_size
 

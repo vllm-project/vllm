@@ -805,7 +805,11 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
 
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="image")
+            # Unscoped on purpose: this bound is shared by the image budget,
+            # the video budget and the dummy data, so a modality-scoped
+            # override must not move it. get_num_{image,video}_tokens
+            # re-resize it with the cap for their own modality.
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
             size = image_processor.size
             if override_size := mm_kwargs.get("size"):
                 size = size | override_size
