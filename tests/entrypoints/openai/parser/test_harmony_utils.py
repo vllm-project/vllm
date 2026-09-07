@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 _TOOL_PARAMETERS = {
     "type": "object",
@@ -975,10 +976,11 @@ class TestGetSystemMessage:
 
     def test_unsupported_reasoning_effort_raises_clear_error(self) -> None:
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="reasoning_effort='max' is not supported by Harmony",
-        ):
+        ) as exc_info:
             get_system_message(reasoning_effort="max")
+        assert exc_info.value.parameter == "reasoning_effort"
 
 
 class TestResponseInputToHarmonyReasoningItem:

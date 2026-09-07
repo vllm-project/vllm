@@ -37,6 +37,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tool_parsers.utils import (
     build_responses_tool_call_name_map,
@@ -273,7 +274,10 @@ def _construct_message_from_response_item(
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""
         if item.encrypted_content:
-            raise ValueError("Encrypted content is not supported.")
+            raise VLLMValidationError(
+                "Encrypted content is not supported.",
+                parameter="input",
+            )
         elif item.content and len(item.content) >= 1:
             reasoning = item.content[0].text
         elif len(item.summary) >= 1:
