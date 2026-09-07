@@ -56,6 +56,9 @@ impl RenderConfig {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
+    /// Unlike `text.max_model_len()` this stays `None` when unset,
+    /// so model cards advertise `null` instead of the `u32::MAX`.
+    pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -87,6 +90,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
+        max_model_len: config.max_model_len,
         text,
         chat,
     }))
