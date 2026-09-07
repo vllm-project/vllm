@@ -1114,9 +1114,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefill = attn_metadata.prefill
         if prefill is None:
             return False
+        # `forward_mha` is optional on MLAAttentionImpl. Sparse-MLA impls such as
+        # FLASHINFER_MLA_SPARSE_SM120 implement only `forward_mqa`, so selecting
+        # either MHA path for them would raise NotImplementedError at runtime.
+        if not type(self.impl).mha_available():
+            return False
         use_masked_mha = (
             self.prefill_backend is not None
-            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.masked_mha_available
             and self.impl.dcp_world_size <= 1
             and _use_masked_mha(
                 backend_name=self.attn_backend.get_name(),

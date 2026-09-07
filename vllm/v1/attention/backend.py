@@ -998,6 +998,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
     supports_pcp: bool = True
 
+    # Whether this impl provides the masked-MHA prefill path. Backend selection
+    # in mla_attention.py reads this attribute directly, so it must exist on
+    # every MLA impl; impls that support masked MHA set it to True themselves.
+    masked_mha_available: bool = False
+
     @abstractmethod
     def __init__(
         self,
@@ -1037,6 +1042,16 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         """MHA-style prefill forward pass."""
         raise NotImplementedError
+
+    @classmethod
+    def mha_available(cls) -> bool:
+        """Whether this impl overrides the default (raising) `forward_mha`.
+
+        `forward_mha` is optional: sparse-MLA impls such as the SM120 backend
+        implement only `forward_mqa`. Selection code must not route work to an
+        impl that would just raise NotImplementedError.
+        """
+        return cls.forward_mha is not MLAAttentionImpl.forward_mha
 
     @abstractmethod
     def forward_mqa(
