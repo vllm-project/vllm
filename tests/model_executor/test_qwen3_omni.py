@@ -144,6 +144,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create a mock context
     mock_ctx = Mock(spec=InputProcessingContext)
+    mock_ctx.tokenizer = mock_tokenizer
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
@@ -346,6 +347,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             draft_model_config=draft_model_config,
+            draft_parallel_config=SimpleNamespace(),
             attention_backend=None,
             kv_cache_dtype=None,
         ),
@@ -361,9 +363,8 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
 
     with (
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
-        patch.object(
-            dspark_utils,
-            "get_pp_group",
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(
