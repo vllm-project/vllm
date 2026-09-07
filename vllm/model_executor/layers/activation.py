@@ -229,12 +229,22 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
+        # CustomOp.__init__ already installed a (possibly compiled) dispatch via
+        # dispatch_forward(compile_native=...). Assigning the bare bound method
+        # here would discard that wrapper, leaving forward_native to run as 7
+        # separate eager kernels (clamp, clamp, mul, sigmoid, mul, add, mul) on
+        # every shared-expert MLP. Keep the compiled wrapper instead -- it is
+        # what maybe_compile() exists for on models with no @support_torch_compile.
         if current_platform.is_rocm() or current_platform.is_xpu():
-            self._forward_method = self.forward_native
+            self._forward_method = self.maybe_compile(
+                self.forward_native, enable=compile_native
+            )
         elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
-            self._forward_method = self.forward_native
+            self._forward_method = self.maybe_compile(
+                self.forward_native, enable=compile_native
+            )
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
