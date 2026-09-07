@@ -256,6 +256,34 @@ def _make_multi_group_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMe
     )
 
 
+def test_store_send_group_mismatch_fails_closed(caplog_vllm):
+    caplog_vllm.set_level(logging.ERROR, logger=worker.logger.name)
+    store = MagicMock()
+    databases = []
+    for group_id in range(2):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+        )
+        db.set_kv_caches_base_addr([0x1000 + group_id * 0x1000])
+        db.set_block_len([256])
+        databases.append(db)
+    thread = _make_store_sending_thread(store, token_databases=databases)
+    req = _make_store_req("req-missing-group", [b"a0", b"a1"])
+
+    _run_store_req(thread, req)
+
+    store.batch_is_exist.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_not_called()
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert any(
+        "Rejecting Mooncake store job with cache-group mismatch" in record.getMessage()
+        and "metadata_groups=1" in record.getMessage()
+        and "worker_groups=2" in record.getMessage()
+        for record in caplog_vllm.records
+    )
+
+
 _DISK_OFFLOAD_SINGLE_KEY_BYTES = worker._estimate_disk_offload_staging_bytes([256])
 _DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
 _DISK_OFFLOAD_BUDGET_FOR_THREE_KEYS = 4 * _DISK_OFFLOAD_SINGLE_KEY_BYTES
