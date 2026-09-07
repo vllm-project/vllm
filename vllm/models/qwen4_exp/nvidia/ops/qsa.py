@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -11,6 +13,12 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import HAS_TRITON, tl, triton
+
+
+@lru_cache(maxsize=1)
+def _is_sm120() -> bool:
+    """True on sm_120 (RTX PRO 6000 Blackwell): selects the sm_120 tuning table."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)
 
 
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
@@ -436,17 +444,58 @@ def _compress_qsa_groups_kernel(
 
 
 def _select_config(
-    num_rows: int, num_kv_heads: int, use_prefill_config: bool, num_columns: int
+    num_rows: int,
+    num_kv_heads: int,
+    use_prefill_config: bool,
+    num_columns: int,
+    is_fp8: bool = False,
 ) -> tuple[int, int, int, int]:
     """Select (block_n, num_warps, num_tiles, num_splits) for the kernel.
 
-    Tuned on GB300 for the Qwen3.8-Flash-Next TP1/TP2/TP4 shapes, keyed on
-    base_programs = num_rows * num_kv_heads. The bp > 2048 region splits on
-    use_prefill_config (capture-stable: at FULL-graph capture max_query_len is the
-    uniform decode/verify length).
+    Keyed on base_programs = num_rows * num_kv_heads. The bp > 2048 region splits
+    on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
+    the uniform decode/verify length). The default table was tuned on GB300;
+    sm_120 (RTX PRO 6000 Blackwell) has its own tables, retuned per region and
+    split by cache dtype (bf16 vs fp8 favour different configs on sm_120, most
+    visibly on the large-prefill region), all correctness-checked on their path.
     """
     base_programs = num_rows * num_kv_heads
-    if base_programs > 2048:
+    if _is_sm120() and is_fp8:
+        if base_programs > 2048:
+            BLOCK_N, target_splits, num_warps = (
+                (32, 2, 1) if use_prefill_config else (64, 1, 2)
+            )
+        elif base_programs <= 24:
+            BLOCK_N, target_splits, num_warps = 64, 64, 8
+        elif base_programs <= 32:
+            BLOCK_N, target_splits, num_warps = 128, 8, 4
+        elif base_programs <= 64:
+            BLOCK_N, target_splits, num_warps = 64, 8, 4
+        elif base_programs <= 128:
+            BLOCK_N, target_splits, num_warps = 32, 4, 4
+        elif base_programs <= 256:
+            BLOCK_N, target_splits, num_warps = 128, 4, 4
+        elif base_programs <= 512:
+            BLOCK_N, target_splits, num_warps = 64, 4, 4
+        else:
+            BLOCK_N, target_splits, num_warps = 32, 2, 1
+    elif _is_sm120():
+        # bf16 K/V cache: the big win here is the large-prefill region.
+        if base_programs > 2048:
+            BLOCK_N, target_splits, num_warps = 64, 2, 2
+        elif base_programs <= 24:
+            BLOCK_N, target_splits, num_warps = 64, 64, 8
+        elif base_programs <= 64:
+            BLOCK_N, target_splits, num_warps = 64, 8, 8
+        elif base_programs <= 128:
+            BLOCK_N, target_splits, num_warps = 32, 8, 8
+        elif base_programs <= 256:
+            BLOCK_N, target_splits, num_warps = 32, 8, 1
+        elif base_programs <= 512:
+            BLOCK_N, target_splits, num_warps = 64, 4, 2
+        else:
+            BLOCK_N, target_splits, num_warps = 32, 4, 1
+    elif base_programs > 2048:
         BLOCK_N, target_splits, num_warps = (
             (32, 1, 1) if use_prefill_config else (64, 1, 2)
         )
@@ -540,7 +589,7 @@ def qsa_sparse_paged_attention(
     block_m = triton.next_power_of_2(group_size)
     selection_width = logical_indices.shape[1] - 1  # trailing column is the count
     block_n, partial_warps, num_tiles, num_splits = _select_config(
-        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width
+        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width, is_fp8
     )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
@@ -642,7 +691,9 @@ def warmup_qsa_sparse_paged_attention(
 
     # Every config the dispatch can pick for this group size.
     profiles = {
-        _select_config(num_rows, num_kv_heads, use_prefill_config, selection_width)
+        _select_config(
+            num_rows, num_kv_heads, use_prefill_config, selection_width, is_fp8
+        )
         for num_rows in range(1, 8193)
         for use_prefill_config in (False, True)
     }
