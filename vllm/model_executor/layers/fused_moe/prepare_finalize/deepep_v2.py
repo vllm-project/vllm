@@ -606,7 +606,7 @@ class GlobalizeRecvTopkIdxKernel(
         return dict(
             recv_topk_idx=TritonWarmupTensor(
                 torch.int64,
-                shape=(compile_key.n_elements // compile_key.topk, compile_key.topk),
+                shape=(1, compile_key.topk),
             ),
             psum_recv_per_rank=TritonWarmupTensor(
                 torch.int32,
@@ -614,6 +614,8 @@ class GlobalizeRecvTopkIdxKernel(
             ),
             rank_expert_offset=compile_key.rank_expert_offset,
             num_experts=compile_key.num_experts,
+            n_elements=compile_key.n_elements,
+            block=compile_key.block,
         )
 
     @kernel_launcher
@@ -623,23 +625,21 @@ class GlobalizeRecvTopkIdxKernel(
         psum_recv_per_rank: torch.Tensor,
         rank_expert_offset: int,
         num_experts: int,
+        *,
+        n_elements: int | None = None,
+        block: int = 1024,
     ) -> LaunchSpec:
-        num_tokens, topk = recv_topk_idx.shape
-        compile_key = self.dispatch(
-            num_tokens=num_tokens,
-            topk=topk,
-            P=psum_recv_per_rank.shape[0],
-            rank_expert_offset=rank_expert_offset,
-            num_experts=num_experts,
-        )
-        grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
+        topk = recv_topk_idx.shape[1]
+        if n_elements is None:
+            n_elements = recv_topk_idx.shape[0] * topk
+        grid = (triton.cdiv(n_elements, block),)
         return grid, dict(
             topk_idx_ptr=recv_topk_idx,
             psum_ptr=psum_recv_per_rank,
-            P=compile_key.p,
-            n_elements=compile_key.n_elements,
+            P=psum_recv_per_rank.shape[0],
+            n_elements=n_elements,
             topk=topk,
-            BLOCK=compile_key.block,
+            BLOCK=block,
         )
 
 

@@ -187,7 +187,7 @@ class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
             routed_scaling_factor=float(
                 getattr(hf_config, "routed_scaling_factor", 1.0)
             ),
-            launch_pdl=current_platform.is_arch_support_pdl(),
+            launch_pdl=(False, True),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:

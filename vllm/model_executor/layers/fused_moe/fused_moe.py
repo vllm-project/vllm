@@ -927,9 +927,7 @@ class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"
             use_td=resolve_moe_use_td(),
         )
 
-    def warmup_inputs(
-        self, compile_key: CompileKey
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         if compile_key.group_k <= 0:
             a_scale_cols = 1
             b_scale_cols = 1
@@ -963,39 +961,39 @@ class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"
             or compile_key.use_int8_w8a8
             or compile_key.use_int8_w8a16
         )
-        args = (
-            data_ptr,
-            b_ptr,
-            c_ptr,
-            float_ptr if compile_key.has_bias else None,
-            a_scale_ptr if uses_scales else None,
-            b_scale_ptr if uses_scales else None,
-            float_ptr if compile_key.mul_routed_weight else None,
-            int32_ptr if not compile_key.naive_block_assignment else None,
-            int32_ptr,
-            int32_ptr,
-            compile_key.n,
-            compile_key.k,
-            compile_key.em,
-            compile_key.num_valid_tokens,
-            compile_key.k,
-            1,
-            compile_key.n * compile_key.k,
-            1,
-            compile_key.k,
-            compile_key.n,
-            1,
-            a_scale_cols if compile_key.group_k > 0 else 0,
-            1 if compile_key.group_k > 0 else 0,
-            compile_key.n * b_scale_cols if compile_key.group_k > 0 else 0,
-            1 if compile_key.group_k > 0 else 0,
-            b_scale_cols if compile_key.group_k > 0 else 0,
-            compile_key.n if compile_key.has_bias else 0,
-            1 if compile_key.has_bias else 0,
-            compile_key.group_n,
-            compile_key.group_k,
-        )
-        return args, dict(
+        return dict(
+            A=data_ptr,
+            B=b_ptr,
+            C=c_ptr,
+            B_bias=float_ptr if compile_key.has_bias else None,
+            A_scale=a_scale_ptr if uses_scales else None,
+            B_scale=b_scale_ptr if uses_scales else None,
+            topk_weights=float_ptr if compile_key.mul_routed_weight else None,
+            sorted_token_ids=(
+                int32_ptr if not compile_key.naive_block_assignment else None
+            ),
+            expert_ids=int32_ptr,
+            num_tokens_post_padded=int32_ptr,
+            N=compile_key.n,
+            K=compile_key.k,
+            EM=compile_key.em,
+            num_valid_tokens=compile_key.num_valid_tokens,
+            stride_am=compile_key.k,
+            stride_ak=1,
+            stride_be=compile_key.n * compile_key.k,
+            stride_bk=1,
+            stride_bn=compile_key.k,
+            stride_cm=compile_key.n,
+            stride_cn=1,
+            stride_asm=a_scale_cols if compile_key.group_k > 0 else 0,
+            stride_ask=1 if compile_key.group_k > 0 else 0,
+            stride_bse=(compile_key.n * b_scale_cols if compile_key.group_k > 0 else 0),
+            stride_bsk=1 if compile_key.group_k > 0 else 0,
+            stride_bsn=b_scale_cols if compile_key.group_k > 0 else 0,
+            stride_bbe=compile_key.n if compile_key.has_bias else 0,
+            stride_bbn=1 if compile_key.has_bias else 0,
+            group_n=compile_key.group_n,
+            group_k=compile_key.group_k,
             dtype=compile_key.dtype,
             A_ROWS=compile_key.num_valid_tokens,
             naive_block_assignment=compile_key.naive_block_assignment,
@@ -1034,7 +1032,24 @@ class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"
         N: int,
         K: int,
         EM: int,
-        *args: Any,
+        num_valid_tokens: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_asm: int,
+        stride_ask: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        stride_bbe: int,
+        stride_bbn: int,
+        group_n: int,
+        group_k: int,
+        *,
         dtype: torch.dtype,
         A_ROWS: int,
         naive_block_assignment: bool,
@@ -1573,14 +1588,8 @@ class ComputeIdentityKernel(VllmTritonJitKernel["ComputeIdentityKernel.CompileKe
         hidden_dim: int,
         scales_stride: int,
     ) -> LaunchSpec:
-        compile_key = self.dispatch(
-            top_k=top_k,
-            hidden_dim=hidden_dim,
-            num_tokens=num_tokens,
-            scales_stride=scales_stride,
-        )
         grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-        return grid, dict(BLOCK_SIZE=compile_key.block_size)
+        return grid, dict(BLOCK_SIZE=256)
 
 
 def zero_experts_compute_triton(

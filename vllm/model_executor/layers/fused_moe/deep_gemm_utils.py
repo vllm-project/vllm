@@ -267,15 +267,11 @@ class DeepGemmEPScatterStartKernel(
         align_m: int,
     ) -> LaunchSpec:
         num_experts = num_recv_tokens_per_expert.shape[0]
-        compile_key = self.dispatch(
-            num_experts=num_experts,
-            align_m=align_m,
-        )
         return (num_experts,), dict(
             num_experts=num_experts,
             num_warps=8,
-            BLOCK_E=compile_key.block_e,
-            BLOCK_EXPERT_NUM=compile_key.block_expert_num,
+            BLOCK_E=128,
+            BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
             ALIGN_M=align_m,
         )
 
@@ -533,14 +529,8 @@ class DeepGemmEPScatterCopyKernel(
         pack_ue8m0: bool,
     ) -> LaunchSpec:
         hidden_size = recv_x.shape[1]
-        compile_key = self.dispatch(
-            total_token_num=recv_x.shape[0],
-            hidden_size=hidden_size,
-            topk_num=recv_topk.shape[1],
-            has_expert_map=expert_map is not None,
-            block_size=block_size,
-            pack_ue8m0=pack_ue8m0,
-        )
+        scale_hidden_size = hidden_size // block_size
+        scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
         return (min(recv_topk.shape[0], 1024 * 8),), dict(
             total_token_num=recv_topk.shape[0],
             recv_x_stride0=recv_x.stride(0),
@@ -555,16 +545,16 @@ class DeepGemmEPScatterCopyKernel(
             output_tensor_scale_stride1=output_tensor_scale.stride(1),
             output_index_stride0=output_index.stride(0),
             output_index_stride1=output_index.stride(1),
-            topk_num=compile_key.topk_num,
-            HAS_EXPERT_MAP=compile_key.has_expert_map,
+            topk_num=recv_topk.shape[1],
+            HAS_EXPERT_MAP=expert_map is not None,
             num_warps=8,
-            HIDDEN_SIZE=compile_key.hidden_size,
-            HIDDEN_SIZE_PAD=compile_key.hidden_size_pad,
-            SCALE_HIDDEN_SIZE=compile_key.scale_hidden_size,
-            SCALE_HIDDEN_SIZE_PAD=compile_key.scale_hidden_size_pad,
-            PACK_UE8M0=compile_key.pack_ue8m0,
-            SCALE_PACKED_SIZE=compile_key.scale_packed_size,
-            SCALE_PACKED_SIZE_PAD=compile_key.scale_packed_size_pad,
+            HIDDEN_SIZE=hidden_size,
+            HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+            SCALE_HIDDEN_SIZE=scale_hidden_size,
+            SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+            PACK_UE8M0=pack_ue8m0,
+            SCALE_PACKED_SIZE=scale_packed_size,
+            SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
         )
 
 

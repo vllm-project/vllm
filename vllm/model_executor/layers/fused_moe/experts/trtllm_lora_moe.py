@@ -133,13 +133,9 @@ class TrtLlmLoraUnpermuteActivationKernel(
         out: torch.Tensor,
         intermediate_size: int,
     ) -> LaunchSpec:
-        compile_key = self.dispatch(
-            dtype=act_permuted.dtype,
-            intermediate_size=intermediate_size,
-        )
         grid = (
             out.shape[0],
-            triton.cdiv(intermediate_size, compile_key.block_i),
+            triton.cdiv(intermediate_size, 1024),
         )
         return grid, dict(
             act_ptr=act_permuted,
@@ -147,7 +143,7 @@ class TrtLlmLoraUnpermuteActivationKernel(
             num_cols=intermediate_size,
             stride_ar=act_permuted.stride(0),
             stride_or=out.stride(0),
-            BLOCK_I=compile_key.block_i,
+            BLOCK_I=1024,
         )
 
 
@@ -271,14 +267,9 @@ class TrtLlmLoraFinalizeKernel(
         scale: float,
     ) -> LaunchSpec:
         hidden_size = gemm2_permuted.shape[1]
-        compile_key = self.dispatch(
-            dtype=gemm2_permuted.dtype,
-            hidden_size=hidden_size,
-            top_k=top_k,
-        )
         grid = (
             output.shape[0],
-            triton.cdiv(hidden_size, compile_key.block_k),
+            triton.cdiv(hidden_size, 512),
         )
         return grid, dict(
             gemm2_ptr=gemm2_permuted,
@@ -291,8 +282,8 @@ class TrtLlmLoraFinalizeKernel(
             stride_d0=w2_delta.stride(0),
             stride_d1=w2_delta.stride(1),
             stride_o0=output.stride(0),
-            TOP_K=compile_key.top_k,
-            BLOCK_K=compile_key.block_k,
+            TOP_K=top_k,
+            BLOCK_K=512,
         )
 
 

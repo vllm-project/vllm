@@ -439,9 +439,7 @@ class FusedMoeNvfp4EmulationKernel(
             dtype=dtype,
         )
 
-    def warmup_inputs(
-        self, compile_key: CompileKey
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         k_packed = compile_key.k // 2
         k_scale = max(1, compile_key.k // 16)
         c_top_k = max(1, compile_key.top_k)
@@ -480,32 +478,30 @@ class FusedMoeNvfp4EmulationKernel(
             shape=(triton.cdiv(compile_key.em, compile_key.block_size_m),),
         )
         num_tokens_post_padded_ptr = TritonWarmupTensor(torch.int32)
-        args = (
-            a_ptr,
-            b_ptr,
-            c_ptr,
-            b_scale_ptr,
-            w_global_scale_ptr,
-            topk_weights_ptr,
-            sorted_token_ids_ptr,
-            expert_ids_ptr,
-            num_tokens_post_padded_ptr,
-            compile_key.n,
-            compile_key.k,
-            compile_key.em,
-            compile_key.num_valid_tokens,
-            compile_key.k,
-            1,
-            compile_key.n * k_packed,
-            1,
-            k_packed,
-            compile_key.top_k * compile_key.n,
-            1,
-            compile_key.n * k_scale,
-            1,
-            k_scale,
-        )
-        return args, dict(
+        return dict(
+            A=a_ptr,
+            B=b_ptr,
+            C=c_ptr,
+            B_scale=b_scale_ptr,
+            w_global_scale=w_global_scale_ptr,
+            topk_weights=topk_weights_ptr,
+            sorted_token_ids=sorted_token_ids_ptr,
+            expert_ids=expert_ids_ptr,
+            num_tokens_post_padded=num_tokens_post_padded_ptr,
+            N=compile_key.n,
+            K=compile_key.k,
+            EM=compile_key.em,
+            num_valid_tokens=compile_key.num_valid_tokens,
+            stride_am=compile_key.k,
+            stride_ak=1,
+            stride_be=compile_key.n * k_packed,
+            stride_bk=1,
+            stride_bn=k_packed,
+            stride_cm=compile_key.top_k * compile_key.n,
+            stride_cn=1,
+            stride_bse=compile_key.n * k_scale,
+            stride_bsk=1,
+            stride_bsn=k_scale,
             block_k_diviable=compile_key.block_k_divisible,
             MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
             top_k=compile_key.top_k,
@@ -532,7 +528,18 @@ class FusedMoeNvfp4EmulationKernel(
         N: int,
         K: int,
         EM: int,
-        *args: Any,
+        num_valid_tokens: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        *,
         block_k_diviable: bool,
         MUL_ROUTED_WEIGHT: bool,
         top_k: int,

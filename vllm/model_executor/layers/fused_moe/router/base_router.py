@@ -157,8 +157,8 @@ if current_platform.is_cuda_alike():
             int32_ptr = TritonWarmupTensor(torch.int32)
             return dict(
                 topk_ids=int32_ptr,
-                logical_replica_count=int32_ptr,
-                logical_to_physical_map=int32_ptr,
+                logical_replica_count=TritonWarmupTensor(torch.int64),
+                logical_to_physical_map=TritonWarmupTensor(torch.int64),
                 out=int32_ptr,
                 expert_load_view=int32_ptr,
                 record_enabled=TritonWarmupTensor(torch.bool),

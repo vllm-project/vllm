@@ -168,12 +168,13 @@ def test_count_expert_num_tokens_compile_matches_optional_pointer(
         num_experts=16,
         topk_numel=16,
         has_expert_map=has_expert_map,
-        block_size=16,
+        block_size=1024,
     )
 
     kernel.compile(compile_key)
 
     assert (calls[0][1]["expert_map"] is not None) is has_expert_map
+    assert calls[0][1]["BLOCK_SIZE"] == 1024
 
 
 @pytest.mark.parametrize(
@@ -499,13 +500,14 @@ def test_globalize_recv_topk_dispatch_matches_legacy_meta(
         module = importlib.import_module(module_name)
     kernel = module.GlobalizeRecvTopkIdxKernel()
 
-    assert kernel.dispatch(
+    actual = kernel.dispatch(
         num_tokens=17,
         topk=8,
         P=4,
         rank_expert_offset=64,
         num_experts=256,
-    ) == kernel.CompileKey(
+    )
+    expected = kernel.CompileKey(
         n_elements=2,
         topk=8,
         p=2,
@@ -513,6 +515,23 @@ def test_globalize_recv_topk_dispatch_matches_legacy_meta(
         num_experts=16,
         block=1024,
     )
+    assert actual == expected
+
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    arg_names = kernel.kernel.arg_names
+    monkeypatch.setattr(
+        kernel,
+        "kernel",
+        SimpleNamespace(
+            arg_names=arg_names,
+            warmup=lambda *args, **kwargs: calls.append((args, kwargs)),
+        ),
+    )
+
+    kernel.compile(expected)
+
+    assert calls[0][1]["n_elements"] == expected.n_elements
+    assert calls[0][1]["BLOCK"] == expected.block
 
 
 @pytest.mark.parametrize("has_num_unpadded", [False, True])
@@ -537,6 +556,29 @@ def test_eplb_map_and_record_dispatch_matches_legacy_meta(
     )
 
 
+def test_dsv4_topk_warmup_covers_pdl_variants() -> None:
+    kernel = DSV4TopKKernel()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v4",
+                n_routed_experts=256,
+                num_experts_per_tok=6,
+                norm_topk_prob=True,
+                scoring_func="sqrtsoftplus",
+                vision_n_layers=0,
+                routed_scaling_factor=2.5,
+            )
+        ),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+    )
+
+    warmed_keys = kernel.get_warmup_keys(config)
+
+    assert warmed_keys
+    assert {key.launch_pdl for key in warmed_keys} == {False, True}
+
+
 def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
     kernel = DSV4TopKKernel()
 
@@ -544,11 +586,31 @@ def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
         num_experts=256,
         indices_dtype=torch.int32,
         routed_scaling_factor=2.5,
+        has_vl=False,
+        image_sentinel_lo=0,
         launch_pdl=True,
     ) == kernel.CompileKey(
         num_experts=256,
         block_n=256,
         indices_dtype=torch.int32,
         routed_scaling_factor=2.5,
+        has_vl=False,
+        image_sentinel_lo=0,
+        launch_pdl=True,
+    )
+    assert kernel.dispatch(
+        num_experts=256,
+        indices_dtype=torch.int64,
+        routed_scaling_factor=2.5,
+        has_vl=True,
+        image_sentinel_lo=128000,
+        launch_pdl=True,
+    ) == kernel.CompileKey(
+        num_experts=256,
+        block_n=256,
+        indices_dtype=torch.int64,
+        routed_scaling_factor=2.5,
+        has_vl=True,
+        image_sentinel_lo=128000,
         launch_pdl=True,
     )
