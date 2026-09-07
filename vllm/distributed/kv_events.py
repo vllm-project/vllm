@@ -272,7 +272,7 @@ class _KVCacheState:
                     continue
                 if event.locality is not None and locality != event.locality:
                     continue
-                if event.ownership is not None and ownership != event.ownership:
+                if ownership != event.ownership:
                     continue
                 self._deactivate(key)
 
