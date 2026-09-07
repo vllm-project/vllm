@@ -1553,7 +1553,23 @@ class TestGlm5NextSamplingCaps:
         )
         assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
 
-    def test_class_cap_overrides_target_fps(self):
+    def test_class_cap_overrides_target_fps(self, monkeypatch):
+        """The sampler must receive the capped values, not the requested ones.
+
+        Asserting only on the returned length would pass with the fps cap
+        removed, because `max_frames` alone already bounds the output.
+        """
+        seen = {}
+        import vllm.transformers_utils.processors.glm5next as glm5next_processor
+
+        real = glm5next_processor.glm_sample_frame_indices
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(glm5next_processor, "glm_sample_frame_indices", spy)
+
         source = self._source(total_frames=2, fps=2.0, duration=1.0)
         target = VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
         indices = Glm5NextVideoBackend.compute_frames_index_to_sample(
@@ -1561,13 +1577,28 @@ class TestGlm5NextSamplingCaps:
             target,
             max_frames=2_000_000,
         )
+        assert seen["target_fps"] == Glm5NextVideoBackend._MAX_FPS
+        assert seen["max_frame_count"] == Glm5NextVideoBackend._MAX_FRAMES
         assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
 
     def test_normal_operation_unchanged(self):
-        """A 30s clip at the default 2.0 fps interval keeps its sampling."""
+        """A 30s clip below both caps samples exactly as the bare sampler does."""
+        from vllm.transformers_utils.processors.glm5next import (
+            glm_sample_frame_indices,
+        )
+
         source = self._source(total_frames=900, fps=30.0, duration=30.0)
         target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
         indices = Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
+        expected = glm_sample_frame_indices(
+            900,
+            30.0,
+            30.0,
+            target_fps=None,
+            max_frame_count=Glm5NextVideoBackend._MAX_FRAMES,
+            temporal_patch_size=2,
+        )
+        assert indices == expected
         assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
         assert all(0 <= idx < 900 for idx in indices)
 
