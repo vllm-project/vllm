@@ -17,6 +17,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.sparse_indexer_budget import sparse_indexer_max_logits_bytes
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -878,10 +879,6 @@ def rocm_aiter_sparse_attn_indexer(
         # (decode). Prefill logits are bounded by
         # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
         # split_indexer_prefill_chunks; decode logits are smaller.
-        from vllm.v1.attention.backends.mla.indexer import (
-            sparse_indexer_max_logits_bytes,
-        )
-
         max_logits_elems = sparse_indexer_max_logits_bytes()
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device

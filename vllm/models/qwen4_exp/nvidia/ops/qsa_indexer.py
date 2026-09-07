@@ -9,7 +9,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.mla.indexer import (
+from vllm.v1.attention.sparse_indexer_budget import (
     sparse_indexer_max_logits_bytes,
 )
 

@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
@@ -38,6 +36,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.sparse_indexer_budget import sparse_indexer_max_logits_bytes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -638,33 +637,6 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
         )
-
-
-_INTEGRATED_GPU_MAX_LOGITS_MB = 64
-
-
-def sparse_indexer_max_logits_bytes() -> int:
-    """Byte budget for one sparse-indexer logits call (prefill sub-chunking and
-    the profiling-run reservation).
-
-    ``VLLM_SPARSE_INDEXER_MAX_LOGITS_MB`` (default 512) is honoured whenever it is
-    set. When it is not set and the device is an integrated (unified-memory) GPU
-    such as GB10 / DGX Spark, the default drops to 64 MiB: the logits tensor is
-    ``(chunk queries x prefix pools)`` and changes size every chunk of a long
-    prefill, so at the 512 MiB default a 200K+-token request streams hundreds of
-    ~500 MB non-reusable blocks per step through the caching allocator; on
-    unified memory the resulting segment requests exhaust the host and the
-    driver fails before the allocator's OOM-retry can flush its cache. Smaller
-    calls keep the blocks small and reusable at a modest prefill cost.
-    """
-    mib = 1024 * 1024
-    if "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" in os.environ:
-        return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * mib
-    if current_platform.is_cuda() and torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if getattr(props, "is_integrated", False):
-            return _INTEGRATED_GPU_MAX_LOGITS_MB * mib
-    return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * mib
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
