@@ -24,6 +24,55 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
     str, dict[tuple[int, int], _MatmulShapeConfig]
 ] = {
     "ada": {
+        (3376, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (768, 1536): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (4096, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (768, 2048): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (1280, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (768, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (100352, 768): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (64, _MatmulMConfig(16, 64, 4, 3)),
+                (2147483647, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
         (12288, 2048): _MatmulShapeConfig(
             block_k=64,
             m_buckets=(
