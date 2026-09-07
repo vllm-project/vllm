@@ -201,3 +201,47 @@ def test_rotary_embedding_dispatch(
     - forward_cuda/forward methods should call ApplyRotaryEmb.forward()
     """
     run_dispatch_test(test_case, device)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU only test.")
+@pytest.mark.parametrize(
+    "num_tokens,num_heads,head_size,rot_dim,is_neox_style",
+    [
+        (128, 32, 128, 128, True),  # typical text shape
+        (4096, 16, 80, 80, False),  # GPT-J style (interleaved)
+        (4096, 32, 128, 64, True),  # partial rotary (rot_dim < head_size)
+    ],
+    ids=["text", "gptj_interleaved", "partial_rotary"],
+)
+def test_apply_rotary_emb_xpu_matches_native(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    rot_dim: int,
+    is_neox_style: bool,
+):
+    """ApplyRotaryEmb.forward_xpu (vllm_xpu_kernels SYCL op) must match
+    forward_native (the CustomOp default fallback) exactly."""
+    from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+apply_rotary_emb"])
+    )
+    get_cached_compilation_config.cache_clear()
+
+    with set_current_vllm_config(vllm_config):
+        op = ApplyRotaryEmb(enforce_enable=True, is_neox_style=is_neox_style)
+        assert op.apply_rotary_emb_xpu is not None, (
+            "vllm_xpu_kernels.rotary.apply_rotary_emb failed to import on XPU"
+        )
+
+        x = torch.randn(
+            num_tokens, num_heads, head_size, device="xpu", dtype=torch.bfloat16
+        )
+        x = x[..., :rot_dim].contiguous()
+        cos = torch.randn(num_tokens, rot_dim // 2, device="xpu", dtype=torch.bfloat16)
+        sin = torch.randn(num_tokens, rot_dim // 2, device="xpu", dtype=torch.bfloat16)
+
+        expected = op.forward_native(x, cos, sin)
+        actual = op.forward_xpu(x, cos, sin)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)

@@ -130,6 +130,16 @@ class ApplyRotaryEmb(CustomOp):
                     "flash_attn.ops.triton.rotary"
                 ).apply_rotary
 
+        # XPU: vllm_xpu_kernels (pinned in requirements/xpu.txt) ships a SYCL
+        # apply_rotary_emb kernel; without this the CustomOp default
+        # forward_xpu falls back to the ~8-kernel elementwise forward_native.
+        self.apply_rotary_emb_xpu = None
+        if current_platform.is_xpu():
+            with suppress(ImportError):
+                self.apply_rotary_emb_xpu = import_module(
+                    "vllm_xpu_kernels.rotary"
+                ).apply_rotary_emb
+
     @staticmethod
     def forward_static(
         x: torch.Tensor,
@@ -236,6 +246,19 @@ class ApplyRotaryEmb(CustomOp):
 
         output = self._post_process(output, origin_shape, origin_dtype)
         return output
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.apply_rotary_emb_xpu is None:
+            return self.forward_native(x, cos, sin)
+
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+        output = self.apply_rotary_emb_xpu(x, cos, sin, self.is_neox_style)
+        return self._post_process(output, origin_shape, origin_dtype)
 
     def forward_hip(
         self,
