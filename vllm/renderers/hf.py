@@ -432,12 +432,13 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 yield loop_ast, loop_target.name
                 break
 
-        if isinstance(loop_iter, jinja2.nodes.Name):
-            # Check for loops over a variable literally named "content" or
-            # over a macro parameter that receives message.content
-            if loop_iter.name == "content" or loop_iter.name in macro_content_params:
-                assert isinstance(loop_target, jinja2.nodes.Name)
-                yield loop_ast, loop_target.name
+        # Check for loops over a variable literally named "content" or
+        # over a macro parameter that receives message.content
+        if isinstance(loop_iter, jinja2.nodes.Name) and (
+            loop_iter.name == "content" or loop_iter.name in macro_content_params
+        ):
+            assert isinstance(loop_target, jinja2.nodes.Name)
+            yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:

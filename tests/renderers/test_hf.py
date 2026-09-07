@@ -11,6 +11,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
+    _detect_content_format,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
     _template_error_reason,
@@ -360,6 +361,40 @@ def test_resolve_chat_template_kwargs_with_template_name():
     # unknown param should be filtered
     assert "unknown_param" not in resolved
 
+
+@pytest.mark.parametrize(
+    ("chat_template", "expected_format"),
+    [
+        (
+            """
+            {% macro render_message(role, message_content) %}
+              {% for item in message_content %}{{ item['type'] }}{% endfor %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_message(message['role'], message['content']) }}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% for message in messages %}
+              {% for item in message['content'] %}{{ item['type'] }}{% endfor %}
+            {% endfor %}
+            """,
+            "openai",
+        ),
+        (
+            """
+            {% for message in messages %}{{ message['content'] }}{% endfor %}
+            """,
+            "string",
+        ),
+    ],
+)
+def test_detect_content_format(chat_template, expected_format):
+    """Detect content format when content is passed through a macro."""
+    assert _detect_content_format(chat_template, default="string") == expected_format
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
