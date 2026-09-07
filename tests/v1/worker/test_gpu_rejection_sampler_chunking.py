@@ -10,6 +10,7 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rejection_sampler_module
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -24,6 +25,73 @@ def test_iter_request_chunks_preserves_request_boundaries():
         (2, 3),
         (3, 4),
     ]
+
+
+def test_compact_topk_candidate_sampling_cpu(monkeypatch):
+    """Compact MTP verification must preserve draft/bonus row semantics."""
+    input_batch = SimpleNamespace(
+        num_reqs=1,
+        num_draft_tokens=1,
+        num_draft_tokens_per_req=np.array([1], dtype=np.int32),
+        cu_num_logits_np=np.array([0, 2], dtype=np.int32),
+        cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
+        input_ids=torch.tensor([0, 2], dtype=torch.int64),
+        logits_indices=torch.tensor([0, 1], dtype=torch.int64),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        idx_mapping=torch.tensor([0], dtype=torch.int32),
+    )
+    sampler = object.__new__(RejectionSampler)
+    sampler.num_speculative_steps = 1
+    sampler.synthetic_conditional_rates = None
+    sampler.use_block_verification = False
+    sampler.sampler = SimpleNamespace(
+        req_states=SimpleNamespace(
+            prefill_len=SimpleNamespace(gpu=torch.tensor([0], dtype=torch.int32))
+        )
+    )
+    monkeypatch.setattr(
+        rejection_sampler_module,
+        "get_num_sampled_and_rejected",
+        lambda num_sampled, *_args: (
+            num_sampled,
+            torch.zeros_like(num_sampled),
+        ),
+    )
+
+    candidate_logits = torch.tensor(
+        [[3.0, 2.0, 1.0], [1.0, 0.0, -float("inf")]], dtype=torch.float32
+    )
+    candidate_ids = torch.tensor([[0, 1, 3], [4, 5, 6]], dtype=torch.int64)
+    output = sampler.sample_from_topk_candidates(
+        candidate_logits, candidate_ids, input_batch
+    )
+
+    assert output.sampled_token_ids.shape == (1, 2)
+    assert int(output.sampled_token_ids[0, 0]) in {0, 1, 3}
+    # The draft id (2) is absent from the compact target set, so it is
+    # rejected and no bonus token is emitted for this request.
+    assert int(output.sampled_token_ids[0, 1]) == -1
+    assert output.num_sampled.tolist() == [1]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_compact_rejection_indices_match_interleaved_layout():
+    """The fused index builder must remove exactly one bonus row per request."""
+    device = torch.device("cuda")
+    # Requests contain 0, 3 and 1 draft rows respectively, followed by one
+    # bonus row in the candidate layout.
+    cu_num_logits = torch.tensor([0, 1, 5, 7], dtype=torch.int32, device=device)
+    target_indices, bonus_indices = (
+        rejection_sampler_module._prepare_compact_rejection_indices(
+            cu_num_logits,
+            num_draft_tokens=4,
+            num_reqs=3,
+            device=device,
+        )
+    )
+    torch.cuda.synchronize()
+    assert target_indices.cpu().tolist() == [1, 2, 3, 5]
+    assert bonus_indices.cpu().tolist() == [0, 4, 6]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
