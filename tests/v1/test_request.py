@@ -25,6 +25,7 @@ def test_request_status_fmt_str():
 
 
 def test_request_copies_session_id_from_engine_core_request():
+    """Test that Request preserves session ID from EngineCoreRequest."""
     engine_request = EngineCoreRequest(
         request_id="request-1",
         prompt_token_ids=[1, 2, 3],
@@ -44,6 +45,7 @@ def test_request_copies_session_id_from_engine_core_request():
 
 
 def test_request_copies_kv_hints_from_engine_core_request():
+    """Test that Request preserves KV hints from EngineCoreRequest."""
     kv_hints = KvHintsEnvelope(
         protocol_version="0.1",
         message_id="msg-1",
