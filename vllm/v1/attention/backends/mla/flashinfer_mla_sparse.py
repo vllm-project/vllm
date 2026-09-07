@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
@@ -321,6 +321,19 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     can_return_lse_for_decode: bool = True
     lse_base_on_e: bool = False
 
+    # The inherited capability is never assigned; derive it from finalized config.
+    @property
+    def supports_mtp_with_cp_non_trivial_interleave_size(  # type: ignore[override]
+        self,
+    ) -> bool:
+        from vllm.v1.attention.backends.mla.indexer import (
+            _supports_block_interleaved_glm_validation,
+        )
+
+        # NIXL finalizes interleave after model construction; read live config.
+        config = getattr(self, "_block_interleaved_dcp_config", None)
+        return config is not None and _supports_block_interleaved_glm_validation(config)
+
     def __init__(
         self,
         num_heads: int,
@@ -368,6 +381,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
+        self._block_interleaved_dcp_config = get_current_vllm_config()
 
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None

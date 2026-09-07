@@ -69,6 +69,40 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     return use_fp4
 
 
+def _supports_block_interleaved_glm_validation(vllm_config: VllmConfig) -> bool:
+    """Limit the private block-interleaved exception to the validated layout."""
+    parallel_config = vllm_config.parallel_config
+    attention_config = vllm_config.attention_config
+    backend = attention_config.backend
+    model_config = vllm_config.model_config
+    speculative_config = vllm_config.speculative_config
+    return (
+        parallel_config.cp_kv_cache_interleave_size == 64
+        and vllm_config.cache_config.block_size == 64
+        and parallel_config.decode_context_parallel_size
+        == parallel_config.tensor_parallel_size
+        == 4
+        and parallel_config.prefill_context_parallel_size == 1
+        and vllm_config.use_v2_model_runner
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and model_config is not None
+        and model_config.hf_text_config.model_type == "glm_moe_dsa"
+        and backend is not None
+        and backend.name == "FLASHINFER_MLA_SPARSE"
+        and not attention_config.backend_per_kind
+        and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+        and attention_config.resolve_indexer_kv_dtype("fp8") == "fp8"
+        and (
+            speculative_config is None
+            or (
+                speculative_config.method == "mtp"
+                and speculative_config.num_speculative_tokens == 3
+            )
+        )
+    )
+
+
 class PrepareUniformDecodeKernel(
     VllmTritonJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
@@ -717,14 +751,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        # The DCP sparse-indexer code is parameterized by interleave size, but
-        # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
-        # so fail closed here rather than silently produce wrong output.
-        if self.dcp_world_size > 1 and self.cp_kv_cache_interleave_size > 1:
+        # Private GLM/NIXL validation exception. Keep other unvalidated layouts
+        # closed; block-interleaved MTP also requires the V2 draft slot mapping.
+        block_interleaved_glm_validation = (
+            self.kv_cache_spec.block_size == 64
+            and _supports_block_interleaved_glm_validation(self.vllm_config)
+        )
+        if (
+            self.dcp_world_size > 1
+            and self.cp_kv_cache_interleave_size > 1
+            and not block_interleaved_glm_validation
+        ):
             raise NotImplementedError(
                 "DCP sparse indexer currently supports only "
                 f"cp_kv_cache_interleave_size=1 (got "
-                f"{self.cp_kv_cache_interleave_size})."
+                f"{self.cp_kv_cache_interleave_size}) outside the private "
+                "GLM SM100 TP4/DCP4 block64 validation layout."
             )
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)

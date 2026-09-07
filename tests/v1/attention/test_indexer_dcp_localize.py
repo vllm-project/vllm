@@ -15,6 +15,280 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 
+@pytest.fixture
+def block_interleaved_glm_config(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.config import AttentionConfig
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda family: family == 100
+    )
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4,
+            decode_context_parallel_size=4,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=64,
+        ),
+        cache_config=SimpleNamespace(block_size=64, cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend="FLASHINFER_MLA_SPARSE"),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")
+        ),
+        speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=3),
+        use_v2_model_runner=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        pytest.param({}, True, id="validated"),
+        pytest.param({"cache_config.cache_dtype": "fp8_e4m3"}, True, id="fp8-alias"),
+        pytest.param({"speculative_config": None}, True, id="no-speculation"),
+        pytest.param(
+            {"attention_config.indexer_kv_dtype": "fp8"}, True, id="indexer-fp8"
+        ),
+        pytest.param({"cache_config.cache_dtype": "auto"}, False, id="mla-auto"),
+        pytest.param({"cache_config.cache_dtype": "bfloat16"}, False, id="mla-bf16"),
+        pytest.param(
+            {"attention_config.indexer_kv_dtype": "mxfp4"}, False, id="indexer-fp4"
+        ),
+        pytest.param({"attention_config.backend": None}, False, id="backend-auto"),
+        pytest.param(
+            {"attention_config.backend": "FLASHMLA_SPARSE"}, False, id="other-backend"
+        ),
+        pytest.param(
+            {
+                "attention_config.backend_per_kind": {
+                    "mla_attention": "FLASHINFER_MLA_SPARSE"
+                }
+            },
+            False,
+            id="backend-override",
+        ),
+        pytest.param(
+            {"parallel_config.cp_kv_cache_interleave_size": 1},
+            False,
+            id="token-interleave",
+        ),
+        pytest.param(
+            {"parallel_config.cp_kv_cache_interleave_size": 32},
+            False,
+            id="interleave32",
+        ),
+        pytest.param({"cache_config.block_size": 128}, False, id="block128"),
+        pytest.param({"parallel_config.tensor_parallel_size": 8}, False, id="tp8"),
+        pytest.param(
+            {"parallel_config.decode_context_parallel_size": 2}, False, id="dcp2"
+        ),
+        pytest.param(
+            {"parallel_config.prefill_context_parallel_size": 2}, False, id="pcp2"
+        ),
+        pytest.param(
+            {
+                "parallel_config.prefill_context_parallel_size": 2,
+                "parallel_config.decode_context_parallel_size": 1,
+            },
+            False,
+            id="pcp-only",
+        ),
+        pytest.param({"use_v2_model_runner": False}, False, id="runner-v1"),
+        pytest.param(
+            {"model_config.hf_text_config.model_type": "deepseek_v32"},
+            False,
+            id="other-model",
+        ),
+        pytest.param({"model_config": None}, False, id="no-model"),
+        pytest.param(
+            {"speculative_config.method": "eagle"}, False, id="other-speculation"
+        ),
+        pytest.param(
+            {"speculative_config.num_speculative_tokens": 1}, False, id="mtp1"
+        ),
+    ],
+)
+def test_block_interleaved_glm_validation_and_capability_are_bounded(
+    block_interleaved_glm_config, overrides, expected
+):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+    from vllm.v1.attention.backends.mla.indexer import (
+        _supports_block_interleaved_glm_validation,
+    )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    config = block_interleaved_glm_config
+    for path, value in overrides.items():
+        obj = config
+        *parents, field = path.split(".")
+        for parent in parents:
+            obj = getattr(obj, parent)
+        if path == "attention_config.backend" and value is not None:
+            value = AttentionBackendEnum[value]
+        setattr(obj, field, value)
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl._block_interleaved_dcp_config = config
+    assert _supports_block_interleaved_glm_validation(config) is expected
+    assert impl.supports_mtp_with_cp_non_trivial_interleave_size is expected
+
+
+@pytest.mark.parametrize("cuda,sm100", [(False, True), (True, False)])
+def test_block_interleaved_glm_validation_rejects_other_platforms(
+    block_interleaved_glm_config, monkeypatch, cuda, sm100
+):
+    from vllm.v1.attention.backends.mla.indexer import (
+        _supports_block_interleaved_glm_validation,
+    )
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: sm100
+    )
+    assert not _supports_block_interleaved_glm_validation(block_interleaved_glm_config)
+
+
+def test_block_interleaved_mtp_capability_reads_finalized_config(
+    block_interleaved_glm_config,
+):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+
+    config = block_interleaved_glm_config
+    impl = object.__new__(FlashInferMLASparseImpl)
+    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
+    impl._block_interleaved_dcp_config = config
+    config.parallel_config.cp_kv_cache_interleave_size = 1
+    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
+    config.parallel_config.cp_kv_cache_interleave_size = 64
+    assert impl.supports_mtp_with_cp_non_trivial_interleave_size
+    config.parallel_config.prefill_context_parallel_size = 2
+    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("first_causal_len", [63, 255])
+@pytest.mark.parametrize("dcp_rank", range(4))
+def test_flashinfer_sparse_dcp_mtp_keeps_per_token_causal_pages(
+    monkeypatch, first_causal_len: int, dcp_rank: int
+):
+    """MTP rows crossing an interleave boundary retain individual causal masks.
+
+    Exercise the real owner filtering and physical page conversion. Only the
+    FlashInfer launcher is replaced: it must receive one query per row, not a
+    multi-query local causal triangle, including rows with no local candidates.
+    """
+    from types import SimpleNamespace
+
+    import flashinfer.decode
+
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+
+    device = torch.device("cuda")
+    num_tokens, num_heads, kv_lora_rank = 4, 2, 512
+    block_size, interleave, world, topk = 64, 64, 4, 512
+    causal_lens = list(range(first_causal_len, first_causal_len + num_tokens))
+    global_ids = torch.arange(topk, device=device, dtype=torch.int32)
+    topk_indices = torch.where(
+        global_ids.unsqueeze(0) < torch.tensor(causal_lens, device=device).unsqueeze(1),
+        global_ids,
+        -1,
+    )
+    # Non-identity pages catch confusing local token IDs with physical slots.
+    block_ids = [3, 1]
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        block_table=torch.tensor([block_ids], dtype=torch.int32, device=device),
+        block_size=block_size,
+        cp_kv_cache_interleave_size=interleave,
+    )
+    expected_slots = []
+    for length in causal_lens:
+        owned = [
+            pos for pos in range(length) if (pos // interleave) % world == dcp_rank
+        ]
+        local = [
+            (pos // (world * interleave)) * interleave + pos % interleave
+            for pos in owned
+        ]
+        expected_slots.append(
+            sorted(
+                block_ids[pos // block_size] * block_size + pos % block_size
+                for pos in local
+            )
+        )
+    expected_counts = torch.tensor(
+        [len(slots) for slots in expected_slots], dtype=torch.int32, device=device
+    )
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.scale = 1.0
+    impl.qk_nope_head_dim = 192
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = 64
+    impl.kv_cache_dtype = "fp8"
+    impl.topk_indices_buffer = topk_indices
+    impl.dcp_world_size = world
+    impl.dcp_rank = dcp_rank
+    impl._workspace_buffer = torch.empty(1, device=device, dtype=torch.int8)
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.is_nope_mla = False
+    impl.need_to_return_lse_for_decode = True
+    q = torch.zeros(
+        num_tokens,
+        num_heads,
+        kv_lora_rank + 64,
+        device=device,
+        dtype=torch.float8_e4m3fn,
+    )
+    launches = 0
+
+    def fake_flashinfer(**kwargs):
+        nonlocal launches
+        launches += 1
+        assert kwargs["query"].shape == (num_tokens, 1, num_heads, kv_lora_rank + 64)
+        pages = kwargs["block_tables"]
+        assert pages.shape == (num_tokens, 1, topk)
+        torch.testing.assert_close(kwargs["seq_lens"], expected_counts)
+        for row, slots in enumerate(expected_slots):
+            count = len(slots)
+            assert sorted(pages[row, 0, :count].tolist()) == slots
+            assert (pages[row, 0, count:] == -1).all()
+
+        out = torch.ones(num_tokens, 1, num_heads, kv_lora_rank, device=device)
+        lse = torch.ones(num_tokens, num_heads, 1, device=device)
+        # Empty sparse rows can have undefined kernel partials. They must not
+        # contaminate the later cross-rank LSE reduction, even at zero weight.
+        out[expected_counts == 0] = float("nan")
+        lse[expected_counts == 0] = float("nan")
+        return out, lse
+
+    monkeypatch.setattr(
+        flashinfer.decode, "trtllm_batch_decode_with_kv_cache_mla", fake_flashinfer
+    )
+    out, lse = impl.forward_mqa(
+        q,
+        torch.zeros(4, block_size, kv_lora_rank + 64, device=device),
+        metadata,
+        SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0),
+    )
+    assert launches == 1
+    assert lse is not None
+    empty = expected_counts == 0
+    assert (out[empty] == 0).all()
+    assert torch.isneginf(lse[empty]).all()
+    assert (out[~empty] == 1).all()
+    assert (lse[~empty] == 1).all()
+
+
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
     return sum(1 for pos in range(length) if (pos // interleave) % world == rank)
 
@@ -254,9 +528,12 @@ def _merge_local_topks_global_with_fake_dcp(
 
 
 @pytest.mark.parametrize("world", [1, 2, 4])
-@pytest.mark.parametrize("interleave", [1, 2, 4])
+@pytest.mark.parametrize("interleave", [1, 2, 4, 64])
 def test_get_dcp_local_seq_lens_matches_naive(world: int, interleave: int):
-    seq_lens = torch.arange(0, 33, dtype=torch.int32)
+    seq_lens = torch.tensor(
+        [*range(33), 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513],
+        dtype=torch.int32,
+    )
 
     for rank in range(world):
         actual = get_dcp_local_seq_lens(seq_lens, world, rank, interleave)
@@ -287,11 +564,13 @@ def test_get_dcp_local_seq_lens_can_localize_per_token_bounds():
         torch.testing.assert_close(actual, expected)
 
 
-def test_get_dcp_local_seq_lens_preserves_mtp_bounds_shape():
-    seq_lens = torch.tensor([[8, 9, 10], [11, 12, 13]], dtype=torch.int32)
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_get_dcp_local_seq_lens_preserves_mtp_bounds_shape(interleave: int):
+    seq_lens = torch.tensor(
+        [[8, 9, 10], [63, 64, 65], [255, 256, 257]], dtype=torch.int32
+    )
     world = 2
     rank = 1
-    interleave = 1
 
     actual = get_dcp_local_seq_lens(seq_lens, world, rank, interleave)
     expected = torch.tensor(
@@ -415,11 +694,11 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_sparse_decode_dcp_persistent_topk_matches_non_dcp(interleave: int):
     torch.manual_seed(3)
     device = torch.device("cuda")
     world = 2
-    interleave = 1
     topk = 512
     num_rows = 2
     max_seq_len = 1025
@@ -496,8 +775,9 @@ def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     reason="This test requires CUDA and CuteDSL",
 )
 @pytest.mark.parametrize("use_row_starts", [False, True])
+@pytest.mark.parametrize("interleave", [1, 64])
 def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
-    use_row_starts: bool,
+    use_row_starts: bool, interleave: int
 ):
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         pack_dcp_topk_candidates_cutedsl,
@@ -540,14 +820,16 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
             packed,
             rank,
             world,
-            1,
+            interleave,
             row_starts,
         )
 
         expected_scores = logits.gather(
             1, topk_indices.to(torch.long) + row_offsets.to(torch.long).view(-1, 1)
         )
-        expected_ids = (topk_indices * world + rank).to(torch.float32)
+        expected_ids = _local_to_global_indices(
+            topk_indices, rank, world, interleave
+        ).to(torch.float32)
         torch.testing.assert_close(packed[..., 0], expected_scores)
         torch.testing.assert_close(packed[..., 1], expected_ids)
         packed_by_rank.append(packed)
@@ -642,6 +924,61 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("rank", [0, 1, 2, 3])
+@pytest.mark.parametrize("interleave", [1, 64])
+@pytest.mark.parametrize("query_slice", [None, slice(1, 5)])
+def test_sparse_prefill_dcp_chunk_causal_bounds_at_block_boundaries(
+    rank: int, interleave: int, query_slice: slice | None
+):
+    """Cached, batched queries retain rank-local causal bounds when sliced."""
+    world = 4
+    device = torch.device("cuda")
+    seq_lens_cpu = torch.tensor([65, 257], dtype=torch.int32)
+    query_start_loc_cpu = torch.tensor([0, 3, 6], dtype=torch.int32)
+    seq_lens = seq_lens_cpu.to(device)
+    chunk = build_prefill_chunk_metadata(
+        start_idx=0,
+        end_idx=2,
+        query_start_loc=query_start_loc_cpu.to(device),
+        query_start_loc_cpu=query_start_loc_cpu,
+        uncompressed_seq_lens=seq_lens,
+        compressed_seq_lens=seq_lens,
+        compressed_seq_lens_cpu=seq_lens_cpu,
+        block_table=torch.zeros((2, 5), dtype=torch.int32, device=device),
+        compress_ratio=1,
+        query_slice=query_slice,
+        dcp_rank=rank,
+        dcp_world_size=world,
+        cp_kv_cache_interleave_size=interleave,
+    )
+    assert chunk is not None
+    local_first_len = _local_count(65, rank, world, interleave)
+    local_second_len = _local_count(257, rank, world, interleave)
+    expected_starts = [0] * 3 + [local_first_len] * 3
+    expected_ends = [
+        start + _local_count(bound, rank, world, interleave)
+        for start, bound in zip(expected_starts, [63, 64, 65, 255, 256, 257])
+    ]
+    query_slice = query_slice or slice(None)
+    torch.testing.assert_close(
+        chunk.cu_seqlen_ks.cpu(),
+        torch.tensor(expected_starts[query_slice], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        chunk.cu_seqlen_ke.cpu(),
+        torch.tensor(expected_ends[query_slice], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        chunk.local_cu_seq_lens.cpu(),
+        torch.tensor(
+            [0, local_first_len, local_first_len + local_second_len],
+            dtype=torch.int32,
+        ),
+    )
+    assert chunk.local_total_seq_lens == local_first_len + local_second_len
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("block_stride_rows", [None, 12])
 def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     block_stride_rows: int | None,
@@ -680,7 +1017,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("interleave", [1, 2])
+@pytest.mark.parametrize("interleave", [1, 2, 64])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 # 384 is not a power of two, so it exercises the multi-tile atomic allocator
 # rather than the single-tile path 1024 takes.
@@ -695,7 +1032,7 @@ def test_dcp_filter_compaction_matches_reference(
     device = torch.device("cuda")
     torch.manual_seed(7)
     dcp_size = 2
-    block_size = 8
+    block_size = max(8, interleave)
     num_rows = 5
     max_blocks = 64
     seq = max_blocks * block_size
@@ -746,15 +1083,15 @@ def test_dcp_filter_compaction_matches_reference(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("interleave", [1, 2, 4])
+@pytest.mark.parametrize("interleave", [1, 2, 4, 64])
 def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
     device = torch.device("cuda")
     dcp_size = 2
-    block_size = 4
+    block_size = max(4, interleave)
     num_topk = 128
     selected_k = 8
-    seq_len = 16
+    seq_len = 4 * block_size
     head_dim = 16
     num_queries = 3
 
@@ -891,17 +1228,18 @@ def test_persistent_topk_pads_surplus_with_negative_one():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_sparse_decode_dcp_short_context_matches_non_dcp():
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_sparse_decode_dcp_short_context_matches_non_dcp(world: int, interleave: int):
     """End-to-end DCP decode where the global seq_len < topk (so every rank's
     local top-k is surplus-padded). Exercises the kernel surplus -> merge mask
     -> global top-k -> physical localize -> LSE merge chain for the common
     short-context decode case, vs the non-DCP reference."""
     torch.manual_seed(4)
     device = torch.device("cuda")
-    world = 2
-    interleave = 1
     topk = 512
-    num_rows = 2
+    seq_lens_list = [63, 64, 65, 250, 255, 256, 257, 300]
+    num_rows = len(seq_lens_list)
     max_seq_len = 300  # < topk -> surplus everywhere
     head_dim = 16
 
@@ -909,7 +1247,7 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     k = torch.randn(max_seq_len, head_dim, device=device)
     v = torch.randn(max_seq_len, head_dim, device=device)
     logits = q @ k.T
-    seq_lens = torch.tensor([[250], [300]], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device=device).view(-1, 1)
 
     non_dcp_topk = torch.empty((num_rows, topk), dtype=torch.int64, device=device)
     for row, seq_len in enumerate(seq_lens.flatten().tolist()):
