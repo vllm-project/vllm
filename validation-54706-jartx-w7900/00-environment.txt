@@ -1,0 +1,76 @@
+# PR #54706 JartX closure - environment facts (W7900/gfx1100)
+
+Date: 2026-09-07T07:00:12Z
+
+## uname
+Linux u-18147-942e8579 6.8.0-79-generic #79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+## OS
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+## GPU (rocm-smi)
+
+
+============================ ROCm System Management Interface ============================
+====================================== Product Info ======================================
+GPU[0]		: Card Series: 		AMD Radeon Graphics
+GPU[0]		: Card Model: 		0x744b
+GPU[0]		: Card Vendor: 		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[0]		: Card SKU: 		D7070910
+GPU[0]		: Subsystem ID: 	0x0e0c
+GPU[0]		: Device Rev: 		0x00
+GPU[0]		: Node ID: 		6
+GPU[0]		: GUID: 		47780
+GPU[0]		: GFX Version: 		gfx1100
+==========================================================================================
+================================== End of ROCm SMI Log ===================================
+
+## rocminfo gfx
+  Marketing Name:          AMD EPYC 9334 32-Core Processor    
+  Marketing Name:          AMD EPYC 9334 32-Core Processor    
+  Name:                    gfx1100                            
+  Marketing Name:          AMD Radeon Graphics                
+
+## hipcc (system, used only as build-time compiler; PyTorch runtime comes from rocm7.14 wheels)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/rocm-7.2.1/lib/llvm/bin
+Configuration file: /opt/rocm-7.2.1/lib/llvm/bin/clang++.cfg
+
+## Python / tooling
+Python 3.12.3
+git version 2.43.0
+gh version 2.100.0 (2026-09-03)
+cmake version 3.28.3
+1.11.1
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+
+## repo state
+branch: fix/rdna3-w4a16-determinism
+HEAD: dddf1647811a4663dc0de5511bad3fe348afb3b3
+upstream/main: 6fbb00b18874e27ba7d7adc0a3b8e93fee763ab1
+merge-base: 40b2f62061575905aaac8bc360eaea62a4baeb67
+
+## diff stat vs upstream/main
+ csrc/rocm/q_gemm_rdna3.cu                          | 105 ++++++-
+ csrc/rocm/q_gemm_rdna3_wmma.cu                     | 323 ++++++++++++++++++---
+ .../quantization/test_rdna3_w4a16_determinism.py   | 156 ++++++++++
+ 3 files changed, 536 insertions(+), 48 deletions(-)
+torch: 2.14.0+rocm7.14
+torch.version.hip: 7.14.60850
+cuda.is_available: True
+device name: AMD Radeon Pro W7900D
+gcnArchName: gfx1100 | SMs: 48 | VRAM GB: 48.0

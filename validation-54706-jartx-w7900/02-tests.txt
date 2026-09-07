@@ -1,0 +1,30 @@
+# Targeted test results — PR #54706 JartX closure (W7900/gfx1100)
+
+Date: 2026-09-07T08:11:01Z
+Build: closure changes (at::empty WMMA scratch, scalar z_count==1 fast path,
+       direct-store epilogue, stale-CAS comment fixes, rewritten tests)
+Command: python -m pytest tests/kernels/quantization/test_rdna3_w4a16_determinism.py -v
+
+## Result: 20 passed, 0 failed, 0 errors in 17.96s
+
+Repeatability (A):
+  test_scalar_splitk_bit_repeatable        [bf16,fp16] PASS  # K=4096 -> 16 writers (strengthened from K=1024/4)
+  test_scalar_small_m_bit_repeatable       [bf16,fp16] PASS
+  test_scalar_single_split_bit_repeatable  [bf16,fp16] PASS  # NEW: z_count==1 direct-store path
+  test_wmma_splitk_bit_repeatable          [bf16,fp16] PASS
+  test_wmma_large_m_bit_repeatable         [bf16,fp16] PASS
+
+FP32-reference correctness (B):
+  test_scalar_matches_fp32_reference            [bf16,fp16] PASS
+  test_scalar_single_split_matches_fp32_reference[bf16,fp16] PASS
+  test_wmma_matches_fp32_reference              [bf16,fp16] PASS
+  test_wmma_single_split_matches_fp32_reference [bf16,fp16] PASS
+  test_wmma_large_m_matches_fp32_reference      [bf16,fp16] PASS
+
+Hygiene: repo-standard dist_init fixture (temp-file rendezvous, no hardcoded
+MASTER_PORT), per-test cleanup via conftest autouse fixtures; the old
+_cm.__enter__() leak and MASTER_PORT=29741 are gone.
+
+The at::empty WMMA scratch passing all reference checks empirically
+confirms the coverage invariant documented at alloc_wmma_partials:
+any reducer-visible slot left unwritten would surface as garbage/NaN.

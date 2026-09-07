@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-LicenseFileCopyrightText: Copyright contributors to the vLLM project
-"""Bit-repeatability regression tests for the RDNA3 W4A16 GEMM.
+"""Determinism + FP32-reference correctness tests for the RDNA3 W4A16 GEMM.
 
 The split-K epilogues of ``gptq_gemm_rdna3`` (scalar path) and the WMMA
 path previously accumulated per-split low-precision partials directly into
@@ -11,9 +11,53 @@ gfx1100 once more than a few split blocks contended.
 
 Both paths now store FP32 split partials and reduce them in a fixed order
 with a single final low-precision rounding, which is deterministic by
-construction. These tests assert exact repeatability through the public op
-so they fail on the legacy atomic epilogue and pass on the deterministic
-one. Both activation dtypes (bf16, fp16) are covered.
+construction. When the split count is 1 every path stores directly
+(single writer per output element).
+
+These tests assert, through the public op path:
+
+A. Repeatability — ``torch.equal`` across repeated identical calls.
+B. Numerical correctness — against an FP32 dequantized reference.
+
+(B) exists because repeatability alone cannot see the failure mode the
+deterministic epilogue introduces: the FP32 partials scratch is
+``at::empty`` (its coverage invariant is documented at
+``alloc_wmma_partials`` in ``csrc/rocm/q_gemm_rdna3_wmma.cu``), and across
+repeated calls the caching allocator hands back the same block — a slot
+that ever went unwritten would be bitwise-repeatable *and* wrong.
+
+Reference semantics (uint4b8, GPTQv1, synthesized zero points):
+    W[k, n] = (q[k, n] - 8) * float(round_to_dtype(scale[g, n])),  g = k//G
+    ref[m, n] = x[m, :] @ W[:, n]  (FP32 matmul)
+
+Tolerances are derived from the kernel's rounding structure, not tuned to
+pass (measured max errors on W7900/gfx1100 in parentheses):
+
+* scalar bf16  — dequant keeps FP32 precision end-to-end (magic-value
+  v_dot2 path); the only rounding is the final cast, so
+  max_abs <= 0.5 * ulp_bf16(max|ref|) * 1.5 + 1e-3   (measured ~0.06).
+* scalar fp16  — the classic exllama bit-trick rounds the per-(group,
+  column) offset constant scale*(-1024-zero) to fp16 (~0.008 abs at
+  scale≈0.02). That deterministic noise accumulates across the K/groups
+  axis (sigma ≈ 0.24 at K=4096, measured max ≈ 1.0). This is pre-existing
+  dequant behaviour shared with the exllama kernel — NOT epilogue error —
+  so the tolerance is loose (2.5) and the tight fp16 check lives on the
+  WMMA path below.
+* WMMA bf16    — B is narrowed to bf16 per cell (one rounding,
+  <= 0.5*ulp_bf16(|B|)), accumulated in FP32; measured max ≈ 0.09 at
+  K=4096 — tolerance 0.25.
+* WMMA fp16    — B narrowed to fp16 via the precise sub-then-mul variant
+  (one rounding, ~1e-4); measured max ≈ 0.015 — tolerance 0.05.
+
+All four are orders of magnitude below what an unwritten scratch slot
+(caching-allocator garbage / NaN) or an indexing bug (errors of the same
+scale as |ref| ≈ 7) would produce.
+
+Test hygiene: the op path needs a single-process distributed group and a
+current VLLM config; tests use the repo-standard ``dist_init`` fixture from
+``tests/conftest.py`` (real context manager, temp-file rendezvous so no
+hardcoded MASTER_PORT can collide in parallel CI, and the suite's standard
+post-test cleanup).
 """
 
 import pytest
@@ -56,13 +100,23 @@ REPEATS = 20
 GROUP = 128
 DTYPES = [torch.bfloat16, torch.float16]
 
+# max_abs_error tolerances vs the FP32 reference, per (path, dtype).
+# Derivation in the module docstring; ~2-3x headroom over measured maxima.
+TOL = {
+    ("scalar", torch.bfloat16): 0.10,
+    ("scalar", torch.float16): 2.50,
+    ("wmma", torch.bfloat16): 0.25,
+    ("wmma", torch.float16): 0.05,
+}
 
-def _build(K, N, seed, dtype):
+
+def _build_layer(k, n, seed, dtype):
     torch.manual_seed(seed)
-    q_int4_kn = torch.randint(0, 16, (K, N), dtype=torch.int32)
-    scales_gn = (torch.randn(K // GROUP, N) * 0.01 + 0.02).to(dtype)
-    qweight = pack_quantized_values_into_int32(q_int4_kn, WEIGHT_TYPE, packed_dim=0)
-    no_loader = lambda *a, **k: None  # noqa: E731
+    q_int4_kn = torch.randint(0, 16, (k, n), dtype=torch.int32)
+    scales_gn = (torch.randn(k // GROUP, n) * 0.01 + 0.02).to(dtype)
+    qweight = pack_quantized_values_into_int32(q_int4_kn, WEIGHT_TYPE,
+                                               packed_dim=0)
+    no_loader = lambda *a, **kw: None  # noqa: E731
 
     class DummyLayer(torch.nn.Module):
         pass
@@ -76,81 +130,179 @@ def _build(K, N, seed, dtype):
         "scales",
         GroupQuantScaleParameter(data=scales_gn, weight_loader=no_loader,
                                  input_dim=0, output_dim=1))
-    return layer.to(device)
+    layer.to(device)
+    return layer, q_int4_kn, scales_gn
 
 
-def _run(M, K, N, seed, dtype):
-    from vllm.config import VllmConfig, set_current_vllm_config
-    _cm = set_current_vllm_config(VllmConfig())
-    _cm.__enter__()
-    import os
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29741")
-    from vllm.distributed import (init_distributed_environment,
-                                  initialize_model_parallel)
-    if not torch.distributed.is_initialized():
-        init_distributed_environment(backend="cpu:gloo,cuda:hccl", world_size=1,
-                                     rank=0, local_rank=0,
-                                     distributed_init_method="env://")
-        initialize_model_parallel(tensor_model_parallel_size=1)
-    layer = _build(K, N, seed, dtype)
+def _prepare(layer, dtype, k, n):
     cfg = MPLinearLayerConfig(
-        full_weight_shape=(K, N), partition_weight_shape=(K, N),
+        full_weight_shape=(k, n), partition_weight_shape=(k, n),
         weight_type=WEIGHT_TYPE, act_type=dtype,
         group_size=GROUP, zero_points=False, has_g_idx=False)
     kernel = RDNA3W4A16LinearKernel(cfg, w_q_param_name="qweight",
                                     w_s_param_name="scales",
                                     w_zp_param_name=None, w_gidx_param_name=None)
     kernel.process_weights_after_loading(layer)
-    w_q, w_s, w_zp, w_g_idx = kernel._get_weight_params(layer)
+    return kernel._get_weight_params(layer)
+
+
+def _reference(m, k, dtype, seed, q_int4_kn, scales_gn):
     torch.manual_seed(seed + 1)
-    x = torch.randn(M, K, device=device, dtype=dtype)
-    return [
-        torch.ops._rocm_C.gptq_gemm_rdna3(x, w_q, w_zp, w_s, w_g_idx, False)
-        for _ in range(REPEATS)
-    ]
+    x = torch.randn(m, k, device=device, dtype=dtype)
+    # FP32 reference; see module docstring for the dequant semantics.
+    w_f32 = (q_int4_kn.to(device).float() - 8.0) * scales_gn.to(
+        device).repeat_interleave(GROUP, dim=0).float()
+    return x, x.float() @ w_f32
 
 
-@gfx1100_only
-@pytest.mark.parametrize("dtype", DTYPES)
-def test_scalar_splitk_bit_repeatable(dtype):
-    """Scalar path, split-K active (Z = 1024/256 = 4 concurrent writers)."""
-    outs = _run(M=1, K=1024, N=4096, seed=1234, dtype=dtype)
+def _run_op(x, w_q, w_zp, w_s, w_g_idx):
+    return torch.ops._rocm_C.gptq_gemm_rdna3(x, w_q, w_zp, w_s, w_g_idx, False)
+
+
+def _outputs_and_ref(M, K, N, seed, dtype, repeats=1):
+    layer, q_int4_kn, scales_gn = _build_layer(K, N, seed, dtype)
+    w_q, w_s, w_zp, w_g_idx = _prepare(layer, dtype, K, N)
+    x, ref = _reference(M, K, dtype, seed, q_int4_kn, scales_gn)
+    outs = [_run_op(x, w_q, w_zp, w_s, w_g_idx) for _ in range(repeats)]
+    return outs, ref
+
+
+def _path_for(dtype, m):
+    """Public dispatch: bf16 reaches WMMA at M>=16, fp16 at M>=64."""
+    if (dtype == torch.bfloat16 and m >= 16) or \
+       (dtype == torch.float16 and m >= 64):
+        return "wmma"
+    return "scalar"
+
+
+def _assert_repeatable(outs):
     for o in outs[1:]:
         assert torch.equal(o, outs[0]), (
-            "RDNA3 W4A16 scalar split-K produced differing outputs for "
-            "identical inputs")
+            "RDNA3 W4A16 split-K produced differing outputs for identical "
+            "inputs")
+
+
+def _assert_close_to_ref(out, ref, path, dtype):
+    err = (out.float() - ref).abs()
+    max_abs = err.max().item()
+    mean_abs = err.mean().item()
+    tol = TOL[(path, dtype)]
+    assert torch.isfinite(out.float()).all(), "non-finite output"
+    assert max_abs <= tol, (
+        f"RDNA3 W4A16 {path} output deviates from the FP32 dequantized "
+        f"reference: max_abs={max_abs:.4f} > tol={tol} (mean_abs="
+        f"{mean_abs:.4f}). This catches values that are bitwise-repeatable "
+        "but wrong (e.g. an unwritten FP32 scratch slot).")
+
+
+# ---------------------------------------------------------------------------
+# A. Repeatability (bit-exact across identical calls)
+# ---------------------------------------------------------------------------
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_splitk_bit_repeatable(dist_init, dtype):
+    """Scalar path at production-like contention: K=4096 splits into
+    ceil(4096/256) = 16 concurrent writers per output element (the old CAS
+    bug's onset was between 2 and 4 writers, so this sits well inside the
+    failure regime rather than at the empirical threshold)."""
+    outs, _ = _outputs_and_ref(M=1, K=4096, N=4096, seed=1234,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
 
 
 @gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_scalar_small_m_bit_repeatable(dtype):
+def test_scalar_small_m_bit_repeatable(dist_init, dtype):
     """Scalar M>1 tiles share the same deterministic epilogue."""
-    outs = _run(M=8, K=1024, N=4096, seed=1235, dtype=dtype)
-    for o in outs[1:]:
-        assert torch.equal(o, outs[0])
+    outs, _ = _outputs_and_ref(M=8, K=4096, N=4096, seed=1235,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
 
 
 @gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_wmma_splitk_bit_repeatable(dtype):
+def test_scalar_single_split_bit_repeatable(dist_init, dtype):
+    """z_count == 1 (K=256 < BLOCK_KN_SIZE): direct-store epilogue, no
+    scratch, no reduce pass."""
+    outs, _ = _outputs_and_ref(M=1, K=256, N=4096, seed=1238,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_splitk_bit_repeatable(dist_init, dtype):
     """WMMA path (bf16 M >= 16, fp16 M >= 64), split-K active.
 
     K=6656 gives K_SPLIT=4 under the upstream heuristic; the deterministic
     epilogue must be bit-repeatable regardless of the split count.
     """
-    M = 16 if dtype == torch.bfloat16 else 64
-    outs = _run(M=M, K=6656, N=4096, seed=1236, dtype=dtype)
-    for o in outs[1:]:
-        assert torch.equal(o, outs[0]), (
-            "RDNA3 W4A16 WMMA split-K produced differing outputs for "
-            "identical inputs")
+    m = 16 if dtype == torch.bfloat16 else 64
+    outs, _ = _outputs_and_ref(M=m, K=6656, N=4096, seed=1236,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
 
 
 @gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_wmma_large_m_bit_repeatable(dtype):
+def test_wmma_large_m_bit_repeatable(dist_init, dtype):
     """Large-M WMMA tiles (128x64 kernels) with the deterministic epilogue."""
-    outs = _run(M=128, K=6656, N=4096, seed=1237, dtype=dtype)
-    for o in outs[1:]:
-        assert torch.equal(o, outs[0])
+    outs, _ = _outputs_and_ref(M=128, K=6656, N=4096, seed=1237,
+                             dtype=dtype, repeats=REPEATS)
+    _assert_repeatable(outs)
+
+
+# ---------------------------------------------------------------------------
+# B. Numerical correctness against the FP32 dequantized reference
+# ---------------------------------------------------------------------------
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_matches_fp32_reference(dist_init, dtype):
+    """Scalar split-K (K=4096, 16 writers) vs the FP32 reference."""
+    m = 1
+    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1240,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_single_split_matches_fp32_reference(dist_init, dtype):
+    """Scalar z_count == 1 direct-store path vs the FP32 reference."""
+    m = 1
+    outs, ref = _outputs_and_ref(M=m, K=256, N=512, seed=1241,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_matches_fp32_reference(dist_init, dtype):
+    """WMMA split-K path (bf16 16x16_1w / fp16 64x64_4w) vs FP32 reference."""
+    m = 16 if dtype == torch.bfloat16 else 64
+    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1242,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_single_split_matches_fp32_reference(dist_init, dtype):
+    """WMMA k_split == 1 direct-store path (K=256 -> compute_wmma_k_split
+    returns 1 for every dispatch level) vs the FP32 reference."""
+    m = 16 if dtype == torch.bfloat16 else 64
+    outs, ref = _outputs_and_ref(M=m, K=256, N=512, seed=1243,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_wmma_large_m_matches_fp32_reference(dist_init, dtype):
+    """Large-M WMMA (128x64_k32, row-tiled scratch + reduce) vs FP32."""
+    m = 128
+    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1244,
+                             dtype=dtype)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
