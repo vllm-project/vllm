@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -23,6 +26,14 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
+)
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -758,13 +769,12 @@ def make_routing_data(
         (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
     )
 
-    grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
-    pack_bitmatrix[grid](
-        bitmatrix,
-        topk_ids,
-        n_rows,
-        bm_cols,
-        num_topk,
+    _PACK_BITMATRIX_KERNEL(
+        bitmatrix=bitmatrix,
+        topk_ids=topk_ids,
+        n_rows=n_rows,
+        bm_cols=bm_cols,
+        n_expts_act=num_topk,
         BLOCK_SIZE_M=BLOCK_SIZE_M,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
@@ -862,9 +872,14 @@ def masked_moe_sum(
 ) -> None:
     M, topk, K = intermediate.shape
     BLOCK_K = 1024
-    grid = (M, triton.cdiv(K, BLOCK_K))
-    _masked_topk_sum_kernel[grid](
-        intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
+    _MASKED_MOE_SUM_KERNEL(
+        inp=intermediate,
+        topk_ids=topk_ids,
+        out=output,
+        K=K,
+        topk=topk,
+        BLOCK_K=BLOCK_K,
+        num_rows=M,
     )
 
 
@@ -906,9 +921,251 @@ def remap_topk_to_local(
     out = torch.empty_like(topk_ids, dtype=torch.int64)
     n = topk_ids.numel()
     BLOCK = 1024
-    grid = (triton.cdiv(n, BLOCK),)
-    _remap_topk_to_local_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
+    _REMAP_TOPK_TO_LOCAL_KERNEL(
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+        out=out,
+        n_elements=n,
+        BLOCK=BLOCK,
+    )
     return out
+
+
+# ---------------------------------------------------------------------------
+# JIT-warmup owners (PR #49627 "de-JITification") for the vLLM-authored
+# OAI-Triton MoE kernels. These three ``@triton.jit`` kernels sit on the EP /
+# LoRA MoE paths and otherwise JIT lazily on the first such forward. Each owner
+# reuses its runtime launch specification for compile-only warmup, so the
+# imperative ``_warmup_gpt_oss_moe_kernels`` hook (kernel_warmup.py) can
+# AOT-compile every specialization the runtime would hit.
+#
+# Out-of-AOT-scope (documented in PR49627_INTEGRATION.md): the default
+# single-GPU / TP MXFP4 monolithic path routes through the *external* OpenAI
+# ``triton_kernels`` (routing / matmul_ogs / swiglu / topk) which the #49627
+# framework cannot own, and the three nested monkey-patch closures
+# (``_stage2_pow2`` / ``_routing_compute_indx_pow2`` /
+# ``_combined_routing_compute_pow2``) have no clean module-level handle.
+
+
+def _oai_moe_hf_config(vllm_config: Any) -> Any:
+    model_config = getattr(vllm_config, "model_config", None)
+    return getattr(model_config, "hf_config", None) if model_config else None
+
+
+class _PackBitmatrixKernel(VllmTritonJitKernel["_PackBitmatrixKernel.CompileKey"]):
+    """Owner for ``pack_bitmatrix`` (topk_ids -> bitmatrix), launched by
+    ``make_routing_data`` on the EP / LoRA routing path."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        n_rows: int
+        bm_cols: int
+        n_expts_act: int
+        block_size_m: int
+        block_size_k: int
+
+    kernel = staticmethod(pack_bitmatrix)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        n_rows: int,
+        bm_cols: int,
+        n_expts_act: int,
+        block_size_m: int,
+        block_size_k: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            n_rows=triton_scalar_specialization_rep(n_rows),
+            bm_cols=bm_cols,
+            n_expts_act=triton_scalar_specialization_rep(n_expts_act),
+            block_size_m=block_size_m,
+            block_size_k=block_size_k,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = _oai_moe_hf_config(vllm_config)
+        num_local_experts = getattr(hf_config, "num_local_experts", 0) or 0
+        num_topk = getattr(hf_config, "num_experts_per_tok", 0) or 0
+        max_tokens = (
+            getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 0) or 0
+        )
+        if num_local_experts <= 0 or num_topk <= 0 or max_tokens <= 0:
+            return []
+        # bm_cols = cdiv(local_experts_per_rank, 32); enumerate 1..no-EP max so
+        # every EP sharding (fewer experts per rank -> smaller bm_cols) is warmed.
+        bm_cols_max = triton.cdiv(num_local_experts, 32)
+        return self._trace_dispatch(self.dispatch)(
+            n_rows=WarmupIntRange(1, min(max_tokens, 16) + 1),
+            bm_cols=list(range(1, bm_cols_max + 1)),
+            n_expts_act=num_topk,
+            block_size_m=512,
+            block_size_k=32,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            bitmatrix=TritonWarmupTensor(torch.uint32),
+            topk_ids=TritonWarmupTensor(torch.int16),
+            n_rows=compile_key.n_rows,
+            bm_cols=compile_key.bm_cols,
+            n_expts_act=compile_key.n_expts_act,
+            BLOCK_SIZE_M=compile_key.block_size_m,
+            BLOCK_SIZE_K=compile_key.block_size_k,
+        )
+
+    @kernel_launcher
+    def __call__(  # type: ignore[override]
+        self,
+        *,
+        bitmatrix: torch.Tensor,
+        topk_ids: torch.Tensor,
+        n_rows: int,
+        bm_cols: int,
+        n_expts_act: int,
+        BLOCK_SIZE_M: int,
+        BLOCK_SIZE_K: int,
+    ) -> LaunchSpec:
+        grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
+        return grid, {}
+
+
+_PACK_BITMATRIX_KERNEL = _PackBitmatrixKernel()
+
+
+class _RemapTopkToLocalKernel(
+    VllmTritonJitKernel["_RemapTopkToLocalKernel.CompileKey"]
+):
+    """Owner for ``_remap_topk_to_local_kernel`` (global->local expert ids),
+    launched by ``remap_topk_to_local`` on the EP path (expert_map is not None).
+    """
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        n_elements: int
+        block: int
+
+    kernel = staticmethod(_remap_topk_to_local_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        n_elements: int,
+        block: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            n_elements=triton_scalar_specialization_rep(n_elements),
+            block=block,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = _oai_moe_hf_config(vllm_config)
+        num_topk = getattr(hf_config, "num_experts_per_tok", 0) or 0
+        max_tokens = (
+            getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 0) or 0
+        )
+        if num_topk <= 0 or max_tokens <= 0:
+            return []
+        max_elements = max_tokens * num_topk
+        return self._trace_dispatch(self.dispatch)(
+            n_elements=WarmupIntRange(1, min(max_elements, 16) + 1),
+            block=1024,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            topk_ids=TritonWarmupTensor(torch.int32),
+            expert_map=TritonWarmupTensor(torch.int32),
+            out=TritonWarmupTensor(torch.int64),
+            n_elements=compile_key.n_elements,
+            BLOCK=compile_key.block,
+        )
+
+    @kernel_launcher
+    def __call__(  # type: ignore[override]
+        self,
+        *,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        out: torch.Tensor,
+        n_elements: int,
+        BLOCK: int,
+    ) -> LaunchSpec:
+        grid = (triton.cdiv(n_elements, BLOCK),)
+        return grid, {}
+
+
+_REMAP_TOPK_TO_LOCAL_KERNEL = _RemapTopkToLocalKernel()
+
+
+class _MaskedMoeSumKernel(VllmTritonJitKernel["_MaskedMoeSumKernel.CompileKey"]):
+    """Owner for ``_masked_topk_sum_kernel`` (masked per-row MoE reduction),
+    launched by ``masked_moe_sum`` on the LoRA (unfused) path. ``topk_ids`` is
+    int32 (no EP) or int64 (EP-remapped); both dtypes are warmed."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        k: int
+        topk: int
+        block_k: int
+        topk_ids_is_64: bool
+
+    kernel = staticmethod(_masked_topk_sum_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        k: int,
+        topk: int,
+        block_k: int,
+        topk_ids_is_64: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            k=triton_scalar_specialization_rep(k),
+            topk=topk,
+            block_k=block_k,
+            topk_ids_is_64=topk_ids_is_64,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = _oai_moe_hf_config(vllm_config)
+        hidden_size = getattr(hf_config, "hidden_size", 0) or 0
+        num_topk = getattr(hf_config, "num_experts_per_tok", 0) or 0
+        if hidden_size <= 0 or num_topk <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            k=hidden_size,
+            topk=num_topk,
+            block_k=1024,
+            topk_ids_is_64=[False, True],
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        topk_ids_dtype = torch.int64 if compile_key.topk_ids_is_64 else torch.int32
+        return dict(
+            inp=TritonWarmupTensor(torch.bfloat16),
+            topk_ids=TritonWarmupTensor(topk_ids_dtype),
+            out=TritonWarmupTensor(torch.bfloat16),
+            K=compile_key.k,
+            topk=compile_key.topk,
+            BLOCK_K=compile_key.block_k,
+            num_rows=1,
+        )
+
+    @kernel_launcher
+    def __call__(  # type: ignore[override]
+        self,
+        *,
+        inp: torch.Tensor,
+        topk_ids: torch.Tensor,
+        out: torch.Tensor,
+        K: int,
+        topk: int,
+        BLOCK_K: int,
+        num_rows: int,
+    ) -> LaunchSpec:
+        grid = (num_rows, triton.cdiv(K, BLOCK_K))
+        return grid, {}
+
+
+_MASKED_MOE_SUM_KERNEL = _MaskedMoeSumKernel()
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
