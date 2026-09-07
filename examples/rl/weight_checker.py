@@ -73,8 +73,7 @@ def verify_weight_update(base_url: str) -> None:
         mismatches = comparison["mismatches"]
         preview = "\n".join(f"  - {name}" for name in mismatches[:10])
         raise RuntimeError(
-            f"Weight verification failed with {len(mismatches)} mismatches:\n"
-            f"{preview}"
+            f"Weight verification failed with {len(mismatches)} mismatches:\n{preview}"
         )
 
     print("Weight verification passed: all inference weights match.")

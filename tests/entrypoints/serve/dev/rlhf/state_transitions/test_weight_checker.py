@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the POST /weight_checker development endpoint."""
+"""HTTP checksum baselines, corruption detection, and checkpoint restoration.
+
+The API smoke uses one real small model so reset can always be undone. Rank
+aggregation additionally runs with TP2/DP2/EP on four GPUs. Pure baseline and
+merge errors are covered by entrypoints/unit_tests/test_weight_checker.py;
+transport correctness remains in tests/distributed/test_weight_transfer.py.
+"""
 
 import os
 
 import pytest
+import regex as re
 import requests
 
 from tests.entrypoints.serve.dev.rlhf.conftest import (
@@ -30,10 +37,12 @@ def _mode(tp: int, dp: int = 1, ep: bool = False, real_weights: bool = False):
         "name": key,
         "real_weights": real_weights,
     }
-    return pytest.param(value, id=key)
+    return pytest.param(
+        value, id=key, marks=[pytest.mark.distributed] if tp * dp > 1 else []
+    )
 
 
-_MODE_TP1 = _mode(1)
+_MODE_TP1 = _mode(1, real_weights=True)
 _MODE_TP2DP2EP = _mode(2, dp=2, ep=True, real_weights=True)
 
 
@@ -47,7 +56,6 @@ def _requested_modes(available: list) -> list:
 
 _API_MODES = _requested_modes([_MODE_TP1])
 _DISTRIBUTED_MODES = _requested_modes([_MODE_TP2DP2EP])
-_PORT_BY_MODE = {"tp1": 8830, "tp2dp2ep": 10830}
 
 
 def _mode_args(mode: dict) -> list[str]:
@@ -67,15 +75,22 @@ def _mode_args(mode: dict) -> list[str]:
 
 
 @pytest.fixture(scope="class")
-def wc_server(request):
+def wc_server(request, num_gpus_available):
     """Start one server for each test class and parallel mode."""
     mode = request.param
-    port = _PORT_BY_MODE[mode["name"]]
+    if num_gpus_available < mode["tp"] * mode["dp"]:
+        pytest.skip("Insufficient GPUs for the requested checker topology")
+    model = (
+        os.environ.get("VLLM_TEST_MOE_MODEL", "TitanML/tiny-mixtral")
+        if mode["ep"]
+        else os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+    )
     with server(
-        port=port,
+        model=model,
         timeout=900,
         dummy_weights=not mode["real_weights"],
-        extra_args=_mode_args(mode),
+        extra_args=_mode_args(mode)
+        + (["--hf-overrides", '{"sliding_window": null}'] if mode["ep"] else []),
     ) as url:
         yield mode, url
 
@@ -108,13 +123,11 @@ class TestWeightCheckerAPI:
         assert health(url) == 200
 
     @pytest.mark.parametrize(
-        "payload", [{}, {"action": "snapshot"}, {"action": "frobnicate"}]
+        "payload", [{}, {"action": "snapshot"}, {"action": "frobnicate"}, [], None]
     )
     def test_invalid_action_returns_400(self, wc_server, payload):
         mode, url = wc_server
-        response = requests.post(
-            f"{url}/weight_checker", json=payload, timeout=10
-        )
+        response = requests.post(f"{url}/weight_checker", json=payload, timeout=10)
         assert response.status_code == 400, (
             f"[{mode['name']}] expected 400, got "
             f"{response.status_code}: {response.text}"
@@ -126,9 +139,15 @@ class TestWeightCheckerAPI:
         first = weight_checker(url, "checksum")
         assert first.status_code == 200, first.text
         checksums = first.json()["checksums"]
+        assert first.json()["baseline_created"] is True
+        assert checksums
+        assert all(
+            re.fullmatch(r"[0-9a-f]{64}", digest) for digest in checksums.values()
+        )
 
         second = weight_checker(url, "checksum")
         assert second.status_code == 200, second.text
+        assert second.json()["baseline_created"] is False
         assert checksums == second.json()["checksums"], (
             f"[{mode['name']}] checksum changed while weights were unchanged"
         )
@@ -150,22 +169,27 @@ class TestWeightCheckerAPI:
             f"{second.status_code}: {second.text}"
         )
 
-    def test_reset_changes_weights(self, wc_server):
-        """Run last because reset destructively randomizes model weights."""
-        mode, url = wc_server
-        assert weight_checker(url, "checksum").status_code == 200
-
-        response = weight_checker(url, "reset")
-        assert response.status_code == 200, response.text
-        assert response.json()["status"] == "reset"
-
+    def test_reset_changes_weights_and_reload_restores_them(self, wc_server):
+        """A failed assertion still restores weights before the next test."""
+        _, url = wc_server
+        original = weight_checker(url, "checksum")
+        original.raise_for_status()
+        try:
+            reset = weight_checker(url, "reset")
+            reset.raise_for_status()
+            comparison = weight_checker(url, "compare")
+            comparison.raise_for_status()
+            assert comparison.json()["match"] is False
+            assert comparison.json()["mismatches"]
+        finally:
+            collective_rpc(url, "reload_weights").raise_for_status()
+        restored = weight_checker(url, "checksum")
+        restored.raise_for_status()
+        assert restored.json()["checksums"] == original.json()["checksums"]
         comparison = weight_checker(url, "compare")
-        assert comparison.status_code == 200, comparison.text
-        body = comparison.json()
-        assert body["match"] is False, (
-            f"[{mode['name']}] expected reset to change weights: {body}"
-        )
-        assert body["mismatches"]
+        comparison.raise_for_status()
+        assert comparison.json() == {"match": True, "mismatches": []}
+        assert ok(gen(url))
 
 
 @pytest.mark.parametrize("wc_server", _DISTRIBUTED_MODES, indirect=True)
@@ -184,6 +208,14 @@ class TestWeightCheckerTP2DP2EP:
             f"got {len(initial_body['engines'])}"
         )
 
+        ranks = set()
+        for key in initial_body["checksums"]:
+            match = re.fullmatch(r"dp(\d+):pp0:pcp0:tp(\d+):ep\d+:.+", key)
+            assert match is not None, f"Unqualified checksum key: {key}"
+            ranks.add(tuple(map(int, match.groups())))
+        assert ranks == {
+            (dp, tp) for dp in range(mode["dp"]) for tp in range(mode["tp"])
+        }
         reset = weight_checker(url, "reset")
         assert reset.status_code == 200, reset.text
 
