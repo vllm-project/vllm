@@ -15,6 +15,7 @@ RENDER_PATHS = {
     "/v1/completions/render",
     "/v1/completions/derender",
     "/v1/messages/render",
+    "/v1/responses/render",
 }
 GENERATE_PATH = "/inference/v1/generate"
 SCALE_OUT_PATHS = RENDER_PATHS | {GENERATE_PATH}
