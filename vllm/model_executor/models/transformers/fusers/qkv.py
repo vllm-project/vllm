@@ -16,13 +16,13 @@ from vllm.model_executor.models.transformers.fusers.base import (
     local_output_sizes,
 )
 from vllm.model_executor.models.transformers.fx_utils import (
+    block_chain,
     compile_forward,
-    innermost_block,
     is_linear,
     recover_forward,
     replace_expr,
     returned_linear,
-    single_self_call,
+    self_call_and_refs,
 )
 from vllm.model_executor.models.transformers.utils import (
     log_replacement,
@@ -34,6 +34,65 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+def _is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _in_boolean_context(funcdef: ast.FunctionDef, ref: ast.expr) -> bool:
+    """Is `ref` used only for its truth value (a test, or a `not` operand)?
+
+    In these positions the object's identity never escapes, so a reference that
+    is always truthy can be replaced by `True`. `and`/`or` are excluded: they
+    yield an operand, so the module could escape (`x and self.<name>`)."""
+    for node in ast.walk(funcdef):
+        if (
+            isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert))
+            and node.test is ref
+        ):
+            return True
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.Not)
+            and node.operand is ref
+        ):
+            return True
+    return False
+
+
+def _fold_existence_guard(
+    funcdef: ast.FunctionDef, ref: ast.Attribute, name: str
+) -> None:
+    """Fold a guard on `self.<name>`'s existence to its constant value.
+
+    The fuser deletes `self.<name>` and binds only instances where it exists as a
+    truthy `nn.Linear` (guaranteed by the match, the cache key, and `validate`),
+    so a guard testing its presence is a fusion invariant. Two forms are folded:
+
+    - `self.<name> is/is not/==/!= None`: `is None`/`== None` to `False`,
+      `is not None`/`!= None` to `True`.
+    - a bare truthiness test (`... if self.<name> else ...`, `not self.<name>`):
+      the reference itself to `True`.
+
+    Any other surviving reference escapes the projection's value, which no longer
+    exists after fusion, so refuse rather than change semantics."""
+    for node in ast.walk(funcdef):
+        if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+            continue
+        (op,), (right,) = node.ops, node.comparators
+        if not isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)):
+            continue
+        if (ref is node.left and _is_none(right)) or (
+            ref is right and _is_none(node.left)
+        ):
+            value = isinstance(op, (ast.IsNot, ast.NotEq))
+            replace_expr(funcdef, node, ast.copy_location(ast.Constant(value), node))
+            return
+    if _in_boolean_context(funcdef, ref):
+        replace_expr(funcdef, ref, ast.copy_location(ast.Constant(True), ref))
+        return
+    raise ValueError(f"{name} is referenced outside an existence guard")
 
 
 @dataclass
@@ -101,12 +160,23 @@ class QKVFuser(StackedFuser):
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
-        """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source."""
+        """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source.
+
+        A projection may be guarded by an existence check -- a
+        `self.<proj> is (not) None` comparison (e.g. Gemma 4's `v_proj`) or a bare
+        truthiness test -- which is folded to its constant value (see
+        `_fold_existence_guard`). The calls may sit in different branches, so the
+        fused GEMM is inserted before the earliest of them, in the innermost block
+        that dominates all three.
+        """
         funcdef, fn = recover_forward(type(module))
-        calls = [
-            single_self_call(funcdef, name)
-            for name in (self.q_name, self.k_name, self.v_name)
-        ]
+        proj_names = (self.q_name, self.k_name, self.v_name)
+        calls = []
+        for name in proj_names:
+            call, refs = self_call_and_refs(funcdef, name)
+            for ref in refs:
+                _fold_existence_guard(funcdef, ref, name)
+            calls.append(call)
         arg_dumps = {ast.dump(call.args[0]) for call in calls}
         if len(arg_dumps) != 1:
             raise ValueError("projection inputs are written differently")
@@ -117,7 +187,7 @@ class QKVFuser(StackedFuser):
             name
             for name, child in module.named_children()
             if isinstance(child, nn.Linear)
-        } - {self.q_name, self.k_name, self.v_name}
+        } - set(proj_names)
         for node in ast.walk(funcdef):
             if (
                 isinstance(node, ast.Call)
@@ -126,15 +196,40 @@ class QKVFuser(StackedFuser):
                 and any(ast.dump(arg) in arg_dumps for arg in node.args)
             ):
                 raise ValueError("another linear consumes the same input")
-        blocks = [innermost_block(funcdef.body, call) for call in calls]
-        if any(found is None for found in blocks):
+
+        # Insert the fused GEMM before the earliest call, in the innermost block
+        # common to all three (the calls may be split across branches).
+        chains = [block_chain(funcdef.body, call) for call in calls]
+        if any(not chain for chain in chains):
             raise ValueError("projection calls not found in the function body")
-        if len({id(block) for block, _ in blocks}) != 1:
-            raise ValueError("projection calls are in different blocks")
+        depth = 0
+        for level in zip(*chains):
+            if len({id(block) for block, _ in level}) != 1:
+                break
+            depth += 1
+        block = chains[0][depth - 1][0]
+        indices = [chain[depth - 1][1] for chain in chains]
+        insert_index = min(indices)
+        # The shared input must not be rebound between the insertion point and
+        # the last call, else the hoisted GEMM would read a different value.
+        arg_names = {
+            node.id
+            for node in ast.walk(calls[0].args[0])
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        region = block[insert_index : max(indices) + 1]
+        rebound = {
+            node.id
+            for stmt in region
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+        }
+        if arg_names & rebound:
+            raise ValueError("projection input is rebound before all projections")
 
         # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
         names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
-        temps = [f"{name}_fused" for name in (self.q_name, self.k_name, self.v_name)]
+        temps = [f"{name}_fused" for name in proj_names]
         if names & set(temps):
             raise ValueError("fused temporaries would shadow existing names")
         merged = f"self.{self.merged_name}"
@@ -147,9 +242,8 @@ class QKVFuser(StackedFuser):
             if isinstance(node, ast.Name) and node.id == "__arg__"
         )
         replace_expr(assign, arg, calls[0].args[0])
-        block, index = blocks[0]
-        ast.copy_location(assign, block[index])
-        block.insert(min(index for _, index in blocks), assign)
+        ast.copy_location(assign, block[insert_index])
+        block.insert(insert_index, assign)
         for call, temp in zip(calls, temps):
             replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
         self.fused_forward = compile_forward(funcdef, fn)

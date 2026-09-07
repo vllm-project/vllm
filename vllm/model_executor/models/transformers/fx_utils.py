@@ -70,6 +70,13 @@ class _MetaProxy(fx.Proxy):
     def __getattr__(self, k: str) -> "_MetaAttribute":
         return _MetaAttribute(self, k)
 
+    def __setitem__(self, key: object, value: object) -> None:
+        # Record `obj[key] = value` so tracing continues past in-place writes
+        # into containers (e.g. Gemma 4's `shared_kv_states[...] = ...`).
+        self.tracer.create_proxy(
+            "call_function", operator.setitem, (self, key, value), {}
+        )
+
 
 class _MetaAttribute(_MetaProxy, fx.proxy.Attribute):
     """Attribute proxy (e.g. `x.shape`) carrying its meta value.
@@ -312,41 +319,61 @@ def compile_forward(funcdef: ast.FunctionDef, fn: Callable) -> Callable:
     return namespace[funcdef.name]
 
 
+def self_call_and_refs(
+    funcdef: ast.FunctionDef, name: str
+) -> tuple[ast.Call, list[ast.Attribute]]:
+    """The unique `self.<name>(arg)` call, plus every other `self.<name>` reference.
+
+    Raises unless exactly one single-argument `self.<name>(arg)` call exists, so
+    one fx `call_module` node maps to one syntactic call site. The remaining
+    references (e.g. `is not None` guards) are returned for the caller to resolve.
+    """
+    uses = [
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute)
+        and node.attr == name
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    calls = [
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Call)
+        and any(node.func is use for use in uses)
+        and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+    ]
+    if len(calls) != 1:
+        raise ValueError(f"{name} is not called exactly once as self.{name}(arg)")
+    call = calls[0]
+    other_refs = [use for use in uses if use is not call.func]
+    return call, other_refs
+
+
 def single_self_call(funcdef: ast.FunctionDef, name: str) -> ast.Call:
     """The unique `self.<name>(arg)` call in `funcdef`.
 
     Raises unless `name` appears exactly once, as such a call, so the source
     rewrite agrees with the fx match.
     """
-    uses = [
-        node
-        for node in ast.walk(funcdef)
-        if isinstance(node, ast.Attribute) and node.attr == name
-    ]
-    if len(uses) != 1:
-        raise ValueError(f"{name} is referenced {len(uses)} times")
-    calls = [
-        node
-        for node in ast.walk(funcdef)
-        if isinstance(node, ast.Call)
-        and node.func is uses[0]
-        and len(node.args) == 1
-        and not isinstance(node.args[0], ast.Starred)
-        and not node.keywords
-    ]
-    if (
-        len(calls) != 1
-        or not isinstance(uses[0].value, ast.Name)
-        or uses[0].value.id != "self"
-    ):
-        raise ValueError(f"{name} is not a single-argument call on self")
-    return calls[0]
+    call, other_refs = self_call_and_refs(funcdef, name)
+    if other_refs:
+        raise ValueError(f"{name} is referenced {len(other_refs) + 1} times")
+    return call
 
 
-def innermost_block(
+def block_chain(
     block: list[ast.stmt], node: ast.AST
-) -> tuple[list[ast.stmt], int] | None:
-    """The innermost statement list containing `node`, and the index within."""
+) -> list[tuple[list[ast.stmt], int]]:
+    """Path of (statement list, index) pairs from `block` down to `node`.
+
+    Each pair names a nested block and the index in it of the statement
+    containing `node`; the last pair is `node`'s innermost block. Empty if
+    `node` is not in `block`. The longest common prefix of several nodes' chains
+    is the innermost block that dominates them all.
+    """
     for index, stmt in enumerate(block):
         if not any(child is node for child in ast.walk(stmt)):
             continue
@@ -359,11 +386,11 @@ def innermost_block(
             if (
                 isinstance(child_block, list)
                 and child_block
-                and (found := innermost_block(child_block, node)) is not None
+                and (tail := block_chain(child_block, node))
             ):
-                return found
-        return block, index
-    return None
+                return [(block, index), *tail]
+        return [(block, index)]
+    return []
 
 
 def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:

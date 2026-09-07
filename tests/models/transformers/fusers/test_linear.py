@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's linear fusers."""
 
+import ast
 import inspect
 from types import MethodType, SimpleNamespace
 
@@ -234,6 +235,154 @@ class ResidDropoutAttention(FakeAttention):
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         return self.resid_dropout(self.o_proj(attn_output)), None
+
+
+class GuardedVAttention(FakeAttention):
+    """Gemma 4-style: `v_proj` is called once but also read in a `None` guard.
+
+    The guard is a fusion invariant (the fuser only binds instances where the
+    projection exists), so it folds to `True` and the call still fuses."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = (
+            self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            if self.v_proj is not None
+            else k
+        )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class TruthyGuardAttention(FakeAttention):
+    """`v_proj` guarded by a bare truthiness test instead of `is not None`.
+
+    An `nn.Linear` is always truthy, so the guard folds to `True` and the call
+    still fuses (the projection is a proven invariant, exactly as for a `None`
+    guard)."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = (
+            self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            if self.v_proj
+            else k
+        )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class BranchedKVAttention(FakeAttention):
+    """Gemma 4-style: q at body level, k/v inside an untaken `else` branch.
+
+    The three calls do not share a block, so the fused GEMM must be hoisted to
+    the innermost block that dominates all of them (the function body). The
+    live `if`/`else` must survive the rewrite."""
+
+    is_kv_shared_layer = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.is_kv_shared_layer:
+            k = v = None
+        else:
+            k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class RebindArgAttention(FakeAttention):
+    """The projection input is rebound (in an untaken branch) before k/v.
+
+    The branch is dead at trace time so the match succeeds, but the source
+    rewrite must refuse: hoisting the GEMM above the rebind would feed k/v a
+    different input. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states = hidden_states * 2
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class NonFoldableRefAttention(FakeAttention):
+    """A surviving `v_proj` reference that is not an existence guard -> no fusion.
+
+    Deleting `v_proj` would break `isinstance(self.v_proj, nn.Linear)`: it reads
+    the projection's type, not just whether it exists, so the fuser cannot fold
+    it and must refuse rather than rewrite it."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if isinstance(self.v_proj, nn.Linear):
+            v = v.contiguous()
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
 
 
 class PackedQKVAttention(nn.Module):
@@ -488,6 +637,160 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(PerHeadQKNormAttention(), QKVFuser).o_name == "o_proj"
         # A module between o_proj and the return is transparent.
         assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
+
+
+@pytest.mark.parametrize(
+    "attn_cls", [GuardedVAttention, TruthyGuardAttention, BranchedKVAttention]
+)
+def test_fuses_gemma4_qkv_obstacles(attn_cls):
+    """A guarded `v_proj` (obstacle 1) or branch-split k/v (obstacle 2) fuses.
+
+    Both patterns leave `v_proj` referenced beyond its single call, or split the
+    calls across blocks; the rewrite folds the guard / hoists the GEMM and the
+    numerics still match. The guard may be a `None` comparison or a bare
+    truthiness test; both are proven invariants, so folding them is sound. The
+    naive "relax the reference count" fix fuses the guarded cases but silently
+    drops the guard's semantics.
+    """
+    with torch.device("meta"):
+        meta = attn_cls()
+    fuser = get_fuser(meta, QKVFuser)
+    assert isinstance(fuser, QKVFuser)
+    assert (fuser.q_name, fuser.o_name) == ("q_proj", "o_proj")
+
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert "qkv_proj" in names
+    assert not {"q_proj", "k_proj", "v_proj"} & names
+    if attn_cls is BranchedKVAttention:
+        assert "is_kv_shared_layer" in names  # the live branch survives
+
+    real = attn_cls(kv_heads=4, layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    real.attn = FakeSelfAttn()
+    expected, _ = real(x)
+    fused = _apply_qkv_fuser_with_stubs(real, fuser)
+    out, _ = fused(x)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("attn_cls", [RebindArgAttention, NonFoldableRefAttention])
+def test_qkv_refuses_unsound_rewrites(attn_cls):
+    """The match succeeds but the source rewrite must refuse, leaving no fuser.
+
+    `RebindArgAttention` rebinds the shared input before k/v (hoisting the GEMM
+    would change their input); `NonFoldableRefAttention` reads `v_proj` outside
+    an existence guard (the fuser cannot fold it away). Both fail closed in
+    `update_forward`, so `get_fuser` returns `None`.
+    """
+    with torch.device("meta"):
+        meta = attn_cls()
+    assert get_fuser(meta, QKVFuser) is None
+
+
+def _guard_funcdef(expr: str) -> tuple[ast.FunctionDef, ast.Attribute]:
+    """A `def f(self, a, b, T): return <expr>` and its `self.v_proj` reference."""
+    funcdef = ast.parse(f"def f(self, a, b, T):\n    return {expr}").body[0]
+    assert isinstance(funcdef, ast.FunctionDef)
+    ref = next(
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute) and node.attr == "v_proj"
+    )
+    return funcdef, ref
+
+
+@pytest.mark.parametrize(
+    "expr, expected",
+    [
+        ("a if self.v_proj is not None else b", True),
+        ("a if self.v_proj != None else b", True),
+        ("a if self.v_proj is None else b", False),
+        ("a if self.v_proj == None else b", False),
+        ("a if None is not self.v_proj else b", True),  # None on the left
+    ],
+)
+def test_fold_existence_guard_folds_none_comparison(expr, expected):
+    """`is`/`is not`/`==`/`!=` against `None`, either operand order, fold to a bool.
+
+    The projection is a proven invariant (it exists as an `nn.Linear`), so an
+    `is (not) None` guard has a constant truth value; folding it lets the call be
+    rewritten away without changing the guard's outcome."""
+    funcdef, ref = _guard_funcdef(expr)
+    qkv._fold_existence_guard(funcdef, ref, "v_proj")
+    test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.IfExp)).test
+    assert isinstance(test, ast.Constant) and test.value is expected
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "a if self.v_proj else b",  # a ternary test
+        "not self.v_proj",  # a `not` operand
+    ],
+)
+def test_fold_existence_guard_folds_bare_truthiness(expr):
+    """A bare truthiness test folds the reference itself to `True`.
+
+    An `nn.Linear` has no `__bool__`/`__len__`, so it is always truthy; in a pure
+    boolean position (a test, or a `not` operand) the reference can be replaced by
+    `True`, letting the projection be deleted."""
+    funcdef, ref = _guard_funcdef(expr)
+    qkv._fold_existence_guard(funcdef, ref, "v_proj")
+    # No `self.v_proj` reference survives; a literal `True` took its place.
+    attrs = [n for n in ast.walk(funcdef) if isinstance(n, ast.Attribute)]
+    assert not any(n.attr == "v_proj" for n in attrs)
+    constants = [n for n in ast.walk(funcdef) if isinstance(n, ast.Constant)]
+    assert any(n.value is True for n in constants)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "a if isinstance(self.v_proj, T) else b",  # a different predicate
+        "self.v_proj.weight",  # an attribute read, not a guard
+        "a and self.v_proj",  # `and` yields the operand, which may escape
+        "self.v_proj or a",  # `or` yields the module itself when truthy
+    ],
+)
+def test_fold_existence_guard_refuses_non_guard_reference(expr):
+    """A surviving reference that is not an existence guard cannot be folded away.
+
+    Rewriting it is unsafe (its value depends on more than the projection's
+    existence), so the fuser refuses rather than change semantics."""
+    funcdef, ref = _guard_funcdef(expr)
+    with pytest.raises(ValueError, match="outside an existence guard"):
+        qkv._fold_existence_guard(funcdef, ref, "v_proj")
+
+
+@pytest.mark.parametrize("layer_idx", [0, 1])
+def test_fuses_real_gemma4_attention(layer_idx):
+    """The real Gemma 4 attention (both obstacles at once) fuses end to end."""
+    pytest.importorskip("transformers.models.gemma4")
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
+
+    config = Gemma4TextConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        head_dim=16,
+        intermediate_size=128,
+    )
+    with torch.device("meta"):
+        meta = Gemma4TextAttention(config, layer_idx=layer_idx)
+    fuser = get_fuser(meta, QKVFuser)
+    assert isinstance(fuser, QKVFuser)
+    assert (fuser.q_name, fuser.k_name, fuser.v_name) == (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    )
+    assert fuser.o_name == "o_proj"
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert not {"q_proj", "k_proj", "v_proj"} & names
 
 
 @pytest.mark.parametrize("kv_heads", [1, 2])
