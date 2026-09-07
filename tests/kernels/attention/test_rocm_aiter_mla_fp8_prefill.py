@@ -121,7 +121,7 @@ def _build_prefill_metadata(
 
     builder = object.__new__(AiterMLAMetadataBuilder)
     builder.num_heads = num_heads
-    builder.mla_dims = SimpleNamespace(v_head_dim=V_HEAD_DIM)
+    builder.mla_dims = SimpleNamespace(v_head_dim=V_HEAD_DIM)  # type: ignore[assignment]
     builder._init_fp8_prefill_ps_buffers(
         max_num_reqs=len(seq_lens),
         max_prefill_qlen=max_q,
@@ -136,7 +136,7 @@ def _build_prefill_metadata(
     prefill = SimpleNamespace(query_start_loc=qo_indptr, max_query_len=max_q)
     metadata = SimpleNamespace(prefill=prefill, num_decodes=0)
     common = SimpleNamespace(query_start_loc_cpu=qo_indptr_cpu)
-    builder._build_fp8_prefill_ps_metadata(metadata, common)
+    builder._build_fp8_prefill_ps_metadata(metadata, common)  # type: ignore[arg-type]
     return metadata, total_q, builder
 
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.interface import DeviceCapability
@@ -21,12 +23,12 @@ from vllm.platforms.interface import DeviceCapability
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
 else:
-    CudaPlatform = None
+    CudaPlatform = None  # type: ignore[assignment]  # Unavailable platform import.
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
 else:
-    RocmPlatform = None
+    RocmPlatform = None  # type: ignore[misc, assignment]  # Unavailable platform import.
 
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -409,14 +411,14 @@ def test_invalid_backend():
 def test_auto_backend_string(auto_value: str):
     """Test that 'auto' string value triggers automatic backend selection."""
     # Using "auto" should result in backend=None (automatic selection)
-    attention_config = AttentionConfig(backend=auto_value)
+    attention_config = AttentionConfig(backend=auto_value)  # type: ignore[arg-type]
     assert attention_config.backend is None
 
 
 def test_auto_backend_selection_behavior():
     """Test that 'auto' backend behaves same as None (automatic selection)."""
     # Create config with explicit "auto"
-    auto_config = AttentionConfig(backend="auto")
+    auto_config = AttentionConfig(backend="auto")  # type: ignore[arg-type]
 
     # Create config with None (default)
     none_config = AttentionConfig(backend=None)
@@ -461,7 +463,7 @@ def test_auto_backend_selection_behavior():
     reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
 )
 def test_per_head_quant_scales_backend_selection(
-    backend_name: str, flash_attn_version: int | None, should_succeed: bool
+    backend_name: str, flash_attn_version: Literal[2, 3, 4] | None, should_succeed: bool
 ):
     """Test backend selection when use_per_head_quant_scales=True."""
     # Clear cache to ensure fresh backend selection
@@ -614,7 +616,7 @@ def test_non_causal_autoselect_backend():
         "int8_per_token_head",
     ],
 )
-def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
+def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: CacheDType):
     """FlashAttentionBackend must not claim support for kv_cache dtypes
     that it cannot handle."""
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -624,7 +626,7 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
-    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+    kv_cache_dtype: CacheDType, monkeypatch: pytest.MonkeyPatch
 ):
     """FlashAttentionBackend must accept the two fp8 dtypes it can actually
     handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""

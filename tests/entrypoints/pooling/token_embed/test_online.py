@@ -71,6 +71,7 @@ async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
     assert poolings.id == f"pooling-{request_id}"
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == len(input_tokens)
+    assert isinstance(poolings.data[0].data[0], list)
     assert len(poolings.data[0].data[0]) == 384
 
 

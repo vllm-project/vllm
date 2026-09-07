@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend and engine-reasoner checks that are not manager-flow tests."""
 
+from typing import Literal
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -17,7 +19,9 @@ TOKENIZER = "gpt2"
 NUM_SPEC_TOKENS = 4
 
 
-def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
+def _make_manager_and_request(
+    backend: Literal["xgrammar", "guidance"], prompt_str: str = '{"a": "b"}'
+):
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode(prompt_str)
 
@@ -33,6 +37,7 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
     sampling_params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
     )
+    assert sampling_params.structured_outputs is not None
     sampling_params.structured_outputs._backend = backend
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
@@ -43,6 +48,7 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
         pooling_params=None,
     )
     manager.grammar_init(request)
+    assert request.structured_output_request is not None
     while not request.structured_output_request._check_grammar_completion():
         continue
 
