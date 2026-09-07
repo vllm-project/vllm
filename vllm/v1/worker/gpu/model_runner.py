@@ -1463,7 +1463,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            if input_batch.logits_cover_all_tokens:
+                sample_hidden_states = hidden_states[: input_batch.num_tokens]
+            else:
+                sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
         if grammar_output is not None:

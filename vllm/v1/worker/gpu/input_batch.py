@@ -109,6 +109,34 @@ class InputBatch:
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
 
+    @property
+    def logits_cover_all_tokens(self) -> bool:
+        """Whether logits_indices is exactly arange(num_tokens).
+
+        combine_sampled_and_draft_tokens() places request i's logit rows at
+        [query_end_i - num_logits_i, query_end_i), and prepare_inputs asserts
+        num_logits_i <= num_scheduled_tokens_i, so a request never selects more
+        rows than it contributed. The per-request blocks are therefore laid out
+        in batch order and each sits at the tail of its own query.
+
+        Under that bound, sum(num_logits) == sum(num_scheduled_tokens) forces
+        num_logits_i == num_scheduled_tokens_i for every i: no request can make
+        up another's shortfall. Each block then spans its whole query, the
+        blocks tile [0, num_tokens) without gaps, and logits_indices is a plain
+        arange -- so callers may slice [:num_tokens] instead of gathering.
+
+        This holds for a pure decode batch (one row per request) and equally
+        for a speculative verification step, where every request contributes
+        1 + num_draft_tokens rows and consumes exactly that many query rows,
+        including when draft counts differ across requests. It is false as soon
+        as any request is mid-prefill, since that request contributes many query
+        rows but a single logit.
+
+        Slicing returns a view of the forward pass output, not a copy. Callers
+        must not hold it past the step or write through it.
+        """
+        return self.logits_indices.shape[0] == self.num_tokens
+
     @classmethod
     def make_dummy(
         cls,

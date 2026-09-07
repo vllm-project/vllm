@@ -4564,6 +4564,16 @@ class GPUModelRunner(
                 hidden_states = model_output
                 aux_hidden_states = None
 
+            def select_logits_rows(hidden_states: torch.Tensor) -> torch.Tensor:
+                # logits_indices is arange(num_tokens_unpadded) whenever every
+                # scheduled token yields a logit -- pure decode, and speculative
+                # verification too. See InputBatch.logits_cover_all_tokens for
+                # why the counts matching implies the indices are contiguous.
+                # The slice is a view of the forward output, used within the step.
+                if logits_indices.shape[0] == num_tokens_unpadded:
+                    return hidden_states[:num_tokens_unpadded]
+                return hidden_states[logits_indices]
+
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -4581,13 +4591,13 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
-                sample_hidden_states = hidden_states[logits_indices]
+                sample_hidden_states = select_logits_rows(hidden_states)
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
 
-                sample_hidden_states = hidden_states[logits_indices]
+                sample_hidden_states = select_logits_rows(hidden_states)
                 if not get_pp_group().is_last_rank:
                     all_gather_tensors = {
                         "residual": not is_residual_scattered_for_sp(
