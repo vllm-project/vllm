@@ -442,3 +442,27 @@ def test_ephemeral_replay_endpoint_resolves_real_port():
         assert config.replay_endpoint == "tcp://*:0"
     finally:
         publisher.shutdown()
+
+
+def test_ephemeral_publisher_binds_for_0_0_0_0():
+    """A 0.0.0.0 wildcard endpoint must bind and resolve its ephemeral port."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.utils.network_utils import get_ip, split_host_port
+
+    wildcard_endpoint = "tcp://0.0.0.0:0"
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=wildcard_endpoint,
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    try:
+        assert isinstance(publisher, ZmqEventPublisher)
+        resolved = publisher.get_publisher_config()
+        assert resolved.endpoint != wildcard_endpoint
+
+        host, port = split_host_port(resolved.endpoint.removeprefix("tcp://"))
+        assert host == get_ip()
+        assert port != 0
+    finally:
+        publisher.shutdown()

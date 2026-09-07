@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from threading import Thread
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
@@ -41,7 +41,7 @@ from vllm.v1.engine.core_client import (
     MPClient,
     SyncMPClient,
 )
-from vllm.v1.engine.utils import CoreEngineProcManager
+from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
@@ -470,6 +470,62 @@ def test_kv_event_sources_excludes_disabled_and_none():
     client._apply_ready_response(_kv_event_ready_response_payload(1, None))
 
     assert client.get_kv_event_sources() == []
+
+
+@pytest.mark.asyncio
+async def test_scale_down_purges_stale_kv_event_sources():
+    """After a successful elastic-EP scale-down, discovery entries for
+    ranks that no longer exist must be dropped, while entries for ranks
+    that remain must be preserved untouched."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.engine_inflight = Counter()
+    client.core_engines = [bytes([i, 0]) for i in range(3)]
+    client.lb_engines = [[0, 0, 0.0] for _ in range(3)]
+    client.eng_start_index = 0
+    client.eep_scaling_cache = None
+    client.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=3)
+    )
+    client.resources = SimpleNamespace(
+        engine_manager=MagicMock(spec=CoreEngineActorManager)
+    )
+    client.first_req_send_socket = AsyncMock()
+    client._call_utility_async = AsyncMock(return_value=None)
+    client._ensure_stats_update_task = MagicMock()
+    client.resume_scheduler_async = AsyncMock()
+    client._make_reconfig_request = MagicMock(return_value=object())
+
+    completed_future = asyncio.get_running_loop().create_future()
+    completed_future.set_result(None)
+    client._eep_wait_for_setup_switch_complete = MagicMock(
+        return_value=completed_future
+    )
+
+    def make_config(topic: str) -> KVEventsConfig:
+        return KVEventsConfig(
+            enable_kv_cache_events=True,
+            publisher="zmq",
+            endpoint="tcp://*:5557",
+            topic=topic,
+        )
+
+    client._kv_event_sources = {
+        0: make_config("rank0"),
+        1: make_config("rank1"),
+        2: make_config("rank2"),
+    }
+
+    # Scale down from 3 ranks to 2: rank 2 goes away.
+    await DPLBAsyncMPClient._commit_scale_down_elastic_ep(client, 2)
+
+    sources = client.get_kv_event_sources()
+    assert [s["data_parallel_rank"] for s in sources] == [0, 1]
+    assert sources[0]["topic"] == "rank0"
+    assert sources[1]["topic"] == "rank1"
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

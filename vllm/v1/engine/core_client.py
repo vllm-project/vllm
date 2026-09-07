@@ -1984,6 +1984,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             wait_future.cancel()
             raise
 
+        # Scale-down has committed successfully: ranks beyond the new size
+        # are gone, so drop their now-stale KV-event discovery entries.
+        for stale_rank in range(new_data_parallel_size, cur_data_parallel_size):
+            self._kv_event_sources.pop(stale_rank, None)
+
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,

@@ -430,13 +430,10 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
-            # bind stable, connect volatile convention
-            if self._endpoint is not None and (
-                "*" in self._endpoint
-                or "::" in self._endpoint
-                or self._endpoint.startswith("ipc://")
-                or self._endpoint.startswith("inproc://")
+            # bind stable, connect volatile convention: bind for wildcard
+            # hosts (see _WILDCARD_HOSTS) and ipc/inproc, else connect.
+            if self._endpoint is not None and self._is_wildcard_bind_endpoint(
+                self._endpoint
             ):
                 self._pub.bind(self._endpoint)
                 self._endpoint = self._resolve_bound_tcp_endpoint(
@@ -520,6 +517,22 @@ class ZmqEventPublisher(EventPublisher):
                 )
         # Send end of sequence marker
         self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
+
+    @staticmethod
+    def _is_wildcard_bind_endpoint(endpoint: str) -> bool:
+        """True if `endpoint` should be bound rather than connected: ipc/
+        inproc transports, or a TCP endpoint whose host is a recognized
+        wildcard (see _WILDCARD_HOSTS)."""
+        if endpoint.startswith("ipc://") or endpoint.startswith("inproc://"):
+            return True
+        if not endpoint.startswith("tcp://"):
+            return False
+        host = endpoint[len("tcp://") :]
+        if host.startswith("["):
+            host = host[: host.index("]") + 1]
+        else:
+            host = host.rsplit(":", 1)[0]
+        return host in ZmqEventPublisher._WILDCARD_HOSTS
 
     @staticmethod
     def _resolve_bound_tcp_endpoint(sock: zmq.Socket, endpoint: str) -> str:
