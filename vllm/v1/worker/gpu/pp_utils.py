@@ -181,21 +181,6 @@ class PPHandler:
             broadcast_drafts=slot.draft_tokens,
         )
 
-    def broadcast_drafts(
-        self, draft_tokens: torch.Tensor, input_batch: InputBatch
-    ) -> None:
-        """Broadcast draft proposals so non-last ranks can embed real token ids."""
-        assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
-            return
-        with torch.cuda.stream(self.broadcast_stream):
-            self.broadcast_stream.wait_stream(self.main_stream)
-            send = draft_tokens[input_batch.idx_mapping].contiguous()
-            torch.distributed.broadcast(
-                send, src=self.last_rank, group=self.broadcast_group
-            )
-            send.record_stream(self.broadcast_stream)
-
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
         requests in the batch."""

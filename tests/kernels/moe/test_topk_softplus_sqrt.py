@@ -327,7 +327,10 @@ def test_dsv4_fast_topk_padding_uint32_falls_back(monkeypatch: pytest.MonkeyPatc
     )
     # uint32 CUDA tensors do not support boolean-mask indexing; widen first.
     torch.testing.assert_close(
-        topk_ids.to(torch.int64)[~is_padding], topk_ids_ref.to(torch.int64), atol=0, rtol=0
+        topk_ids.to(torch.int64)[~is_padding],
+        topk_ids_ref.to(torch.int64),
+        atol=0,
+        rtol=0,
     )
     torch.testing.assert_close(
         topk_weights[~is_padding], topk_weights_ref, atol=2e-5, rtol=2e-5
