@@ -719,6 +719,47 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_per_token_or_group_input
         )
 
+    @classmethod
+    def _warn_on_unrealized_mxfp4_activations(
+        cls, input_quant: QuantizationArgs | None
+    ) -> None:
+        """
+        Report an MXFP4 artifact whose activation declaration this configuration
+        does not realize.
+
+        `CompressedTensorsW4A4Mxfp4` is true W4A4 only on SM100+ with FlashInfer
+        and W4A16 weight-only via Marlin otherwise, as its own docstring records,
+        while its `get_min_capability()` returns 80. An artifact declaring
+        quantized activations is therefore admitted from sm_80 up and served
+        weight-only below SM100.
+
+        This reports that difference and changes nothing about it: no artifact is
+        refused, no scheme selection changes, and the model loads exactly as
+        before. The check is conservative -- it reports only the cases that are
+        weight-only for certain, so SM100+ without FlashInfer is not reported.
+        """
+        if input_quant is None:
+            # Weight-only was declared and weight-only is what runs.
+            return
+
+        if not cls._is_mxfp4(input_quant):
+            logger.warning_once(
+                "This checkpoint declares %d-bit input activation quantization "
+                "alongside MXFP4 weights. The MXFP4 scheme quantizes activations "
+                "to MXFP4 or not at all, so the declared activation format is not "
+                "applied and these layers run weight-only.",
+                input_quant.num_bits,
+            )
+            return
+
+        if not cls._check_scheme_supported(100, error=False):
+            logger.warning_once(
+                "This checkpoint declares MXFP4 input activations (W4A4), but "
+                "dynamic activation quantization requires SM100+ with FlashInfer. "
+                "On this device these layers run W4A16 weight-only via Marlin; "
+                "the weights are as declared, the activations are not quantized."
+            )
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
@@ -743,6 +784,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A4Fp4()
 
         if self._is_mxfp4(weight_quant):
+            # Read the activation declaration here for the same reason the NVFP4
+            # branch above reads it: the two declarations name different
+            # realizations. Unlike that branch this only reports the difference;
+            # the artifact is still accepted and the scheme is unchanged.
+            self._warn_on_unrealized_mxfp4_activations(input_quant)
             return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):

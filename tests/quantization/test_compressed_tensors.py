@@ -1019,3 +1019,112 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def _mxfp4_args(num_bits: int = 4, group_size: int = 32) -> QuantizationArgs:
+    return QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.FLOAT,
+        strategy=QuantizationStrategy.GROUP.value,
+        symmetric=True,
+        dynamic=True,
+        group_size=group_size,
+    )
+
+
+@pytest.mark.parametrize(
+    "input_quant,capability,expect_warning",
+    [
+        # weight-only was declared and weight-only is what runs
+        pytest.param(None, 80, False, id="no_activation_declaration"),
+        # W4A4 declared, realized weight-only below SM100
+        pytest.param(_mxfp4_args(), 80, True, id="mxfp4_activations_sm80"),
+        pytest.param(_mxfp4_args(), 90, True, id="mxfp4_activations_sm90"),
+        # W4A4 declared and realizable, so nothing is reported
+        pytest.param(_mxfp4_args(), 100, False, id="mxfp4_activations_sm100"),
+        # an activation format the MXFP4 path does not apply
+        pytest.param(
+            QuantizationArgs(
+                num_bits=8,
+                type=QuantizationType.FLOAT,
+                strategy=QuantizationStrategy.TENSOR.value,
+                symmetric=True,
+                dynamic=True,
+            ),
+            100,
+            True,
+            id="non_mxfp4_activations",
+        ),
+    ],
+)
+def test_mxfp4_activation_declaration_is_reported(
+    input_quant, capability, expect_warning, caplog, monkeypatch, disable_log_dedup
+):
+    """An MXFP4 artifact whose activation declaration is not realized is reported.
+
+    The MXFP4 scheme is true W4A4 only on SM100+ with FlashInfer and W4A16
+    weight-only otherwise, while `get_min_capability()` returns 80. Reading the
+    declaration makes that difference visible at load time; it does not change
+    which scheme is selected or whether the artifact is accepted.
+    """
+    monkeypatch.setattr(
+        CompressedTensorsConfig,
+        "_check_scheme_supported",
+        staticmethod(
+            lambda min_capability, error=True, match_exact=False: (
+                capability >= min_capability
+            )
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        CompressedTensorsConfig._warn_on_unrealized_mxfp4_activations(input_quant)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert bool(warnings) is expect_warning
+    if expect_warning:
+        assert "weight-only" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "input_quant,expect_warning",
+    [
+        pytest.param(None, False, id="no_activation_declaration"),
+        pytest.param(_mxfp4_args(), True, id="mxfp4_activations"),
+    ],
+)
+def test_mxfp4_branch_reports_but_still_selects_the_same_scheme(
+    input_quant, expect_warning, caplog, monkeypatch, disable_log_dedup
+):
+    """The MXFP4 branch reads the declaration and selects the scheme it always did.
+
+    The scheme is stubbed because constructing the real one requires an MXFP4
+    linear kernel. What is under test is the branch: that it consults the
+    activation declaration, and that doing so changes neither which scheme is
+    returned nor whether the artifact is accepted.
+    """
+    import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors as ct_module  # noqa: E501
+
+    class StubMxfp4Scheme:
+        pass
+
+    monkeypatch.setattr(ct_module, "CompressedTensorsW4A4Mxfp4", StubMxfp4Scheme)
+    monkeypatch.setattr(
+        CompressedTensorsConfig,
+        "_check_scheme_supported",
+        staticmethod(lambda min_capability, error=True, match_exact=False: False),
+    )
+    config = CompressedTensorsConfig(
+        target_scheme_map={}, ignore=[], quant_format="mxfp4-pack-quantized"
+    )
+
+    with caplog.at_level("WARNING"):
+        scheme = config._get_scheme_from_parts(
+            weight_quant=_mxfp4_args(),
+            input_quant=input_quant,
+            format="mxfp4-pack-quantized",
+        )
+
+    assert isinstance(scheme, StubMxfp4Scheme)
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert bool(warnings) is expect_warning
