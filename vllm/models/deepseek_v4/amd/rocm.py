@@ -941,6 +941,23 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
             chunk_size = chunk_end - chunk_start
+            query_start = (
+                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+            )
+            query_end = (
+                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            )
+            if query_end <= query_start:
+                # Every request in this chunk has a zero-length query.
+                # split_decodes_and_prefills() derives num_prefills as the
+                # suffix num_reqs - first_prefill, so padded request slots
+                # (query_start_loc[num_reqs + 1:] = num_tokens) land in the
+                # prefill range even though they carry no query tokens. With
+                # PREFILL_CHUNK_SIZE such slots can fill a whole chunk. The
+                # gathers and the sparse-attention call below would then run
+                # over an empty query range, and combine_topk_swa_indices()
+                # cannot reshape(0, -1).
+                continue
             if not swa_only:
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
@@ -967,13 +984,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 block_size=swa_metadata.block_size,
                 offset=N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
-            )
-
-            query_start = (
-                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
-            )
-            query_end = (
-                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
             combined_indices, combined_lens = combine_topk_swa_indices(
