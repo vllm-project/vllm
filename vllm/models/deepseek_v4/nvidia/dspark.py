@@ -195,6 +195,17 @@ class DSparkDeepseekV4Model(nn.Module):
         for layer in self.layers:
             attn = layer.attn
             proj = attn.fused_wqa_wkv
+            layer_quant = getattr(proj, "quant_method", None)
+            if (
+                attn.q_lora_rank != q_lora_rank
+                or attn.head_dim != first_attn.head_dim
+                or getattr(layer_quant, "weight_block_size", None) != block_size
+                or getattr(layer_quant, "fp8_linear", None) is not fp8_linear
+            ):
+                logger.info_once(
+                    "DSpark fused WKV skipped: layer projection mismatch"
+                )
+                return False
             weight = getattr(proj, "weight", None)
             weight_scale_inv = getattr(proj, "weight_scale_inv", None)
             if (
@@ -375,7 +386,7 @@ def _insert_context_kv(
                 block_size,
             )
             return
-        kv = attn.kv_norm(kv)
+        kv = attn.kv_norm(kv).contiguous()
         torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
             kv,
             swa_2d,
@@ -386,7 +397,7 @@ def _insert_context_kv(
             block_size,
         )
         return
-    kv = attn.kv_norm(kv)
+    kv = attn.kv_norm(kv).contiguous()
     n_ctx = kv.shape[0]
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
