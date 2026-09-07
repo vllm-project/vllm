@@ -11,6 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -94,6 +95,15 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:pooling-common-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     def _build_pooling_tok_params(
         self,
