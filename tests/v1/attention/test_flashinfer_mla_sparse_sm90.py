@@ -191,12 +191,14 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     assert builder.state.plan_calls[0][1].tolist() == expected_lens
 
 
-def test_plan_uses_state_params(monkeypatch):
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_plan_uses_state_params(monkeypatch, kv_dtype):
     """The NoPE/rope dims and scale live on the builder state, not the layer.
 
     plan() takes exact per-row KV lengths; the schedule is rebuilt on every
     call (contexts grow between steps) and the indptrs are always full-size
-    with zero-query padding rows past num_tokens.
+    with zero-query padding rows past num_tokens. An fp8 cache plans as
+    float8_e4m3fn while the query side stays bfloat16.
     """
     impl, rows = make_impl(64, "auto")
     wrapper = FakeWrapper()
@@ -204,7 +206,7 @@ def test_plan_uses_state_params(monkeypatch):
     state.device = torch.device("cpu")
     state.wrapper = wrapper
     state.num_heads = 4
-    state.kv_dtype = torch.bfloat16
+    state.kv_dtype = kv_dtype
     state.kv_lora_rank = HEAD
     state.qk_rope_head_dim = 64
     state.sm_scale = 576**-0.5
@@ -226,7 +228,24 @@ def test_plan_uses_state_params(monkeypatch):
     assert (heads, ckv, kpe, page, causal) == (4, HEAD, 64, 1, False)
     assert scale == 576**-0.5
     assert kwargs["q_data_type"] == torch.bfloat16
-    assert kwargs["kv_data_type"] == torch.bfloat16
+    assert kwargs["kv_data_type"] == kv_dtype
+
+
+@pytest.mark.parametrize(
+    "spec_dtype,expected",
+    [
+        (torch.uint8, torch.float8_e4m3fn),
+        (torch.float8_e4m3fn, torch.float8_e4m3fn),
+        (torch.bfloat16, torch.bfloat16),
+    ],
+)
+def test_plan_dtype_translates_fp8_storage(spec_dtype, expected):
+    """An fp8 cache is allocated as uint8 but planned as float8_e4m3fn.
+
+    The wrapper rejects uint8, so a cache spec carrying the storage dtype has
+    to be translated before it reaches plan(); other dtypes pass through.
+    """
+    assert FlashInferMLASparseSM90Builder._plan_dtype(spec_dtype) == expected
 
 
 def test_kv_lens_host_formula():
