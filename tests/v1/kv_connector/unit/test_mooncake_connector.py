@@ -460,12 +460,17 @@ async def test_register_worker_recovers_from_slow_bootstrap_server(monkeypatch):
     timeout must be retried on the wire, not treated as fatal."""
 
     original = MooncakeBootstrapServer.register_worker
-    first_call = {"done": False}
+    state = {"done": False, "calls": 0}
 
     async def slow_register(self, payload: RegisterWorkerPayload):
-        if not first_call["done"]:
-            first_call["done"] = True
+        state["calls"] += 1
+        if not state["done"]:
+            state["done"] = True
+            # Record the worker first, then stall past the client timeout, so
+            # the retry exercises the duplicate-registration path.
+            response = await original(self, payload)
             await asyncio.sleep(1.5)
+            return response
         return await original(self, payload)
 
     monkeypatch.setattr(MooncakeBootstrapServer, "register_worker", slow_register)
@@ -480,6 +485,7 @@ async def test_register_worker_recovers_from_slow_bootstrap_server(monkeypatch):
     try:
         worker = _make_local_register_worker_stub()
         await MooncakeConnectorWorker.register_worker_with_bootstrap(worker)
+        assert state["calls"] == 2
 
         async with httpx.AsyncClient() as client:
             response = await client.get(f"http://127.0.0.1:{port}/query")
