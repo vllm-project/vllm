@@ -9,8 +9,6 @@ processor in the pytest parent process to keep os.fork() in sibling
 tests (e.g. test_weight_transfer_llm.py) deadlock-free.
 """
 
-import os
-
 import httpx
 import pytest
 import pytest_asyncio
@@ -41,10 +39,11 @@ def server():
         "--no-enable-prefix-caching",
     ]
 
-    envs = os.environ.copy()
-    envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
-
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+    ) as remote_server:
         yield remote_server
 
 

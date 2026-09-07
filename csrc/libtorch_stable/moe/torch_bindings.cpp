@@ -20,7 +20,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
-      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding) -> ()");
+      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
+      "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when
@@ -126,10 +127,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
-
-  // DeepSeek V3 optimized router GEMM for SM90+
-  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
 #endif
 }
 

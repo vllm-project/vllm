@@ -19,9 +19,8 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
-  # Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s benchmarks/'
+      pytest -v -s benchmarks/'
