@@ -5,7 +5,7 @@ import weakref
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -714,6 +714,26 @@ class ElasticEPScalingExecutor:
         with set_current_vllm_config(self.worker.vllm_config):
             kernel_warmup(self.worker, process_local_only=True)
 
+    def _warmup_request_budget(self) -> int:
+        """Warmup requests this rank has room for, agreed with its DP siblings.
+
+        The warmup builds a batch of synthetic requests, and a rank that kept
+        its requests through the switch has that many fewer slots to give it.
+        The batch size decides how many steps the warmup runs, so the ranks
+        have to agree on it or they deadlock on the first step they disagree.
+        """
+        budget = len(self.worker.model_runner.req_states.free_indices)
+        dp_group = get_dp_group()
+        if dp_group.world_size > 1:
+            counts = torch.tensor([budget], dtype=torch.int32, device="cpu")
+            torch.distributed.all_reduce(
+                counts,
+                op=torch.distributed.ReduceOp.MIN,
+                group=dp_group.cpu_group,
+            )
+            budget = int(counts[0].item())
+        return budget
+
     def warm_and_capture(self) -> None:
         # Must run on every DP sibling in lockstep: _dummy_run calls
         # coordinate_batch_across_dp whenever data_parallel_size > 1
@@ -744,9 +764,34 @@ class ElasticEPScalingExecutor:
         # just-rebalanced EPLB stats.
         runner = self.worker.model_runner
         runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
-        # The request warmup would claim pool slots and KV blocks that live
-        # requests hold. The _dummy_run above already grew the workspace.
-        self.worker.compile_or_warm_up_model(skip_request_warmup=True)
+
+        # MRV2 warms with synthetic requests, which claim request slots and
+        # write KV through real block ids that live requests already hold.
+        warmup_kwargs: dict[str, Any] = {}
+        saved_pool: tuple[list[int], dict[str, int], dict[int, str]] | None = None
+        if self.worker.use_v2_model_runner:
+            req_states = runner.req_states
+            saved_pool = (
+                list(req_states.free_indices),
+                dict(req_states.req_id_to_index),
+                dict(req_states.index_to_req_id),
+            )
+            warmup_kwargs = {
+                "warmup_max_num_reqs": self._warmup_request_budget(),
+                "warmup_null_blocks": True,
+            }
+        try:
+            self.worker.compile_or_warm_up_model(**warmup_kwargs)
+        finally:
+            # The warmup only ever took free slots, so live rows are untouched
+            # and handing the allocator back undoes the rest.
+            if saved_pool is not None:
+                req_states = runner.req_states
+                req_states.free_indices[:] = saved_pool[0]
+                req_states.req_id_to_index.clear()
+                req_states.req_id_to_index.update(saved_pool[1])
+                req_states.index_to_req_id.clear()
+                req_states.index_to_req_id.update(saved_pool[2])
 
         lock_workspace()
 

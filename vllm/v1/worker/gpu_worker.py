@@ -755,7 +755,9 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(
-        self, skip_request_warmup: bool = False
+        self,
+        warmup_max_num_reqs: int | None = None,
+        warmup_null_blocks: bool = False,
     ) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
@@ -792,9 +794,15 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner and not skip_request_warmup:
+        if self.use_v2_model_runner:
             # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+            warmup_kernels(
+                self.model_runner,
+                self.execute_model,
+                self.sample_tokens,
+                max_num_reqs=warmup_max_num_reqs,
+                use_null_blocks=warmup_null_blocks,
+            )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

@@ -214,11 +214,25 @@ def warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    *,
+    max_num_reqs: int | None = None,
+    use_null_blocks: bool = False,
 ) -> None:
     """Run scheduler-realistic prefill and decode steps to JIT compile kernels.
 
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
+
+    The two arguments below let a rank that is already serving re-warm without
+    disturbing what it is serving, which elastic EP needs after a reconfigure.
+    Both change the batch this builds, so every rank must pass the same values
+    or they will disagree on how many steps to run.
+
+    Args:
+        max_num_reqs: Extra cap on the warmup batch size, for a request pool
+            that is not empty. 0 skips the warmup.
+        use_null_blocks: Point every warmup request at the null block instead
+            of at block ids 1.. , which a serving rank has handed out already.
     """
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -269,7 +283,11 @@ def warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    if max_blocks_per_req > 0:
+    if max_num_reqs is not None:
+        num_reqs = min(num_reqs, max_num_reqs)
+        if num_reqs <= 0:
+            return
+    if max_blocks_per_req > 0 and not use_null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
@@ -296,6 +314,8 @@ def warmup_kernels(
 
     def _alloc_blocks(num_blocks: int) -> list[int]:
         nonlocal next_block_id
+        if use_null_blocks:
+            return [0] * num_blocks
         return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
 
     # The KV-block zeroing kernel is driven by the scheduler's
@@ -425,4 +445,7 @@ def warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    if use_null_blocks and model_runner.kv_block_zeroer is not None:
+        # Backends that ask for zeroing read the null block, so put it back.
+        model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()
