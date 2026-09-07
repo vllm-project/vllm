@@ -37,7 +37,7 @@ def test_detector_deduplicates_context_even_when_target_differs():
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-@pytest.mark.parametrize("key", [42, 15726070495360670683])
+@pytest.mark.parametrize("key", [1, 2**32, 42, 15726070495360670683])
 @pytest.mark.parametrize("context_width", [1, 4, 16])
 def test_fused_watermarker_matches_cpu(key: int, context_width: int):
     torch.manual_seed(0)
@@ -51,3 +51,16 @@ def test_fused_watermarker_matches_cpu(key: int, context_width: int):
     ).token_ids.cpu()
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_fused_watermarker_handles_nan_logits():
+    contexts = torch.zeros((2, 4), dtype=torch.int64, device="cuda")
+    logits = torch.full((2, 1025), float("nan"), device="cuda")
+    watermarker = GumbelWatermarker(key=42, context_width=4)
+
+    token_ids = watermarker.sample(logits, contexts, lambda values: None).token_ids
+
+    assert torch.all((token_ids >= 0) & (token_ids < logits.shape[-1]))

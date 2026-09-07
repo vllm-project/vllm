@@ -53,7 +53,7 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"gumbel","key":42,"prf":"hmac_sha256"}',
+            '{"algorithm":"gumbel","key":42,"prf":"philox"}',
         ]
     )
 
@@ -63,7 +63,7 @@ def test_watermark_config_cli():
     assert config.algorithm == "gumbel"
     assert config.key == 42
     assert config.context_width == 4
-    assert config.prf == "hmac_sha256"
+    assert config.prf == "philox"
     assert not config.supports_speculative_decoding
 
 

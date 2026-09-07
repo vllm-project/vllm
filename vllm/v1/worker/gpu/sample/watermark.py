@@ -76,6 +76,7 @@ def _uint32_to_uniform(value):
 @triton.jit
 def _gumbel_value(logits_ptr, output, mask):
     logits = tl.load(logits_ptr, mask=mask, other=float("-inf")).to(tl.float32)
+    logits = tl.where(logits != logits, float("-inf"), logits)
     uniform = _uint32_to_uniform(output)
     return logits - tl.log(-tl.log(uniform))
 
@@ -89,7 +90,7 @@ def _select_max(best_value, best_token, candidate_value, candidate):
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
 def _philox_gumbel_kernel(
     local_argmax_ptr,
     local_argmax_stride,

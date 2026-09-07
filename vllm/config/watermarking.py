@@ -26,15 +26,13 @@ class WatermarkConfig:
     """Algorithm used to watermark generated text."""
     context_width: int = Field(default=4, ge=1)
     """Number of prior output tokens used by the watermark PRF."""
-    prf: WatermarkPRFName = "philox"
+    prf: Literal["philox"] = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
     @model_validator(mode="after")
     def validate_key(self) -> Self:
-        max_key = 2**64 - 1 if self.prf == "philox" else 2**256 - 1
-        if self.key > max_key:
-            key_bits = 64 if self.prf == "philox" else 256
-            raise ValueError(f"{self.prf} keys must fit in {key_bits} bits")
+        if self.key > 2**64 - 1:
+            raise ValueError("philox keys must fit in 64 bits")
         return self
 
     @property

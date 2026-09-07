@@ -658,6 +658,11 @@ class VllmConfig:
     @property
     def use_v2_model_runner(self) -> bool:
         if getattr(self, "watermark_config", None) is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                logger.info_once(
+                    "Watermarking requires Model Runner V2 and overrides "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
             return True
 
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER

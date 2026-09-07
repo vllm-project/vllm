@@ -78,22 +78,20 @@ independent enough for the sampling algorithm and detector statistics. PRF
 selection is an advanced compatibility and performance setting; most users
 should keep the default.
 
-vLLM implements two PRFs:
+Watermarked generation currently supports the `philox` PRF:
 
-- `philox` is the default. It is based on the counter-based Philox4x32-10
+- `philox` is based on the counter-based Philox4x32-10
   generator from the [Random123 paper](https://doi.org/10.1145/2063384.2063405).
   It is parallel, vectorizes on accelerators, and avoids CPU transfers, but is
   not a cryptographic PRF and does not provide key-recovery or forgery
   resistance. vLLM versions its input mapping and provides compatibility
   vectors so generation and detection remain interoperable.
-- `hmac_sha256` is a cryptographically secure reference implementation based on
-  [HMAC](https://doi.org/10.1007/3-540-68697-5_1) and standardized by
-  [RFC 2104](https://www.rfc-editor.org/rfc/rfc2104). It provides a conservative,
-  portable reference but copies inputs to the CPU and is not suitable for
-  performance-sensitive generation.
 
-To override the default, set `prf` in `--watermark-config` and use the same PRF
-for detection.
+vLLM also provides `hmac_sha256`, a cryptographically secure reference PRF based
+on [HMAC](https://doi.org/10.1007/3-540-68697-5_1) and standardized by
+[RFC 2104](https://www.rfc-editor.org/rfc/rfc2104). It remains available to
+detectors and downstream implementations, but cannot be selected for generation
+because its full-vocabulary CPU implementation is prohibitively slow.
 
 ## Detection
 
@@ -112,8 +110,16 @@ print(result.p_value, result.is_watermarked)
 
 The tokenizer, algorithm, PRF, key, and context width must match generation.
 Gumbel detection scores repeated contexts once by default so identical PRF
-random vectors are not treated as independent evidence. This can be disabled
-with `deduplicate_contexts=False`.
+random vectors are not treated as independent evidence. Keep
+`deduplicate_contexts=True` unless the detector's calibration has been adjusted
+for correlated scores.
+
+The reported p-value is calibrated under the assumption that scored PRF inputs
+are independent. A deployment uses one fixed key, so repeated structures across
+documents reuse the same PRF values and can make the realized false-positive
+rate key-dependent even when contexts are deduplicated within each document.
+Measure the false-positive rate on representative unwatermarked traffic with the
+deployed key before relying on `is_watermarked` for decisions.
 
 A minimal HTTP detector is available in
 `examples/basic/online_serving/watermark_detection_server.py`:
@@ -128,6 +134,12 @@ curl http://localhost:8000/detect \
   -H 'Content-Type: application/json' \
   -d '{"text":"Text to inspect"}'
 ```
+
+The example server is a reference implementation, not a public detection
+service. Access to scores or p-values creates a detector oracle: an adversary can
+recover token-level contributions with adaptive queries and use them to remove
+or forge the watermark. Production services should restrict access and apply
+authentication, authorization, and rate limits.
 
 ## Limitations
 

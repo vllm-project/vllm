@@ -2390,13 +2390,16 @@ def test_gumbel_watermark_rejects_speculative_decoding():
         )
 
 
-@pytest.mark.parametrize(
-    ("prf", "key", "key_bits"),
-    [("philox", 2**64, 64), ("hmac_sha256", 2**256, 256)],
-)
-def test_watermark_key_range_is_prf_specific(prf, key, key_bits):
-    with pytest.raises(ValueError, match=rf"{key_bits} bits"):
-        WatermarkConfig(key=key, prf=prf)
+def test_watermark_key_must_fit_in_64_bits():
+    with pytest.raises(ValueError, match="64 bits"):
+        WatermarkConfig(key=2**64)
+
+
+def test_hmac_watermark_generation_is_rejected():
+    with pytest.raises(ValidationError):
+        pydantic.TypeAdapter(WatermarkConfig).validate_python(
+            {"key": 42, "prf": "hmac_sha256"}
+        )
 
 
 def test_watermark_key_is_excluded_from_serialization():
@@ -2411,7 +2414,13 @@ def test_watermarking_forces_model_runner_v2(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config = SimpleNamespace(watermark_config=WatermarkConfig(key=42))
 
-    assert VllmConfig.use_v2_model_runner.fget(config)
+    with patch("vllm.config.vllm.logger.info_once") as info_once:
+        assert VllmConfig.use_v2_model_runner.fget(config)
+
+    info_once.assert_called_once_with(
+        "Watermarking requires Model Runner V2 and overrides "
+        "VLLM_USE_V2_MODEL_RUNNER=0."
+    )
 
 
 @patch("vllm.config.speculative.ModelConfig")

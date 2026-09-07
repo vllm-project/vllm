@@ -162,9 +162,13 @@ def test_detection_on_known_sequences(
 
 
 @pytest.mark.parametrize("prf_name", ["philox", "hmac_sha256"])
-def test_detector_rejects_empty_input(prf_name: WatermarkPRFName):
-    detection = GumbelWatermarkDetector(key=42, prf=prf_name).detect([])
+def test_detector_handles_empty_input(prf_name: WatermarkPRFName):
+    detector = GumbelWatermarkDetector(key=42, context_width=4, prf=prf_name)
+    contexts, targets = detector._prepare_inputs([])
+    detection = detector.detect([])
 
+    assert contexts.shape == (0, 4)
+    assert targets.shape == (0,)
     assert detection.score == 0
     assert detection.p_value == 1
     assert not detection.is_watermarked

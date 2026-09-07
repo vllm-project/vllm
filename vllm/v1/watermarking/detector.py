@@ -67,6 +67,12 @@ class WatermarkDetector(ABC):
                 targets.append(token_id)
             prefix.append(token_id)
 
+        if not contexts:
+            return (
+                torch.empty((0, self.context_width), dtype=torch.int64),
+                torch.empty(0, dtype=torch.int64),
+            )
+
         return (
             torch.tensor(contexts, dtype=torch.int64).reshape(-1, self.context_width),
             torch.tensor(targets, dtype=torch.int64),

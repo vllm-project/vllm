@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
-from vllm.config.watermarking import WatermarkConfig, WatermarkPRFName
+from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.watermarker import WatermarkSample
@@ -16,10 +16,9 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel"])
-@pytest.mark.parametrize("prf_name", ["philox", "hmac_sha256"])
-def test_watermarker_contract(algorithm: str, prf_name: WatermarkPRFName):
+def test_watermarker_contract(algorithm: str):
     watermarker = create_watermarker(
-        WatermarkConfig(algorithm=algorithm, key=42, context_width=4, prf=prf_name)
+        WatermarkConfig(algorithm=algorithm, key=42, context_width=4)
     )
     logits = torch.zeros(2, 128)
     contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
@@ -61,8 +60,10 @@ def test_gpu_sampler_warns_when_watermarking_is_enabled_for_greedy(monkeypatch):
     sampler.add_request(0, 1, SamplingParams(temperature=0, watermarking=False))
 
     assert messages == [
-        "Watermarking is enabled, but greedy decoding (temperature=0) cannot be "
-        "watermarked. This request will use ordinary greedy sampling."
+        (
+            "Watermarking is enabled, but greedy decoding (temperature=0) cannot be "
+            "watermarked. This request will use ordinary greedy sampling."
+        )
     ]
 
 
