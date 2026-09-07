@@ -2301,6 +2301,9 @@ class DPEngineCoreProc(EngineCoreProc):
             pending_pause=self.pending_pause,
         )
 
+        if self.enable_fault_tolerance:
+            self.ft_sentinel.maybe_activate_steady_state_cpu_timeout(self.step_counter)
+
         if pause_consensus:
             self.ignore_start_dp_wave = True
             self.pending_pause = False
