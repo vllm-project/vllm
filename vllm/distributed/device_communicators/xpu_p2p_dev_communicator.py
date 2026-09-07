@@ -45,23 +45,22 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     # parent.
     _DEV_EAGER_BYTES = 128 * 1024
 
-    # Capacity. Under XPU graph capture the kernel is the only recordable
-    # path (see all_reduce), so it must hold the largest all-reduce a
-    # captured batch issues: max_cudagraph_capture_size tokens x hidden x
-    # 2 bytes, 8 MiB at 512 x 8192. The communicator cannot derive that
-    # bound itself (which tensors a model all-reduces, and how capture
-    # sizes scale with speculative tokens, is the model's business), so
-    # it is fixed and all_reduce raises if a capture exceeds it. The
+    # Staging budget, not a message ceiling: a capture larger than this is
+    # split across several launches. It covers the common case in one, an
+    # all-reduce of max_cudagraph_capture_size tokens x hidden x 2 bytes,
+    # 8 MiB at 512 x 8192. The communicator cannot derive that bound itself
+    # (which tensors a model all-reduces, and how capture sizes scale with
+    # speculative tokens, is the model's business), so it is fixed. The
     # kernel's PCIe read rate is flat at ~12 GB/s of payload from 512 KiB
     # up to this size (measured bf16 under replay: 1.31 MB 116us, 4 MiB
     # 340us, 8 MiB 696us; oneCCL 350us, 998us, 2053us).
     _DEV_SLOT_BYTES = 8 << 20
 
-    # All-gather capacity. The input is this rank's shard, half the size
-    # of the all-reduce input at the same token count: T x hidden bytes for
-    # the hidden-state gathers (4 MiB at 512 x 8192), num_reqs x vocab
-    # bytes for the drafter's captured logits gather (248 KB at one
-    # sequence and a 248k vocab).
+    # All-gather budget, split the same way. The input is this rank's shard,
+    # half the size of the all-reduce input at the same token count: T x
+    # hidden bytes for the hidden-state gathers (4 MiB at 512 x 8192),
+    # num_reqs x vocab bytes for the drafter's captured logits gather
+    # (248 KB at one sequence and a 248k vocab, 15.9 MB at 64).
     # The kernel beats oneCCL at every size up to the slot (measured bf16,
     # peer bytes: 16 KiB 10.6us vs 40.7us, 1 MiB 87.6us vs 315.9us, 4 MiB
     # 338us vs 1225us), so eager dispatch has no crossover: kernel up to
@@ -216,21 +215,39 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         if not input_.is_contiguous():
             input_ = input_.contiguous()
         output = torch.empty_like(input_)
+        # A message past the slot is split rather than refused. Shapes are
+        # static under capture, so the chunk count is fixed at record time
+        # and replay repeats the same launches; both ranks see the same
+        # shape and so record the same count. An input that fits takes the
+        # single-launch path unchanged, which keeps the slicing out of a
+        # collective that costs tens of microseconds.
+        numel = input_.numel()
+        step = self._DEV_SLOT_BYTES // input_.element_size()
+        pairs: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+        if numel <= step:
+            pairs = ((output, input_),)
+        else:
+            flat_in, flat_out = input_.view(-1), output.view(-1)
+            pairs = tuple(
+                (flat_out[start : start + step], flat_in[start : start + step])
+                for start in range(0, numel, step)
+            )
         # Every argument is a function of the tensor alone; the sequence
         # number and slot parity come from a device-side counter, so a
         # launch recorded into an XPU graph stays correct on replay. The op
         # submits to the queue behind torch's current stream, which under
         # capture is the recording one.
-        torch.ops._xpu_C.xpu_p2p_all_reduce(
-            output,
-            input_,
-            self._dev_slots,
-            self._peer_dev_slots,
-            self._my_flags,
-            self._peer_flags,
-            self._counters,
-            self._DEV_SLOT_BYTES,
-        )
+        for out_chunk, in_chunk in pairs:
+            torch.ops._xpu_C.xpu_p2p_all_reduce(
+                out_chunk,
+                in_chunk,
+                self._dev_slots,
+                self._peer_dev_slots,
+                self._my_flags,
+                self._peer_flags,
+                self._counters,
+                self._DEV_SLOT_BYTES,
+            )
         return output
 
     def _dev_all_gather(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
@@ -242,18 +259,37 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             dtype=input_.dtype,
             device=input_.device,
         )
+        # Split like the all-reduce above. The output holds this rank's whole
+        # shard followed by the peer's, so chunk c belongs in two windows
+        # that are numel elements apart: the reason the op takes both
+        # offsets rather than deriving them from a rank id.
+        numel = input_.numel()
+        esz = input_.element_size()
+        rank = self.rank_in_group
+        step = self._AG_SLOT_BYTES // esz
+        chunks: tuple[tuple[torch.Tensor, int], ...]
+        if numel <= step:
+            chunks = ((input_, 0),)
+        else:
+            flat_in = input_.view(-1)
+            chunks = tuple(
+                (flat_in[start : start + step], start)
+                for start in range(0, numel, step)
+            )
         # An empty input is a no-op inside the op, on both ranks alike.
-        torch.ops._xpu_C.xpu_p2p_all_gather(
-            output,
-            input_,
-            self._ag_slots,
-            self._peer_ag_slots,
-            self._ag_my_flags,
-            self._ag_peer_flags,
-            self._ag_counters,
-            self._AG_SLOT_BYTES,
-            self.rank_in_group,
-        )
+        for in_chunk, start in chunks:
+            torch.ops._xpu_C.xpu_p2p_all_gather(
+                output,
+                in_chunk,
+                self._ag_slots,
+                self._peer_ag_slots,
+                self._ag_my_flags,
+                self._ag_peer_flags,
+                self._ag_counters,
+                self._AG_SLOT_BYTES,
+                (rank * numel + start) * esz,
+                ((1 - rank) * numel + start) * esz,
+            )
         # Same concat-then-move layout as the base class.
         output = output.reshape((2,) + input_size).movedim(0, dim)
         return output.reshape(
@@ -269,17 +305,13 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             return super().all_gather(input_, dim)
         # oneCCL rejects graph recording; see all_reduce.
         if not self._ag_ready:
-            reason = "device-sync all-gather unavailable"
-        else:
-            reason = (
-                f"{input_.nbytes} bytes exceeds the {self._AG_SLOT_BYTES} "
-                "byte staging slot; lower max_cudagraph_capture_size (or "
-                "max_num_seqs), or set VLLM_XPU_ENABLE_XPU_GRAPH=0"
+            raise RuntimeError(
+                f"XPU custom all-gather ({self.unique_name}) cannot be "
+                "graph-captured: device-sync all-gather unavailable"
             )
-        raise RuntimeError(
-            f"XPU custom all-gather ({self.unique_name}) cannot be "
-            f"graph-captured: {reason}"
-        )
+        # Over the slot and capturing: split it. Eager keeps falling through
+        # to the parent above, which is faster there.
+        return self._dev_all_gather(input_, dim)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dev_ok = self._dev_ready and input_.dtype in self._SUPPORTED_DTYPES
@@ -293,18 +325,14 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         # oneCCL rejects graph recording); both would run eagerly during
         # capture and be missing from the replay, which is silent wrong
         # output. A slower kernel beats that; a raise beats it too.
-        if dev_ok and input_.nbytes <= self._DEV_SLOT_BYTES:
+        # Size is no longer a reason to refuse: _dev_all_reduce splits a
+        # message the slot cannot hold.
+        if dev_ok:
             return self._dev_all_reduce(input_)
         if not self._dev_ready:
             reason = "device-sync path unavailable"
-        elif input_.dtype not in self._SUPPORTED_DTYPES:
-            reason = f"dtype {input_.dtype} unsupported"
         else:
-            reason = (
-                f"{input_.nbytes} bytes exceeds the {self._DEV_SLOT_BYTES} "
-                "byte staging slot; lower max_cudagraph_capture_size (or "
-                "max_num_seqs), or set VLLM_XPU_ENABLE_XPU_GRAPH=0"
-            )
+            reason = f"dtype {input_.dtype} unsupported"
         raise RuntimeError(
             f"XPU custom all-reduce ({self.unique_name}) cannot be "
             f"graph-captured: {reason}"
