@@ -3,6 +3,7 @@
 """Validate NVIDIA DSv4 attention JIT dispatch."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -186,6 +187,30 @@ def test_sparse_c128_compress_dispatch_matches_legacy_constructor_args() -> None
     )
 
 
+def test_sparse_c128_compress_launcher_returns_allocated_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = SparseAttnCompressC128Block8Kernel()
+    executor = Mock(return_value=None)
+    monkeypatch.setattr(kernel, "_get_or_compile", Mock(return_value=executor))
+    tensor = torch.empty(1)
+    output = torch.empty((1, 512))
+
+    result = kernel(
+        state_cache=tensor,
+        num_actual=1,
+        token_to_req_indices=tensor,
+        positions=tensor,
+        slot_mapping=tensor,
+        block_table=tensor,
+        head_dim=512,
+        compressed_kv=output,
+    )
+
+    assert result is output
+    executor.assert_called_once()
+
+
 @pytest.mark.parametrize(
     (
         "cache_block_size",
@@ -331,22 +356,17 @@ def test_dequant_gather_warmup_keys_disabled_when_block_size_zero() -> None:
 def test_indexer_mxfp4_warmup_keys_enumerate_coarsen_axis() -> None:
     kernel = IndexerQMxFp4Kernel()
 
-    assert kernel.get_warmup_keys(_indexer_config(use_fp4=True)) == [
+    assert set(kernel.get_warmup_keys(_indexer_config(use_fp4=True))) == {
         kernel.CompileKey(
             head_dim=128,
             rope_dim=64,
             num_heads=64,
-            cos_sin_dtype=Float32,
-            coarsen=1,
-        ),
-        kernel.CompileKey(
-            head_dim=128,
-            rope_dim=64,
-            num_heads=64,
-            cos_sin_dtype=Float32,
-            coarsen=4,
-        ),
-    ]
+            cos_sin_dtype=cos_sin_dtype,
+            coarsen=coarsen,
+        )
+        for cos_sin_dtype in (Float32, BFloat16)
+        for coarsen in (1, 4)
+    }
 
 
 def test_indexer_mxfp4_warmup_keys_disabled_without_fp4_cache() -> None:
@@ -357,22 +377,17 @@ def test_indexer_mxfp4_warmup_keys_disabled_without_fp4_cache() -> None:
 def test_indexer_fp8_warmup_keys_enumerate_coarsen_axis() -> None:
     kernel = IndexerQFp8Kernel()
 
-    assert kernel.get_warmup_keys(_indexer_config(use_fp4=False)) == [
+    assert set(kernel.get_warmup_keys(_indexer_config(use_fp4=False))) == {
         kernel.CompileKey(
             head_dim=128,
             rope_dim=64,
             num_heads=64,
-            cos_sin_dtype=Float32,
-            coarsen=1,
-        ),
-        kernel.CompileKey(
-            head_dim=128,
-            rope_dim=64,
-            num_heads=64,
-            cos_sin_dtype=Float32,
-            coarsen=4,
-        ),
-    ]
+            cos_sin_dtype=cos_sin_dtype,
+            coarsen=coarsen,
+        )
+        for cos_sin_dtype in (Float32, BFloat16)
+        for coarsen in (1, 4)
+    }
 
 
 def test_indexer_fp8_warmup_keys_disabled_with_fp4_cache() -> None:

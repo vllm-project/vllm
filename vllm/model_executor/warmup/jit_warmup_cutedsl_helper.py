@@ -11,11 +11,10 @@ from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 DEFAULT_CUTEDSL_COMPILE_OPTIONS = "--enable-tvm-ffi"
 
 CompileKeyT = TypeVar("CompileKeyT")
-CuTeDSLLaunchSpec: TypeAlias = tuple[
-    CompileKeyT,
-    tuple[Any, ...],
-    Mapping[str, Any] | None,
-]
+CuTeDSLLaunchSpec: TypeAlias = (
+    tuple[CompileKeyT, tuple[Any, ...], Mapping[str, Any] | None]
+    | tuple[CompileKeyT, tuple[Any, ...], Mapping[str, Any] | None, Any]
+)
 
 
 def cutedsl_fake_stream(*, use_tvm_ffi_env_stream: bool = True) -> Any:
@@ -70,11 +69,13 @@ def kernel_launcher(
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        compile_key, launch_args, runtime_context = call_fn(self, *args, **kwargs)
+        spec = call_fn(self, *args, **kwargs)
+        compile_key, launch_args, runtime_context = spec[:3]
         executor = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )
-        return executor(*launch_args)
+        result = executor(*launch_args)
+        return spec[3] if len(spec) == 4 else result
 
     return wrapper

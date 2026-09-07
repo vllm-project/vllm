@@ -50,6 +50,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -943,7 +944,7 @@ class DeepseekV4Indexer(nn.Module):
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.utils.import_utils import has_cutedsl
 
-            if has_cutedsl():
+            if current_platform.is_cuda() and has_cutedsl():
                 from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
                     _INDEXER_Q_FP8_KERNEL,
                     _INDEXER_Q_MXFP4_KERNEL,

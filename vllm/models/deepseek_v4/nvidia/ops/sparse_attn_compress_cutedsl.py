@@ -1416,10 +1416,7 @@ class SparseAttnCompressC128Block8Kernel(
             compressed_kv,
         )
 
-    # This kernel cannot use @kernel_launcher: it allocates the
-    # ``compressed_kv`` output when the caller omits it and returns that buffer,
-    # whereas the launcher forwards the executor's own (None) result. It still
-    # shares the executor via the base ``_get_or_compile`` owner cache.
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -1431,17 +1428,15 @@ class SparseAttnCompressC128Block8Kernel(
         block_table: torch.Tensor,
         head_dim: int,
         compressed_kv: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        kernel = self._get_or_compile(
-            self.dispatch(head_size=head_dim, state_width=head_dim)
-        )
+    ) -> CuTeDSLLaunchSpec[SparseAttnCompressC128Block8Kernel.CompileKey]:
+        compile_key = self.dispatch(head_size=head_dim, state_width=head_dim)
         if compressed_kv is None:
             compressed_kv = torch.empty(
                 (num_actual, head_dim),
                 dtype=torch.float32,
                 device=state_cache.device,
             )
-        kernel(
+        launch_args = (
             state_cache,
             token_to_req_indices,
             positions,
@@ -1449,7 +1444,7 @@ class SparseAttnCompressC128Block8Kernel(
             block_table,
             compressed_kv,
         )
-        return compressed_kv
+        return compile_key, launch_args, None, compressed_kv
 
 
 class SparseAttnNormRopeStoreKernel(
