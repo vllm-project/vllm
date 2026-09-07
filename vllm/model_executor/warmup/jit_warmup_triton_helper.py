@@ -106,8 +106,16 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             self._warming = False
 
     @cached_property
-    def _kernel_param_names(self) -> frozenset[str]:
-        return frozenset(self.kernel.arg_names)
+    def _kernel_arg_names(self) -> tuple[str, ...]:
+        arg_names = getattr(self.kernel, "arg_names", None)
+        if arg_names is not None:
+            return tuple(arg_names)
+        wrapped = getattr(self.kernel, "func", None)
+        if wrapped is not None:
+            return tuple(inspect.signature(wrapped).parameters)
+        raise TypeError(
+            f"Cannot inspect kernel parameters for {type(self.kernel).__name__}"
+        )
 
     def launch(
         self,
@@ -116,14 +124,22 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         /,
         **kwargs: Any,
     ) -> Any:
+        runtime_launcher = kwargs.pop("_runtime_launcher", None)
+        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         for name, value in inputs.items():
-            target = name if name in self._kernel_param_names else f"{name}_ptr"
-            if target in self._kernel_param_names and target not in kwargs:
+            target = name if name in self._kernel_arg_names else f"{name}_ptr"
+            if target in self._kernel_arg_names and target not in kwargs:
                 kwargs[target] = value
         if self._warming:
             warmup = getattr(self.kernel, "warmup", None)
             assert warmup is not None
             return warmup(grid=(1,), **kwargs)
+        if runtime_launcher is not None:
+            regular_args = [
+                kwargs.pop(name)
+                for name in self._kernel_arg_names[:runtime_launcher_arg_count]
+            ]
+            return runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
         return self.kernel[grid](**kwargs)
 
 
