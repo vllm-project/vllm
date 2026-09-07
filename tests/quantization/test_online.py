@@ -524,7 +524,9 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    ("model_name,quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls"),
+    (
+        "model_name,quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls,extra_runner_kwargs"
+    ),
     [
         # simple case - quantization='fp8_per_tensor'
         pytest.param(
@@ -650,6 +652,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             {"targets": {"model.layers.1.self_attn.o_proj": "mxfp8"}},
             Mxfp8OnlineLinearMethod,
             CompressedTensorsMoEMethod,
+            {},
             id="partially_prequantized_checkpoint",
         ),
     ],
