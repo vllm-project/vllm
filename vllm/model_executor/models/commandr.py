@@ -417,7 +417,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         orig_to_new_substr={"_quantizer.": None},
         orig_to_new_prefix={"lm_head": None},
     )
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }

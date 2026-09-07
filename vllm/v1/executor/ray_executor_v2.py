@@ -8,6 +8,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
+from torch.distributed import TCPStore
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -17,16 +19,17 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
-    _get_open_port,
     get_distributed_init_method,
-    get_open_port,
 )
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
     MultiprocExecutor,
     WorkerProc,
 )
-from vllm.v1.executor.ray_env_utils import get_driver_env_vars
+from vllm.v1.executor.ray_env_utils import (
+    get_driver_env_vars,
+    update_runtime_env_for_worker_import,
+)
 from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
     build_actor_name,
@@ -106,21 +109,34 @@ class RayWorkerProc(WorkerProc):
         self,
         vllm_config: VllmConfig,
         rank: int,
-        distributed_init_method: str,
         input_shm_handle: Handle,
         is_driver_worker: bool,
         is_driver_node: bool = False,
     ):
         # Defer WorkerProc.__init__ until GPU IDs are known.
         self._is_driver_node = is_driver_node
+        self._parallel_config = vllm_config.parallel_config
         self._init_kwargs = dict(
             vllm_config=vllm_config,
             rank=rank,
-            distributed_init_method=distributed_init_method,
             input_shm_handle=input_shm_handle,
             shared_worker_lock=None,
             is_driver_worker=is_driver_worker,
         )
+
+    def create_dist_init_method(self) -> str:
+        host = ray.util.get_node_ip_address()
+        store = TCPStore(
+            host_name=host,
+            port=0,
+            world_size=self._parallel_config.world_size,
+            is_master=True,
+            wait_for_workers=False,
+            multi_tenant=True,
+        )
+        # Keep the bound server alive until init_process_group reuses it.
+        self._dist_init_store = store
+        return get_distributed_init_method(host, store.port)
 
     def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
         """Return (node_id, physical_gpu_ids) assigned to this actor by Ray."""
@@ -140,6 +156,7 @@ class RayWorkerProc(WorkerProc):
         self,
         local_rank: int,
         env_vars: dict[str, str],
+        distributed_init_method: str,
         driver_env_vars: dict[str, str] | None = None,
         assigned_physical_gpu_ids: list[int] | None = None,
     ) -> None:
@@ -163,6 +180,7 @@ class RayWorkerProc(WorkerProc):
                 assigned_physical_gpu_ids
             )
 
+        self._init_kwargs["distributed_init_method"] = distributed_init_method
         self.local_rank = local_rank
         super().__init__(
             local_rank=local_rank,
@@ -243,6 +261,7 @@ class RayExecutorV2(MultiprocExecutor):
 
         env_vars = runtime_env.setdefault("env_vars", {})
         env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
+        update_runtime_env_for_worker_import(runtime_env)
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {
                 "t": "cuda,cudnn,cublas",
@@ -259,25 +278,6 @@ class RayExecutorV2(MultiprocExecutor):
         if device_key == "GPU":
             return {"num_gpus": num_devices}
         return {"num_gpus": 0, "resources": {device_key: num_devices}}
-
-    @staticmethod
-    def _select_tcpstore_port(local_dp_rank: int | None, master_port: int) -> int:
-        """Pick the torch.distributed TCPStore port for this engine.
-
-        Co-located DP engines choosing this port with a shared random search
-        collide intermittently. Seeding by node-local DP rank gives each a
-        disjoint window. Non-DP engines and full windows fall back to a
-        random port.
-        """
-        if local_dp_rank is None:
-            return get_open_port()
-        # Offset past the DP master port reserved range, one window per rank.
-        window = 32
-        start_port = master_port + 100 + local_dp_rank * window
-        try:
-            return _get_open_port(start_port=start_port, max_attempts=window)
-        except RuntimeError:
-            return get_open_port()
 
     def _init_executor(self) -> None:
         """Initialize the RayExecutorV2 executor."""
@@ -324,18 +324,7 @@ class RayExecutorV2(MultiprocExecutor):
                 }
             )
 
-        # Step 3: Resolve the IP for torch.distributed TCPStore.
-        # The TCPStore server runs on rank 0's node, so all workers
-        # must be able to reach this address.
-        dist_ip = bundle_assignments[0]["node_ip"]
-        parallel_config = self.vllm_config.parallel_config
-        port = self._select_tcpstore_port(
-            parallel_config.data_parallel_rank_local,
-            parallel_config.data_parallel_master_port,
-        )
-        distributed_init_method = get_distributed_init_method(dist_ip, port)
-
-        # Step 4: Create broadcast MessageQueue.
+        # Step 3: Create broadcast MessageQueue.
         # Workers on the driver node use shared memory; the rest use TCP.
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
         n_local = sum(1 for a in bundle_assignments if a["node_id"] == driver_node)
@@ -347,9 +336,9 @@ class RayExecutorV2(MultiprocExecutor):
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
-        # Step 5: Spawn RayWorkerProc actors into PG bundles (deferred init).
+        # Step 4: Spawn RayWorkerProc actors into PG bundles (deferred init).
         # Workers are created lightweight here; full initialization happens
-        # in Step 7 after GPU IDs are discovered.
+        # in Step 6 after GPU IDs are discovered.
         self.ray_worker_handles: list[RayWorkerHandle] = []
         instance_id = self.vllm_config.instance_id
 
@@ -401,7 +390,6 @@ class RayExecutorV2(MultiprocExecutor):
                 .remote(
                     vllm_config=self.vllm_config,
                     rank=bundle["rank"],
-                    distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
                     is_driver_worker=is_driver_worker,
                     is_driver_node=is_driver_node,
@@ -417,7 +405,7 @@ class RayExecutorV2(MultiprocExecutor):
             )
             self.ray_worker_handles.append(handle)
 
-        # Step 6: Discover physical GPU IDs assigned to each worker via Ray
+        # Step 5: Discover physical GPU IDs assigned to each worker via Ray
         # runtime context.
         worker_node_and_physical_gpu_ids = ray.get(
             [
@@ -436,8 +424,11 @@ class RayExecutorV2(MultiprocExecutor):
         for node_id, physical_gpu_ids in node_physical_gpu_ids.items():
             node_physical_gpu_ids[node_id] = sorted(physical_gpu_ids)
 
-        # Step 7: Initialize workers with local logical ranks and the
+        # Step 6: Initialize workers with local logical ranks and the
         # logical-to-physical GPU mapping discovered from Ray placement.
+        distributed_init_method = ray.get(
+            self.ray_worker_handles[0].actor.create_dist_init_method.remote()
+        )
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(i)
@@ -448,6 +439,7 @@ class RayExecutorV2(MultiprocExecutor):
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
                     local_rank,
                     worker_env_vars,
+                    distributed_init_method,
                     self.driver_env_vars,
                     assigned_physical_gpu_ids=assigned_physical_gpu_ids,
                 )
@@ -461,7 +453,7 @@ class RayExecutorV2(MultiprocExecutor):
             )
         ray.get(init_worker_refs)
 
-        # Step 8: Collect response MQ handles
+        # Step 7: Collect response MQ handles
         init_results = ray.get(
             [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
         )
@@ -474,12 +466,12 @@ class RayExecutorV2(MultiprocExecutor):
                 MessageQueue.create_from_handle(result["handle"], 0)
             )
 
-        # Step 9: Start run() before wait_until_ready() to avoid
+        # Step 8: Start run() before wait_until_ready() to avoid
         # deadlock — workers send subscriptions inside run().
         for handle in self.ray_worker_handles:
             handle.run()
 
-        # Step 10: wait_until_ready() barrier
+        # Step 9: wait_until_ready() barrier
         self.rpc_broadcast_mq.wait_until_ready()
         for response_mq in self.response_mqs:
             response_mq.wait_until_ready()
