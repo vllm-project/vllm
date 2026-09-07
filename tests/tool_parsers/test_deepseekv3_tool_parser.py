@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-
-
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,8 +12,6 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from tests.tool_parsers.utils import run_tool_extraction
-
-
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -158,7 +154,6 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
         assert tool_calls[0].function.arguments == '{"city": "Paris"}'
 
 
-
 _TOOL_CALLS_BEGIN = "<｜tool▁calls▁begin｜>"
 _TOOL_CALLS_END = "<｜tool▁calls▁end｜>"
 _TOOL_CALL_BEGIN = "<｜tool▁call▁begin｜>"
@@ -257,3 +252,39 @@ def test_streaming_name_regex_timeout_skips_delta():
         name_regex.match.call_args.kwargs["timeout"]
         == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
     )
+
+
+def test_streaming_regex_timeout_is_not_retried_on_later_delta():
+    parser = DeepSeekV3ToolParser(_fake_deepseek_tokenizer())
+    mock_regex = MagicMock()
+    mock_regex.match.side_effect = TimeoutError("Regex timeout")
+    current_text = (
+        f"{_TOOL_CALLS_BEGIN}{_TOOL_CALL_BEGIN}function{_TOOL_SEP}get_weather"
+    )
+    token_ids = [1, 3]
+    later_text = current_text + "x"
+    later_token_ids = [1, 3, 3]
+
+    with patch.object(parser, "stream_tool_call_portion_regex", mock_regex):
+        first = parser.extract_tool_calls_streaming(
+            current_text,
+            current_text,
+            "",
+            token_ids,
+            token_ids,
+            [],
+            _timeout_request(),
+        )
+        second = parser.extract_tool_calls_streaming(
+            later_text,
+            later_text,
+            "x",
+            token_ids,
+            later_token_ids,
+            [3],
+            _timeout_request(),
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.match.assert_called_once()
