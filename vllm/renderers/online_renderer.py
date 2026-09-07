@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
     PromptType,
@@ -412,7 +413,7 @@ class OnlineRenderer:
                         messages.append(new_message)
                     if isinstance(response_message, ResponseFunctionToolCall):
                         previous_outputs.append(response_message)
-        except ValueError as exc:
+        except (ValueError, VLLMValidationError) as exc:
             return self.create_error_response(
                 str(exc),
                 err_type="invalid_request_error",
