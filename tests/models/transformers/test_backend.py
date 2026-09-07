@@ -93,7 +93,8 @@ def check_implementation(
             assert num_glu == expected_glu * num_layers
             assert num_qkv == expected_qkv * num_layers
 
-        assert model_test.apply_model(count_attention_layers) == num_layers
+        tp_size = kwargs_test.get("tensor_parallel_size", 1)
+        assert model_test.apply_model(count_attention_layers) == [num_layers] * tp_size
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
