@@ -1135,12 +1135,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             if bidi_mode == "vision" and self.window_left < 0:
                 self.mm_prefix_enabled = False
-            if self.use_dcp:
+            # Re-check the flag: the line above turns mm-prefix off for this
+            # layer group, and the rejections below only apply while it is on.
+            # Without this a Gemma 4 full-attention group would refuse to start
+            # under DCP or attention sinks, pointing at a flag that no longer
+            # affects it.
+            if self.mm_prefix_enabled and self.use_dcp:
                 raise NotImplementedError(
                     "FlashInfer mm-prefix custom masks are not wired for "
                     "DCP; unset VLLM_FLASHINFER_MM_PREFIX or disable DCP."
                 )
-            if self.has_sinks:
+            if self.mm_prefix_enabled and self.has_sinks:
                 # The mm-prefix groups drive their own planned wrappers via
                 # the plain run() signature, which cannot pass the sink
                 # tensor. Reject the combination here rather than silently
@@ -1237,22 +1242,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # dedicated-XQA API rejects the packed fp4 cache), and that path is not
         # wired for uniform multi-token capture. Advertise single-token only
         # rather than promising UNIFORM_BATCH the decode route cannot honour.
+        # head_size > 256 (Gemma 4 global layers) runs the two-pass VO split:
+        # the builder sets reorder_batch_threshold = 0, so every request,
+        # decode included, goes through the per-step-planned prefill wrapper,
+        # which has no cudagraph buffers. A FULL decode graph captured around
+        # it replays stale plan data and produces garbage. _vo_split_factor()
+        # keys on head_size alone, so this holds for bf16 and FP8 KV as well as
+        # NVFP4 -- refuse capture whenever the split is in play and let the
+        # runner fall back to PIECEWISE.
+        for spec in iter_layer_specs(kv_cache_spec):
+            if isinstance(spec, AttentionSpec) and spec.head_size > 256:
+                return AttentionCGSupport.NEVER
+
         cache_config = vllm_config.cache_config
         if (
             is_sm12x
             and cache_config is not None
             and cache_config.cache_dtype.startswith("nvfp4")
         ):
-            # head_size > 256 (Gemma 4 global layers) runs the two-pass VO
-            # split: the builder sets reorder_batch_threshold = 0 and every
-            # request, decode included, goes through the per-step-planned
-            # prefill wrapper, which has no cudagraph buffers. A FULL decode
-            # graph captured around it replays stale plan data and produces
-            # garbage, so refuse capture for these groups (the runner falls
-            # back to PIECEWISE for the model).
-            for spec in iter_layer_specs(kv_cache_spec):
-                if isinstance(spec, AttentionSpec) and spec.head_size > 256:
-                    return AttentionCGSupport.NEVER
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
@@ -1599,7 +1606,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if not mm_ranges:
             return None
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        # seq_lens_cpu is a deprecated property that lazily runs
+        # seq_lens.to("cpu"). build() calls this helper before its own guarded
+        # access, so without this the mm-prefix path forces an unguarded sync
+        # (and raises under VLLM_GPU_SYNC_CHECK=error).
+        with gpu_sync_allowed():
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         span_lists: list[list[tuple[int, int]]] = []
         any_spans = False
         for j in range(num_prefills):

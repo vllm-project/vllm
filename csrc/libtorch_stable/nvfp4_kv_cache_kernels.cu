@@ -337,6 +337,13 @@ void reshape_and_cache_nvfp4_dispatch(
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
 
+  // Select the cache's device before querying its capability: get_device_prop()
+  // reads the *active* device, so on a heterogeneous host an unguarded query
+  // could pick another GPU's architecture and write an incompatible V-scale
+  // layout. The guard stays in scope for the launch below.
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      key.get_device_index());
+
   // SM120/SM121 (consumer Blackwell) serve NVFP4 KV via the FlashInfer FA2
   // paged reader, which takes the scale-factor strides from the SF tensor
   // itself and reads V scales linearly; the SM100 trtllm-gen reader keeps
@@ -348,6 +355,18 @@ void reshape_and_cache_nvfp4_dispatch(
   STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
                   "block_size must be divisible by 4 for NVFP4 KV cache V "
                   "scale-factor swizzle (SM100 trtllm-gen path)");
+
+  // swizzle_scale_offset() reshapes a page's scales as [T//4, 4, 4, S//4], so
+  // S = scale_dim must itself be a multiple of 4. head_size=80 gives
+  // scale_dim=5: s_group becomes 1, swizzled_t runs past the token's group of
+  // four and writes into the next head or page. head_size<64 is worse still,
+  // giving s_group=0 and a division by zero in the kernel. SM12x writes V
+  // scales linearly and is unaffected.
+  STD_TORCH_CHECK(!swizzle_v_sf || scale_dim % 4 == 0,
+                  "head_size must be divisible by 64 (scale_dim divisible by "
+                  "4) for the NVFP4 KV cache V scale-factor swizzle (SM100 "
+                  "trtllm-gen path); got head_size=",
+                  head_size);
 
   // Detect physical layout from strides (based on full_dim).
   // HND: head stride > block_offset stride.
@@ -394,8 +413,6 @@ void reshape_and_cache_nvfp4_dispatch(
   dim3 grid(num_tokens);
   dim3 block(num_threads);
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
