@@ -139,11 +139,11 @@ class Base(
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
         self.fusers: dict[str, list[BaseFuser]] = {}
         """Module qualname -> the fusers applied to it, populated
-        by `recursive_replace` for `create_attention_instances`."""
+        by `recursive_replace` for `_create_attention_instances`."""
         self.attention_fusers: dict[int, tuple[str, AttentionFuser]] = {}
         """`layer_idx` -> the qualname and fuser of the module computing that
         layer's attention, populated by `recursive_replace` for
-        `create_attention_instances`."""
+        `_create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -179,7 +179,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self.attention_instances = self.create_attention_instances()
+        self._create_attention_instances()
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -197,7 +197,7 @@ class Base(
         Patch the config to ensure that the model is created correctly:
 
         - Sets the attention implementation to "vllm" so the attention instances from
-        `create_attention_instances` are used
+        `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
@@ -570,11 +570,10 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def _create_attention_instances(self) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        attention_instances = {}
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
@@ -671,8 +670,6 @@ class Base(
             # layer identity into the traced graph and so costs one compiled
             # artifact per layer.
             setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
-            attention_instances[i] = attn_instance
-        return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""

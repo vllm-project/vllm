@@ -54,15 +54,13 @@ def get_num_fused(model) -> tuple[int, int]:
 def count_mla_layers(model) -> int:
     from vllm.model_executor.layers.attention import MLAAttention
 
-    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
+    return sum(isinstance(m, MLAAttention) for m in model.modules())
 
 
-def attention_is_registered(model) -> bool:
-    """Attention instances are passed to the Transformers model in a plain dict,
-    so they must also be registered as submodules, otherwise `named_modules` skips
-    them and their `process_weights_after_loading` never runs."""
-    submodules = {id(module) for module in model.modules()}
-    return all(id(attn) in submodules for attn in model.attention_instances.values())
+def count_attention_layers(model) -> int:
+    from vllm.model_executor.layers.attention import Attention
+
+    return sum(isinstance(m, Attention) for m in model.modules())
 
 
 def check_implementation(
@@ -95,7 +93,7 @@ def check_implementation(
             assert num_glu == expected_glu * num_layers
             assert num_qkv == expected_qkv * num_layers
 
-        assert all(model_test.apply_model(attention_is_registered))
+        assert model_test.apply_model(count_attention_layers) == num_layers
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -155,16 +153,13 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
-    from vllm.model_executor.models.transformers.fusers import SinkFuser
-
-    assert all(attn.has_sink for attn in model.attention_instances.values())
     return {
         i: fuser.sink(model.get_submodule(prefix)).float().cpu()
-        for i, (prefix, fuser) in model.find_fusers(SinkFuser).items()
+        for i, (prefix, fuser) in model.attention_fusers.items()
     }
 
 
-def test_sinks(vllm_runner: type[VllmRunner]) -> None:
+def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None:
     """Learnable attention sinks must reach the attention layers.
 
     Only the attention impl can apply them, so if they are not passed to
@@ -182,7 +177,7 @@ def test_sinks(vllm_runner: type[VllmRunner]) -> None:
         assert model_test.llm.llm_engine.model_config.using_transformers_backend()
         sinks = model_test.apply_model(get_sinks)[0]
 
-    with HfRunner(model, dtype="bfloat16") as model_ref:
+    with hf_runner(model, dtype="bfloat16") as model_ref:
         layers = model_ref.model.model.get_decoder().layers
         expected = {i: layer.self_attn.sinks.float() for i, layer in enumerate(layers)}
 
@@ -675,7 +670,7 @@ def test_attention_dispatch_is_matched(model_type: str):
     """Exactly the decoder layers' attention modules match an `AttentionFuser`.
 
     That match is what `recursive_replace` records, and so what
-    `create_attention_instances` attaches vLLM's attention layer to.
+    `_create_attention_instances` attaches vLLM's attention layer to.
     """
     model = build_model(model_type)
     matched = {
@@ -730,7 +725,7 @@ def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
         ValueError,
         match="Layer 0 does not dispatch through the Transformers attention interface",
     ):
-        Base.create_attention_instances(model)
+        Base._create_attention_instances(model)
 
 
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
