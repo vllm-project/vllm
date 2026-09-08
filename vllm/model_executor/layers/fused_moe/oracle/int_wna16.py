@@ -852,7 +852,7 @@ def _process_weights_cpu(
         if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
             raise NotImplementedError(
                 "CPU WNA16 MoE backend does not support GPTQ with "
-                "desc_act=True. The fused MoE kernel has no g_idx "
+                "desc_act=True. The fused MoE kernel has no activation "
                 "reordering support."
             )
         cpu_quant_algo = ops.CPUQuantAlgo.GPTQ

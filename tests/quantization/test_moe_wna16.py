@@ -61,15 +61,6 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
     MoeWNA16Config.from_config(config)
 
 
-def test_moe_wna16_discards_serialized_g_idx():
-    weight = torch.tensor([1])
-    weights = [("model.layers.0.qweight", weight), ("model.layers.0.g_idx", weight)]
-
-    mapped_weights = list(MoeWNA16Config.get_checkpoint_weight_mapper().apply(weights))
-
-    assert mapped_weights == [("model.layers.0.qweight", weight)]
-
-
 @pytest.mark.parametrize(
     ("backend", "quant_config", "may_have_zp", "may_have_bias", "expected"),
     [

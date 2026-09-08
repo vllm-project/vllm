@@ -142,13 +142,13 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = tl.interleave(b, b)
         b = (b >> shifts_full) & 0xF
 
-        g_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
+        group_idx = (k_start * BLOCK_K) // group_size
+        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
+            zp_ptrs = zp_ptr + offs_n * num_groups + group_idx
             zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
             b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
         else:

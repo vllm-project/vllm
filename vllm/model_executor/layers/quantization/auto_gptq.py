@@ -188,14 +188,6 @@ class AutoGPTQConfig(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
-    @staticmethod
-    def get_checkpoint_weight_mapper():
-        # Some desc_act=False checkpoints still serialize the sequential g_idx
-        # tensor. It is redundant once runtime activation ordering is disabled.
-        from vllm.model_executor.models.utils import WeightsMapper
-
-        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
-
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AutoGPTQConfig":
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})

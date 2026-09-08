@@ -345,7 +345,7 @@ class INCXPULinearMethod(INCXPULinearBase):
             layer.scales,
             layer.qzeros,
             self.group_size,
-            None,
+            None,  # Retained by the external XPU op ABI.
         )
         return out.reshape(out_shape)
 

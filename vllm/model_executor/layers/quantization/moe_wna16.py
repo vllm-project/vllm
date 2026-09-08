@@ -114,13 +114,6 @@ class MoeWNA16Config(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
-    @staticmethod
-    def get_checkpoint_weight_mapper():
-        # GPTQ checkpoints can serialize a redundant sequential g_idx tensor.
-        from vllm.model_executor.models.utils import WeightsMapper
-
-        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
-
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MoeWNA16Config":
         linear_quant_method = cls.get_from_keys(config, ["quant_method"])
@@ -590,8 +583,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             expert_id: int,
             return_success: bool = False,
         ):
-            if "g_idx" in weight_name:
-                return False if return_success else None
             if not layer.quant_config.has_zp and "qzeros" in weight_name:
                 return False if return_success else None
 

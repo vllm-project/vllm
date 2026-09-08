@@ -119,18 +119,6 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
         )
 
 
-def test_auto_gptq_discards_serialized_g_idx():
-    weight = torch.tensor([1])
-    weights = [
-        ("model.layers.0.qweight", weight),
-        ("model.layers.0.g_idx", weight),
-    ]
-
-    mapped_weights = list(AutoGPTQConfig.get_checkpoint_weight_mapper().apply(weights))
-
-    assert mapped_weights == [("model.layers.0.qweight", weight)]
-
-
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
