@@ -170,17 +170,14 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         max_value = next_max
 
     has_values = normalizer > 0
-    # Fold the fp8 V dequant scale (output_scale) into the per-row normalizer
-    # rather than the full output: accumulator / (normalizer / output_scale) =
-    # output_scale * accumulator / normalizer, a per-row divide instead of a
-    # HEAD_DIM-wide multiply. The split-K LSE below keeps the unscaled
-    # normalizer, so the merge stays correct.
-    denominator = tl.maximum(normalizer, 1.0e-20)
-    if IS_FP8:
-        denominator = denominator / output_scale
+    # Fold the fp8 V dequant scale (output_scale, 1.0 for bf16) into a per-row
+    # reciprocal normalizer, so the output is a per-row multiply rather than a
+    # HEAD_DIM-wide scale. The split-K LSE below keeps the unscaled normalizer,
+    # so the merge stays correct.
+    inv_normalizer = output_scale / tl.maximum(normalizer, 1.0e-20)
     normalized_output = tl.where(
         has_values[:, None],
-        accumulator / denominator[:, None],
+        accumulator * inv_normalizer[:, None],
         0.0,
     )
     output_mask = head_offsets[:, None] < GROUP_SIZE

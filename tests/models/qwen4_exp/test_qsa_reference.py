@@ -1043,14 +1043,10 @@ def test_qsa_sparse_paged_attention_correctness(
     if fp8:
         # A fixed non-unit pair (k != v) exercises the host-side scale folding
         # and catches a k/v swap; scales are host floats, as the layer exposes
-        # them. vLLM stores quantized caches as uint8 and reinterprets the e4m3
-        # bytes right before the kernel, so the test quantizes the same way
-        # (stored values are the scaled ones, as reshape_and_cache does).
+        # them. Stored values are the scaled ones, as reshape_and_cache does.
         k_scale, v_scale = 0.5, 2.0
         k_cache = (k_cache.float() / k_scale).to(torch.float8_e4m3fn)
         v_cache = (v_cache.float() / v_scale).to(torch.float8_e4m3fn)
-        k_cache = k_cache.view(torch.uint8).view(torch.float8_e4m3fn)
-        v_cache = v_cache.view(torch.uint8).view(torch.float8_e4m3fn)
     else:
         k_scale, v_scale = 1.0, 1.0
 
