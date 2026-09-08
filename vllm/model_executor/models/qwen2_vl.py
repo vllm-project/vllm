@@ -705,10 +705,18 @@ class Qwen2VisionTransformer(nn.Module):
         else:
             max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
 
+        # The non-flash (SDPA) backend splits the packed sequence with Python
+        # sizes derived from cu_seqlens in every block, so keep it on CPU to
+        # avoid a device-to-host sync per layer. Kernel backends need it on GPU.
+        if self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            cu_seqlens_device = cu_seqlens
+        else:
+            cu_seqlens_device = async_tensor_h2d(cu_seqlens, device)
+
         return {
             "rotary_pos_emb_cos": rotary_pos_emb_cos,
             "rotary_pos_emb_sin": rotary_pos_emb_sin,
-            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
+            "cu_seqlens": cu_seqlens_device,
             "max_seqlen": max_seqlen,
         }
 

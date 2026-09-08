@@ -1035,22 +1035,29 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # FlashInfer uses backend-specific cu_seqlens offsets into the flattened
         # Q/K/O and V buffers. Other backends receive the original cumulative
         # token offsets unchanged.
-        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens_np,
-            self.hidden_size,
-            self.tp_size,
-            device,
-            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
-        )
-        cu_window_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_window_seqlens_np,
-            self.hidden_size,
-            self.tp_size,
-            device,
-            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
-        )
+        # The non-flash (SDPA) backend splits the packed sequence with Python
+        # sizes derived from cu_seqlens in every block, so keep it on CPU to
+        # avoid a device-to-host sync per layer. Kernel backends need it on GPU.
+        if self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            cu_seqlens = torch.from_numpy(cu_seqlens_np)
+            cu_window_seqlens = torch.from_numpy(cu_window_seqlens_np)
+        else:
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens_np,
+                self.hidden_size,
+                self.tp_size,
+                device,
+                fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+            )
+            cu_window_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_window_seqlens_np,
+                self.hidden_size,
+                self.tp_size,
+                device,
+                fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+            )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
         window_index = async_tensor_h2d(window_index, device)
