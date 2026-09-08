@@ -591,7 +591,17 @@ class Worker(WorkerBase):
         init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
         rocm_fallback = maybe_rocm_profiling_fallback(profile_result)
-        if rocm_fallback is None:
+        if rocm_fallback is None and profile_result.process_scoped:
+            # The budget is based on this process's own memory usage, so
+            # other processes releasing memory during profiling is harmless.
+            if init_free_memory < free_gpu_memory:
+                logger.warning(
+                    "Other processes released %s GiB on the device while this "
+                    "instance was profiling; ignored because the KV cache "
+                    "budget uses this process's own memory usage.",
+                    format_gib(free_gpu_memory - init_free_memory),
+                )
+        elif rocm_fallback is None:
             # NOTE(woosuk): Here we assume that the other processes using the same
             # GPU did not change their memory usage during the profiling.
             assert init_free_memory >= free_gpu_memory, (
