@@ -23,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
@@ -1799,6 +1800,127 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
 
     assert num_computed == mamba_block_size
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
+
+
+def test_opted_out_scratch_group_keeps_partial_hash_hits():
+    hash_block_size = 2
+    mamba_block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["tail"],
+                KpoolTailSpec(
+                    block_size=mamba_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=mamba_block_size,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.enable_partial_hash_hits
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+
+
+def test_kpool_tail_supports_128_token_partial_hash_hits():
+    hash_block_size = 128
+    cache_block_size = 9 * hash_block_size
+    kpool_block_size = 64
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=cache_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=cache_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["tail"],
+                KpoolTailSpec(
+                    block_size=kpool_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=kpool_block_size,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.scheduler_block_size == cache_block_size
+    assert manager.coordinator.hash_block_size == hash_block_size
+    assert manager.coordinator.enable_partial_hash_hits
+
+    shared_prefix = [10] * (12 * hash_block_size)
+    req0 = make_request("0", shared_prefix, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert (
+        manager.allocate_slots(req0, len(shared_prefix), num_computed, computed_blocks)
+        is not None
+    )
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", shared_prefix + [12] * 64, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == len(shared_prefix)
 
 
 @pytest.mark.parametrize("dcp_world_size", [1, 2, 4])

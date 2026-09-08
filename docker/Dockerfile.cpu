@@ -9,7 +9,6 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
-#   vllm-openai-zen: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -166,6 +165,9 @@ ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
+# When set, sccache skips the S3 backend and uses a local disk cache instead
+# (for builds without S3 credentials, e.g. a developer's local `docker build`).
+ARG SCCACHE_LOCAL_ONLY=0
 
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
@@ -187,10 +189,16 @@ ENV CARGO_BUILD_JOBS=4
 # inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache; \
-        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+            unset SCCACHE_BUCKET SCCACHE_REGION; \
+            export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+        elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+            export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        fi; \
         sccache --show-stats; \
     fi && \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
@@ -273,13 +281,20 @@ FROM vllm-src AS vllm-build
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
+ARG SCCACHE_LOCAL_ONLY=0
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+            unset SCCACHE_BUCKET SCCACHE_REGION; \
+            export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+        elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+            export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        fi; \
         sccache --show-stats; \
     fi && \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
@@ -297,6 +312,7 @@ ARG VLLM_CPU_X86=0
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
+ARG SCCACHE_LOCAL_ONLY=0
 
 WORKDIR /vllm-workspace
 
@@ -304,15 +320,22 @@ RUN mkdir dist
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=cache,target=/root/.triton \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
+    set -ex; \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
         git checkout "270e696d"; \
         if [ "$USE_SCCACHE" = "1" ]; then \
-            if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+            if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+                unset SCCACHE_BUCKET SCCACHE_REGION; \
+                export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+            elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+                export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+            fi; \
             export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
             sccache --show-stats; \
         fi; \
@@ -467,21 +490,5 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 # stage above adds examples/ for testing only, so without this the published
 # vllm-openai-cpu image would not ship examples/*.jinja.
 COPY examples examples
-
-ENTRYPOINT ["vllm", "serve"]
-
-
-######################### ZEN CPU PYPI IMAGE #########################
-FROM vllm-openai AS vllm-openai-zen
-
-ARG TARGETARCH
-
-RUN if [ "$TARGETARCH" != "amd64" ]; then \
-        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
-        exit 1; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install "vllm[zen]"
 
 ENTRYPOINT ["vllm", "serve"]

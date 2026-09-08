@@ -198,9 +198,13 @@ def _fused_norm_rope_kernel(
     if slot_mapping_ptr is None:
         if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
             return
-    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
-        # Padding, or (under DCP) a token whose KV slot another rank owns:
-        # skip the K-side norms and cache writes.
+    elif tl.load(slot_mapping_ptr + tok_idx) < 0 and (
+        pid != 1 or (kv_out_ptr is None and kpe_out_ptr is None)
+    ):
+        # Padding, or (under DCP) a token whose KV slot another rank owns.
+        # Dense prefill still consumes the materialized normalized/rotated K
+        # rows on every rank, so pid 1 must produce them even when this rank
+        # must not write the owner-local cache slot.
         return
 
     if pid == 1:
@@ -250,6 +254,8 @@ def _fused_norm_rope_kernel(
                 return
 
             slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+            if slot_idx < 0:
+                return
             mla_block_size = MLA_CACHE_BLOCK_SIZE
             mla_block_idx = slot_idx // mla_block_size
             mla_block_off = slot_idx % mla_block_size
