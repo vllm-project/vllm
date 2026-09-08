@@ -43,6 +43,9 @@ from ..utils import swiglu_limit_func
 
 logger = init_logger(__name__)
 
+_STAGE2_POW2_KERNEL: VllmTritonJitKernel[Any] | None = None
+_COMBINED_ROUTING_COMPUTE_POW2_KERNEL: VllmTritonJitKernel[Any] | None = None
+
 
 def _triton_kernel_moe_supports_current_device() -> bool:
     # Shared device gate for the OAI Triton MoE expert classes.
@@ -149,6 +152,92 @@ def _patch_make_bitmatrix_metadata() -> None:
         tl.store(RowSortedIndx + offs_global, row_sorted_indx, mask=mask)
         tl.store(ColSortedIndx + row_sorted_indx, offs_global, mask=mask)
 
+    class _Stage2Pow2Kernel(
+        VllmTritonJitKernel["_Stage2Pow2Kernel.CompileKey"]
+    ):
+        partial_block_m = 32
+
+        @dataclass(frozen=True)
+        class CompileKey:
+            n_tokens: int
+            stride_pm: int
+            stride_pn: int
+            toks_per_row: int
+            block_per_tok: int
+            block_size_padded: int
+
+        kernel = staticmethod(_stage2_pow2)
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            num_tokens: int,
+            num_experts: int,
+            topk: int,
+        ) -> CompileKey:
+            return self.CompileKey(
+                n_tokens=triton_scalar_specialization_rep(num_tokens),
+                stride_pm=triton_scalar_specialization_rep(num_experts),
+                stride_pn=1,
+                toks_per_row=topk,
+                block_per_tok=self.partial_block_m,
+                block_size_padded=triton.next_power_of_2(
+                    self.partial_block_m * topk
+                ),
+            )
+
+        def get_warmup_keys(
+            self, *, max_tokens: int, num_experts: int, topk: int
+        ) -> list[CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                num_tokens=WarmupIntRange(1, max_tokens + 1),
+                num_experts=num_experts,
+                topk=topk,
+            )
+
+        def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+            ptr = TritonWarmupTensor(torch.int32)
+            return dict(
+                ColSortedIndx=ptr,
+                RowSortedIndx=ptr,
+                NonzeroIndx=ptr,
+                n_tokens=compile_key.n_tokens,
+                ColPartialSum=ptr,
+                stride_pm=compile_key.stride_pm,
+                stride_pn=compile_key.stride_pn,
+                ColOffs=ptr,
+                grid_size=1,
+                TOKS_PER_ROW=compile_key.toks_per_row,
+                BLOCK_PER_TOK=compile_key.block_per_tok,
+                BLOCK_SIZE_PADDED=compile_key.block_size_padded,
+            )
+
+        @kernel_launcher
+        def __call__(  # type: ignore[override]
+            self,
+            *,
+            ColSortedIndx: Any,
+            RowSortedIndx: Any,
+            NonzeroIndx: Any,
+            n_tokens: Any,
+            ColPartialSum: Any,
+            stride_pm: int,
+            stride_pn: int,
+            ColOffs: Any,
+            grid_size: int,
+            TOKS_PER_ROW: int,
+            BLOCK_PER_TOK: int,
+            BLOCK_SIZE_PADDED: int,
+        ) -> LaunchSpec:
+            return (grid_size,), dict(
+                TOKS_PER_ROW=TOKS_PER_ROW,
+                BLOCK_PER_TOK=BLOCK_PER_TOK,
+                BLOCK_SIZE_PADDED=BLOCK_SIZE_PADDED,
+            )
+
+    global _STAGE2_POW2_KERNEL
+    _STAGE2_POW2_KERNEL = _Stage2Pow2Kernel()
+
     def _make_bitmatrix_metadata_pow2_safe(nonzero_indx, bitmatrix):
         assert nonzero_indx.ndim == 2
         PARTIAL_BLOCK_M = 32
@@ -184,15 +273,17 @@ def _patch_make_bitmatrix_metadata() -> None:
         # Next power of 2 >= block_size (required by tl.arange).
         block_size_padded = 1 << (max(block_size, 1) - 1).bit_length()
         compute_grid = (cdiv(bitmatrix.shape_max[0], PARTIAL_BLOCK_M),)
-        _stage2_pow2[compute_grid](
-            col_sorted_indx,
-            row_sorted_indx,
-            nonzero_indx,
-            bitmatrix.shape[0],
-            col_partial_sum,
-            col_partial_sum.stride(0),
-            col_partial_sum.stride(1),
-            col_offs,
+        assert _STAGE2_POW2_KERNEL is not None
+        _STAGE2_POW2_KERNEL(
+            ColSortedIndx=col_sorted_indx,
+            RowSortedIndx=row_sorted_indx,
+            NonzeroIndx=nonzero_indx,
+            n_tokens=bitmatrix.shape[0],
+            ColPartialSum=col_partial_sum,
+            stride_pm=col_partial_sum.stride(0),
+            stride_pn=col_partial_sum.stride(1),
+            ColOffs=col_offs,
+            grid_size=compute_grid[0],
             TOKS_PER_ROW=toks_per_row,
             BLOCK_PER_TOK=PARTIAL_BLOCK_M,
             BLOCK_SIZE_PADDED=block_size_padded,
@@ -349,6 +440,150 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
                 BLOCK_SIZE_PADDED,
             )
 
+    class _CombinedRoutingComputePow2Kernel(
+        VllmTritonJitKernel["_CombinedRoutingComputePow2Kernel.CompileKey"]
+    ):
+        hist_block_m = 32
+        metadata_block = 512
+
+        @dataclass(frozen=True)
+        class CompileKey:
+            n_tokens: int
+            stride_pm: int
+            stride_pn: int
+            block_m: int
+            n_expts_act: int
+            gate_dtype: torch.dtype
+            tile_starts_stridem: int
+            tile_info_stridem: int
+            first_tile_dim_log2: int
+            sizes: int
+            block: int
+            blocks2a: int
+            block_size_padded: int
+
+        kernel = staticmethod(_combined_routing_compute_pow2)
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            num_tokens: int,
+            num_experts: int,
+            topk: int,
+            gate_dtype: torch.dtype,
+            sizes: int,
+        ) -> CompileKey:
+            n_gates = num_tokens * topk
+            max_n_tiles = (
+                n_gates
+                if n_gates <= num_experts
+                else num_experts - 1 - ((num_experts - n_gates - 1) // 16)
+            )
+            return self.CompileKey(
+                n_tokens=triton_scalar_specialization_rep(num_tokens),
+                stride_pm=triton_scalar_specialization_rep(num_experts),
+                stride_pn=1,
+                block_m=self.hist_block_m,
+                n_expts_act=topk,
+                gate_dtype=gate_dtype,
+                tile_starts_stridem=triton_scalar_specialization_rep(
+                    triton.cdiv(num_experts + 1, self.metadata_block)
+                    * self.metadata_block
+                ),
+                tile_info_stridem=triton_scalar_specialization_rep(
+                    triton.cdiv(max_n_tiles, self.metadata_block)
+                    * self.metadata_block
+                ),
+                first_tile_dim_log2=triton_scalar_specialization_rep(4),
+                sizes=sizes,
+                block=self.metadata_block,
+                blocks2a=triton_scalar_specialization_rep(num_experts * sizes),
+                block_size_padded=triton.next_power_of_2(
+                    self.hist_block_m * topk
+                ),
+            )
+
+        def get_warmup_keys(
+            self, *, max_tokens: int, num_experts: int, topk: int
+        ) -> list[CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                num_tokens=WarmupIntRange(1, max_tokens + 1),
+                num_experts=num_experts,
+                topk=topk,
+                gate_dtype=(torch.float16, torch.bfloat16, torch.float32),
+                sizes=5 if current_platform.is_rocm() else 4,
+            )
+
+        def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+            int_ptr = TritonWarmupTensor(torch.int32)
+            gate_ptr = TritonWarmupTensor(compile_key.gate_dtype)
+            return dict(
+                GatherIndx=int_ptr,
+                ScatterIndx=int_ptr,
+                GateScal=gate_ptr,
+                ExptScal=gate_ptr,
+                ExptIndx=int_ptr,
+                PartialOffs=int_ptr,
+                stride_pm=compile_key.stride_pm,
+                stride_pn=compile_key.stride_pn,
+                TokensStart=int_ptr,
+                n_tokens=compile_key.n_tokens,
+                BLOCK_M=compile_key.block_m,
+                N_EXPTS_ACT=compile_key.n_expts_act,
+                Hist=int_ptr,
+                MDTileStarts=int_ptr,
+                tile_starts_stridem=compile_key.tile_starts_stridem,
+                MDTileInfo=int_ptr,
+                tile_info_stridem=compile_key.tile_info_stridem,
+                first_tile_dim_log2=compile_key.first_tile_dim_log2,
+                SIZES=compile_key.sizes,
+                BLOCK=compile_key.block,
+                blocks2a=compile_key.blocks2a,
+                BLOCK_SIZE_PADDED=compile_key.block_size_padded,
+                grid_size=1,
+            )
+
+        @kernel_launcher
+        def __call__(  # type: ignore[override]
+            self,
+            *,
+            GatherIndx: Any,
+            ScatterIndx: Any,
+            GateScal: Any,
+            ExptScal: Any,
+            ExptIndx: Any,
+            PartialOffs: Any,
+            stride_pm: int,
+            stride_pn: int,
+            TokensStart: Any,
+            n_tokens: Any,
+            BLOCK_M: int,
+            N_EXPTS_ACT: int,
+            Hist: Any,
+            MDTileStarts: Any,
+            tile_starts_stridem: int,
+            MDTileInfo: Any,
+            tile_info_stridem: int,
+            first_tile_dim_log2: int,
+            SIZES: int,
+            BLOCK: int,
+            blocks2a: int,
+            BLOCK_SIZE_PADDED: int,
+            grid_size: int,
+        ) -> LaunchSpec:
+            return (grid_size,), dict(
+                BLOCK_M=BLOCK_M,
+                N_EXPTS_ACT=N_EXPTS_ACT,
+                SIZES=SIZES,
+                BLOCK=BLOCK,
+                BLOCK_SIZE_PADDED=BLOCK_SIZE_PADDED,
+            )
+
+    global _COMBINED_ROUTING_COMPUTE_POW2_KERNEL
+    _COMBINED_ROUTING_COMPUTE_POW2_KERNEL = (
+        _CombinedRoutingComputePow2Kernel()
+    )
+
     def _sort_tokens_pow2(expt_scal, expt_indx, n_expts_tot, bitmatrix):
         import torch
 
@@ -413,29 +648,31 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
         )
 
         indx_offs = partial_hist
-        _combined_routing_compute_pow2[(blocks2a + blocks2b,)](
-            topk_indx,
-            gate_indx,
-            gate_scal,
-            expt_scal,
-            expt_indx,
-            indx_offs,
-            indx_offs.stride(0),
-            indx_offs.stride(1),
-            expt_offs,
-            n_tokens_raw,
-            HIST_BLOCK_M,
-            n_expts_act,
-            hist,
-            token_offs_pad,
-            token_offs_pad.stride(0),
-            block_pid_map,
-            block_pid_map.stride(0),
-            block_m_log2_start,
-            block_m_num,
-            HIST2_BLOCK_M,
-            blocks2a,
-            block_size_padded,
+        assert _COMBINED_ROUTING_COMPUTE_POW2_KERNEL is not None
+        _COMBINED_ROUTING_COMPUTE_POW2_KERNEL(
+            GatherIndx=topk_indx,
+            ScatterIndx=gate_indx,
+            GateScal=gate_scal,
+            ExptScal=expt_scal,
+            ExptIndx=expt_indx,
+            PartialOffs=indx_offs,
+            stride_pm=indx_offs.stride(0),
+            stride_pn=indx_offs.stride(1),
+            TokensStart=expt_offs,
+            n_tokens=n_tokens_raw,
+            BLOCK_M=HIST_BLOCK_M,
+            N_EXPTS_ACT=n_expts_act,
+            Hist=hist,
+            MDTileStarts=token_offs_pad,
+            tile_starts_stridem=token_offs_pad.stride(0),
+            MDTileInfo=block_pid_map,
+            tile_info_stridem=block_pid_map.stride(0),
+            first_tile_dim_log2=block_m_log2_start,
+            SIZES=block_m_num,
+            BLOCK=HIST2_BLOCK_M,
+            blocks2a=blocks2a,
+            BLOCK_SIZE_PADDED=block_size_padded,
+            grid_size=blocks2a + blocks2b,
         )
         return (
             hist,
@@ -500,6 +737,20 @@ if has_triton_kernels():
             "Failed to import Triton kernels. Please make sure your triton "
             "version is compatible. Error: %s",
             e,
+        )
+
+
+def _register_pow2_routing_warmup(moe_config: FusedMoEConfig) -> None:
+    kernel = (
+        _COMBINED_ROUTING_COMPUTE_POW2_KERNEL
+        if use_legacy_triton_kernels
+        else _STAGE2_POW2_KERNEL
+    )
+    if kernel is not None:
+        kernel.register_warmup(
+            max_tokens=moe_config.max_num_tokens,
+            num_experts=moe_config.num_local_experts,
+            topk=moe_config.experts_per_token,
         )
 
 
@@ -1080,6 +1331,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
             num_local_experts=moe_config.num_local_experts,
             topk=moe_config.experts_per_token,
         )
+        _register_pow2_routing_warmup(moe_config)
         if moe_config.num_local_experts < moe_config.num_experts:
             _REMAP_TOPK_TO_LOCAL_KERNEL.register_warmup(
                 max_tokens=moe_config.max_num_tokens,
@@ -1535,6 +1787,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
                 num_local_experts=moe_config.num_local_experts,
                 topk=moe_config.experts_per_token,
             )
+        _register_pow2_routing_warmup(moe_config)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
