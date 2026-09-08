@@ -31,6 +31,7 @@ if current_platform.is_cuda_alike():
 
         @dataclass(frozen=True)
         class CompileKey:
+            output_dtype: torch.dtype
             has_num_unpadded: bool
             num_logical_experts: int
             map_slots: int
@@ -120,12 +121,14 @@ if current_platform.is_cuda_alike():
             self,
             *,
             has_num_unpadded: bool,
+            output_dtype: torch.dtype,
             num_logical_experts: int,
             map_slots: int,
             out_size: int,
             num_active_experts: int,
         ) -> CompileKey:
             return self.CompileKey(
+                output_dtype=output_dtype,
                 has_num_unpadded=has_num_unpadded,
                 num_logical_experts=triton_scalar_specialization_rep(
                     num_logical_experts
@@ -147,6 +150,7 @@ if current_platform.is_cuda_alike():
                 return []
             return self._trace_dispatch(self.dispatch)(
                 has_num_unpadded=(False, True),
+                output_dtype=(torch.int32, torch.int64),
                 num_logical_experts=num_logical_experts,
                 map_slots=1024,
                 out_size=num_logical_experts + num_redundant_experts,
@@ -159,7 +163,7 @@ if current_platform.is_cuda_alike():
                 topk_ids=int32_ptr,
                 logical_replica_count=TritonWarmupTensor(torch.int64),
                 logical_to_physical_map=TritonWarmupTensor(torch.int64),
-                out=int32_ptr,
+                out=TritonWarmupTensor(compile_key.output_dtype),
                 expert_load_view=int32_ptr,
                 record_enabled=TritonWarmupTensor(torch.bool),
                 num_unpadded_tokens=(

@@ -977,11 +977,14 @@ class DeepseekV4MoE(nn.Module):
                 _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
                 _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
-                if vllm_config.kernel_config.moe_backend == "emulation":
-                    from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
-                        _FUSED_MOE_NVFP4_EMULATION_KERNEL,
-                    )
+                from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
+                    Nvfp4QuantizationEmulationTritonExperts,
+                    _FUSED_MOE_NVFP4_EMULATION_KERNEL,
+                )
 
+                if isinstance(experts_cls, type) and issubclass(
+                    experts_cls, Nvfp4QuantizationEmulationTritonExperts
+                ):
                     _FUSED_MOE_NVFP4_EMULATION_KERNEL.register_warmup()
 
                 if vllm_config.lora_config is not None:

@@ -396,9 +396,6 @@ class FusedMoeNvfp4EmulationKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "emulation":
-            return []
-
         hidden_size = vllm_config.model_config.hf_config.hidden_size
         intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
         num_experts = vllm_config.model_config.hf_config.n_routed_experts

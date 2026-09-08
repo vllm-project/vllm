@@ -233,7 +233,7 @@ class PrepareMegaMoeInputsKernel(
         return dict(
             hidden_states=TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size)),
             topk_weights=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
-            topk_ids=TritonWarmupTensor(torch.int32, shape=(1, top_k)),
+            topk_ids=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
             x_fp8=TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, hidden_size)),
             x_sf=TritonWarmupTensor(torch.int32, shape=(1, x_scale_width)),
             topk_idx_out=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
