@@ -38,27 +38,6 @@ class MergedColumnParallelFuser(StackedFuser):
     def shards(self) -> list[tuple[str, ShardId]]:
         return [(name, index) for index, name in enumerate(self.linear_names)]
 
-    @classmethod
-    def sibling_groups(cls, graph: fx.Graph, module: nn.Module) -> list[list[fx.Node]]:
-        """Groups of sibling linears reading the same input, each fusable.
-
-        A group whose members are not distinct direct children is dropped: the
-        source rewrite addresses each projection as `self.<name>` exactly once.
-        """
-        if hasattr(module, cls.merged_name):
-            return []
-        by_input: dict[fx.Node, list[fx.Node]] = {}
-        for node in graph.nodes:
-            if (
-                is_linear(node, module)
-                and len(node.args) == 1
-                and not node.kwargs
-                and isinstance(node.args[0], fx.Node)
-            ):
-                by_input.setdefault(node.args[0], []).append(node)
-        groups = [nodes for nodes in by_input.values() if len(nodes) >= 2]
-        return [group for group in groups if cls._names(group) is not None]
-
     @staticmethod
     def _names(group: list[fx.Node]) -> tuple[str, ...] | None:
         names = tuple(str(node.target) for node in group)
@@ -71,7 +50,30 @@ class MergedColumnParallelFuser(StackedFuser):
         cls, graph: fx.Graph, module: nn.Module
     ) -> "MergedColumnParallelFuser | None":
         """Fuse the module's sibling linears when there is only one such group."""
-        groups = cls.sibling_groups(graph, module)
+        by_input: dict[fx.Node, list[fx.Node]] = {}
+        for node in graph.nodes:
+            if (
+                is_linear(node, module)
+                and len(node.args) == 1
+                and not node.kwargs
+                and isinstance(node.args[0], fx.Node)
+                # Like QKVFuser/PackedQKVFuser: this fuser has no head or
+                # TP-replication awareness, so it must not absorb a QKV-shaped
+                # pattern (e.g. behind a norm) a more specific fuser declined.
+                and node.args[0].op == "placeholder"
+            ):
+                by_input.setdefault(node.args[0], []).append(node)
+        groups = [nodes for nodes in by_input.values() if len(nodes) >= 2]
+        # A group whose members are not distinct direct children is dropped:
+        # the source rewrite addresses each projection as `self.<name>` once.
+        groups = [group for group in groups if cls._names(group) is not None]
+        if len(groups) > 1:
+            logger.debug(
+                "%s has %d fusable sibling-linear groups; skipping fusion "
+                "since which one to merge is ambiguous",
+                type(module).__name__,
+                len(groups),
+            )
         if len(groups) != 1:
             return None
         if (names := cls._names(groups[0])) is None:
