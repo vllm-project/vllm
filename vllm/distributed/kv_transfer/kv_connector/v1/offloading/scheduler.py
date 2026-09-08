@@ -104,6 +104,22 @@ class GroupOffloadConfig(NamedTuple):
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
 
+    def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
+        window = self.sliding_window_size_in_chunks
+        if isinstance(self.kv_cache_spec, SlidingWindowSpec):
+            assert window is not None
+            # Lookup rounds the right edge up, but allocation retains the
+            # window ending at the actual hit boundary, possibly one chunk left.
+            right_padding = -num_tokens % self.tokens_per_chunk
+            window = max(
+                window,
+                cdiv(
+                    self.kv_cache_spec.sliding_window - 1 + right_padding,
+                    self.tokens_per_chunk,
+                ),
+            )
+        return window
+
 
 def get_sliding_window_size_in_chunks(
     kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
@@ -657,12 +673,15 @@ class OffloadingConnectorScheduler:
         keys: Sequence[OffloadKey],
         sliding_window_size: int,
         req_context: ReqContext,
+        initial_window_size: int | None = None,
     ) -> int | None:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
+        The first run may need a larger window for a partial rightmost chunk.
         Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
         consecutive_hits = 0
+        required_window = initial_window_size or sliding_window_size
         for idx in range(len(keys) - 1, -1, -1):
             match self.manager.lookup(keys[idx], req_context):
                 case LookupResult.HIT:
@@ -679,10 +698,12 @@ class OffloadingConnectorScheduler:
                     # async lookups.
                     defer_lookup = True
                     consecutive_hits = 0
+                    required_window = sliding_window_size
                 case LookupResult.MISS:
                     consecutive_hits = 0
-            if consecutive_hits == sliding_window_size:
-                return idx + sliding_window_size if not defer_lookup else None
+                    required_window = sliding_window_size
+            if consecutive_hits == required_window:
+                return idx + required_window if not defer_lookup else None
         return consecutive_hits if not defer_lookup else None
 
     def _touch(self, req_status: RequestOffloadState):
@@ -810,10 +831,19 @@ class OffloadingConnectorScheduler:
                     required_window = sliding_window_size_in_chunks
                     if is_eagle_unverified:
                         required_window += 1
+                    candidate_end = min(
+                        max_hit_size_tokens,
+                        (num_chunks - int(is_eagle_unverified)) * tokens_per_chunk,
+                    )
+                    initial_window = group_config.load_window_size_in_chunks(
+                        candidate_end
+                    )
+                    assert initial_window is not None
                     num_hit_chunks = self._sliding_window_lookup(
                         offload_keys,
                         required_window,
                         req_status.req_context,
+                        initial_window + int(is_eagle_unverified),
                     )
                 if num_hit_chunks == 0:
                     return 0
@@ -864,8 +894,8 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 tokens_per_chunk = group_config.tokens_per_chunk
-                sliding_window_size_in_chunks = (
-                    group_config.sliding_window_size_in_chunks
+                sliding_window_size_in_chunks = group_config.load_window_size_in_chunks(
+                    num_computed_tokens + num_hit_tokens
                 )
                 offload_keys = group_state.offload_keys
                 num_chunks = cdiv(
