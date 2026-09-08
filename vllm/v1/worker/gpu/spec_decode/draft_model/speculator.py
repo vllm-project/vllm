@@ -9,9 +9,10 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, record_kv_cache_layout
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -86,6 +87,11 @@ class StandaloneDraftModelSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
+        # The engine resolves the target layout after the draft config is copied.
+        record_kv_cache_layout(
+            self.draft_vllm_config.cache_config,
+            self.vllm_config.cache_config.get_resolved_kv_cache_layout().name,
+        )
         super().set_attn(
             model_state,
             kv_cache_config,
@@ -106,6 +112,27 @@ class StandaloneDraftModelSpeculator(AutoRegressiveSpeculator):
         self.model_state = DefaultModelState(
             self.draft_vllm_config, self.model, None, self.device
         )
+
+    def get_prefill_cudagraph_mode(
+        self, cudagraph_mode: CUDAGraphMode
+    ) -> CUDAGraphMode:
+        if not cudagraph_mode.has_full_cudagraphs():
+            return cudagraph_mode
+        query_len = self.num_speculative_steps + 1 + self.prefill_seq_len_offset
+        for groups in self.attn_groups:
+            for group in groups:
+                if group.backend.get_name() != "FLASHINFER":
+                    continue
+                threshold = group.get_metadata_builder().reorder_batch_threshold
+                if threshold is not None and query_len > threshold:
+                    # FlashInfer's uniform graph support covers its decode path,
+                    # but the extra standalone row routes this batch to prefill.
+                    return (
+                        CUDAGraphMode.PIECEWISE
+                        if cudagraph_mode.has_piecewise_cudagraphs()
+                        else CUDAGraphMode.NONE
+                    )
+        return cudagraph_mode
 
     def prepare_inputs(
         self,

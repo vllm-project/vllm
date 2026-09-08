@@ -9,6 +9,7 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
+from vllm.config.cache import CacheConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models import supports_multimodal_embeddings
@@ -22,6 +23,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -31,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
     prepare_decode_inputs,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_model import speculator as draft_spec_module
 from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
     StandaloneDraftModelSpeculator,
     prepare_draft_model_prefill_inputs,
@@ -202,6 +205,107 @@ def test_standalone_constructor_expands_only_the_draft_scheduler(tmp_path):
         draft_compilation.static_forward_context
         is target_compilation.static_forward_context
     )
+
+
+def test_standalone_receives_resolved_layout_before_building_attention(monkeypatch):
+    """A layer's existing draft config reference sees the engine's final layout."""
+    target_cache = CacheConfig()
+    draft_cache = CacheConfig(cache_dtype="bfloat16")
+    speculator = object.__new__(StandaloneDraftModelSpeculator)
+    speculator.vllm_config = SimpleNamespace(cache_config=target_cache)
+    speculator.draft_vllm_config = SimpleNamespace(cache_config=draft_cache)
+    speculator.device = torch.device("cpu")
+    speculator.max_num_tokens = 4
+    speculator.model = object()
+    block_tables = SimpleNamespace(num_kv_cache_groups=1)
+    # Resolve after the separate draft config and layer reference already exist.
+    record_kv_cache_layout(target_cache, "LBNHC")
+
+    def build_attention(self, *args):
+        assert self.draft_vllm_config.cache_config is draft_cache
+        assert draft_cache.get_resolved_kv_cache_layout().name == "LBNHC"
+
+    monkeypatch.setattr(AutoRegressiveSpeculator, "set_attn", build_attention)
+    monkeypatch.setattr(draft_spec_module, "DefaultModelState", lambda *args: None)
+    speculator.set_attn(None, None, block_tables, None, [])
+    speculator.set_attn(None, None, block_tables, None, [])
+    assert draft_cache.cache_dtype == "bfloat16"
+    assert (
+        target_cache.get_resolved_kv_cache_layout()
+        == draft_cache.get_resolved_kv_cache_layout()
+    )
+
+
+@pytest.mark.parametrize(
+    ("speculator_cls", "backend", "threshold", "mode", "prefill_mode"),
+    [
+        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "FULL_DECODE_ONLY", "NONE"),
+        (
+            StandaloneDraftModelSpeculator,
+            "FLASHINFER",
+            4,
+            "FULL_AND_PIECEWISE",
+            "PIECEWISE",
+        ),
+        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "FULL", "NONE"),
+        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "PIECEWISE", "PIECEWISE"),
+        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "NONE", "NONE"),
+        (
+            StandaloneDraftModelSpeculator,
+            "FLASHINFER",
+            5,
+            "FULL_DECODE_ONLY",
+            "FULL_DECODE_ONLY",
+        ),
+        (
+            StandaloneDraftModelSpeculator,
+            "FLASH_ATTN",
+            1,
+            "FULL_DECODE_ONLY",
+            "FULL_DECODE_ONLY",
+        ),
+        (_TestSpeculator, "FLASHINFER", 4, "FULL_DECODE_ONLY", "FULL_DECODE_ONLY"),
+    ],
+)
+def test_prefill_graph_respects_backend_query_width(
+    monkeypatch, speculator_cls, backend, threshold, mode, prefill_mode
+):
+    """Only the unsupported prefill FULL path falls back; q1 graphs survive."""
+    speculator = object.__new__(speculator_cls)
+    speculator.num_speculative_steps = 3
+    speculator.device = torch.device("cpu")
+    speculator.vllm_config = object()
+    builder = SimpleNamespace(reorder_batch_threshold=threshold)
+    other_group = SimpleNamespace(
+        backend=SimpleNamespace(get_name=lambda: "FLASH_ATTN"),
+        get_metadata_builder=lambda: SimpleNamespace(reorder_batch_threshold=1),
+    )
+    speculator.attn_groups = [
+        [other_group],
+        [
+            SimpleNamespace(
+                backend=SimpleNamespace(get_name=lambda: backend),
+                get_metadata_builder=lambda: builder,
+            )
+        ],
+    ]
+
+    def manager(config, device, mode, decode_query_len):
+        return SimpleNamespace(mode=mode, query_len=decode_query_len)
+
+    monkeypatch.setattr(spec_module, "SpeculatorCudaGraphManager", manager)
+    original_mode = CUDAGraphMode[mode]
+    speculator.init_cudagraph_manager(original_mode)
+    assert speculator.prefill_cudagraph_manager.mode == CUDAGraphMode[prefill_mode]
+    assert speculator.prefill_cudagraph_manager.query_len == (
+        4 + speculator.prefill_seq_len_offset
+    )
+    assert speculator.decode_cudagraph_manager.mode == (
+        CUDAGraphMode.FULL_DECODE_ONLY
+        if original_mode.decode_mode() == CUDAGraphMode.FULL
+        else CUDAGraphMode.NONE
+    )
+    assert speculator.decode_cudagraph_manager.query_len == 1
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):

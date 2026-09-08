@@ -178,12 +178,17 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 ", ".join(unsupported_backends),
             )
 
+    def get_prefill_cudagraph_mode(
+        self, cudagraph_mode: CUDAGraphMode
+    ) -> CUDAGraphMode:
+        return cudagraph_mode
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            self.get_prefill_cudagraph_mode(cudagraph_mode),
             self.num_speculative_steps + 1 + self.prefill_seq_len_offset,
         )
 
