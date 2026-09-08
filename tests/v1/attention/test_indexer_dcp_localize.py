@@ -21,7 +21,9 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 
-def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_scale):
+def _sparse_dcp_parity_case(
+    config, rank, world, next_n, seed, q_scale, k_scale, backend
+):
     from vllm import _custom_ops as ops
     from vllm.distributed import get_dcp_group
     from vllm.forward_context import set_forward_context
@@ -29,11 +31,19 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
     from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
         FlashInferMLASparseImpl,
     )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseImpl,
+        FlashMLASparseMetadata,
+    )
     from vllm.v1.attention.backends.mla.indexer import (
         DeepSeekV32IndexerDecodeMetadata,
         DeepseekV32IndexerMetadata,
     )
     from vllm.v1.attention.ops.dcp import MLADCPManager
+    from vllm.v1.attention.ops.flashmla import get_mla_metadata
+
+    is_flashmla = backend == "flashmla"
+    impl_cls = FlashMLASparseImpl if is_flashmla else FlashInferMLASparseImpl
 
     device = torch.device(f"cuda:{rank}")
     torch.manual_seed(seed)
@@ -66,6 +76,11 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
     kv = torch.randn(
         batch, capacity, kv_rank + rope_dim, device=device, dtype=torch.bfloat16
     )
+    if is_flashmla:
+        # DS-MLA has per-tile cache scales and BF16 queries, rather than
+        # FlashInfer's per-layer FP8 scales. Exercise two input magnitudes.
+        q = (q * q_scale).to(q.dtype)
+        kv = (kv * k_scale).to(kv.dtype)
     input_hashes = {
         name: hashlib.sha256(
             tensor.view(torch.uint8).cpu().numpy().tobytes()
@@ -78,10 +93,13 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
             ("mla_kv", kv),
         )
     }
-    q_fp8, _ = ops.scaled_fp8_quant(
-        q.flatten(1), torch.tensor(q_scale, device=device, dtype=torch.float32)
-    )
-    q_fp8 = q_fp8.view_as(q)
+    if is_flashmla:
+        q_input = q
+    else:
+        q_input, _ = ops.scaled_fp8_quant(
+            q.flatten(1), torch.tensor(q_scale, device=device, dtype=torch.float32)
+        )
+        q_input = q_input.view_as(q)
     positions = torch.arange(capacity, device=device)
     owned = positions[(positions // interleave) % world == rank]
     local_capacity = owned.numel()
@@ -108,8 +126,8 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
     kv_cache = torch.zeros(
         num_blocks,
         block_size,
-        kv_rank + rope_dim,
-        dtype=torch.float8_e4m3fn,
+        kv_rank + 16 + 2 * rope_dim if is_flashmla else kv_rank + rope_dim,
+        dtype=torch.uint8 if is_flashmla else torch.float8_e4m3fn,
         device=device,
     )
     local_kv = kv[:, owned].reshape(-1, kv_rank + rope_dim)
@@ -118,7 +136,7 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
         local_kv[:, kv_rank:],
         kv_cache,
         slots,
-        "fp8",
+        "fp8_ds_mla" if is_flashmla else "fp8",
         torch.tensor(k_scale, device=device, dtype=torch.float32),
     )
     local_bounds = get_dcp_local_seq_lens(bounds, world, rank, interleave)
@@ -177,19 +195,19 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
             heads // world,
             kv_rank + rope_dim,
             kv_rank,
-            torch.float8_e4m3fn,
+            q_input.dtype,
             torch.bfloat16,
             None,
-            FlashInferMLASparseImpl.lse_base_on_e,
+            impl_cls.lse_base_on_e,
             False,
         )
-        query = manager.query_gather(q_fp8.chunk(world, dim=1)[rank].contiguous())
-        torch.testing.assert_close(query.view(torch.uint8), q_fp8.view(torch.uint8))
+        query = manager.query_gather(q_input.chunk(world, dim=1)[rank].contiguous())
+        torch.testing.assert_close(query.view(torch.uint8), q_input.view(torch.uint8))
     else:
-        query = q_fp8
+        query = q_input
 
     # Set up the kernel-facing layer, with no projection weights or model load.
-    impl = object.__new__(FlashInferMLASparseImpl)
+    impl = object.__new__(impl_cls)
     impl.scale = (192 + rope_dim) ** -0.5
     impl.qk_nope_head_dim, impl.kv_lora_rank = 192, kv_rank
     impl.qk_rope_head_dim, impl.kv_cache_dtype = rope_dim, "fp8"
@@ -205,6 +223,24 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
         block_size=block_size,
         cp_kv_cache_interleave_size=interleave,
     )
+    if is_flashmla:
+        impl.kv_cache_dtype = "fp8_ds_mla"
+        impl.softmax_scale, impl.num_heads = impl.scale, heads // world
+        impl.fp8_decode_padded_heads = 64
+        scheduler, _ = get_mla_metadata(
+            cache_seqlens=torch.full((1,), topk, device=device, dtype=torch.int32),
+            num_q_tokens_per_head_k=tokens * heads,
+            topk=topk,
+            num_heads_q=heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+        attn_metadata.fp8_use_mixed_batch = True
+        attn_metadata.fp8_extra_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=scheduler,
+            cache_lens=torch.full((1,), capacity, device=device, dtype=torch.int32),
+            dummy_block_table=torch.empty((1, 1), device=device, dtype=torch.int32),
+        )
     partial, lse = impl.forward_mqa(
         query,
         kv_cache,
@@ -234,29 +270,74 @@ def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_sc
         "lse": lse_natural.cpu(),
         "indices": indices.cpu(),
         "causal_bounds": bounds.cpu(),
-        "query_fp8": q_fp8.view(torch.uint8).cpu(),
+        "query_bytes": q_input.view(torch.uint8).cpu(),
     }
     if world == 1:
         # Independent FP32 SDPA on the very same quantized Q/K/V catches a
         # common error on both paths, especially a missing FP8 scale.
-        canonical_kv = (
-            kv_cache.view(-1, kv_rank + rope_dim)
-            .float()[slots]
-            .reshape(batch, capacity, kv_rank + rope_dim)
-            * k_scale
-        )
+        if is_flashmla:
+            raw = kv_cache.view(-1, kv_cache.shape[-1])[slots].contiguous()
+            latent = raw[:, :kv_rank].contiguous().view(torch.float8_e4m3fn)
+            scales = raw[:, kv_rank : kv_rank + 16].contiguous().view(torch.float32)
+            # SM100 FlashMLA truncates tile scales to E8M0 before dequantizing.
+            scales = torch.exp2(scales.log2().floor())
+            latent = (latent.float().view(-1, 4, 128) * scales[..., None]).flatten(1)
+            rope = raw[:, kv_rank + 16 :].contiguous().view(torch.bfloat16)
+            canonical_kv = torch.cat((latent, rope.float()), -1).reshape(
+                batch, capacity, kv_rank + rope_dim
+            )
+        else:
+            canonical_kv = (
+                kv_cache.view(-1, kv_rank + rope_dim)
+                .float()[slots]
+                .reshape(batch, capacity, kv_rank + rope_dim)
+                * k_scale
+            )
         reference = torch.empty(tokens, heads, kv_rank, device=device)
         reference_lse = torch.empty(tokens, heads, device=device)
         for row in range(tokens):
             selected = canonical_kv[row // next_n, indices[row, valid[row]].long()]
-            scores = (q_fp8[row].float() * q_scale) @ selected.T * impl.scale
+            query_scale = 1.0 if is_flashmla else q_scale
+            scores = (q_input[row].float() * query_scale) @ selected.T * impl.scale
             reference[row] = scores.softmax(-1) @ selected[:, :kv_rank]
             reference_lse[row] = scores.logsumexp(-1)
         result.update(sdpa=reference.cpu(), sdpa_lse=reference_lse.cpu())
+        if is_flashmla:
+            # TP1's 64 local heads select the separate decode path in production.
+            # Retain mixed-path LSE for diagnostics, but compare its real output.
+            cache_lens = torch.full((batch,), topk, device=device, dtype=torch.int32)
+            scheduler, _ = get_mla_metadata(
+                cache_seqlens=cache_lens,
+                num_q_tokens_per_head_k=next_n * heads,
+                topk=topk,
+                num_heads_q=heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
+            extra_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+            attn_metadata.fp8_use_mixed_batch = False
+            attn_metadata.fp8_extra_metadata = extra_cls(
+                num_decodes=batch,
+                num_decode_tokens=tokens,
+                decode=extra_cls.Decode(
+                    seq_lens=bounds[:, -1],
+                    decode_query_len=next_n,
+                    kernel_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+                        scheduler_metadata=scheduler,
+                        cache_lens=cache_lens,
+                        dummy_block_table=torch.empty(
+                            (batch, 1), device=device, dtype=torch.int32
+                        ),
+                    ),
+                ),
+            )
+            separate_out, _ = impl.forward_mqa(query, kv_cache, attn_metadata, None)
+            torch.testing.assert_close(separate_out, out, rtol=0.065, atol=0.05)
+            result["out"] = separate_out.cpu()
     return result
 
 
-def _flashinfer_dcp_parity_worker(rank, world, directory):
+def _mla_dcp_parity_worker(rank, world, directory, backend):
     from datetime import timedelta
 
     from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
@@ -274,7 +355,7 @@ def _flashinfer_dcp_parity_worker(rank, world, directory):
             tensor_parallel_size=world,
             decode_context_parallel_size=world,
             cp_kv_cache_interleave_size=64,
-            dcp_comm_backend="a2a",
+            dcp_comm_backend="a2a" if backend == "flashinfer" else "ag_rs",
         )
     )
     directory = Path(directory)
@@ -290,11 +371,26 @@ def _flashinfer_dcp_parity_worker(rank, world, directory):
             )
             initialize_model_parallel(world, decode_context_model_parallel_size=world)
             init_workspace_manager(torch.device(f"cuda:{rank}"))
+            if backend == "trtllm_ragged":
+                from tests.v1.attention.test_mla_backends import (
+                    _trtllm_ragged_dcp_parity_case,
+                )
+
+                for seed in (0, 42):
+                    for query_len in (4, 65):
+                        for k_scale in (1.0, 0.25):
+                            result = _trtllm_ragged_dcp_parity_case(
+                                config, rank, world, query_len, seed, k_scale
+                            )
+                            if rank == 0:
+                                name = f"s{seed}-n{query_len}-k{k_scale}"
+                                torch.save(result, directory / f"tp{world}-{name}.pt")
+                return
             for seed in (0, 42):
                 for next_n in (1, 4):
                     for q_scale, k_scale in ((1.0, 1.0), (0.5, 0.25)):
-                        result = _flashinfer_dcp_parity_case(
-                            config, rank, world, next_n, seed, q_scale, k_scale
+                        result = _sparse_dcp_parity_case(
+                            config, rank, world, next_n, seed, q_scale, k_scale, backend
                         )
                         if rank == 0:
                             name = f"s{seed}-n{next_n}-q{q_scale}-k{k_scale}"
@@ -313,21 +409,23 @@ def _flashinfer_dcp_parity_worker(rank, world, directory):
     or not current_platform.is_device_capability_family(100),
     reason="FlashInfer TRTLLM sparse MLA requires SM100",
 )
-def test_flashinfer_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path):
-    """Real FP8 indexer + FlashInfer + DCP collectives match unsharded TP1.
+@pytest.mark.parametrize("backend", ["flashinfer", "flashmla"])
+def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
+    """Real FP8 indexer + sparse backend + DCP collectives match unsharded TP1.
 
     Requires four SM100 GPUs. No fake logits, selected indices, attention
     kernels, or collectives. Artifacts retain the actual output tensors.
     Output comparisons use the existing sparse-backend FP8 tolerance;
     indices are exact and natural-log LSE is checked at 1e-4.
-    TRTLLM_RAGGED prefill and FLASHMLA_SPARSE are outside this decode test.
+    This kernel-facing test deliberately exercises FlashMLA interleave64/MTP3
+    below its configuration guards; passing does not enable that configuration.
     """
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
     for world in (1, 4):
         torch.multiprocessing.spawn(
-            _flashinfer_dcp_parity_worker,
-            args=(world, str(tmp_path)),
+            _mla_dcp_parity_worker,
+            args=(world, str(tmp_path), backend),
             nprocs=world,
             join=True,
         )
@@ -372,7 +470,7 @@ def test_flashinfer_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path):
             ref_path.with_name(ref_path.name.replace("tp1-", "tp4-")), weights_only=True
         )
         torch.testing.assert_close(
-            candidate["query_fp8"], ref["query_fp8"], rtol=0, atol=0
+            candidate["query_bytes"], ref["query_bytes"], rtol=0, atol=0
         )
         assert candidate["input_hashes"] == ref["input_hashes"]
         torch.testing.assert_close(candidate["causal_bounds"], ref["causal_bounds"])
