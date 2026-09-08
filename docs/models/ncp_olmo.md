@@ -108,8 +108,8 @@ explicit graph-safe contract.
 
 ## Validation before upstream review
 
-Before opening a pull request, replace the unavailable test model entry with a
-public small checkpoint and run:
+The registry test uses the public Stage 2 v1 checkpoint with small dummy-weight
+overrides. Before opening a pull request, run:
 
 - model registry import and dummy-weight initialization
 - full pure-HF checkpoint loading
@@ -119,3 +119,8 @@ public small checkpoint and run:
 - chunked-prefill and preemption/recompute tests
 - GPU confirmation of the selected PagedAttention/FlashAttention backend
 - FlashInfer-sampler parity and mixed-backend parity on a sliding-window model
+
+The architecture and checkpoint contract are based on the Concept OLMo
+reference implementation in `Liu-yuliang/concept_olmo`. The pull request must
+identify any code adapted from that repository and preserve the applicable
+source notices.

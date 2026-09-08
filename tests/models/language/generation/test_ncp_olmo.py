@@ -15,7 +15,11 @@ PROMPTS = [
     "A longer request checks that batching preserves the request-local HLM state. " * 8,
     "Name the capital of France.",
 ]
-MAX_NUM_SEQS = len(PROMPTS)
+MAX_NUM_SEQS = 2
+PRESSURE_PROMPTS = [
+    f"Request {index} checks chunked prefill, preemption, and refill. " * 12
+    for index in range(5)
+]
 
 pytestmark = pytest.mark.skipif(
     not MODEL,
@@ -49,9 +53,7 @@ def _generate_hf_greedy_logprobs(
         )
 
         scores = generated.scores
-        output_ids = (
-            generated.sequences[0, -len(scores) :].tolist() if scores else []
-        )
+        output_ids = generated.sequences[0, -len(scores) :].tolist() if scores else []
         output_logprobs = []
         for score in scores:
             logprobs = torch.log_softmax(score[0].float(), dim=-1)
@@ -155,3 +157,65 @@ def test_batched_matches_sequential(
         name_0="sequential_vllm",
         name_1="batched_vllm",
     )
+
+
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_chunked_prefill_preemption_and_refill_match_sequential(
+    vllm_runner,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    """Preserve request-local HLM state across scheduler pressure."""
+
+    with vllm_runner(
+        MODEL,
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=64,
+        num_gpu_blocks_override=17,
+        disable_log_stats=False,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+    ) as vllm_model:
+        sequential_outputs = [
+            vllm_model.generate_greedy_logprobs(
+                [prompt],
+                max_tokens,
+                num_logprobs,
+            )[0]
+            for prompt in PRESSURE_PROMPTS
+        ]
+        metrics_before = vllm_model.llm.get_metrics()
+        pressured_outputs = vllm_model.generate_greedy_logprobs(
+            PRESSURE_PROMPTS,
+            max_tokens,
+            num_logprobs,
+        )
+        metrics_after = vllm_model.llm.get_metrics()
+
+    check_logprobs_close(
+        outputs_0_lst=sequential_outputs,
+        outputs_1_lst=pressured_outputs,
+        name_0="sequential_vllm",
+        name_1="pressured_vllm",
+    )
+    preemptions_before = next(
+        (
+            metric.value
+            for metric in metrics_before
+            if metric.name == "vllm:num_preemptions"
+        ),
+        0,
+    )
+    preemptions_after = next(
+        (
+            metric.value
+            for metric in metrics_after
+            if metric.name == "vllm:num_preemptions"
+        ),
+        0,
+    )
+    assert preemptions_after > preemptions_before
