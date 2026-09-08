@@ -106,9 +106,9 @@ async def test_ssl_refresher():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server_error", [None, RuntimeError("server failed")])
+@pytest.mark.parametrize("failure_stage", [None, "serve", "signal", "shutdown_task"])
 async def test_serve_http_stops_ssl_refresher_when_server_exits(
-    monkeypatch, server_error
+    monkeypatch, failure_stage
 ):
     config = SimpleNamespace(
         ssl=object(),
@@ -117,10 +117,28 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(
         ssl_ca_certs="ca.pem",
         load=MagicMock(),
     )
+    server_error = RuntimeError("server failed") if failure_stage == "serve" else None
     server = SimpleNamespace(serve=AsyncMock(side_effect=server_error))
     ssl_cert_refresher = MagicMock()
     loop = asyncio.get_running_loop()
-    monkeypatch.setattr(loop, "add_signal_handler", lambda *_args: None)
+
+    def add_signal_handler(*_args):
+        if failure_stage == "signal":
+            raise RuntimeError("signal failed")
+
+    create_task = loop.create_task
+
+    def create_task_or_fail(coro, **kwargs):
+        if (
+            failure_stage == "shutdown_task"
+            and coro.cr_code.co_name == "handle_shutdown"
+        ):
+            coro.close()
+            raise RuntimeError("shutdown_task failed")
+        return create_task(coro, **kwargs)
+
+    monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
+    monkeypatch.setattr(loop, "create_task", create_task_or_fail)
     monkeypatch.setattr(launcher.uvicorn, "Config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(launcher, "NoSignalServer", lambda _config: server)
     monkeypatch.setattr(
@@ -133,12 +151,13 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(
 
     shutdown = None
     try:
-        if server_error is None:
+        if failure_stage is None:
             shutdown = await launcher.serve_http(
                 app, sock=None, enable_ssl_refresh=True, port=8000
             )
         else:
-            with pytest.raises(RuntimeError, match="server failed"):
+            error = "server" if failure_stage == "serve" else failure_stage
+            with pytest.raises(RuntimeError, match=f"{error} failed"):
                 await launcher.serve_http(
                     app, sock=None, enable_ssl_refresh=True, port=8000
                 )
