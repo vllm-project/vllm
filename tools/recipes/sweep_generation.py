@@ -43,7 +43,13 @@ def validate_sweep_workload(workload: WorkloadHints) -> None:
 
 
 def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build a small directed sweep around the single initial suggestion."""
+    """Build a diverse, bounded sweep around the initial suggestion.
+
+    The initial five-point sweep changed only one parameter at a time and
+    skipped the useful middle sequence count.  Eight directed points cover the
+    batch-budget curve at full concurrency plus interactions at 3/4 and 1/2 of
+    the initial scheduler concurrency without paying for a full Cartesian grid.
+    """
     initial_seqs = _positive_int(config, "max-num-seqs")
     initial_batch = _positive_int(config, "max-num-batched-tokens")
 
@@ -58,9 +64,14 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
             minimum_batch = max(minimum_batch, max_model_len)
 
     lower_seqs = max(1, (initial_seqs + 1) // 2)
+    middle_seqs = max(lower_seqs, (3 * initial_seqs + 3) // 4)
     lower_batch = max(
         minimum_batch,
         _strict_lower_power_of_two(initial_batch),
+    )
+    smaller_batch = max(
+        minimum_batch,
+        _strict_lower_power_of_two(lower_batch),
     )
     higher_batch = max(
         minimum_batch,
@@ -90,10 +101,13 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     # Keep the exact initial suggestion as the measured baseline. Additional
     # values exist only in the optional sweep package.
     add("initial", initial_seqs, initial_batch)
-    add("lower_scheduler_concurrency", lower_seqs, initial_batch)
+    add("smaller_batch_budget", initial_seqs, smaller_batch)
     add("lower_batch_budget", initial_seqs, lower_batch)
-    add("latency_focused", lower_seqs, lower_batch)
     add("higher_batch_budget", initial_seqs, higher_batch)
+    add("middle_seqs_lower_batch", middle_seqs, lower_batch)
+    add("middle_seqs_higher_batch", middle_seqs, higher_batch)
+    add("lower_seqs_lower_batch", lower_seqs, lower_batch)
+    add("lower_seqs_higher_batch", lower_seqs, higher_batch)
 
     return candidates
 
@@ -286,9 +300,12 @@ recommended-config.yml
 recommendation.json
 ```
 
-With TTFT/TPOT objectives it selects highest mean request goodput across
-repeated runs. Without latency objectives it selects highest mean output-token
-throughput. Configurations with failed requests are excluded.
+With TTFT/TPOT objectives it requires duration-weighted combined compliance of
+at least 99% plus median P99 TTFT/TPOT compliance, then selects highest mean
+output-token throughput. If no candidate qualifies, it records a best-effort
+candidate but does not write `recommended-config.yml`. Without latency
+objectives it selects highest mean output-token throughput. Configurations with
+failed requests are excluded.
 
 `recommended-config.yml` copies the initial configuration and changes only
 `max-num-seqs` and `max-num-batched-tokens`.

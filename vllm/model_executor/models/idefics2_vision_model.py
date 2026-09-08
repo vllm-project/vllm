@@ -74,28 +74,25 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
-    def forward(
+    def get_position_ids(
         self,
-        pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
         tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
-        batch_size = pixel_values.shape[0]
-        target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        batch_size = patch_attention_mask.shape[0]
+        device = patch_attention_mask.device
         boundaries = torch.arange(
             1 / self.num_patches_per_side,
             1.0,
             1 / self.num_patches_per_side,
-            device=pixel_values.device,
+            device=device,
         )
 
         flat_patch_attention_mask = patch_attention_mask.view(batch_size, -1)
         max_patches = flat_patch_attention_mask.shape[-1]
 
         if tgt_sizes is not None:
-            tgt_sizes = tgt_sizes.to(device=pixel_values.device, non_blocking=True)
+            tgt_sizes = tgt_sizes.to(device=device, non_blocking=True)
             nb_patches_h = tgt_sizes[:, 0]
             nb_patches_w = tgt_sizes[:, 1]
         else:
@@ -104,13 +101,13 @@ class Idefics2VisionEmbeddings(nn.Module):
                 nb_patches_w = patch_attention_mask[:, 0, :].sum(dim=1)
             else:
                 # Fallback for unexpected 2D masks without tgt_sizes
-                nb_patches_h = torch.ones(batch_size, device=pixel_values.device)
+                nb_patches_h = torch.ones(batch_size, device=device)
                 nb_patches_w = patch_attention_mask.sum(dim=1)
 
         nb_h = nb_patches_h.clamp(min=1).unsqueeze(1)
         nb_w = nb_patches_w.clamp(min=1).unsqueeze(1)
 
-        i = torch.arange(max_patches, device=pixel_values.device)
+        i = torch.arange(max_patches, device=device)
 
         if patch_attention_mask.dim() == 3 and patch_attention_mask.shape[1] > 1:
             stride_w = patch_attention_mask.shape[2]  # padded 2D grid width
@@ -130,7 +127,20 @@ class Idefics2VisionEmbeddings(nn.Module):
 
         position_ids = torch.where(flat_patch_attention_mask, pos_ids.to(torch.long), 0)
 
-        position_ids = position_ids.to(self.position_embedding.weight.device)
+        return position_ids.to(self.position_embedding.weight.device)
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
+        tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        if position_ids is None:
+            position_ids = self.get_position_ids(patch_attention_mask, tgt_sizes)
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
@@ -432,6 +442,7 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: torch.BoolTensor | None = None,
         tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -455,6 +466,7 @@ class Idefics2VisionTransformer(nn.Module):
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
             tgt_sizes=tgt_sizes,
+            position_ids=position_ids,
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
