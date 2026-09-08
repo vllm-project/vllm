@@ -493,6 +493,10 @@ impl fmt::Debug for FakeChatBackend {
 }
 
 impl TextBackend for FakeChatBackend {
+    fn classification_label(&self, index: usize) -> Option<&str> {
+        (index == 0).then_some("first-class")
+    }
+
     fn tokenizer(&self) -> DynTokenizer {
         Arc::new(fake_chat_tokenizer())
     }
@@ -686,6 +690,635 @@ async fn test_chat_with_engine_outputs(
 
 async fn test_app() -> axum::Router {
     test_app_with_dev_mode(false).await
+}
+
+fn task_wire_literal(task: PoolingTask) -> String {
+    rmp_serde::from_slice(&rmp_serde::to_vec(&task).expect("encode task")).expect("task literal")
+}
+
+#[derive(Clone, Copy)]
+enum PoolingOutputOrder {
+    Immediate,
+    ReversePairs,
+}
+
+async fn post_pooling_json(
+    app: &mut axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    tokio::time::timeout(Duration::from_secs(15), post_json(app, uri, body))
+        .await
+        .expect("pooling HTTP request timed out")
+}
+
+async fn test_pooling_app_with_outputs(
+    engine_id: &'static str,
+    tasks: Vec<PoolingTask>,
+    outputs: Vec<WireTensor>,
+    order: PoolingOutputOrder,
+    inspect: impl Fn(&EngineCoreRequest) + Send + 'static,
+) -> (axum::Router, MockEngineTask) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.as_bytes().to_vec(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                tokio::time::timeout(Duration::from_secs(10), async move {
+                    // `get_supported_tasks` is discovered once and then cached.
+                    let utility = recv_engine_message(dealer).await;
+                    let utility: EngineCoreUtilityRequest =
+                        rmp_serde::from_slice(&utility[1]).expect("decode utility request");
+                    assert_eq!(utility.method_name, "get_supported_tasks");
+                    send_outputs(
+                        push,
+                        utility_outputs(
+                            utility.call_id.as_u64().expect("numeric call id"),
+                            utility_result_value(
+                                tasks.into_iter().map(task_wire_literal).collect::<Vec<_>>(),
+                            ),
+                        ),
+                    )
+                    .await;
+
+                    let group_size = match order {
+                        PoolingOutputOrder::Immediate => 1,
+                        PoolingOutputOrder::ReversePairs => 2,
+                    };
+                    for start in (0..outputs.len()).step_by(group_size) {
+                        let mut requests = Vec::new();
+                        for _ in start..(start + group_size).min(outputs.len()) {
+                            let add = recv_engine_message(dealer).await;
+                            assert_eq!(add[0].as_ref(), &[0x00]);
+                            let request: EngineCoreRequest =
+                                rmp_serde::from_slice(&add[1]).expect("decode request");
+                            assert!(request.sampling_params.is_none());
+                            inspect(&request);
+                            requests.push(request);
+                        }
+                        // Reverse only a bounded group so larger batches can keep submitting.
+                        for request in requests.into_iter().rev() {
+                            let index: usize = request
+                                .external_req_id
+                                .as_deref()
+                                .expect("external request id")
+                                .rsplit('-')
+                                .next()
+                                .expect("batch index")
+                                .parse()
+                                .expect("numeric batch index");
+                            send_outputs(
+                                push,
+                                RequestBatchOutputs {
+                                    outputs: vec![EngineCoreOutput {
+                                        request_id: request.request_id.clone(),
+                                        pooling_output: Some(outputs[index].clone()),
+                                        finish_reason: Some(EngineCoreFinishReason::Stop),
+                                        ..Default::default()
+                                    }],
+                                    finished_requests: Some(
+                                        [request.request_id].into_iter().collect(),
+                                    ),
+                                    ..Default::default()
+                                }
+                                .into(),
+                            )
+                            .await;
+                        }
+                    }
+                })
+                .await
+                .expect("pooling mock engine timed out");
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_preserves_batch_order_shape_and_usage() {
+    let outputs = vec![
+        WireTensor::from_f32(vec![2, 3], vec![1., 2., 3., 4., 5., 6.]).unwrap(),
+        WireTensor::from_f32(vec![1, 3], vec![7., 8., 9.]).unwrap(),
+    ];
+    let (mut app, engine) = test_pooling_app_with_outputs(
+        "engine-pooling",
+        vec![PoolingTask::TokenEmbed],
+        outputs,
+        PoolingOutputOrder::ReversePairs,
+        |request| {
+            assert_eq!(
+                request.pooling_params.as_ref().unwrap().task,
+                PoolingTask::TokenEmbed
+            )
+        },
+    )
+    .await;
+    let (status, response) = post_pooling_json(
+        &mut app,
+        "/pooling",
+        json!({"input": [[1, 2], [3]], "task": "token_embed", "request_id": "batch"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["data"],
+        json!([
+            {"index": 0, "object": "pooling", "data": [[1., 2., 3.], [4., 5., 6.]]},
+            {"index": 1, "object": "pooling", "data": [[7., 8., 9.]]},
+        ])
+    );
+    assert_eq!(response["usage"]["prompt_tokens"], 3);
+    assert_eq!(response["usage"]["total_tokens"], 3);
+    assert_eq!(response["model"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(response["id"], "pool-batch");
+    engine.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_base64_matches_little_endian_float32() {
+    use base64::Engine as _;
+    let (mut app, engine) = test_pooling_app_with_outputs(
+        "engine-embedding-base64",
+        vec![PoolingTask::Embed],
+        vec![WireTensor::from_f32(vec![8], vec![0.25; 8]).unwrap()],
+        PoolingOutputOrder::Immediate,
+        |_| {},
+    )
+    .await;
+    let (status, response) = post_pooling_json(
+        &mut app,
+        "/pooling",
+        json!({"input": "abc", "encoding_format": "base64"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(response["data"][0]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, [0.25_f32.to_le_bytes(); 8].concat());
+    engine.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_completes_batches_larger_than_encode_concurrency() {
+    let outputs = (0..33)
+        .map(|index| WireTensor::from_f32(vec![1], vec![index as f32]).unwrap())
+        .collect();
+    let (mut app, engine) = test_pooling_app_with_outputs(
+        "engine-pooling-large-batch",
+        vec![PoolingTask::Embed],
+        outputs,
+        PoolingOutputOrder::ReversePairs,
+        |_| {},
+    )
+    .await;
+    let (status, response) =
+        post_pooling_json(&mut app, "/pooling", json!({"input": vec![vec![1]; 33]})).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let expected = (0..33)
+        .map(|index| {
+            json!({
+                "index": index, "object": "pooling", "data": [index as f32],
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(response["data"], json!(expected));
+    engine.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_rejects_invalid_inputs_before_submitting_any_batch_member() {
+    for (uri, body, tasks, error_message) in [
+        (
+            "/pooling",
+            json!({"input": []}),
+            vec!["embed"],
+            "at least one prompt",
+        ),
+        (
+            "/pooling",
+            json!({"input": [[1], []]}),
+            vec!["embed"],
+            "must contain at least one prompt token ID",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "dimensions": 0}),
+            vec!["embed"],
+            "dimensions must be positive",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "model": "missing"}),
+            vec!["embed"],
+            "missing",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "normalize": true}),
+            vec!["embed"],
+            "parameter `normalize` is not supported",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "encoding_format": "invalid"}),
+            vec!["embed"],
+            "unknown variant `invalid`",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "task": "classify"}),
+            vec!["embed"],
+            "model does not support Classify",
+        ),
+        (
+            "/pooling",
+            json!({"input": "x", "truncate_prompt_tokens": -2}),
+            vec!["embed"],
+            "invalid truncate_prompt_tokens=-2",
+        ),
+        (
+            "/classify",
+            json!({"input": "x", "task": "embed"}),
+            vec!["embed", "classify"],
+            "task does not match this endpoint",
+        ),
+        (
+            "/classify",
+            json!({"input": "x", "dimensions": 2}),
+            vec!["classify"],
+            "classify does not accept dimensions or encoded outputs",
+        ),
+        (
+            "/classify",
+            json!({"input": "x", "encoding_format": "base64"}),
+            vec!["classify"],
+            "classify does not accept dimensions or encoded outputs",
+        ),
+        (
+            "/classify",
+            json!({"input": "x"}),
+            vec!["embed"],
+            "model does not support Classify",
+        ),
+    ] {
+        let (mut app, engine) = test_admin_app_with_engine_script(move |dealer, push| {
+            boxed_test_future(async move {
+                tokio::time::timeout(Duration::from_secs(10), async move {
+                    loop {
+                        let message = recv_engine_message(dealer).await;
+                        assert_eq!(
+                            message[0].as_ref(),
+                            &[0x03],
+                            "invalid batch submitted to engine"
+                        );
+                        let utility: EngineCoreUtilityRequest =
+                            rmp_serde::from_slice(&message[1]).expect("utility request");
+                        let result = match utility.method_name.as_str() {
+                            "get_supported_tasks" => utility_result_value(tasks.clone()),
+                            "is_sleeping" => utility_result_value(false),
+                            method => panic!("unexpected utility: {method}"),
+                        };
+                        send_outputs(
+                            push,
+                            utility_outputs(utility.call_id.as_u64().unwrap(), result),
+                        )
+                        .await;
+                        if utility.method_name == "is_sleeping" {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("pooling validation mock timed out");
+            })
+        })
+        .await;
+        let (status, response) = post_pooling_json(&mut app, uri, body.clone()).await;
+        let expected = if body.get("model").is_some() {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(status, expected, "{body}: {response}");
+        assert!(
+            response["error"]["message"].as_str().unwrap().contains(error_message),
+            "{body}: {response}"
+        );
+        // This utility shares the request socket and fences all preceding submissions.
+        let barrier = tokio::time::timeout(
+            Duration::from_secs(15),
+            app.call(Request::builder().uri("/is_sleeping").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("pooling submission barrier timed out")
+        .unwrap();
+        assert_eq!(barrier.status(), StatusCode::OK);
+        engine.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_classification_preserves_labels_batch_order_and_usage() {
+    let outputs = [vec![0.1, 0.9], vec![0.8, 0.2], vec![0.5, 0.5]]
+        .into_iter()
+        .map(|values| WireTensor::from_f32(vec![2], values).unwrap())
+        .collect();
+    let (mut app, engine) = test_pooling_app_with_outputs(
+        "engine-classification-labels",
+        vec![PoolingTask::Classify],
+        outputs,
+        PoolingOutputOrder::ReversePairs,
+        |request| {
+            assert_eq!(
+                request.pooling_params.as_ref().unwrap().task,
+                PoolingTask::Classify
+            )
+        },
+    )
+    .await;
+    let (status, response) = post_pooling_json(
+        &mut app,
+        "/classify",
+        json!({"input": [[1, 2], [3], [4]], "request_id": "batch"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    expect_test::expect![[r#"
+        Array [
+            Object {
+                "index": Number(0),
+                "label": Null,
+                "probs": Array [
+                    Number(0.10000000149011612),
+                    Number(0.8999999761581421),
+                ],
+                "num_classes": Number(2),
+            },
+            Object {
+                "index": Number(1),
+                "label": String("first-class"),
+                "probs": Array [
+                    Number(0.800000011920929),
+                    Number(0.20000000298023224),
+                ],
+                "num_classes": Number(2),
+            },
+            Object {
+                "index": Number(2),
+                "label": String("first-class"),
+                "probs": Array [
+                    Number(0.5),
+                    Number(0.5),
+                ],
+                "num_classes": Number(2),
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&response["data"]);
+    assert_eq!(response["usage"]["prompt_tokens"], 4);
+    assert_eq!(response["usage"]["total_tokens"], 4);
+    assert_eq!(response["model"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(response["id"], "classify-batch");
+    engine.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_selects_default_task_independently_of_engine_task_order() {
+    for (tasks, explicit, expected) in [
+        (
+            vec![
+                PoolingTask::TokenClassify,
+                PoolingTask::TokenEmbed,
+                PoolingTask::Classify,
+                PoolingTask::Embed,
+            ],
+            None,
+            PoolingTask::Embed,
+        ),
+        (
+            vec![PoolingTask::TokenEmbed, PoolingTask::Classify],
+            None,
+            PoolingTask::Classify,
+        ),
+        (
+            vec![PoolingTask::TokenClassify, PoolingTask::TokenEmbed],
+            None,
+            PoolingTask::TokenEmbed,
+        ),
+        (
+            vec![PoolingTask::TokenClassify],
+            None,
+            PoolingTask::TokenClassify,
+        ),
+        (
+            vec![PoolingTask::Embed, PoolingTask::Classify],
+            Some("classify"),
+            PoolingTask::Classify,
+        ),
+    ] {
+        let (mut app, engine) = test_pooling_app_with_outputs(
+            "engine-pooling-tasks",
+            tasks,
+            vec![WireTensor::from_f32(vec![2], vec![0.25, 0.75]).unwrap()],
+            PoolingOutputOrder::Immediate,
+            move |request| assert_eq!(request.pooling_params.as_ref().unwrap().task, expected),
+        )
+        .await;
+        let (status, response) = post_pooling_json(
+            &mut app,
+            "/pooling",
+            json!({"input": [1], "task": explicit}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        engine.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_forwards_options_and_truncates_each_text_prompt() {
+    for side in [None, Some("left")] {
+        let (mut app, engine) = test_pooling_app_with_outputs(
+            "engine-pooling-options",
+            vec![PoolingTask::Embed],
+            vec![WireTensor::from_f32(vec![2], vec![0.25, 0.75]).unwrap(); 2],
+            PoolingOutputOrder::Immediate,
+            move |request| {
+                let expected = match (side, request.external_req_id.as_deref().unwrap()) {
+                    (Some("left"), "pool-header-id-0") => [98, 99],
+                    (Some("left"), "pool-header-id-1") => [121, 122],
+                    (None, "pool-header-id-0") => [FAKE_BOS_TOKEN_ID, 97],
+                    (None, "pool-header-id-1") => [FAKE_BOS_TOKEN_ID, 120],
+                    case => panic!("unexpected truncation case: {case:?}"),
+                };
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some(expected.as_slice())
+                );
+                assert_eq!(request.pooling_params.as_ref().unwrap().dimensions, Some(2));
+                assert_eq!(
+                    request.pooling_params.as_ref().unwrap().use_activation,
+                    Some(false)
+                );
+                assert_eq!(request.priority, 7);
+                assert_eq!(request.cache_salt.as_deref(), Some("tenant"));
+            },
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pooling")
+                    .header("content-type", "application/json")
+                    .header("x-request-id", "header-id")
+                    .body(Body::from(
+                        json!({
+                            "input": ["abc", "xyz"],
+                            "request_id": "body-id",
+                            "dimensions": 2,
+                            "use_activation": false,
+                            "priority": 7,
+                            "cache_salt": "tenant",
+                            "truncate_prompt_tokens": 2,
+                            "truncation_side": side,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["id"], "pool-header-id");
+        assert_eq!(response["usage"]["prompt_tokens"], 4);
+        engine.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_respects_add_special_tokens_without_truncation() {
+    for add_special_tokens in [false, true] {
+        let (mut app, engine) = test_pooling_app_with_outputs(
+            "engine-pooling-special-tokens",
+            vec![PoolingTask::Embed],
+            vec![WireTensor::from_f32(vec![1], vec![0.25]).unwrap()],
+            PoolingOutputOrder::Immediate,
+            move |request| {
+                let mut expected = bytes_to_token_ids(b"abc");
+                if add_special_tokens {
+                    expected.insert(0, FAKE_BOS_TOKEN_ID);
+                }
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some(expected.as_slice())
+                );
+            },
+        )
+        .await;
+        let (status, response) = post_pooling_json(
+            &mut app,
+            "/pooling",
+            json!({
+                "input": "abc", "add_special_tokens": add_special_tokens,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        engine.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pooling_rejects_invalid_engine_outputs() {
+    for (uri, task, shape, values, message) in [
+        (
+            "/pooling",
+            PoolingTask::Embed,
+            vec![1],
+            vec![f32::NAN],
+            "non-finite",
+        ),
+        (
+            "/classify",
+            PoolingTask::Classify,
+            vec![1],
+            vec![f32::INFINITY],
+            "non-finite",
+        ),
+        (
+            "/classify",
+            PoolingTask::Classify,
+            vec![1, 2],
+            vec![0.25, 0.75],
+            "expected a pooling vector",
+        ),
+        (
+            "/classify",
+            PoolingTask::Classify,
+            vec![0],
+            vec![],
+            "no classes",
+        ),
+        (
+            "/pooling",
+            PoolingTask::TokenEmbed,
+            vec![1, 1, 1],
+            vec![0.25],
+            "unsupported pooling tensor shape",
+        ),
+    ] {
+        let (mut app, engine) = test_pooling_app_with_outputs(
+            "engine-pooling-invalid-output",
+            vec![task],
+            vec![WireTensor::from_f32(shape, values).unwrap()],
+            PoolingOutputOrder::Immediate,
+            |_| {},
+        )
+        .await;
+        let (status, response) = post_pooling_json(&mut app, uri, json!({"input": [1]})).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{response}");
+        assert!(
+            response["error"]["message"].as_str().unwrap().contains(message),
+            "{response}"
+        );
+        engine.finish().await;
+    }
 }
 
 fn test_render_app() -> axum::Router {

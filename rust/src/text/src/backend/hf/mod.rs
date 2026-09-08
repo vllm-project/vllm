@@ -129,6 +129,10 @@ fn resolve_eos_token_ids(
 }
 
 impl TextBackend for HfTextBackend {
+    fn classification_label(&self, index: usize) -> Option<&str> {
+        self.model_config.id2label.get(&index).map(String::as_str)
+    }
+
     fn tokenizer(&self) -> DynTokenizer {
         self.tokenizer.clone()
     }

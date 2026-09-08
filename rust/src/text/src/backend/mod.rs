@@ -101,6 +101,11 @@ impl SamplingLimits {
 
 /// Minimal text-processing backend needed by `vllm-text`.
 pub trait TextBackend: Send + Sync {
+    /// Resolve a class index through the model's optional label mapping.
+    fn classification_label(&self, _index: usize) -> Option<&str> {
+        None
+    }
+
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
 
