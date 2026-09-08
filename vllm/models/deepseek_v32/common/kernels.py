@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -597,6 +598,7 @@ class FusedNormRopeKernel(VllmTritonJitKernel["FusedNormRopeKernel.CompileKey"])
             ),
             mla_block_stride=k.kv_dim if k.slot_mapping_present else 0,
             mla_entry_stride=k.kv_dim if k.slot_mapping_present else 0,
+            mla_block_size=k.block_size,
             mla_cache_fp8=k.mla_cache_fp8,
             mla_k_scale=fp32,
             mla_ds_scale_view=fp32,
@@ -642,6 +644,7 @@ class FusedNormRopeKernel(VllmTritonJitKernel["FusedNormRopeKernel.CompileKey"])
         mla_kv_cache: torch.Tensor,
         mla_block_stride: int,
         mla_entry_stride: int,
+        mla_block_size: int,
         mla_cache_fp8: bool,
         mla_k_scale: torch.Tensor,
         mla_ds_scale_view: torch.Tensor,
@@ -706,6 +709,7 @@ class FusedNormRopeKernel(VllmTritonJitKernel["FusedNormRopeKernel.CompileKey"])
             mla_cache_ptr=mla_kv_cache,
             mla_cache_block_stride=mla_block_stride,
             mla_cache_entry_stride=mla_entry_stride,
+            MLA_CACHE_BLOCK_SIZE=mla_block_size,
             MLA_CACHE_FP8=mla_cache_fp8,
             mla_cache_scale_ptr=mla_k_scale,
             mla_cache_ds_scale_ptr=mla_ds_scale_view,
@@ -836,32 +840,36 @@ def fused_norm_rope(
         assert index_k_out.shape == index_k.shape
     use_pdl = current_platform.is_arch_support_pdl()
     mla_tile_dim = kv_dim // mla_num_tiles if mla_cache_ds_mla else 1
-    # The kernel-owner reproduces this exact launch (strides read from the
-    # tensors inside __call__); prep above stays in the wrapper.
     _FUSED_NORM_ROPE_KERNEL(
         positions,
+        # Q RMS norm
         q_c,
         q_rms_norm_w,
         q_rms_eps,
         q_c_out,
+        # KV RMS norm
         kv_c,
         kv_rms_norm_w,
         kv_rms_eps,
         kv_c_out,
+        # KV RoPE
         k_pe,
         k_rope_cos_sin_cache,
         k_pe_out,
+        # Index K layer norm + RoPE + FP8 quant
         index_k,
         index_k_layer_norm_w,
         index_k_layer_norm_bias,
         index_k_layer_norm_eps,
         index_k_rope_cos_sin_cache,
         index_k_out,
+        # Cache params
         slot_mapping,
         indexer_k_cache,
         idx_cache_scale_view,
         idx_cache_block_size,
         idx_cache_stride,
+        # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
         mla_block_stride,
         mla_entry_stride,
@@ -873,6 +881,7 @@ def fused_norm_rope(
         mla_cache_ds_mla,
         mla_num_tiles,
         mla_tile_dim,
+        # Top k indices buffer
         topk_indices_buffer,
         has_indexer,
         index_rope_interleave,
@@ -1322,7 +1331,7 @@ class FusedQTritonKernel(VllmTritonJitKernel["FusedQTritonKernel.CompileKey"]):
             launch_pdl=use_pdl,
             # num_warps=1 is optimal here: each program is a single 128-element
             # rope+quant, so the kernel is program-count/occupancy bound, not
-            # per-program compute bound (swept 1/2/4/8 — 1 wins or ties).
+            # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
             num_warps=self.num_warps,
         )
 

@@ -5,9 +5,16 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fused_embed_norm import (
+    _FUSED_EMBED_EH_NORM_KERNEL,
+    fused_embed_eh_norm,
+    has_full_vocab_on_rank,
+    make_input_embedding,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -37,19 +44,12 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-
-from vllm.model_executor.layers.fused_embed_norm import (
-    _FUSED_EMBED_EH_NORM_KERNEL,
-    fused_embed_eh_norm,
-    has_full_vocab_on_rank,
-    make_input_embedding,
-)
 from vllm.models.deepseek_v32.common.kernels import (
     _FUSED_EH_NORM_KERNEL,
     fused_eh_norm,
 )
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import (
     build_glm52_plan,

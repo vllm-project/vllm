@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group

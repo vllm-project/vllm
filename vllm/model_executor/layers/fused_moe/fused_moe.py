@@ -38,6 +38,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -69,7 +70,7 @@ def write_zeros_to_output(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit(do_not_specialize=["EM", "num_valid_tokens"])
+@triton.jit
 def fused_moe_kernel_gptq_awq(
     # Pointers to matrices
     a_ptr,
@@ -632,6 +633,8 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
         input_variant: TritonPointerInputVariant
         n: int
         k: int
+        em: int
+        num_valid_tokens: int
         stride_am: int
         stride_ak: int
         stride_be: int
@@ -691,6 +694,7 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
         self,
         *,
         num_tokens: int,
+        em: int,
         second_gemm: bool,
         layer: Any,
         experts: Any,
@@ -701,9 +705,7 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
         weight = layer.w2_weight if second_gemm else layer.w13_weight
         scale = experts.w2_scale if second_gemm else experts.w1_scale
         zero_point = (
-            experts.quant_config.w2_zp
-            if second_gemm
-            else experts.quant_config.w1_zp
+            experts.quant_config.w2_zp if second_gemm else experts.quant_config.w1_zp
         )
         input_size = weight.size(2) * pack_factor
         group_size = experts.block_shape[1]
@@ -751,19 +753,27 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
             input_variant=input_variant,
             n=weight.size(1),
             k=input_size,
-            stride_am=input_size,
+            em=triton_scalar_specialization_rep(em),
+            num_valid_tokens=triton_scalar_specialization_rep(num_tokens * top_k),
+            stride_am=triton_scalar_specialization_rep(input_size),
             stride_ak=1,
-            stride_be=weight.stride(0),
-            stride_bk=weight.stride(2),
-            stride_bn=weight.stride(1),
-            stride_cm=weight.size(1),
+            stride_be=triton_scalar_specialization_rep(weight.stride(0)),
+            stride_bk=triton_scalar_specialization_rep(weight.stride(2)),
+            stride_bn=triton_scalar_specialization_rep(weight.stride(1)),
+            stride_cm=triton_scalar_specialization_rep(weight.size(1)),
             stride_cn=1,
-            stride_bse=scale.stride(0),
-            stride_bsk=scale.stride(2),
-            stride_bsn=scale.stride(1),
-            stride_bze=zero_point.stride(0) if zero_point is not None else 0,
-            stride_bzk=zero_point.stride(2) if zero_point is not None else 0,
-            stride_bzn=zero_point.stride(1) if zero_point is not None else 0,
+            stride_bse=triton_scalar_specialization_rep(scale.stride(0)),
+            stride_bsk=triton_scalar_specialization_rep(scale.stride(2)),
+            stride_bsn=triton_scalar_specialization_rep(scale.stride(1)),
+            stride_bze=triton_scalar_specialization_rep(zero_point.stride(0))
+            if zero_point is not None
+            else 0,
+            stride_bzk=triton_scalar_specialization_rep(zero_point.stride(2))
+            if zero_point is not None
+            else 0,
+            stride_bzn=triton_scalar_specialization_rep(zero_point.stride(1))
+            if zero_point is not None
+            else 0,
             block_k_diviable=input_size % config["BLOCK_SIZE_K"] == 0,
             group_size=group_size,
             block_size_m=config["BLOCK_SIZE_M"],
@@ -771,8 +781,7 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
             block_size_k=config["BLOCK_SIZE_K"],
             group_size_m=config["GROUP_SIZE_M"],
             split_k=config["SPLIT_K"],
-            mul_routed_weight=second_gemm
-            and not layer.apply_router_weight_on_input,
+            mul_routed_weight=second_gemm and not layer.apply_router_weight_on_input,
             top_k=1 if second_gemm else top_k,
             compute_type=compute_type,
             has_zp=zero_point is not None,
@@ -790,6 +799,7 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
     ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, layer.moe_config.max_num_tokens + 1),
+            em=(1, 2, 16),
             second_gemm=(False, True),
             layer=layer,
             experts=experts,
@@ -854,8 +864,8 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
             num_tokens_post_padded=variant.pointer(
                 "num_tokens_post_padded", torch.int32
             ),
-            EM=1,
-            num_valid_tokens=1,
+            EM=compile_key.em,
+            num_valid_tokens=compile_key.num_valid_tokens,
             config=dict(
                 BLOCK_SIZE_M=compile_key.block_size_m,
                 BLOCK_SIZE_N=compile_key.block_size_n,
@@ -936,9 +946,6 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
             num_warps=config.get("num_warps", 4),
             num_stages=config.get("num_stages", 3),
         )
-
-
-_WNA16_TRITON_KERNEL = Wna16TritonKernel()
 
 
 # NOTE(zyongye): we can remove all the wna16 kernel
@@ -2167,3 +2174,6 @@ def fused_experts_impl(
     )
 
     return out_hidden_states
+
+
+_WNA16_TRITON_KERNEL = Wna16TritonKernel()
