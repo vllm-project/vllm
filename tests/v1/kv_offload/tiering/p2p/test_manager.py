@@ -254,9 +254,9 @@ class TestLookup:
     "kv_params,expected",
     [
         (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
-        (None, OffloadPolicy.BLOCK_LEVEL),
-        (_remote_prefiller_kv_params(), OffloadPolicy.BLOCK_LEVEL),
-        ({"remote_decoder": {}}, OffloadPolicy.BLOCK_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
     ],
     ids=["producer", "plain", "consumer", "producer_no_id"],
 )

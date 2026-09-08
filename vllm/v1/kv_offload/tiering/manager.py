@@ -760,7 +760,7 @@ class TieringOffloadingManager(OffloadingManager):
         policy = (
             OffloadPolicy.REQUEST_LEVEL
             if state.request_level_tiers
-            else OffloadPolicy.BLOCK_LEVEL
+            else OffloadPolicy.CHUNK_LEVEL
         )
         return RequestOffloadingContext(policy=policy)
 
