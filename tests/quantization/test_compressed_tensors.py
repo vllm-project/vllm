@@ -5,7 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -400,6 +400,31 @@ def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
     assert quant_config.gemm1_alpha == 1.702
     assert quant_config.gemm1_beta is None
     assert quant_config.gemm1_clamp_limit == 7.0
+
+
+def test_compressed_tensors_w8a8_fp8_moe_rebuild_reselects_under_the_same_rule():
+    """A rebuild must re-select under the rule the load-time selection used.
+
+    This method selects with allow_vllm_cutlass=True, so a layer can load as
+    VLLM_CUTLASS. If the rebuild re-selects with the default False it lands on
+    a different backend and then refuses a switch the layout allow-list
+    explicitly permits.
+    """
+    quant_method = object.__new__(CompressedTensorsW8A8Fp8MoEMethod)
+    quant_method.moe = Mock()
+    quant_method.fp8_backend = Fp8MoeBackend.VLLM_CUTLASS
+    quant_method.experts_cls = object
+    quant_method.weight_key = None
+    quant_method.activation_key = None
+    quant_method.allow_vllm_cutlass = True
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.fp8.select_fp8_moe_backend",
+        return_value=(Fp8MoeBackend.BATCHED_VLLM_CUTLASS, object),
+    ) as select:
+        quant_method.rebuild_moe_kernel(Mock(), dry_run=True)
+
+    assert select.call_args.kwargs["allow_vllm_cutlass"] is True
 
 
 @pytest.mark.skipif(

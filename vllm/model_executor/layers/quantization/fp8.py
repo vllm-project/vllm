@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
+    rebuild_fp8_moe_kernel,
     refine_fp8_moe_block_shape,
     select_fp8_moe_backend,
 )
@@ -546,6 +547,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if self.quant_config.activation_scheme == "static"
                 else kFp8DynamicTensorSym
             )
+        # Kept so the backend can be re-selected after a P/D role switch
+        # changes the activation format. Both describe the checkpoint, so
+        # neither changes when the all2all backend does.
+        self.weight_key = weight_key
+        self.activation_key = activation_key
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
@@ -737,6 +743,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+        )
+
+    def rebuild_moe_kernel(self, layer: RoutedExperts, dry_run: bool = False) -> None:
+        rebuild_fp8_moe_kernel(
+            self,
+            layer,
+            weight_key=self.weight_key,
+            activation_key=self.activation_key,
+            allow_vllm_cutlass=False,
+            dry_run=dry_run,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

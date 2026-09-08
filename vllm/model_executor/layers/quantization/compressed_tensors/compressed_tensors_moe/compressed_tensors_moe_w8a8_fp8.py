@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
+    rebuild_fp8_moe_kernel,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
@@ -103,11 +104,21 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             activation_key = ct2vllm_act[self.input_quant.strategy]
 
         # Select Fp8 MoE backend
+        # Kept so the backend can be re-selected when a P/D role switch
+        # changes the activation format. Both describe the checkpoint, so
+        # neither changes when the all2all backend does.
+        self.weight_key = weight_key
+        self.activation_key = activation_key
+        # Stashed for the same reason as the two keys: a re-selection must run
+        # under the rule this one ran under. Passing the literal twice is what
+        # lets the two drift, and a rebuild that re-selects under a stricter
+        # rule lands on a different backend and then refuses its own switch.
+        self.allow_vllm_cutlass = True
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
-            allow_vllm_cutlass=True,
+            allow_vllm_cutlass=self.allow_vllm_cutlass,
         )
 
     def create_weights(
@@ -326,6 +337,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+
+    def rebuild_moe_kernel(self, layer, dry_run: bool = False) -> None:
+        """Rebuild for the current all2all backend; see the oracle helper."""
+        rebuild_fp8_moe_kernel(
+            self,
+            layer,
+            weight_key=self.weight_key,
+            activation_key=self.activation_key,
+            allow_vllm_cutlass=self.allow_vllm_cutlass,
+            dry_run=dry_run,
+        )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
