@@ -13,8 +13,9 @@ ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
 # Users can specify a custom version compatible with their host drivers.
-# The default version has been tested with ioinic-dkms=25.11.1.001
-ARG AINIC_VERSION=1.117.3-hydra
+# The default version has been tested with ionic-dkms=26.03.3.001
+# (libionic1=54.0-187-1), required for MoRI-EP/NIXL on Pollara/AINIC.
+ARG AINIC_VERSION=1.117.5
 ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
