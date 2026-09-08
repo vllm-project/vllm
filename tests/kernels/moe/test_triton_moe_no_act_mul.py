@@ -155,8 +155,8 @@ def test_triton_experts_no_mul_activation(
 
     # Verify workspace shapes are correct for no_mul activation
     # workspace1 should handle activation_out_dim = N (not N//2)
-    assert ws1_shape == (m, topk, max(n, k)), (
-        f"workspace1 shape mismatch: expected {(m, topk, max(n, k))}, got {ws1_shape}"
+    assert ws1_shape == (m, topk, n), (
+        f"workspace1 shape mismatch: expected {(m, topk, n)}, got {ws1_shape}"
     )
     # workspace2 should handle max(N, K) for intermediate_cache1/cache3
     assert ws2_shape == (m, topk, max(n, k)), (
@@ -207,7 +207,7 @@ def test_workspace_shapes_no_mul_vs_gated():
     """Test that workspace shapes differ correctly between gated and non-gated."""
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
-    M, N, K, topk = 64, 256, 128, 2
+    M, N, K, topk = 64, 256, 512, 2
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
@@ -224,15 +224,16 @@ def test_workspace_shapes_no_mul_vs_gated():
 
     # For no_mul: activation_out_dim = N
     # For gated: activation_out_dim = N // 2
-    # workspace1 should use max(activation_out_dim, K)
+    # workspace1 only holds the activation output. The separate output view
+    # accounts for K when the shared allocation is created.
     activation_out_dim_no_mul = N
     activation_out_dim_gated = N // 2
 
-    assert ws1_no_mul[2] == max(activation_out_dim_no_mul, K), (
-        f"no_mul workspace1 last dim should be max({activation_out_dim_no_mul}, {K})"
+    assert ws1_no_mul[2] == activation_out_dim_no_mul, (
+        f"no_mul workspace1 last dim should be {activation_out_dim_no_mul}"
     )
-    assert ws1_gated[2] == max(activation_out_dim_gated, K), (
-        f"gated workspace1 last dim should be max({activation_out_dim_gated}, {K})"
+    assert ws1_gated[2] == activation_out_dim_gated, (
+        f"gated workspace1 last dim should be {activation_out_dim_gated}"
     )
 
     # Output shapes should be the same

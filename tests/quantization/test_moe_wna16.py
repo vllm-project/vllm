@@ -12,12 +12,19 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.experts import triton_moe
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    CudaOrTritonWNA16Experts,
+    TritonWNA16Experts,
+)
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
     _convert_moe_wna16_humming_tensors,
     convert_to_wna16_moe_kernel_format,
     map_wna16_backend,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.quantization import moe_wna16
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -26,11 +33,133 @@ from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Config,
     MoeWNA16Method,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
 from vllm.platforms import current_platform
 
 
 def test_map_wna16_backend_supports_triton():
     assert map_wna16_backend("triton") == WNA16MoEBackend.TRITON
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "expected_cls"),
+    [
+        ("auto", CudaOrTritonWNA16Experts),
+        ("triton", TritonWNA16Experts),
+    ],
+)
+def test_moe_wna16_auto_preserves_cuda_dispatch(monkeypatch, moe_backend, expected_cls):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle import int_wna16
+
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = moe_backend
+    quant_config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=False,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={},
+    )
+
+    monkeypatch.setattr(
+        int_wna16,
+        "_get_priority_backends",
+        lambda: [WNA16MoEBackend.TRITON],
+    )
+    for experts_cls in (CudaOrTritonWNA16Experts, TritonWNA16Experts):
+        monkeypatch.setattr(
+            experts_cls,
+            "is_supported_config",
+            lambda *args, **kwargs: (True, None),
+        )
+
+    backend, experts_cls = select_wna16_moe_backend(
+        config=moe_config,
+        weight_key=kInt4Static,
+        quant_config=quant_config,
+        may_have_zp=False,
+        may_have_bias=False,
+    )
+
+    assert backend == WNA16MoEBackend.TRITON
+    assert experts_cls is expected_cls
+
+
+@pytest.mark.parametrize(
+    ("experts_cls", "num_tokens", "expected_kernel"),
+    [
+        (CudaOrTritonWNA16Experts, 192, "cuda"),
+        (CudaOrTritonWNA16Experts, 193, "triton"),
+        (TritonWNA16Experts, 1, "triton"),
+    ],
+)
+def test_moe_wna16_runtime_kernel_dispatch(
+    monkeypatch, experts_cls, num_tokens, expected_kernel
+):
+    experts = object.__new__(experts_cls)
+    experts.quant_config = SimpleNamespace(
+        block_shape=[0, 128],
+        per_act_token_quant=False,
+        use_int4_w4a16=True,
+        use_int8_w8a16=False,
+    )
+    calls = []
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        fused_moe,
+        "invoke_fused_moe_wna16_cuda_kernel",
+        lambda *args, **kwargs: calls.append("cuda"),
+    )
+    monkeypatch.setattr(
+        fused_moe,
+        "invoke_fused_moe_wna16_triton_kernel",
+        lambda *args, **kwargs: calls.append("triton"),
+    )
+    monkeypatch.setattr(
+        triton_moe,
+        "invoke_fused_moe_wna16_triton_kernel",
+        lambda *args, **kwargs: calls.append("triton"),
+    )
+
+    num_experts = 256
+    a = torch.empty(num_tokens, 1)
+    b = torch.empty(num_experts, 1, 1)
+    experts._invoke_wna16_kernel(
+        a,
+        b,
+        torch.empty(num_tokens, 8, 1),
+        torch.empty(num_experts, 1, 1),
+        None,
+        None,
+        torch.empty(1, dtype=torch.int32),
+        torch.empty(1, dtype=torch.int32),
+        torch.empty(1, dtype=torch.int32),
+        False,
+        8,
+        {"BLOCK_SIZE_M": 16},
+        None,
+    )
+
+    assert calls == [expected_kernel]
+
+
+def test_wna16_default_config_matches_kernel_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        fused_moe,
+        "should_moe_wna16_use_cuda",
+        lambda *args, **kwargs: True,
+    )
+    args = (1, 256, 512, 3072, 8, "int4_w4a16", [0, 128])
+
+    auto_config = fused_moe.get_default_config(*args, allow_cuda_wna16=True)
+    triton_config = fused_moe.get_default_config(*args, allow_cuda_wna16=False)
+
+    assert auto_config["BLOCK_SIZE_M"] == 1
+    assert triton_config["BLOCK_SIZE_M"] == 16
 
 
 @pytest.mark.parametrize(
