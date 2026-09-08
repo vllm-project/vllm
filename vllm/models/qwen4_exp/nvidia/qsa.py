@@ -118,16 +118,16 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         # the parent "auto" and restore the real dtype afterwards: the parent
         # only uses it for that probe, and do_kv_cache_update reads the
         # attribute at call time.
-        args = list(args)
+        arg_list = list(args)
         kv_cache_dtype = kwargs.get(
-            "kv_cache_dtype", args[6] if len(args) > 6 else "auto"
+            "kv_cache_dtype", arg_list[6] if len(arg_list) > 6 else "auto"
         )
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             if "kv_cache_dtype" in kwargs:
                 kwargs["kv_cache_dtype"] = "auto"
             else:
-                args[6] = "auto"
-        super().__init__(*args, **kwargs)
+                arg_list[6] = "auto"
+        super().__init__(*arg_list, **kwargs)
         self.kv_cache_dtype = kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
