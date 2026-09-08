@@ -178,9 +178,23 @@ class CoreEngineProcManager:
 
         from vllm.v1.engine.core import EngineCoreProc
 
+        # One death pipe per engine; the engine sees EOF once this process
+        # exits by any means (see monitor_parent_death).
+        self._death_writers: list[connection.Connection] = []
+        death_readers: list[connection.Connection] = []
+        for _ in range(local_engine_count):
+            death_reader, death_writer = context.Pipe(duplex=False)
+            death_readers.append(death_reader)
+            self._death_writers.append(death_writer)
+        if context.get_start_method() == "fork":
+            # Forked engines inherit every write end; tell them which to close.
+            common_kwargs["inherited_fds"] = [
+                writer.fileno() for writer in self._death_writers
+            ]
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
-        for index in range(local_engine_count):
+        for index, death_reader in enumerate(death_readers):
             local_index = local_start_index + index
             global_index = start_index + index
 
@@ -191,7 +205,11 @@ class CoreEngineProcManager:
                     target=EngineCoreProc.run_engine_core,
                     name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {"dp_rank": global_index, "local_dp_rank": local_index},
+                    | {
+                        "dp_rank": global_index,
+                        "local_dp_rank": local_index,
+                        "death_pipe": death_reader,
+                    },
                 )
             )
 
@@ -205,7 +223,9 @@ class CoreEngineProcManager:
         # pickles process args at start() time, sequentially per rank.
         user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+            for proc, local_dp_rank, death_reader in zip(
+                self.processes, local_dp_ranks, death_readers
+            ):
                 # Populate the logical-to-physical GPU mapping in DP for
                 # platforms that cannot rely on
                 # torch.accelerator.set_device_index(), and for Ray.
@@ -233,6 +253,7 @@ class CoreEngineProcManager:
                     process_kind="EngineCore",
                 ):
                     proc.start()
+                death_reader.close()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -252,6 +273,8 @@ class CoreEngineProcManager:
                     process_timeout,
                 )
             shutdown(self.processes, timeout=process_timeout)
+            for writer in self._death_writers:
+                writer.close()
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""
