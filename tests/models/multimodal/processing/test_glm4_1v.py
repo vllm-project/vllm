@@ -259,9 +259,9 @@ def _probe_budgets(model_id: str, mm_processor_kwargs: dict | None) -> dict:
     )
     info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
     return {
+        "image_max_pixels": info._get_image_max_pixels(),
         "size_bound": tuple(info.get_image_size_with_most_features()),
         "video_frames": info._get_max_video_frames(30_000),
-        "image_tokens": info.get_max_image_tokens(),
     }
 
 
@@ -271,17 +271,21 @@ def test_images_kwargs_max_pixels_does_not_leak_into_video_budget(model_id: str)
     """An image-scoped override must not move the shared size upper bound.
 
     ``get_image_size_with_most_features`` feeds the video frame budget and the
-    dummy data as well as the image budget. Scoping it to ``image`` would let
-    an image-only override shrink the profiled video budget, which no override
-    of that modality should touch.
+    dummy data as well as the image budget. Scoping that bound to ``image``
+    would let an image-only override shrink the profiled video budget, which
+    no override of that modality should touch.
     """
     stock = _probe_budgets(model_id, None)
     scoped = _probe_budgets(
         model_id, {"images_kwargs": {"max_pixels": _SMALL_MAX_PIXELS}}
     )
 
-    assert scoped["size_bound"] == stock["size_bound"]
-    assert scoped["video_frames"] == stock["video_frames"]
+    # The override reaches the per-item image read it is meant for.
+    assert stock["image_max_pixels"] != _SMALL_MAX_PIXELS
+    assert scoped["image_max_pixels"] == _SMALL_MAX_PIXELS
 
-    # The override still reaches the per-item read it is meant for.
-    assert scoped["image_tokens"] < stock["image_tokens"]
+    # It must not reach the bound that video sizing and dummy data share.
+    assert (scoped["size_bound"], scoped["video_frames"]) == (
+        stock["size_bound"],
+        stock["video_frames"],
+    )
