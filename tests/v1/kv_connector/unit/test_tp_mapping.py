@@ -103,6 +103,55 @@ def test_mla_dcp_source_ranks(
 
 
 @pytest.mark.parametrize(
+    "tp_rank,expected_attention,expected_ssm,expected_all",
+    [
+        (0, (0, 4), (0,), (0, 4)),
+        (4, (0, 4), (4,), (0, 4)),
+        (3, (3, 7), (3,), (3, 7)),
+    ],
+)
+def test_homogeneous_hybrid_dcp_keeps_ssm_tp_sharded(
+    tp_rank, expected_attention, expected_ssm, expected_all
+):
+    mapping = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=8,
+        remote_tp_size=8,
+        is_mla=True,
+        num_kv_heads=1,
+        group_spec_types=(FullAttentionSpec, MambaSpec),
+        dcp_size=4,
+        remote_dcp_size=4,
+    )
+
+    assert mapping.source_ranks_per_group == (expected_attention, expected_ssm)
+    assert mapping.all_source_ranks == expected_all
+
+
+def test_kda_staging_regions_use_only_ssm_block_ids():
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._kda_transport = object()
+    worker._ssm_region_indices = [2, 3]
+    worker._scratch_region_indices = []
+    worker._ple_group_index = None
+    worker.num_regions = 4
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+
+    desc_ids = worker._compute_desc_ids(
+        ([1], [2]),
+        dst_num_blocks=8,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    # Attention block 1 addresses only regions 0 and 1. SSM block 2
+    # addresses the two KDA target-state descriptors appended after the
+    # four base-region descriptor tables.
+    np.testing.assert_array_equal(desc_ids, np.asarray([1, 9, 34, 42]))
+
+
+@pytest.mark.parametrize(
     "tp_size,remote_tp_size,dcp_size,remote_dcp_size",
     [
         (4, 2, 4, 2),

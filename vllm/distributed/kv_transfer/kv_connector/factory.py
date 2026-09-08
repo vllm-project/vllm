@@ -10,12 +10,13 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
 )
+from vllm.logger import init_logger
+from vllm.utils.func_utils import supports_kw
+
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     supports_hma,
 )
-from vllm.logger import init_logger
-from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -143,6 +144,22 @@ class KVConnectorFactory:
         )
 
         return MultiConnector.all_children_support_hma(kv_transfer_config)
+
+    @classmethod
+    def supports_kda_recoverssm_config(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connector_cls = cls.get_connector_class(kv_transfer_config)
+        if kv_transfer_config.kv_connector != "MultiConnector":
+            return connector_cls.supports_kda_recoverssm_transport(
+                kv_transfer_config.kv_connector_extra_config
+            )
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+            MultiConnector,
+        )
+
+        return MultiConnector.all_children_support_kda_recoverssm(kv_transfer_config)
 
 
 # Register various connectors here.

@@ -15,6 +15,17 @@ and worker classes; the connector classes here only forward calls.
 from typing import TYPE_CHECKING, Any
 
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
+from vllm.forward_context import ForwardContext
+from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
@@ -28,11 +39,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorPromMetrics,
-    KVConnectorStats,
-    PromMetric,
-    PromMetricT,
+from vllm.distributed.kv_transfer.kv_connector.v1.dspark_context_transport import (
+    dspark_context_kv_transport_enabled,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
+    kda_target_state_transport_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
@@ -53,22 +64,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
     NixlPromMetrics,
 )
-from vllm.forward_context import ForwardContext
-from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.request import Request
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         NixlBaseConnectorScheduler,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -362,6 +369,14 @@ class NixlPullConnector(NixlBaseConnector):
 class NixlPushConnector(NixlBaseConnector):
     """Push-based (WRITE) NIXL KV transfer connector."""
 
+    @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        return kda_target_state_transport_enabled(extra_config)
+
+    @classmethod
+    def supports_dspark_context_transport(cls, extra_config: dict[str, Any]) -> bool:
+        return dspark_context_kv_transport_enabled(extra_config)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -369,10 +384,6 @@ class NixlPushConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        if vllm_config.parallel_config.decode_context_parallel_size > 1:
-            raise ValueError(
-                "NixlPushConnector does not support decode_context_parallel_size > 1."
-            )
         self.connector_scheduler: NixlPushConnectorScheduler | None = None
         self.connector_worker: NixlPushConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
