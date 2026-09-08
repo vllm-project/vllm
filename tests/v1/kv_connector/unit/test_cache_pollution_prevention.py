@@ -76,6 +76,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
 
     # mock connector indicating sync load
     fail_scheduler.connector = Mock()
+    fail_scheduler.connector.prefix_completion_group_ids = frozenset()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )

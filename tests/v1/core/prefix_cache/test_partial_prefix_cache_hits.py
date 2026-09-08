@@ -41,13 +41,16 @@ def test_connector_without_divergent_hit_support_uses_common_lookup():
     manager = MagicMock()
     manager.get_computed_blocks.return_value = (common_blocks, 0, 0)
     scheduler = SimpleNamespace(
-        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=False),
+        connector=SimpleNamespace(
+            prefix_completion_group_ids=frozenset(),
+            supports_divergent_local_hybrid_hits=False,
+        ),
         kv_cache_manager=manager,
     )
 
     result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
 
-    assert result == (common_blocks, 0, 0, False)
+    assert result == (common_blocks, 0, 0, False, None)
     manager.get_computed_blocks_for_connector.assert_not_called()
 
 
@@ -61,13 +64,16 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
         True,
     )
     scheduler = SimpleNamespace(
-        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=True),
+        connector=SimpleNamespace(
+            prefix_completion_group_ids=frozenset(),
+            supports_divergent_local_hybrid_hits=True,
+        ),
         kv_cache_manager=manager,
     )
 
     result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
 
-    assert result == (per_group_blocks, 6, 0, True)
+    assert result == (per_group_blocks, 6, 0, True, None)
     manager.get_computed_blocks.assert_not_called()
 
 
@@ -922,9 +928,8 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
     scheduler.kv_cache_manager.remove_skipped_blocks.assert_called_once()
 
 
-def test_block_pool_touch_pins_released_cow_target():
-    """The connector can rescue an offered CoW target after its step-scoped
-    retention is released by using the bound BlockPool's touch method."""
+def test_boundary_state_offload_pins_released_cow_target():
+    """A drained boundary-state handoff keeps its released CoW block alive."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -972,10 +977,6 @@ def test_block_pool_touch_pins_released_cow_target():
     ((_group_id, block_id, boundary_tokens),) = offloads["0"]
     assert boundary_tokens == 6
     cow_block = manager.block_pool.blocks[block_id]
-    assert cow_block.ref_cnt == 0
-    assert block_id in _free_block_ids(manager)
-
-    manager.block_pool.touch([cow_block])
     assert cow_block.ref_cnt == 1
     assert block_id not in _free_block_ids(manager)
 
