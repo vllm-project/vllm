@@ -321,6 +321,9 @@ def test_large_front_workspace_is_shared_within_one_worker() -> None:
 @pytest.mark.parametrize(
     "num_tokens,expected",
     [
+        (6, False),
+        (7, True),
+        (8, False),
         (511, False),
         (512, True),
         (1537, True),

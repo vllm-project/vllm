@@ -76,6 +76,7 @@ logger = init_logger(__name__)
 
 _KIMI_K3_LARGE_FRONT_MIN_TOKENS = 512
 _KIMI_K3_LARGE_FRONT_MAX_TOKENS = 8192
+_KIMI_K3_DECODE_FRONT_TOKEN_COUNTS = frozenset((7,))
 
 
 @dataclass
@@ -451,9 +452,9 @@ class KimiMoE(nn.Module):
         )
 
     def _supports_kimi_k3_large_front(self, num_tokens: int) -> bool:
-        return (
-            self._kimi_k3_large_front_available
-            and _KIMI_K3_LARGE_FRONT_MIN_TOKENS
+        return self._kimi_k3_large_front_available and (
+            num_tokens in _KIMI_K3_DECODE_FRONT_TOKEN_COUNTS
+            or _KIMI_K3_LARGE_FRONT_MIN_TOKENS
             <= num_tokens
             <= _KIMI_K3_LARGE_FRONT_MAX_TOKENS
         )
@@ -525,7 +526,7 @@ class KimiMoE(nn.Module):
         if not self._logged_kimi_k3_large_front:
             self._logged_kimi_k3_large_front = True
             logger.info_once(
-                "Using Kimi-K3 large-M merged FP32 MoE front with fused "
+                "Using Kimi-K3 merged FP32 MoE front with fused "
                 "SiTU epilogue and native routed experts.",
                 scope="global",
             )
