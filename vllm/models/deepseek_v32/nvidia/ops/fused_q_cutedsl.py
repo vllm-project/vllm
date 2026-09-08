@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from functools import cache
+from dataclasses import dataclass
+from typing import Any
 
 import cutlass
 import cutlass.cute as cute
@@ -9,6 +10,11 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float8E4M3FN, Float32, Int64, Uint8, Uint16, Uint32
 
 from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+)
 from vllm.platforms import current_platform
 
 
@@ -25,6 +31,41 @@ def _make_fake_tensor(dtype, shape, divisibility):
     )
 
 
+def is_fused_q_cutedsl_geometry_supported(
+    *,
+    num_q_heads: int,
+    qk_rope_head_dim: int,
+    kv_lora_rank: int,
+    index_n_head: int,
+    index_head_dim: int,
+    has_indexer: bool,
+    quantize_mqa: bool,
+    act_dtype: torch.dtype,
+) -> bool:
+    """Tensor-free twin of :func:`is_fused_q_cutedsl_supported`.
+
+    Used at model-load warmup registration, where the runtime tensors do not
+    exist yet, to decide whether the CuTeDSL path *will* be the runtime path for
+    this layer. The runtime predicate's dtype checks (q_pe/ql_nope/index_q all
+    bf16) are approximated by ``act_dtype``: q_pe/ql_nope are the model compute
+    dtype and index_q is ``wq_b``'s bf16 output, both tracked by the attention
+    layernorm weight dtype. When this returns False the ``fused_q`` wrapper falls
+    back to the Triton owner, which is warmed separately.
+    """
+    if not (
+        current_platform.has_device_capability(100)
+        and quantize_mqa
+        and act_dtype == torch.bfloat16
+        and qk_rope_head_dim == 64
+        and kv_lora_rank == 512
+        # One warp per head group; a non-multiple would trip the kernel's own
+        # assert instead of falling back to Triton.
+        and num_q_heads % 4 == 0
+    ):
+        return False
+    return not has_indexer or (index_head_dim == 128 and index_n_head % 16 == 0)
+
+
 def is_fused_q_cutedsl_supported(
     q_pe: torch.Tensor,
     index_q: torch.Tensor | None,
@@ -33,93 +74,38 @@ def is_fused_q_cutedsl_supported(
     has_indexer: bool,
     quantize_mqa: bool,
 ) -> bool:
-    if not (
-        current_platform.has_device_capability(100)
-        and quantize_mqa
-        and q_pe.dtype == ql_nope.dtype == torch.bfloat16
-        and q_pe.shape[-1] == 64
-        and ql_nope.shape[-1] == 512
-        # One warp per head group; a non-multiple would trip the kernel's own
-        # assert instead of falling back to Triton.
-        and q_pe.shape[1] % 4 == 0
+    if q_pe.dtype != ql_nope.dtype or (
+        has_indexer and (index_q is None or index_q.dtype != torch.bfloat16)
     ):
         return False
-    return not has_indexer or (
-        index_q is not None
-        and index_q.dtype == torch.bfloat16
-        and index_q.shape[1] % 16 == 0
-        and index_q.shape[-1] == 128
+    return is_fused_q_cutedsl_geometry_supported(
+        num_q_heads=q_pe.shape[1],
+        qk_rope_head_dim=q_pe.shape[-1],
+        kv_lora_rank=ql_nope.shape[-1],
+        index_n_head=index_q.shape[1] if has_indexer else 0,
+        index_head_dim=index_q.shape[-1] if has_indexer else 0,
+        has_indexer=has_indexer,
+        quantize_mqa=quantize_mqa,
+        act_dtype=q_pe.dtype,
     )
 
 
-def fused_q_cutedsl(
-    positions: torch.Tensor,
-    q_pe: torch.Tensor,
-    rope_cache: torch.Tensor,
-    ql_nope: torch.Tensor,
-    q_scale: torch.Tensor,
-    mqa_output: torch.Tensor,
-    idx_q: torch.Tensor,
-    idx_rope_cache: torch.Tensor,
-    idx_weights: torch.Tensor,
-    idx_weights_softmax_scale: float,
-    idx_weights_head_scale: float,
-    idx_q_fp8: torch.Tensor,
-    idx_weights_out: torch.Tensor,
-    has_indexer: bool = True,
-    index_rope_interleave: bool = True,
-) -> None:
-    _, num_heads, rope_dim = q_pe.shape
-    _, _, nope_dim = ql_nope.shape
-    _, num_idx_heads, idx_dim = idx_q.shape
+class FusedQCuteDSLKernel(VllmCuTeDSLJitKernel["FusedQCuteDSLKernel.CompileKey"]):
+    num_warps = 4
 
-    if has_indexer:
-        idx_rope_type = _TORCH_TO_CUTE_DTYPE[idx_rope_cache.dtype]
-        idx_weights_type = _TORCH_TO_CUTE_DTYPE[idx_weights.dtype]
-    else:
-        idx_dim = num_idx_heads = 0
-        idx_q = idx_rope_cache = idx_q_fp8 = None
-        idx_weights = idx_weights_out = None
-        idx_rope_type = idx_weights_type = None
-
-    rope_type = _TORCH_TO_CUTE_DTYPE[rope_cache.dtype]
-    compiled = FusedQKernel.compile(
-        rope_dim,
-        nope_dim,
-        num_heads,
-        rope_type,
-        idx_dim,
-        num_idx_heads,
-        idx_rope_type,
-        idx_weights_type,
-        index_rope_interleave,
-    )
-    compiled(
-        positions,
-        q_pe,
-        rope_cache,
-        ql_nope,
-        q_scale.view(1),
-        mqa_output,
-        idx_q,
-        idx_rope_cache,
-        idx_weights,
-        idx_q_fp8,
-        idx_weights_out,
-        float(idx_weights_softmax_scale * idx_weights_head_scale),
-    )
-
-
-class FusedQKernel:
     def __init__(
         self,
-        rope_dim: int,
-        nope_dim: int,
-        num_heads: int,
-        idx_dim: int,
-        num_idx_heads: int,
-        index_rope_interleave: bool,
+        rope_dim: int | None = None,
+        nope_dim: int = 0,
+        num_heads: int = 0,
+        idx_dim: int = 0,
+        num_idx_heads: int = 0,
+        index_rope_interleave: bool = False,
     ) -> None:
+        super().__init__()
+        if rope_dim is None:
+            return
+
         assert rope_dim == 64
         assert nope_dim == 512
         assert idx_dim in (128, 0)
@@ -134,14 +120,192 @@ class FusedQKernel:
         # mqa:     rope_dim=64, nope_dim=512, num_heads=64/TP
         # indexer: rope_dim=64, nope_dim=64,  num_heads=32
 
-        self.num_warps = 4
         assert num_heads % self.num_warps == 0
         assert num_idx_heads % (4 * self.num_warps) == 0
         self.num_ctas_per_tok = num_heads // self.num_warps
         self.num_ctas_per_idx_tok = num_idx_heads // (4 * self.num_warps)
 
-    @cute.jit
+    @dataclass(frozen=True)
+    class CompileKey:
+        rope_dim: int
+        nope_dim: int
+        num_heads: int
+        rope_type: type[cutlass.Numeric]
+        idx_dim: int
+        num_idx_heads: int
+        idx_rope_type: type[cutlass.Numeric] | None
+        idx_weights_type: type[cutlass.Numeric] | None
+        index_rope_interleave: bool
+
+    @staticmethod
+    def kernel(compile_key: "FusedQCuteDSLKernel.CompileKey") -> Any:
+        return FusedQCuteDSLKernel(
+            compile_key.rope_dim,
+            compile_key.nope_dim,
+            compile_key.num_heads,
+            compile_key.idx_dim,
+            compile_key.num_idx_heads,
+            compile_key.index_rope_interleave,
+        ).host_entrypoint
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_q_heads: int,
+        qk_rope_head_dim: int,
+        kv_lora_rank: int,
+        index_n_head: int,
+        index_head_dim: int,
+        has_indexer: bool,
+        index_rope_interleave: bool,
+        rope_cache_dtype: torch.dtype,
+        idx_rope_cache_dtype: torch.dtype | None,
+        idx_weights_dtype: torch.dtype | None,
+    ) -> "FusedQCuteDSLKernel.CompileKey":
+        return self.CompileKey(
+            rope_dim=qk_rope_head_dim,
+            nope_dim=kv_lora_rank,
+            num_heads=num_q_heads,
+            rope_type=_TORCH_TO_CUTE_DTYPE[rope_cache_dtype],
+            idx_dim=index_head_dim if has_indexer else 0,
+            num_idx_heads=index_n_head if has_indexer else 0,
+            idx_rope_type=(
+                _TORCH_TO_CUTE_DTYPE[idx_rope_cache_dtype] if has_indexer else None
+            ),
+            idx_weights_type=(
+                _TORCH_TO_CUTE_DTYPE[idx_weights_dtype] if has_indexer else None
+            ),
+            index_rope_interleave=index_rope_interleave,
+        )
+
+    def get_warmup_keys(self, **kwargs: Any) -> list["FusedQCuteDSLKernel.CompileKey"]:
+        return self._trace_dispatch(self.dispatch)(**kwargs)
+
+    def warmup_inputs(
+        self, compile_key: "FusedQCuteDSLKernel.CompileKey"
+    ) -> tuple[Any, ...]:
+        num_tokens = cute.sym_int()
+        max_pos = cute.sym_int()
+        rope_dim = compile_key.rope_dim
+        nope_dim = compile_key.nope_dim
+        num_heads = compile_key.num_heads
+        idx_dim = compile_key.idx_dim
+        num_idx_heads = compile_key.num_idx_heads
+
+        positions = _make_fake_tensor(Int64, (num_tokens,), divisibility=1)
+        q_pe = _make_fake_tensor(
+            BFloat16, (num_tokens, num_heads, rope_dim), divisibility=16
+        )
+        rope_cache = _make_fake_tensor(
+            compile_key.rope_type, (max_pos, rope_dim), divisibility=8
+        )
+        ql_nope = _make_fake_tensor(
+            BFloat16, (num_tokens, num_heads, nope_dim), divisibility=16
+        )
+        q_scale = _make_fake_tensor(Float32, (1,), divisibility=4)
+        mqa_output = _make_fake_tensor(
+            Float8E4M3FN,
+            (num_tokens, num_heads, nope_dim + rope_dim),
+            divisibility=16,
+        )
+
+        if compile_key.idx_rope_type is not None:
+            index_q = _make_fake_tensor(
+                BFloat16, (num_tokens, num_idx_heads, idx_dim), divisibility=16
+            )
+            index_rope_cache = _make_fake_tensor(
+                compile_key.idx_rope_type, (max_pos, rope_dim), divisibility=8
+            )
+            index_weights = _make_fake_tensor(
+                compile_key.idx_weights_type,
+                (num_tokens, num_idx_heads),
+                divisibility=8,
+            )
+            index_q_fp8 = _make_fake_tensor(
+                Float8E4M3FN, (num_tokens, num_idx_heads, idx_dim), divisibility=16
+            )
+            index_weights_out = _make_fake_tensor(
+                Float32, (num_tokens, num_idx_heads), divisibility=4
+            )
+        else:
+            index_q = index_rope_cache = index_q_fp8 = None
+            index_weights = index_weights_out = None
+
+        return (
+            positions,
+            q_pe,
+            rope_cache,
+            ql_nope,
+            q_scale,
+            mqa_output,
+            index_q,
+            index_rope_cache,
+            index_weights,
+            index_q_fp8,
+            index_weights_out,
+            Float32(0.0),
+        )
+
+    @kernel_launcher
     def __call__(
+        self,
+        positions: torch.Tensor,
+        q_pe: torch.Tensor,
+        rope_cache: torch.Tensor,
+        ql_nope: torch.Tensor,
+        q_scale: torch.Tensor,
+        mqa_output: torch.Tensor,
+        idx_q: torch.Tensor,
+        idx_rope_cache: torch.Tensor,
+        idx_weights: torch.Tensor,
+        idx_weights_softmax_scale: float,
+        idx_weights_head_scale: float,
+        idx_q_fp8: torch.Tensor,
+        idx_weights_out: torch.Tensor,
+        *,
+        has_indexer: bool = True,
+        index_rope_interleave: bool = True,
+    ) -> CuTeDSLLaunchSpec["FusedQCuteDSLKernel.CompileKey"]:
+        _, num_heads, rope_dim = q_pe.shape
+        _, _, nope_dim = ql_nope.shape
+        _, num_idx_heads, idx_dim = idx_q.shape
+
+        compile_key = self.dispatch(
+            num_q_heads=num_heads,
+            qk_rope_head_dim=rope_dim,
+            kv_lora_rank=nope_dim,
+            index_n_head=num_idx_heads,
+            index_head_dim=idx_dim,
+            has_indexer=has_indexer,
+            index_rope_interleave=index_rope_interleave,
+            rope_cache_dtype=rope_cache.dtype,
+            idx_rope_cache_dtype=idx_rope_cache.dtype if has_indexer else None,
+            idx_weights_dtype=idx_weights.dtype if has_indexer else None,
+        )
+        if not has_indexer:
+            # Shared layer: the kernel skips the indexer CTAs, so the dummy
+            # indexer tensors are never dereferenced -- pass None through.
+            idx_q = idx_rope_cache = idx_q_fp8 = None
+            idx_weights = idx_weights_out = None
+
+        launch_args = (
+            positions,
+            q_pe,
+            rope_cache,
+            ql_nope,
+            q_scale.view(1),
+            mqa_output,
+            idx_q,
+            idx_rope_cache,
+            idx_weights,
+            idx_q_fp8,
+            idx_weights_out,
+            float(idx_weights_softmax_scale * idx_weights_head_scale),
+        )
+        return compile_key, launch_args
+
+    @cute.jit
+    def host_entrypoint(
         self,
         positions: cute.Tensor,
         q_pe: cute.Tensor,
@@ -165,7 +329,7 @@ class FusedQKernel:
             num_idx_ctas = num_tokens * self.num_ctas_per_idx_tok
             grid = (num_mqa_ctas + num_idx_ctas, 1, 1)
 
-        self.kernel(
+        self.device_kernel(
             positions,
             q_pe,
             rope_cache,
@@ -186,7 +350,7 @@ class FusedQKernel:
         )
 
     @cute.kernel
-    def kernel(
+    def device_kernel(
         self,
         positions: cute.Tensor,
         q_pe: cute.Tensor,
@@ -458,80 +622,5 @@ class FusedQKernel:
             w = idx_weights[token_id, head_id].to(Float32)
             idx_weights_out[token_id, head_id] = w * scale * weight_scale
 
-    @staticmethod
-    @cache
-    def compile(
-        rope_dim: int,
-        nope_dim: int,
-        num_heads: int,
-        rope_type: type[cutlass.Numeric],
-        idx_dim: int,
-        num_idx_heads: int,
-        idx_rope_type: type[cutlass.Numeric] | None,
-        idx_weights_type: type[cutlass.Numeric] | None,
-        index_rope_interleave: bool,
-    ):
-        num_tokens = cute.sym_int()
-        max_pos = cute.sym_int()
 
-        positions = _make_fake_tensor(Int64, (num_tokens,), divisibility=1)
-        q_pe = _make_fake_tensor(
-            BFloat16, (num_tokens, num_heads, rope_dim), divisibility=16
-        )
-        rope_cache = _make_fake_tensor(rope_type, (max_pos, rope_dim), divisibility=8)
-        ql_nope = _make_fake_tensor(
-            BFloat16, (num_tokens, num_heads, nope_dim), divisibility=16
-        )
-        q_scale = _make_fake_tensor(Float32, (1,), divisibility=4)
-        mqa_output = _make_fake_tensor(
-            Float8E4M3FN,
-            (num_tokens, num_heads, nope_dim + rope_dim),
-            divisibility=16,
-        )
-
-        if idx_rope_type is not None:
-            index_q = _make_fake_tensor(
-                BFloat16, (num_tokens, num_idx_heads, idx_dim), divisibility=16
-            )
-            index_rope_cache = _make_fake_tensor(
-                idx_rope_type, (max_pos, rope_dim), divisibility=8
-            )
-            index_weights = _make_fake_tensor(
-                idx_weights_type, (num_tokens, num_idx_heads), divisibility=8
-            )
-            index_q_fp8 = _make_fake_tensor(
-                Float8E4M3FN, (num_tokens, num_idx_heads, idx_dim), divisibility=16
-            )
-            index_weights_out = _make_fake_tensor(
-                Float32, (num_tokens, num_idx_heads), divisibility=4
-            )
-        else:
-            index_q = index_rope_cache = index_q_fp8 = None
-            index_weights = index_weights_out = None
-
-        kernel = FusedQKernel(
-            rope_dim,
-            nope_dim,
-            num_heads,
-            idx_dim,
-            num_idx_heads,
-            index_rope_interleave,
-        )
-        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        return cute.compile(
-            kernel,
-            positions,
-            q_pe,
-            rope_cache,
-            ql_nope,
-            q_scale,
-            mqa_output,
-            index_q,
-            index_rope_cache,
-            index_weights,
-            index_q_fp8,
-            index_weights_out,
-            Float32(0.0),
-            stream,
-            options="--enable-tvm-ffi",
-        )
+_FUSED_Q_CUTEDSL_KERNEL = FusedQCuteDSLKernel()

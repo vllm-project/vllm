@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
+    _FUSED_EMBED_EH_NORM_KERNEL,
     fused_embed_eh_norm,
     has_full_vocab_on_rank,
     make_input_embedding,
@@ -43,7 +44,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
+from vllm.models.deepseek_v32.common.kernels import (
+    _FUSED_EH_NORM_KERNEL,
+    fused_eh_norm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -183,6 +187,16 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         )
         # A full on-rank table lets the eh_norm fusion fold in the embedding gather.
         self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
+        if vllm_config.kernel_config.enable_jit_warmup:
+            if self.replicated_embed:
+                _FUSED_EMBED_EH_NORM_KERNEL.register_warmup(
+                    ids_dtype=torch.int64,
+                    table_dtype=self.embed_tokens.weight.dtype,
+                    hidden_dtype=vllm_config.model_config.dtype,
+                    hidden_size=config.hidden_size,
+                )
+            else:
+                _FUSED_EH_NORM_KERNEL.register_warmup()
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
