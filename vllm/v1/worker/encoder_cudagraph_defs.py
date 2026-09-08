@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
 import torch
@@ -88,8 +88,13 @@ class EncoderCudaGraphConfig:
     )
     """Independently captured encoder paths keyed by their forward name."""
 
-    enable_secondary_capture_axis: bool = False
-    """Whether to enable secondary capture axis."""
+    capture_axes: tuple[tuple[Hashable, ...], ...] = ()
+    """Extra capture axes beyond the token budget; empty to disable.
+
+    Each entry is the ordered key set of one axis. When non-empty, one graph
+    is captured per token budget per combination of axis keys (cartesian
+    product), so the total number of captured graphs is
+    ``num_budgets * prod(len(axis) for axis in capture_axes)``."""
 
 
 @dataclass

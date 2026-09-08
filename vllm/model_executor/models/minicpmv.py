@@ -1575,16 +1575,14 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return image_size, image_size
 
     def _mcpmv_patch_grid_pixel_hw(
-        self, secondary_capture_axis_key: tuple[int, int]
+        self, patch_grid_key: tuple[int, int]
     ) -> tuple[int, int]:
         patch_size = int(self.vpm.embeddings.patch_size)
-        th, tw = secondary_capture_axis_key
+        th, tw = patch_grid_key
         return th * patch_size, tw * patch_size
 
-    def _mcpmv_patch_grid_num_patches(
-        self, secondary_capture_axis_key: tuple[int, int]
-    ) -> int:
-        th, tw = secondary_capture_axis_key
+    def _mcpmv_patch_grid_num_patches(self, patch_grid_key: tuple[int, int]) -> int:
+        th, tw = patch_grid_key
         return th * tw
 
     def _mcpmv_max_patches_per_slice(self) -> int:
@@ -1592,10 +1590,8 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         patch_size = int(self.vpm.embeddings.patch_size)
         return (image_size // patch_size) ** 2
 
-    def get_encoder_cudagraph_secondary_capture_axis_keys(
-        self,
-    ) -> tuple[tuple[int, int], ...]:
-        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the second capture axis."""
+    def _mcpmv_patch_grid_keys(self) -> tuple[tuple[int, int], ...]:
+        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
         max_side = int(self.vpm.embeddings.image_size) // int(
             self.vpm.embeddings.patch_size
         )
@@ -1610,15 +1606,15 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             keys.append(full)
         return tuple(keys)
 
-    def resolve_encoder_cudagraph_secondary_capture_axis_key(
+    def resolve_encoder_cudagraph_capture_axis_keys(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        ordered_secondary_capture_axis_keys: Sequence[Hashable],
-    ) -> Hashable:
-        keys = ordered_secondary_capture_axis_keys
+        capture_axes: Sequence[Sequence[Hashable]],
+    ) -> tuple[Hashable, ...]:
+        keys = cast("tuple[tuple[int, int], ...]", tuple(capture_axes[0]))
         if not indices:
-            return keys[0]
+            return (keys[0],)
         video = self.get_input_modality(mm_kwargs) == "video"
         pixel_values_key = "video_pixel_values" if video else "pixel_values"
         pixel_values: list[list[torch.Tensor]] = mm_kwargs[pixel_values_key]
@@ -1630,10 +1626,10 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         need_h = int(selected[:, 0].max().item())
         need_w = int(selected[:, 1].max().item())
         for candidate_key in keys:
-            th, tw = cast("tuple[int, int]", candidate_key)
+            th, tw = candidate_key
             if th >= need_h and tw >= need_w:
-                return candidate_key
-        return keys[-1]
+                return (candidate_key,)
+        return (keys[-1],)
 
     def _mcpmv_max_slices_cap(
         self,
@@ -1670,7 +1666,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             buffer_keys=buffer_keys,
             out_hidden_size=int(self.embed_dim),
             max_frames_per_video=max_frames,
-            enable_secondary_capture_axis=True,
+            capture_axes=(self._mcpmv_patch_grid_keys(),),
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
@@ -1730,13 +1726,13 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
-        return self.select_encoder_cudagraph_items_for_axis(mm_kwargs, indices)
+        return self.select_encoder_cudagraph_items_for_axes(mm_kwargs, indices)
 
-    def select_encoder_cudagraph_items_for_axis(
+    def select_encoder_cudagraph_items_for_axes(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> dict[str, Any]:
         video = self.get_input_modality(mm_kwargs) == "video"
         pixel_values_key = "video_pixel_values" if video else "pixel_values"
@@ -1774,15 +1770,17 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
         tgt_groups = torch.split(tgt_sizes, slice_counts)
 
-        if secondary_capture_axis_key is None:
-            patch_grid_key = self.resolve_encoder_cudagraph_secondary_capture_axis_key(
-                mm_kwargs,
-                indices,
-                self.get_encoder_cudagraph_secondary_capture_axis_keys(),
-            )
+        if axis_keys:
+            patch_grid = cast("tuple[int, int]", axis_keys[0])
         else:
-            patch_grid_key = secondary_capture_axis_key
-        patch_grid = cast("tuple[int, int]", patch_grid_key)
+            patch_grid = cast(
+                "tuple[int, int]",
+                self.resolve_encoder_cudagraph_capture_axis_keys(
+                    mm_kwargs,
+                    indices,
+                    self.get_encoder_cudagraph_config().capture_axes,
+                )[0],
+            )
         pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
         max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
 
@@ -1822,7 +1820,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         dtype: torch.dtype,
         path: str = "default",
     ) -> EncoderCudaGraphCaptureInputs:
-        return self.prepare_encoder_cudagraph_capture_inputs_for_axis(
+        return self.prepare_encoder_cudagraph_capture_inputs_for_axes(
             token_budget,
             max_batch_size,
             max_frames_per_batch,
@@ -1831,7 +1829,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             path,
         )
 
-    def prepare_encoder_cudagraph_capture_inputs_for_axis(
+    def prepare_encoder_cudagraph_capture_inputs_for_axes(
         self,
         token_budget: int,
         max_batch_size: int,
@@ -1839,17 +1837,16 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        if secondary_capture_axis_key is None:
+        if axis_keys:
+            patch_grid = cast("tuple[int, int]", axis_keys[0])
+        else:
             # Default to the largest (full-resolution) patch grid.
-            secondary_capture_axis_key = (
-                self.get_encoder_cudagraph_secondary_capture_axis_keys()[-1]
-            )
-        th, tw = cast("tuple[int, int]", secondary_capture_axis_key)
-        normalized_key = (th, tw)
-        pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(normalized_key)
-        max_patches = self._mcpmv_patch_grid_num_patches(normalized_key)
+            patch_grid = self._mcpmv_patch_grid_keys()[-1]
+        th, tw = patch_grid
+        pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
+        max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
         max_num_slices = self._mcpmv_max_slices_cap(
             token_budget,
             max_batch_size,

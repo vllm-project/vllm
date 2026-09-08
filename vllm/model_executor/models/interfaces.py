@@ -1995,43 +1995,35 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
-    def get_encoder_cudagraph_secondary_capture_axis_keys(
-        self,
-    ) -> Sequence[Hashable] | None:
-        """Ordered secondary capture axis keys, or None to disable the second axis.
-
-        Used when multiple graphs are captured for the same token budget.
-        """
-        return None
-
-    def resolve_encoder_cudagraph_secondary_capture_axis_key(
+    def resolve_encoder_cudagraph_capture_axis_keys(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        ordered_secondary_capture_axis_keys: Sequence[Hashable],
-    ) -> Hashable:
-        """Resolve the secondary capture axis key for the given indices.
+        capture_axes: Sequence[Sequence[Hashable]],
+    ) -> tuple[Hashable, ...]:
+        """Resolve one key per capture axis for the given indices.
 
-        Called only when secondary capture axis is enabled. The returned key must be
-        one of ordered_secondary_capture_axis_keys.
+        Called only when ``EncoderCudaGraphConfig.capture_axes`` is non-empty.
+        The returned tuple must contain one key from each axis of
+        capture_axes, in order.
         """
-        return ordered_secondary_capture_axis_keys[0]
+        return tuple(axis[0] for axis in capture_axes)
 
-    def select_encoder_cudagraph_items_for_axis(
+    def select_encoder_cudagraph_items_for_axes(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> dict[str, Any]:
-        """select_encoder_cudagraph_items variant aware of the secondary axis.
+        """select_encoder_cudagraph_items variant aware of capture axes.
 
-        Called by the manager so that models enabling the secondary capture
-        axis can slice inputs for the given key. By default, delegates to
-        select_encoder_cudagraph_items and ignores the key.
+        Called by the manager so that models enabling capture axes can slice
+        inputs for the given per-axis keys. By default, delegates to
+        select_encoder_cudagraph_items and ignores the keys.
         """
         return self.select_encoder_cudagraph_items(mm_kwargs, indices)
 
-    def prepare_encoder_cudagraph_capture_inputs_for_axis(
+    def prepare_encoder_cudagraph_capture_inputs_for_axes(
         self,
         token_budget: int,
         max_batch_size: int,
@@ -2039,13 +2031,13 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """prepare_encoder_cudagraph_capture_inputs variant aware of the
-        secondary capture axis.
+        """prepare_encoder_cudagraph_capture_inputs variant aware of
+        capture axes.
 
         By default, delegates to prepare_encoder_cudagraph_capture_inputs and
-        ignores the key.
+        ignores the keys.
         """
         return self.prepare_encoder_cudagraph_capture_inputs(
             token_budget,

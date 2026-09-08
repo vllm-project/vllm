@@ -116,7 +116,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
-    mgr._ordered_secondary_capture_axis_keys = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
@@ -432,7 +432,7 @@ def _make_manager_for_gpu(
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
-    mgr._ordered_secondary_capture_axis_keys = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUDA graph manager for vision encoder budget-batch execution."""
 
+import itertools
+import math
 from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
@@ -29,7 +31,12 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 
 logger = init_logger(__name__)
 
-BudgetGraphMapKey: TypeAlias = int | tuple[int, Hashable]
+CaptureAxisKeys: TypeAlias = tuple[Hashable, ...]
+
+BudgetGraphMapKey: TypeAlias = int | tuple[int, CaptureAxisKeys]
+
+# Warn when capture axes multiply the captured graph count past this point.
+_CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 
 
 @dataclass
@@ -53,8 +60,8 @@ class BudgetGraphMetadata:
     input_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
-    # Second CUDA-graph capture axis key, None if unused.
-    secondary_capture_axis_key: Hashable | None = None
+    # Per-axis capture keys, empty when no extra capture axis is used.
+    axis_keys: CaptureAxisKeys = ()
 
 
 class EncoderCudaGraphManager:
@@ -82,9 +89,15 @@ class EncoderCudaGraphManager:
 
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        if len(self.config.paths) > 1 and self.config.enable_secondary_capture_axis:
+        self._capture_axes: tuple[CaptureAxisKeys, ...] = tuple(
+            tuple(axis) for axis in self.config.capture_axes
+        )
+        if any(len(axis) == 0 for axis in self._capture_axes):
+            raise ValueError("Encoder cudagraph capture axes must be non-empty.")
+
+        if len(self.config.paths) > 1 and self._capture_axes:
             raise NotImplementedError(
-                "Combining dual-path encoder CUDA graphs with secondary capture axis "
+                "Combining dual-path encoder CUDA graphs with capture axes "
                 "is not supported yet."
             )
 
@@ -165,15 +178,6 @@ class EncoderCudaGraphManager:
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
-        self._ordered_secondary_capture_axis_keys: tuple[Hashable, ...] | None = None
-        if self.config.enable_secondary_capture_axis:
-            keys = self.model.get_encoder_cudagraph_secondary_capture_axis_keys()
-            if not keys:
-                raise ValueError(
-                    "Secondary capture axis is enabled but no keys were returned."
-                )
-            self._ordered_secondary_capture_axis_keys = tuple(keys)
-
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
         self.graph_hits = 0
@@ -202,12 +206,12 @@ class EncoderCudaGraphManager:
         logger.info(
             "EncoderCudaGraphManager initialized with paths=%s, "
             "max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s, "
-            "ordered_secondary_capture_axis_keys=%s",
+            "capture_axes=%s",
             self.path_token_budgets,
             self.max_batch_size,
             self.max_frames_per_batch,
             self.use_dp,
-            self._ordered_secondary_capture_axis_keys,
+            self._capture_axes,
         )
 
     @staticmethod
@@ -241,35 +245,34 @@ class EncoderCudaGraphManager:
         """Capture CUDA graphs for every configured path and token budget."""
         self.graph_pool = graph_pool
 
+        num_graphs = self.get_num_graphs_to_capture()
+        if num_graphs > _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD:
+            logger.warning(
+                "Capturing %d encoder CUDA graphs; capture axes multiply the "
+                "per-budget graph count, consider pruning axis keys.",
+                num_graphs,
+            )
+
         for path, budgets in self.path_token_budgets.items():
             for token_budget in sorted(budgets, reverse=True):
                 if token_budget == 0:
                     continue
-                if self.config.enable_secondary_capture_axis:
-                    assert self._ordered_secondary_capture_axis_keys is not None
-                    for (
-                        secondary_capture_axis_key
-                    ) in self._ordered_secondary_capture_axis_keys:
-                        self._capture_budget_graph(
-                            token_budget,
-                            path=path,
-                            secondary_capture_axis_key=secondary_capture_axis_key,
-                        )
-                else:
-                    self._capture_budget_graph(token_budget, path=path)
+                for axis_keys in itertools.product(*self._capture_axes):
+                    self._capture_budget_graph(
+                        token_budget,
+                        path=path,
+                        axis_keys=axis_keys,
+                    )
 
         logger.info(
             "Encoder CUDA graph capture complete. Captured %d graphs across %d paths.",
-            self.get_num_graphs_to_capture(),
+            num_graphs,
             len(self.path_token_budgets),
         )
 
     def _num_graphs_for_budgets(self, budgets: list[int]) -> int:
         num_budgets = sum(1 for budget in budgets if budget != 0)
-        if self.config.enable_secondary_capture_axis:
-            assert self._ordered_secondary_capture_axis_keys is not None
-            return num_budgets * len(self._ordered_secondary_capture_axis_keys)
-        return num_budgets
+        return num_budgets * math.prod(len(axis) for axis in self._capture_axes)
 
     def get_num_graphs_to_capture(self) -> int:
         return sum(
@@ -289,28 +292,28 @@ class EncoderCudaGraphManager:
         self,
         token_budget: int,
         path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: CaptureAxisKeys = (),
     ):
         """Capture CUDA graph for a single token budget."""
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
-            "max_frames_per_batch=%d, secondary_capture_axis_key=%s",
+            "max_frames_per_batch=%d, axis_keys=%s",
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
-            secondary_capture_axis_key,
+            axis_keys,
         )
 
         graph_set = self._get_graph_set(path)
 
-        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs_for_axis(
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs_for_axes(
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
             self.device,
             self.dtype,
             path,
-            secondary_capture_axis_key,
+            axis_keys,
         )
 
         values = capture_inputs.values
@@ -328,9 +331,7 @@ class EncoderCudaGraphManager:
             output_buffer.copy_(output)
 
         graph_map_key: BudgetGraphMapKey = (
-            token_budget
-            if secondary_capture_axis_key is None
-            else (token_budget, secondary_capture_axis_key)
+            token_budget if not axis_keys else (token_budget, axis_keys)
         )
         graph_set[graph_map_key] = BudgetGraphMetadata(
             token_budget=token_budget,
@@ -339,7 +340,7 @@ class EncoderCudaGraphManager:
             graph=graph,
             input_buffers=values,
             output_buffer=output_buffer,
-            secondary_capture_axis_key=secondary_capture_axis_key,
+            axis_keys=axis_keys,
         )
 
     def _find_smallest_fitting_budget_given_tokens(
@@ -367,14 +368,14 @@ class EncoderCudaGraphManager:
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: CaptureAxisKeys | None = None,
     ) -> dict[str, Any]:
         """Select the mm kwargs for `indices` from the model."""
         # Same as `_get_item_specs`: implementations re-read the per-item
         # grid/patch counts to slice the batch, so the D2H is inherent.
         with gpu_sync_allowed():
-            return self.model.select_encoder_cudagraph_items_for_axis(
-                mm_kwargs, indices, secondary_capture_axis_key
+            return self.model.select_encoder_cudagraph_items_for_axes(
+                mm_kwargs, indices, axis_keys
             )
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
@@ -394,7 +395,7 @@ class EncoderCudaGraphManager:
         mm_kwargs: dict[str, Any],
         token_budget: int,
         path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
+        axis_keys: CaptureAxisKeys = (),
     ) -> torch.Tensor | None:
         """Execute budget graph.
 
@@ -409,9 +410,7 @@ class EncoderCudaGraphManager:
         num_items = len(self._get_item_specs(mm_kwargs))
 
         graph_map_key: BudgetGraphMapKey = (
-            token_budget
-            if secondary_capture_axis_key is None
-            else (token_budget, secondary_capture_axis_key)
+            token_budget if not axis_keys else (token_budget, axis_keys)
         )
         if graph_map_key not in graph_set:
             self.graph_misses += num_items
@@ -498,20 +497,17 @@ class EncoderCudaGraphManager:
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:
-            secondary_capture_axis_key: Hashable | None = None
-            if self.config.enable_secondary_capture_axis:
-                assert self._ordered_secondary_capture_axis_keys is not None
-                secondary_capture_axis_key = (
-                    self.model.resolve_encoder_cudagraph_secondary_capture_axis_key(
-                        mm_kwargs,
-                        batch_indices,
-                        self._ordered_secondary_capture_axis_keys,
-                    )
+            axis_keys: CaptureAxisKeys | None = None
+            if self._capture_axes:
+                axis_keys = self.model.resolve_encoder_cudagraph_capture_axis_keys(
+                    mm_kwargs,
+                    batch_indices,
+                    self._capture_axes,
                 )
             batch_mm_kwargs = self._select_items(
                 mm_kwargs,
                 batch_indices,
-                secondary_capture_axis_key,
+                axis_keys,
             )
             graph_outputs: dict[str, torch.Tensor] = {}
             all_eager = True
@@ -533,7 +529,7 @@ class EncoderCudaGraphManager:
                         batch_mm_kwargs,
                         token_budget,
                         path=path,
-                        secondary_capture_axis_key=secondary_capture_axis_key,
+                        axis_keys=axis_keys or (),
                     )
                     assert graph_output is not None
                     output = graph_output
