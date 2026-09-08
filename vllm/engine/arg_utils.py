@@ -694,6 +694,12 @@ class EngineArgs:
         KernelConfig, "enable_flashinfer_autotune"
     )
     enable_bf16x3_router_gemm: bool | None = None
+    dsa_topk_backend: Literal["native", "flashinfer"] = get_field(
+        KernelConfig, "dsa_topk_backend"
+    )
+    dsa_topk_tie_break: Literal["small", "large"] = get_field(
+        KernelConfig, "dsa_topk_tie_break"
+    )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1648,6 +1654,12 @@ class EngineArgs:
             "--enable-bf16x3-router-gemm",
             **kernel_kwargs["enable_bf16x3_router_gemm"],
         )
+        kernel_group.add_argument(
+            "--dsa-topk-backend", **kernel_kwargs["dsa_topk_backend"]
+        )
+        kernel_group.add_argument(
+            "--dsa-topk-tie-break", **kernel_kwargs["dsa_topk_tie_break"]
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -2506,6 +2518,10 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.enable_bf16x3_router_gemm is not None:
             kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
+        if self.dsa_topk_backend != "native":
+            kernel_config.dsa_topk_backend = self.dsa_topk_backend
+        if self.dsa_topk_tie_break != "small":
+            kernel_config.dsa_topk_tie_break = self.dsa_topk_tie_break
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

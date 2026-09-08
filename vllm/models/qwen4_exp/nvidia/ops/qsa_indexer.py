@@ -5,6 +5,9 @@
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.sparse_attn_topk import (
+    flashinfer_deterministic_topk,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -476,10 +479,23 @@ def _topk(
     token_topk: int,
     compress_ratio: int,
     block_indices: torch.Tensor,
-    topk_workspace: torch.Tensor,
+    topk_workspace: torch.Tensor | None,
+    use_flashinfer_topk: bool = False,
+    flashinfer_topk_tie_break: int = 1,
 ) -> None:
-    # similar dispatch logic as DeepSeek indexer
     block_topk = token_topk // compress_ratio
+    if use_flashinfer_topk:
+        flashinfer_deterministic_topk(
+            logits,
+            visible_blocks,
+            block_topk,
+            flashinfer_topk_tie_break,
+            out=block_indices,
+        )
+        return
+
+    # Keep the native QSA dispatch unchanged when the opt-in backend is disabled.
+    assert topk_workspace is not None
     use_cooperative_topk = (
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
@@ -510,6 +526,8 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    use_flashinfer_topk: bool = False,
+    flashinfer_topk_tie_break: int = 1,
 ) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
@@ -568,7 +586,15 @@ def qsa_select_paged_decode(
         token_topk,
         compress_ratio,
         block_indices,
-        torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+        (
+            None
+            if use_flashinfer_topk
+            else torch.empty(
+                (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+            )
+        ),
+        use_flashinfer_topk,
+        flashinfer_topk_tie_break,
     )
 
 
@@ -583,6 +609,8 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    use_flashinfer_topk: bool = False,
+    flashinfer_topk_tie_break: int = 1,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -614,8 +642,10 @@ def qsa_select_paged_prefill(
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
-    topk_workspace = torch.empty(
-        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+    topk_workspace = (
+        None
+        if use_flashinfer_topk
+        else torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device)
     )
 
     for query_start in range(0, rows, rows_per_chunk):
@@ -639,6 +669,8 @@ def qsa_select_paged_prefill(
             compress_ratio,
             block_indices[query_slice],
             topk_workspace,
+            use_flashinfer_topk,
+            flashinfer_topk_tie_break,
         )
 
 

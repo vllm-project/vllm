@@ -16,6 +16,10 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
+from vllm.model_executor.layers.sparse_attn_topk import (
+    flashinfer_deterministic_topk,
+    flashinfer_tie_break_value,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -23,6 +27,7 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_logits,
     has_deep_gemm,
 )
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -316,6 +321,8 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    use_flashinfer_topk: bool = False,
+    flashinfer_topk_tie_break: int = 1,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -329,11 +336,14 @@ def sparse_attn_indexer(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
-            values_spec,
-            scales_spec,
-            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
+        if use_flashinfer_topk:
+            current_workspace_manager().get_simultaneous(values_spec, scales_spec)
+        else:
+            current_workspace_manager().get_simultaneous(
+                values_spec,
+                scales_spec,
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -505,17 +515,27 @@ def sparse_attn_indexer(
                         cu_seqlen_ke,
                         clean_logits=False,
                     )
-                num_rows = logits.shape[0]
-                ops.top_k_per_row_prefill(
-                    logits,
-                    cu_seqlen_ks,
-                    cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                if use_flashinfer_topk:
+                    flashinfer_deterministic_topk(
+                        logits,
+                        cu_seqlen_ke - cu_seqlen_ks,
+                        topk_tokens,
+                        flashinfer_topk_tie_break,
+                        row_starts=cu_seqlen_ks,
+                        out=topk_indices,
+                    )
+                else:
+                    num_rows = logits.shape[0]
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
             _merge_dcp_topk_global(
                 logits,
@@ -627,7 +647,15 @@ def sparse_attn_indexer(
             1024,
             2048,
         )
-        if use_cooperative_topk:
+        if use_flashinfer_topk:
+            flashinfer_deterministic_topk(
+                logits,
+                seq_lens,
+                topk_tokens,
+                flashinfer_topk_tie_break,
+                out=topk_indices,
+            )
+        elif use_cooperative_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -712,6 +740,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    use_flashinfer_topk: bool = False,
+    flashinfer_topk_tie_break: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -769,9 +799,32 @@ class SparseAttnIndexer(CustomOp):
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
         vllm_config = get_current_vllm_config()
+        kernel_config = vllm_config.kernel_config
+        self.use_flashinfer_topk = kernel_config.dsa_topk_backend == "flashinfer"
+        self.flashinfer_topk_tie_break = flashinfer_tie_break_value(
+            kernel_config.dsa_topk_tie_break
+        )
+        if self.use_flashinfer_topk:
+            if not current_platform.is_cuda():
+                raise ValueError("The FlashInfer DSA TopK backend requires CUDA")
+            if not has_flashinfer():
+                raise ValueError(
+                    "The FlashInfer DSA TopK backend requires the flashinfer "
+                    "package and either nvcc or FlashInfer cubins."
+                )
+
         parallel_config = vllm_config.parallel_config
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
+        if (
+            self.use_flashinfer_topk
+            and self.dcp_world_size > 1
+            and self.flashinfer_topk_tie_break != 1
+        ):
+            raise ValueError(
+                "DSA decode context parallelism currently supports only the "
+                "small deterministic TopK tie-break"
+            )
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._cp_kv_cache_interleave_size: int | None = None
@@ -869,6 +922,9 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            False,
+            self.use_flashinfer_topk,
+            self.flashinfer_topk_tie_break,
         )
 
     def forward_xpu(

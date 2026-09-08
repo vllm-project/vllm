@@ -207,6 +207,9 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+DSATopKBackend = Literal["native", "flashinfer"]
+DSATopKTieBreak = Literal["small", "large"]
+
 
 @config
 class KernelConfig:
@@ -232,6 +235,16 @@ class KernelConfig:
 
     enable_bf16x3_router_gemm: bool = False
     """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
+
+    dsa_topk_backend: DSATopKBackend = "native"
+    """TopK backend for sparse-attention indexers.
+
+    ``"native"`` preserves the default vLLM kernels. ``"flashinfer"`` uses
+    FlashInfer's graph-safe deterministic TopK with an explicit index tie-break.
+    """
+
+    dsa_topk_tie_break: DSATopKTieBreak = "small"
+    """Index preference for equal values with the FlashInfer TopK backend."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -308,6 +321,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("dsa_topk_backend", "dsa_topk_tie_break", mode="before")
+    @classmethod
+    def _normalize_dsa_topk_config(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
