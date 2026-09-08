@@ -3,6 +3,7 @@
 
 import io
 import os
+import sys
 
 import pytest
 import torch
@@ -171,6 +172,7 @@ def test_startup_omp_num_threads_divides_between_local_workers():
     assert startup_omp_num_threads(available * 4) == 1
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux cgroups")
 def test_available_cpu_count_honors_root_cgroup_quota(monkeypatch):
     files = {
         "/proc/self/cgroup": "0::/user.slice/container.scope\n",
