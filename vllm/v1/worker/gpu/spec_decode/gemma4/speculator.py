@@ -51,7 +51,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
 
         Gemma4 forces TRITON_ATTN due to heterogeneous head dimensions
         (head_dim=256 sliding, global_head_dim=512 full). The base class
-        resets attention_config.backend to None for draft models, causing
+        resets attention_config.prefill_backend to None for draft models, causing
         sliding layers to fall back to FLASH_ATTN which cannot handle
         KV-shared cache. Override to carry the target's backend through.
         """
@@ -60,16 +60,21 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             self.vllm_config,
             model_config=draft_model_config,
         )
-        target_backend = self.vllm_config.attention_config.backend
-        if target_backend is not None:
-            draft_vllm_config = replace(
-                draft_vllm_config,
-                attention_config=replace(
-                    draft_vllm_config.attention_config,
-                    backend=target_backend,
+        target_attention_config = self.vllm_config.attention_config
+        return replace(
+            draft_vllm_config,
+            attention_config=replace(
+                target_attention_config,
+                prefill_backend=(
+                    self.speculative_config.resolved_attention_backend
+                    or target_attention_config.prefill_backend
                 ),
-            )
-        return draft_vllm_config
+                decode_backend=(
+                    self.speculative_config.resolved_attention_decode_backend
+                    or target_attention_config.decode_backend
+                ),
+            ),
+        )
 
     def _setup_gemma4_kv_sharing(
         self,

@@ -38,6 +38,7 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+    has_prefill: bool = False
 
 
 def sync_cudagraph_and_dp_padding(
@@ -50,6 +51,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    has_prefill: bool = False,
     parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
@@ -64,18 +66,21 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
+    tensor[6][dp_rank] = has_prefill
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
+    has_prefill_across_dp = tensor[6]
+    synced_has_prefill = bool(has_prefill_across_dp.any().item())
     max_query_lens_across_dp = tensor[3]
     allow_ubatching_across_dp = tensor[4]
     num_reqs_across_dp = tensor[5]
@@ -119,6 +124,7 @@ def sync_cudagraph_and_dp_padding(
                 num_reqs=num_reqs,
                 num_ubatches=get_num_ubatches(parallel_config),
             ), DPSyncState(
+                has_prefill=synced_has_prefill,
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
                 ),
@@ -139,6 +145,7 @@ def sync_cudagraph_and_dp_padding(
                 num_active_loras=desired_batch_desc.num_active_loras,
             ),
             DPSyncState(
+                has_prefill=synced_has_prefill,
                 num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
@@ -166,6 +173,7 @@ def sync_cudagraph_and_dp_padding(
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
+        has_prefill=synced_has_prefill,
         max_query_len=synced_max_query_len,
     )
 
@@ -173,6 +181,7 @@ def sync_cudagraph_and_dp_padding(
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, DPSyncState(
+        has_prefill=synced_has_prefill,
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
@@ -195,6 +204,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    has_prefill: bool = False,
     parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
@@ -232,6 +242,8 @@ def dispatch_cg_and_sync_dp(
         (batch_desc, sync), where `sync` is this batch's agreement for a later
         dispatch to reuse. It is None when `dp_size` is 1 or no rank has work.
     """
+    if dp_sync is not None:
+        has_prefill = dp_sync.has_prefill
     reuse_eager = dp_sync is not None and dp_sync.eager
 
     if need_eager or reuse_eager:
@@ -251,6 +263,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
             num_active_loras=num_active_loras,
+            has_prefill=has_prefill,
             max_query_len=max_query_len,
         )
 
@@ -286,6 +299,7 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        has_prefill=has_prefill,
         parallel_config=parallel_config,
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,

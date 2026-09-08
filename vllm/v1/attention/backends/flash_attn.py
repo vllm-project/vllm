@@ -34,6 +34,7 @@ from vllm.v1.attention.backends.fa_utils import (
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
+    find_attention_impl_variant,
     get_dcp_local_seq_lens,
     get_num_attention_heads_from_layers,
 )
@@ -314,9 +315,10 @@ def _get_sliding_window_configs(
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        if not isinstance(layer.impl, FlashAttentionImpl):
+        impl = find_attention_impl_variant(layer.impl, FlashAttentionImpl)
+        if impl is None:
             continue
-        sliding_window_configs.add(layer.impl.sliding_window)
+        sliding_window_configs.add(impl.sliding_window)
     return sliding_window_configs
 
 

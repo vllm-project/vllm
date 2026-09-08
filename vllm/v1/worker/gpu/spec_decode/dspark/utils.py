@@ -47,7 +47,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_attention_backend = _resolve_dspark_attention_backend(
         draft_model_config,
-        speculative_config.attention_backend,
+        speculative_config.resolved_attention_backend,
         vllm_config.attention_config.backend,
     )
 
@@ -57,7 +57,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
-            backend=draft_attention_backend,
+            prefill_backend=draft_attention_backend,
+            decode_backend=speculative_config.resolved_attention_decode_backend,
         ),
         cache_config=(
             replace(

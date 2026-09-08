@@ -68,6 +68,7 @@ class BatchExecutionDescriptor:
     # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
+    decode_only: bool = False
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
 
@@ -103,7 +104,10 @@ def _is_compatible(
     num_active_loras: int,
     max_query_len: int | None,
     num_ubatches: int,
+    has_prefill: bool = False,
 ) -> bool:
+    if has_prefill and desc.decode_only:
+        return False
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
     # desc.max_query_len=None means the graph does not constrain query length; a
@@ -293,6 +297,7 @@ class CudaGraphManager:
                         num_reqs=rounded_num_reqs,
                         uniform_token_count=decode_query_len,
                         num_active_loras=num_active_loras,
+                        decode_only=True,
                     )
 
                     # avoid duplicate graphs
@@ -442,6 +447,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        has_prefill: bool = False,
         max_query_len: int | None = None,
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
@@ -459,6 +465,7 @@ class CudaGraphManager:
                     effective_loras,
                     max_query_len,
                     num_ubatches,
+                    has_prefill,
                 ):
                     return desc
         return BatchExecutionDescriptor(
