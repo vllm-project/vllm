@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ def _sparse_dcp_parity_case(
     from vllm import _custom_ops as ops
     from vllm.distributed import get_dcp_group
     from vllm.forward_context import set_forward_context
-    from vllm.utils.deep_gemm import get_num_sms, get_paged_mqa_logits_metadata
+    from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
         FlashInferMLASparseImpl,
     )
@@ -36,11 +37,11 @@ def _sparse_dcp_parity_case(
         FlashMLASparseMetadata,
     )
     from vllm.v1.attention.backends.mla.indexer import (
-        DeepSeekV32IndexerDecodeMetadata,
-        DeepseekV32IndexerMetadata,
+        DeepseekV32IndexerMetadataBuilder,
     )
     from vllm.v1.attention.ops.dcp import MLADCPManager
     from vllm.v1.attention.ops.flashmla import get_mla_metadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     is_flashmla = backend == "flashmla"
     impl_cls = FlashMLASparseImpl if is_flashmla else FlashInferMLASparseImpl
@@ -140,26 +141,49 @@ def _sparse_dcp_parity_case(
         torch.tensor(k_scale, device=device, dtype=torch.float32),
     )
     local_bounds = get_dcp_local_seq_lens(bounds, world, rank, interleave)
-    decode = DeepSeekV32IndexerDecodeMetadata(
-        block_table=block_table,
-        seq_lens=local_bounds,
-        decode_lens=torch.full((batch,), next_n, dtype=torch.int32, device=device),
-        requires_padding=False,
-        schedule_metadata=get_paged_mqa_logits_metadata(
-            local_bounds, block_size, get_num_sms()
+    # Construct the real builder so reintroducing the interleave guard fails
+    # before attention runs. No model identity or backend allowlist is supplied.
+    builder_config = copy.copy(config)
+    builder_config.model_config = SimpleNamespace(max_model_len=capacity)
+    if next_n > 1:
+        builder_config.speculative_config = SimpleNamespace(
+            num_speculative_tokens=next_n - 1, enable_adaptive_verification=False
+        )
+    builder = DeepseekV32IndexerMetadataBuilder(
+        MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=index_dim + 4,
+            dtype=torch.uint8,
         ),
-        global_seq_lens=bounds if world > 1 else None,
+        ["indexer"],
+        builder_config,
+        device,
+        block_table_width=blocks_per_req,
     )
-    metadata = DeepseekV32IndexerMetadata(
-        seq_lens=local_bounds[:, -1],
-        max_seq_len=local_capacity,
+    query_starts = torch.arange(batch + 1, dtype=torch.int32) * next_n
+    common = CommonAttentionMetadata(
+        query_start_loc=query_starts.to(device),
+        query_start_loc_cpu=query_starts,
+        seq_lens=bounds[:, -1].contiguous(),
+        seq_lens_cpu_upper_bound=torch.tensor(lengths, dtype=torch.int32),
+        num_reqs=batch,
+        num_actual_tokens=tokens,
+        max_query_len=next_n,
+        max_seq_len=max(lengths),
+        block_table_tensor=block_table,
         slot_mapping=torch.full((tokens,), -1, dtype=torch.int64, device=device),
-        num_decodes=batch,
-        num_decode_tokens=tokens,
-        num_prefills=0,
-        num_prefill_tokens=0,
-        decode=decode,
+        dcp_local_seq_lens=local_bounds[:, -1] if world > 1 else None,
     )
+    metadata = builder.build(0, common)
+    assert metadata.decode is not None
+    torch.testing.assert_close(
+        metadata.decode.seq_lens.flatten(), local_bounds.flatten()
+    )
+    if world > 1:
+        torch.testing.assert_close(
+            metadata.decode.global_seq_lens.flatten(), bounds.flatten()
+        )
     indices = torch.empty(tokens, topk, dtype=torch.int32, device=device)
     with set_forward_context({"indexer": metadata}, config):
         sparse_indexer.sparse_attn_indexer(
@@ -417,8 +441,8 @@ def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
     kernels, or collectives. Artifacts retain the actual output tensors.
     Output comparisons use the existing sparse-backend FP8 tolerance;
     indices are exact and natural-log LSE is checked at 1e-4.
-    This kernel-facing test deliberately exercises FlashMLA interleave64/MTP3
-    below its configuration guards; passing does not enable that configuration.
+    This kernel-facing test also exercises multi-token attention below the
+    separate backend MTP compatibility checks; it does not change those checks.
     """
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
@@ -495,162 +519,6 @@ def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
         torch.testing.assert_close(ref["lse"], ref["sdpa_lse"], rtol=1e-4, atol=1e-4)
     # Check each query separately so exact short rows cannot dilute an error.
     assert all(case["max_row_relative_l2"] < 0.065 for case in metrics)
-
-
-@pytest.fixture
-def block_interleaved_glm_config(monkeypatch):
-    from types import SimpleNamespace
-
-    from vllm.config import AttentionConfig
-
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda family: family == 100
-    )
-    return SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
-            decode_context_parallel_size=4,
-            prefill_context_parallel_size=1,
-            cp_kv_cache_interleave_size=64,
-        ),
-        cache_config=SimpleNamespace(block_size=64, cache_dtype="fp8"),
-        attention_config=AttentionConfig(backend="FLASHINFER_MLA_SPARSE"),
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")
-        ),
-        speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=3),
-        use_v2_model_runner=True,
-    )
-
-
-@pytest.mark.parametrize(
-    "overrides,expected",
-    [
-        pytest.param({}, True, id="validated"),
-        pytest.param({"cache_config.cache_dtype": "fp8_e4m3"}, True, id="fp8-alias"),
-        pytest.param({"speculative_config": None}, True, id="no-speculation"),
-        pytest.param(
-            {"attention_config.indexer_kv_dtype": "fp8"}, True, id="indexer-fp8"
-        ),
-        pytest.param({"cache_config.cache_dtype": "auto"}, False, id="mla-auto"),
-        pytest.param({"cache_config.cache_dtype": "bfloat16"}, False, id="mla-bf16"),
-        pytest.param(
-            {"attention_config.indexer_kv_dtype": "mxfp4"}, False, id="indexer-fp4"
-        ),
-        pytest.param({"attention_config.backend": None}, False, id="backend-auto"),
-        pytest.param(
-            {"attention_config.backend": "FLASHMLA_SPARSE"}, False, id="other-backend"
-        ),
-        pytest.param(
-            {
-                "attention_config.backend_per_kind": {
-                    "mla_attention": "FLASHINFER_MLA_SPARSE"
-                }
-            },
-            False,
-            id="backend-override",
-        ),
-        pytest.param(
-            {"parallel_config.cp_kv_cache_interleave_size": 1},
-            False,
-            id="token-interleave",
-        ),
-        pytest.param(
-            {"parallel_config.cp_kv_cache_interleave_size": 32},
-            False,
-            id="interleave32",
-        ),
-        pytest.param({"cache_config.block_size": 128}, False, id="block128"),
-        pytest.param({"parallel_config.tensor_parallel_size": 8}, False, id="tp8"),
-        pytest.param(
-            {"parallel_config.decode_context_parallel_size": 2}, False, id="dcp2"
-        ),
-        pytest.param(
-            {"parallel_config.prefill_context_parallel_size": 2}, False, id="pcp2"
-        ),
-        pytest.param(
-            {
-                "parallel_config.prefill_context_parallel_size": 2,
-                "parallel_config.decode_context_parallel_size": 1,
-            },
-            False,
-            id="pcp-only",
-        ),
-        pytest.param({"use_v2_model_runner": False}, False, id="runner-v1"),
-        pytest.param(
-            {"model_config.hf_text_config.model_type": "deepseek_v32"},
-            False,
-            id="other-model",
-        ),
-        pytest.param({"model_config": None}, False, id="no-model"),
-        pytest.param(
-            {"speculative_config.method": "eagle"}, False, id="other-speculation"
-        ),
-        pytest.param(
-            {"speculative_config.num_speculative_tokens": 1}, False, id="mtp1"
-        ),
-    ],
-)
-def test_block_interleaved_glm_validation_and_capability_are_bounded(
-    block_interleaved_glm_config, overrides, expected
-):
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
-    from vllm.v1.attention.backends.mla.indexer import (
-        _supports_block_interleaved_glm_validation,
-    )
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-    config = block_interleaved_glm_config
-    for path, value in overrides.items():
-        obj = config
-        *parents, field = path.split(".")
-        for parent in parents:
-            obj = getattr(obj, parent)
-        if path == "attention_config.backend" and value is not None:
-            value = AttentionBackendEnum[value]
-        setattr(obj, field, value)
-
-    impl = object.__new__(FlashInferMLASparseImpl)
-    impl._block_interleaved_dcp_config = config
-    assert _supports_block_interleaved_glm_validation(config) is expected
-    assert impl.supports_mtp_with_cp_non_trivial_interleave_size is expected
-
-
-@pytest.mark.parametrize("cuda,sm100", [(False, True), (True, False)])
-def test_block_interleaved_glm_validation_rejects_other_platforms(
-    block_interleaved_glm_config, monkeypatch, cuda, sm100
-):
-    from vllm.v1.attention.backends.mla.indexer import (
-        _supports_block_interleaved_glm_validation,
-    )
-
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
-    monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda _: sm100
-    )
-    assert not _supports_block_interleaved_glm_validation(block_interleaved_glm_config)
-
-
-def test_block_interleaved_mtp_capability_reads_finalized_config(
-    block_interleaved_glm_config,
-):
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
-
-    config = block_interleaved_glm_config
-    impl = object.__new__(FlashInferMLASparseImpl)
-    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
-    impl._block_interleaved_dcp_config = config
-    config.parallel_config.cp_kv_cache_interleave_size = 1
-    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
-    config.parallel_config.cp_kv_cache_interleave_size = 64
-    assert impl.supports_mtp_with_cp_non_trivial_interleave_size
-    config.parallel_config.prefill_context_parallel_size = 2
-    assert not impl.supports_mtp_with_cp_non_trivial_interleave_size
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
