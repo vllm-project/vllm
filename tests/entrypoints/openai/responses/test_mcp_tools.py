@@ -4,13 +4,21 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
+import vllm.entrypoints.mcp.tool_server as tool_server_module
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.mcp.tool_server import MCPToolServer
+from vllm.entrypoints.mcp.tool_server import (
+    MCPToolServer,
+    init_tool_server,
+    post_process_tools_description,
+)
 
 from .conftest import (
     BASE_TEST_ENV,
@@ -36,8 +44,28 @@ _PYTHON_TOOL_INSTRUCTION = (
 )
 
 
+@pytest.mark.asyncio
+async def test_init_tool_server_without_configuration():
+    args = SimpleNamespace(tool_server=None)
+
+    assert await init_tool_server(args) is None
+
+
+@pytest.mark.asyncio
+async def test_init_tool_server_with_mcp_url(monkeypatch: pytest.MonkeyPatch):
+    server = MagicMock()
+    server.add_tool_server = AsyncMock()
+    monkeypatch.setattr(tool_server_module, "MCPToolServer", lambda: server)
+
+    result = await init_tool_server(SimpleNamespace(tool_server="http://mcp.test"))
+
+    assert result is server
+    server.add_tool_server.assert_awaited_once_with("http://mcp.test")
+
+
+@pytest.mark.skip_global_cleanup
 class TestMCPToolServerUnit:
-    """Test MCPToolServer.get_tool_description filtering logic.
+    """Test MCP tool description processing and filtering.
 
     Note: The wildcard "*" is normalized to None by
     _extract_allowed_tools_from_mcp_requests before reaching this layer,
@@ -95,6 +123,41 @@ class TestMCPToolServerUnit:
 
         # Empty list - returns None
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
+
+    def test_post_process_tools_description_uses_trim_schema_result(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        tool = mcp_types.Tool(
+            name="tool",
+            input_schema={"type": "object"},
+        )
+        result = mcp_types.ListToolsResult(tools=[tool])
+        trimmed_schema = {"type": "object", "properties": {}}
+
+        monkeypatch.setattr(
+            "vllm.entrypoints.mcp.tool_server.trim_schema",
+            lambda _schema: trimmed_schema,
+        )
+
+        post_process_tools_description(result)
+
+        assert tool.input_schema is trimmed_schema
+
+    def test_post_process_tools_description_honors_meta_opt_out(self):
+        mcp_types = pytest.importorskip("mcp.types")
+        included = mcp_types.Tool(
+            name="included",
+            input_schema={"type": "object"},
+        )
+        excluded = mcp_types.Tool(
+            name="excluded",
+            input_schema={"type": "object"},
+            meta={"include_in_prompt": False},
+        )
+        result = mcp_types.ListToolsResult(tools=[included, excluded])
+
+        post_process_tools_description(result)
+
+        assert result.tools == [included]
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
