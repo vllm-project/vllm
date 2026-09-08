@@ -37,6 +37,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
@@ -1372,3 +1375,51 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+
+class TestPushHandshakeDCP:
+    """``NixlPushConnector`` writes rank-to-rank, so it supports DCP only when
+    both instances shard the KV cache the same way. The pull path keeps
+    #50611's cross-sharding support."""
+
+    @staticmethod
+    def _worker(cls, dcp_size: int):
+        w = object.__new__(cls)
+        w.pcp_size = 1
+        w.dcp_size = dcp_size
+        return w
+
+    @staticmethod
+    def _peer(dcp_size: int) -> NixlAgentMetadata:
+        return NixlAgentMetadata(
+            engine_id="remote-engine",
+            agent_metadata=b"agent",
+            kv_caches_base_addr=[0x1000],
+            device_id=0,
+            num_blocks=4,
+            block_lens=[256],
+            block_strides=[256],
+            kv_cache_layout="LBHNC",
+            block_size=16,
+            ssm_sizes=(0, 0),
+            attn_backend_name="FLASH_ATTN",
+            physical_blocks_per_logical_kv_block=1,
+            dcp_size=dcp_size,
+        )
+
+    def test_push_accepts_equal_dcp(self):
+        w = self._worker(NixlPushConnectorWorker, 8)
+        NixlPushConnectorWorker._validate_remote_parallel_config(w, self._peer(8))
+
+    def test_push_rejects_unequal_dcp(self):
+        """A P side that shards its KV 8 ways cannot WRITE into a D side that
+        replicates it: the write is rank-to-rank and would land the wrong slice."""
+        w = self._worker(NixlPushConnectorWorker, 8)
+        with pytest.raises(NotImplementedError, match="shard identically"):
+            NixlPushConnectorWorker._validate_remote_parallel_config(w, self._peer(1))
+
+    def test_pull_still_allows_unequal_dcp(self):
+        """The READ path resolves the source ranks per block, so it keeps
+        supporting different DCP degrees across the two instances."""
+        w = self._worker(NixlPullConnectorWorker, 8)
+        NixlPullConnectorWorker._validate_remote_parallel_config(w, self._peer(1))

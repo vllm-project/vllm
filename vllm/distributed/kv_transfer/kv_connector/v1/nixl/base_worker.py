@@ -530,8 +530,10 @@ class NixlBaseConnectorWorker:
         # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
         # replicated or fully sharded. A DCP rank is always derivable this way.
         self.dcp_rank = self.tp_rank % self.dcp_size
-        if self._has_mamba and self.dcp_size > 1:
+        if self._has_mamba and self.dcp_size > 1 and self._TRANSFER_MODE != "push":
             # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
+            # Push never slices: it writes rank-to-rank between identically
+            # sharded instances (enforced at handshake).
             raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
 
         self.num_blocks = kv_cache_config.num_blocks
@@ -768,6 +770,12 @@ class NixlBaseConnectorWorker:
                 "on both instances. "
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if self._TRANSFER_MODE == "push" and local_dcp_size != remote_dcp_size:
+            raise NotImplementedError(
+                "NixlPushConnector supports decode_context_parallel_size > 1 only "
+                "when both instances shard identically (push writes rank-to-rank). "
+                f"Local DCP={local_dcp_size}; remote DCP={remote_dcp_size}."
             )
 
     def _sync_block_size_with_kernel(self) -> None:
