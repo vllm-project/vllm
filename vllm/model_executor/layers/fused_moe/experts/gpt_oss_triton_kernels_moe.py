@@ -152,9 +152,7 @@ def _patch_make_bitmatrix_metadata() -> None:
         tl.store(RowSortedIndx + offs_global, row_sorted_indx, mask=mask)
         tl.store(ColSortedIndx + row_sorted_indx, offs_global, mask=mask)
 
-    class _Stage2Pow2Kernel(
-        VllmTritonJitKernel["_Stage2Pow2Kernel.CompileKey"]
-    ):
+    class _Stage2Pow2Kernel(VllmTritonJitKernel["_Stage2Pow2Kernel.CompileKey"]):
         partial_block_m = 32
 
         @dataclass(frozen=True)
@@ -165,6 +163,7 @@ def _patch_make_bitmatrix_metadata() -> None:
             toks_per_row: int
             block_per_tok: int
             block_size_padded: int
+            row_sorted_aligned: bool
 
         kernel = staticmethod(_stage2_pow2)
 
@@ -181,9 +180,8 @@ def _patch_make_bitmatrix_metadata() -> None:
                 stride_pn=1,
                 toks_per_row=topk,
                 block_per_tok=self.partial_block_m,
-                block_size_padded=triton.next_power_of_2(
-                    self.partial_block_m * topk
-                ),
+                block_size_padded=triton.next_power_of_2(self.partial_block_m * topk),
+                row_sorted_aligned=(num_tokens * topk) % 4 == 0,
             )
 
         def get_warmup_keys(
@@ -196,16 +194,18 @@ def _patch_make_bitmatrix_metadata() -> None:
             )
 
         def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-            ptr = TritonWarmupTensor(torch.int32)
+            int_ptr = TritonWarmupTensor(torch.int32)
             return dict(
-                ColSortedIndx=ptr,
-                RowSortedIndx=ptr,
-                NonzeroIndx=ptr,
+                ColSortedIndx=int_ptr,
+                RowSortedIndx=TritonWarmupTensor(
+                    torch.int32, aligned=compile_key.row_sorted_aligned
+                ),
+                NonzeroIndx=TritonWarmupTensor(torch.int16),
                 n_tokens=compile_key.n_tokens,
-                ColPartialSum=ptr,
+                ColPartialSum=int_ptr,
                 stride_pm=compile_key.stride_pm,
                 stride_pn=compile_key.stride_pn,
-                ColOffs=ptr,
+                ColOffs=int_ptr,
                 grid_size=1,
                 TOKS_PER_ROW=compile_key.toks_per_row,
                 BLOCK_PER_TOK=compile_key.block_per_tok,
@@ -461,6 +461,7 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
             block: int
             blocks2a: int
             block_size_padded: int
+            scatter_aligned: bool
 
         kernel = staticmethod(_combined_routing_compute_pow2)
 
@@ -491,16 +492,14 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
                     * self.metadata_block
                 ),
                 tile_info_stridem=triton_scalar_specialization_rep(
-                    triton.cdiv(max_n_tiles, self.metadata_block)
-                    * self.metadata_block
+                    triton.cdiv(max_n_tiles, self.metadata_block) * self.metadata_block
                 ),
                 first_tile_dim_log2=triton_scalar_specialization_rep(4),
                 sizes=sizes,
                 block=self.metadata_block,
                 blocks2a=triton_scalar_specialization_rep(num_experts * sizes),
-                block_size_padded=triton.next_power_of_2(
-                    self.hist_block_m * topk
-                ),
+                block_size_padded=triton.next_power_of_2(self.hist_block_m * topk),
+                scatter_aligned=(num_tokens * topk) % 4 == 0,
             )
 
         def get_warmup_keys(
@@ -510,7 +509,7 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
                 num_tokens=WarmupIntRange(1, max_tokens + 1),
                 num_experts=num_experts,
                 topk=topk,
-                gate_dtype=(torch.float16, torch.bfloat16, torch.float32),
+                gate_dtype=torch.bfloat16,
                 sizes=5 if current_platform.is_rocm() else 4,
             )
 
@@ -519,10 +518,12 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
             gate_ptr = TritonWarmupTensor(compile_key.gate_dtype)
             return dict(
                 GatherIndx=int_ptr,
-                ScatterIndx=int_ptr,
+                ScatterIndx=TritonWarmupTensor(
+                    torch.int32, aligned=compile_key.scatter_aligned
+                ),
                 GateScal=gate_ptr,
                 ExptScal=gate_ptr,
-                ExptIndx=int_ptr,
+                ExptIndx=TritonWarmupTensor(torch.int16),
                 PartialOffs=int_ptr,
                 stride_pm=compile_key.stride_pm,
                 stride_pn=compile_key.stride_pn,
@@ -580,9 +581,7 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
             )
 
     global _COMBINED_ROUTING_COMPUTE_POW2_KERNEL
-    _COMBINED_ROUTING_COMPUTE_POW2_KERNEL = (
-        _CombinedRoutingComputePow2Kernel()
-    )
+    _COMBINED_ROUTING_COMPUTE_POW2_KERNEL = _CombinedRoutingComputePow2Kernel()
 
     def _sort_tokens_pow2(expt_scal, expt_indx, n_expts_tot, bitmatrix):
         import torch
@@ -1192,9 +1191,6 @@ class _PackBitmatrixKernel(VllmTritonJitKernel["_PackBitmatrixKernel.CompileKey"
         )
 
 
-_PACK_BITMATRIX_KERNEL = _PackBitmatrixKernel()
-
-
 class _RemapTopkToLocalKernel(
     VllmTritonJitKernel["_RemapTopkToLocalKernel.CompileKey"]
 ):
@@ -1246,14 +1242,15 @@ class _RemapTopkToLocalKernel(
         if out is None:
             out = torch.empty_like(topk_ids, dtype=torch.int64)
         n_elements = topk_ids.numel()
-        return (triton.cdiv(n_elements, self.block),), dict(
-            out=out,
-            n_elements=n_elements,
-            BLOCK=self.block,
-        ), out
-
-
-_REMAP_TOPK_TO_LOCAL_KERNEL = _RemapTopkToLocalKernel()
+        return (
+            (triton.cdiv(n_elements, self.block),),
+            dict(
+                out=out,
+                n_elements=n_elements,
+                BLOCK=self.block,
+            ),
+            out,
+        )
 
 
 class _MaskedMoeSumKernel(VllmTritonJitKernel["_MaskedMoeSumKernel.CompileKey"]):
@@ -1312,9 +1309,6 @@ class _MaskedMoeSumKernel(VllmTritonJitKernel["_MaskedMoeSumKernel.CompileKey"])
             topk=topk,
             BLOCK_K=self.block_k,
         )
-
-
-_MASKED_MOE_SUM_KERNEL = _MaskedMoeSumKernel()
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
@@ -1879,3 +1873,8 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             quant_config=self.quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+
+_PACK_BITMATRIX_KERNEL = _PackBitmatrixKernel()
+_REMAP_TOPK_TO_LOCAL_KERNEL = _RemapTopkToLocalKernel()
+_MASKED_MOE_SUM_KERNEL = _MaskedMoeSumKernel()
