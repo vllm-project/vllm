@@ -1219,6 +1219,14 @@ class Platform:
         return device_memory_info(device)[0]
 
     @classmethod
+    def get_process_memory_usage(cls, device_id: int = 0) -> int | None:
+        """Return the device memory in bytes used by the current process on the
+        visible device `device_id`, or `None` when the platform cannot
+        attribute device memory to processes.
+        """
+        return None
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
