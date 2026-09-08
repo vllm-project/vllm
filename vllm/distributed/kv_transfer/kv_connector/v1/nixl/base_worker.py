@@ -698,8 +698,6 @@ class NixlBaseConnectorWorker:
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
         self._failed_recv_pending: set[ReqId] = set()
-        self._failed_recv_reported: set[ReqId] = set()
-        self._failed_recv_lock = threading.Lock()
         # Set when the local KV destination is host memory; see host_staging.
         self._host_stager: HostWriteStager | None = None
         self._host_stager_init_attempted = False
@@ -2889,13 +2887,12 @@ class NixlBaseConnectorWorker:
             )
             self._pending_recv_notifs.pop(req_id, None)
             self._handle_failed_transfer(req_id, None)
-        with self._failed_recv_lock:
-            drained_failures = {
-                req_id
-                for req_id in self._failed_recv_pending
-                if not self._recving_transfers.get(req_id)
-                and not self._host_staging_active(req_id)
-            }
+        drained_failures = {
+            req_id
+            for req_id in self._failed_recv_pending
+            if not self._recving_transfers.get(req_id)
+            and not self._host_staging_active(req_id)
+        }
         for req_id in drained_failures:
             self._finish_recv_component(req_id)
         return done
@@ -2909,10 +2906,9 @@ class NixlBaseConnectorWorker:
         """Complete a receive once its direct and staged parts are terminal."""
         if self._recving_transfers.get(req_id) or self._host_staging_active(req_id):
             return False
-        with self._failed_recv_lock:
-            failed = req_id in self._failed_recv_pending
-            if failed:
-                self._failed_recv_pending.discard(req_id)
+        failed = req_id in self._failed_recv_pending
+        if failed:
+            self._failed_recv_pending.discard(req_id)
         if failed:
             self._report_failed_recv(req_id)
             return False
@@ -3009,17 +3005,16 @@ class NixlBaseConnectorWorker:
         if self._host_stager is not None:
             self._host_stager.abort(req_id)
             if self._host_staging_active(req_id):
-                with self._failed_recv_lock:
-                    self._failed_recv_pending.add(req_id)
-                return
-        with self._failed_recv_lock:
-            if self._recving_transfers.get(req_id):
                 self._failed_recv_pending.add(req_id)
                 return
-            self._failed_recv_pending.discard(req_id)
+        if self._recving_transfers.get(req_id):
+            self._failed_recv_pending.add(req_id)
+            return
+        self._failed_recv_pending.discard(req_id)
         self._report_failed_recv(req_id)
 
     def _report_failed_recv(self, req_id: str) -> None:
+        """Report a failed recv and invalidate its blocks."""
         meta = self._recving_metadata.get(req_id)
         if meta is None:
             self._pending_recv_notifs.pop(req_id, None)

@@ -6,7 +6,6 @@ import inspect
 import os
 import tempfile
 import textwrap
-import threading
 import time
 import uuid
 from collections import defaultdict
@@ -1933,9 +1932,7 @@ def test_mixed_host_staging_waits_for_both_receive_parts(staging_finishes_first)
     worker = object.__new__(NixlConnectorWorker)
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = {"request": [7]}
-    worker._failed_recv_lock = threading.Lock()
     worker._failed_recv_pending = set()
-    worker._failed_recv_reported = set()
     worker._pending_recv_notifs = {"request": [("agent", b"notification")]}
     worker._send_pending_recv_notifs = MagicMock()
     worker._report_failed_recv = MagicMock()
@@ -1972,7 +1969,6 @@ def test_mixed_host_staging_reports_failure_after_aborted_sibling_drains():
     worker = object.__new__(NixlConnectorWorker)
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = {}
-    worker._failed_recv_lock = threading.Lock()
     worker._failed_recv_pending = {"request"}
     worker._pending_recv_notifs = {}
     worker._report_failed_recv = MagicMock()
@@ -2093,7 +2089,6 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
     worker._failed_recv_pending = set()
-    worker._failed_recv_lock = threading.Lock()
     worker._host_stager = None
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
