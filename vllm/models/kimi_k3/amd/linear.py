@@ -76,7 +76,7 @@ logger = init_logger(__name__)
 
 _KIMI_K3_LARGE_FRONT_MIN_TOKENS = 512
 _KIMI_K3_LARGE_FRONT_MAX_TOKENS = 8192
-_KIMI_K3_DECODE_FRONT_TOKEN_COUNTS = frozenset((7,))
+_KIMI_K3_DECODE_FRONT_TOKEN_COUNTS = frozenset((7, 14))
 
 
 @dataclass
