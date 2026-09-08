@@ -307,6 +307,17 @@ class GraniteMoeModel(nn.Module):
             # Legacy names to new names
             "moe.input_linear.weight": "moe.experts.gate_up_proj",
             "moe.output_linear.weight": "moe.experts.down_proj",
+            # Quantized checkpoints pair each fused expert weight with a
+            # scale. The rules above match with str.endswith, so the scales
+            # need rules of their own or they keep their checkpoint names
+            # and match no FusedMoE parameter. Keep the gate_up_proj and
+            # down_proj stems: FusedMoE rewrites those to experts.w13_weight
+            # and experts.w2_weight, so the trailing _scale is what yields
+            # w13_weight_scale and w2_weight_scale. Naming these directly
+            # after the parameters instead matches no entry and is dropped
+            # without an error.
+            "moe.input_linear.weight_scale": "moe.experts.gate_up_proj_scale",
+            "moe.output_linear.weight_scale": "moe.experts.down_proj_scale",
             ".router.layer.weight": ".gate.weight",
             # Checkpoint name to vLLM name
             ".router.weight": ".gate.weight",
