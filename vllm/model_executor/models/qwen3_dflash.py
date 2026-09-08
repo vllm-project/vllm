@@ -660,6 +660,13 @@ class DFlashQwen3Model(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
+        return self.final_norm(hidden_states, residual)
+
+    def final_norm(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            return self.norm(hidden_states)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
