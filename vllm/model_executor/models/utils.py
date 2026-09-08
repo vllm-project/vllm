@@ -55,7 +55,7 @@ class WeightsMapper:
     orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_duplicate: Mapping[str, str] = field(default_factory=dict)
+    src_to_dst_copy: Mapping[str, str] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -72,9 +72,9 @@ class WeightsMapper:
             },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
-            orig_to_new_duplicate={
-                **self.orig_to_new_duplicate,
-                **other.orig_to_new_duplicate,
+            src_to_dst_copy={
+                **self.src_to_dst_copy,
+                **other.src_to_dst_copy,
             },
         )
 
@@ -155,7 +155,7 @@ class WeightsMapper:
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, data in weights:
             yield from self._apply_one(name, data)
-            for substr, new_substr in self.orig_to_new_duplicate.items():
+            for substr, new_substr in self.src_to_dst_copy.items():
                 if substr in name:
                     # A copy, so it can carry its own shard_id.
                     yield from self._apply_one(
@@ -195,7 +195,7 @@ class WeightsMapper:
             orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
-            orig_to_new_duplicate={},
+            src_to_dst_copy={},
         )
 
 
