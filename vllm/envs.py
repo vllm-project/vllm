@@ -267,6 +267,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_FP8_HOST_STAGED_AR: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1882,6 +1883,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
+    # FP8 (E4M3, per-128 scale) allreduce for TP groups on PCIe fabrics
+    # without working P2P: quantize locally, exchange the compressed
+    # payload over NCCL send/recv (host-staged transport), dequantize and
+    # reduce locally. Prefill-sized messages only.
+    "VLLM_FP8_HOST_STAGED_AR": lambda: bool(
+        int(os.getenv("VLLM_FP8_HOST_STAGED_AR", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
