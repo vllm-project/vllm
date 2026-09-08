@@ -65,6 +65,80 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
+    "extra_config,expected_threshold",
+    [
+        ({}, 0),
+        ({"bidirectional_kv_xfer": True}, 64),
+        ({"kv_recompute_threshold": 128}, 128),
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_kv_recompute_threshold_default(
+    mock_platform, extra_config, expected_threshold
+):
+    """Keep the existing defaults while allowing P→D opt-in."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector_extra_config=extra_config,
+    )
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=make_kv_cache_config(block_size=16),
+    )
+
+    assert scheduler.kv_recompute_threshold == expected_threshold
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "threshold,num_computed_tokens,expected",
+    [
+        pytest.param(8, 0, (0, False), id="below-threshold-recomputes"),
+        pytest.param(10, 0, (10, True), id="at-threshold-pulls"),
+        pytest.param(0, 0, (10, True), id="zero-disables-policy"),
+    ],
+)
+def test_remote_prefill_recompute_threshold(
+    threshold, num_computed_tokens, expected
+):
+    """Apply the threshold to the standard D-side P→D pull path."""
+    scheduler = make_nixl_scheduler()
+    scheduler.kv_recompute_threshold = threshold
+    request = create_request(num_tokens=10, do_remote_prefill=True)
+
+    assert (
+        scheduler.get_num_new_matched_tokens(request, num_computed_tokens) == expected
+    )
+
+
+@pytest.mark.cpu_test
+def test_remote_decode_recompute_threshold():
+    """Keep applying the threshold to the existing bidirectional D→P path."""
+    scheduler = make_nixl_scheduler()
+    scheduler.kv_recompute_threshold = 8
+    request = create_request(num_tokens=10, do_remote_decode=True)
+    request.kv_transfer_params.update(
+        remote_block_ids=[0],
+        remote_engine_id="decode-engine",
+        remote_request_id="decode-request",
+        remote_host="decode-host",
+        remote_port=5678,
+        remote_num_tokens=6,
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
     "use_mla,source_ranks,tp_ratio,expected",
     [
         pytest.param(True, (0,), -2, False, id="pure_mla_with_remote_dcp"),

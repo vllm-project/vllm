@@ -156,15 +156,6 @@ class NixlBaseConnectorScheduler:
             vllm_config.cache_config.mamba_cache_mode == "all"
         )
 
-        # Threshold to decide whether to compute kv cache locally
-        # or pull from a remote node: minimum number of remote
-        # tokens to amortize the xfer latencies
-        self.kv_recompute_threshold: int = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "kv_recompute_threshold", 64
-            )
-        )
-
         # Bi-directional KV transfer feature supports KV block
         # transfers from D node to P node
         self.is_bidirectional_kv_xfer_enabled = (
@@ -172,6 +163,22 @@ class NixlBaseConnectorScheduler:
                 "bidirectional_kv_xfer", False
             )
         )
+
+        # Threshold to decide whether to compute KV cache locally
+        # or pull from a remote node: minimum number of remote
+        # tokens to amortize the xfer latencies. Keep the existing
+        # 64-token default for bidirectional D->P pulls. For standard
+        # P->D remote-prefill pulls, opt in explicitly so enabling this
+        # policy does not change the default scheduling behavior.
+        default_recompute_threshold = (
+            64 if self.is_bidirectional_kv_xfer_enabled else 0
+        )
+        self.kv_recompute_threshold: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "kv_recompute_threshold", default_recompute_threshold
+            )
+        )
+
         self.decoder_kv_blocks_ttl = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "decoder_kv_blocks_ttl", 480
