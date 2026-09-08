@@ -22,6 +22,30 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Per-request load filtering
+
+Set `kv_transfer_params.kv_load_tiers` to control which offload tiers are
+queried for a request. An empty list disables loading from every offload tier,
+including the CPU primary tier:
+
+```json
+{
+  "kv_transfer_params": {
+    "kv_load_tiers": []
+  }
+}
+```
+
+GPU prefix-cache reuse remains enabled. Prompt tokens that are not available
+in the GPU cache are recomputed instead of loaded. Offloading also remains
+enabled unless it is controlled separately with `max_offload_tokens`.
+
+When `kv_load_tiers` is omitted, all configured tiers participate. Any
+non-empty filter keeps the CPU primary tier enabled, even if the filter names
+only a secondary tier such as `STORAGE`. The filter selects secondary tiers;
+CPU can satisfy a resident hit directly and is the required staging tier for
+secondary-to-GPU loads. A secondary-only load path is not supported.
+
 ## Terminology: Chunks
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
