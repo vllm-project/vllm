@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import ray
 import torch
+from huggingface_hub import ResolvedRevision
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import LLM
@@ -3148,6 +3149,43 @@ def test_missing_speculative_config_changes_compatibility_hash():
     speculative_hash = compute_nixl_compatibility_hash(speculative_config, "FLASH_ATTN")
 
     assert regular_hash != speculative_hash
+
+
+@pytest.mark.parametrize(
+    ("revision_field", "local_revision", "remote_revision", "should_match"),
+    [
+        ("revision", "revision-a", "revision-b", False),
+        (
+            "revision",
+            ResolvedRevision("a" * 40, initial="main"),
+            ResolvedRevision("b" * 40, initial="main"),
+            False,
+        ),
+        (
+            "revision",
+            ResolvedRevision("a" * 40, initial="branch-a"),
+            ResolvedRevision("a" * 40, initial="branch-b"),
+            True,
+        ),
+        ("code_revision", "revision-a", "revision-b", False),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_model_revision_changes_compatibility_hash(
+    revision_field: str,
+    local_revision: str,
+    remote_revision: str,
+    should_match: bool,
+):
+    local_config = create_vllm_config()
+    remote_config = create_vllm_config()
+    setattr(local_config.model_config, revision_field, local_revision)
+    setattr(remote_config.model_config, revision_field, remote_revision)
+
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN")
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN")
+
+    assert (local_hash == remote_hash) is should_match
 
 
 @pytest.mark.skip_global_cleanup

@@ -78,7 +78,8 @@ what may differ.
 By default, a **compatibility hash** is checked during handshake. P and D instances must agree on:
 
 - vLLM version and NIXL connector version
-- Model (architecture, dtype, number of KV heads, head size, number of hidden layers)
+- Model (revision, code revision, architecture, dtype, number of KV heads, head
+  size, number of hidden layers)
 - Attention backend
 - KV cache dtype (`cache_dtype`)
 - EAGLE/MTP-style speculative method and draft-model configuration
