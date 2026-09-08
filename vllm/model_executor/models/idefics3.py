@@ -625,6 +625,7 @@ class Idefics3ForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
+        assert isinstance(image_input, Idefics3ImagePixelInputs)
         image_features = self._process_image_pixels(image_input)
         image_features = self.model.connector(image_features)
 
@@ -788,7 +789,7 @@ class Idefics3ForConditionalGeneration(
         path: str = "default",
     ) -> torch.Tensor:
         image_input = self._parse_and_validate_image_input(**mm_kwargs)
-        assert image_input is not None and image_input["type"] == "pixel_values"
+        assert isinstance(image_input, Idefics3ImagePixelInputs)
         image_features = self._process_image_pixels(image_input)
         image_features = self.model.connector(image_features)
         return image_features.flatten(0, 1)
