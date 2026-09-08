@@ -125,6 +125,8 @@ def test_backend_selection(
         attention_config=attention_config,
         cache_config=cache_config,
         parallel_config=ParallelConfig(
+            # Skip GPU-count autodetection: selection does not launch workers.
+            distributed_executor_backend="mp" if use_dcp else None,
             tensor_parallel_size=2 if use_dcp else 1,
             decode_context_parallel_size=2 if use_dcp else 1,
         ),
