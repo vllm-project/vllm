@@ -373,7 +373,10 @@ RUN case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
     esac
 
+# pytrec-eval-terrier bundles pre-C23 trec_eval sources. GCC 15 defaults to C23;
+# use C17 for test dependency builds without changing the vLLM compiler flags.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    export CFLAGS="${CFLAGS:+${CFLAGS} }-std=gnu17" && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         python3 /workspace/use_existing_torch.py --prefix \
         && uv pip install -r requirements/test/cpu.txt \
@@ -408,7 +411,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirements/test/cpu.txt
 
+# vllm-dev installs the same test dependencies in its own environment.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    export CFLAGS="${CFLAGS:+${CFLAGS} }-std=gnu17" && \
     uv pip install -r requirements/lint.txt && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         uv pip install -r requirements/test/cpu.txt \
