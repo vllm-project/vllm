@@ -45,7 +45,9 @@ TEXT_DOCUMENTS = [
 ]
 
 DTYPE = "half"
-GPU_MEMORY_UTILIZATION = 0.7
+# The Tomoro model needs room for its vision encoder and a 4096-token KV cache
+# on the 16 GiB devices used by the H200 MIG test lane.
+GPU_MEMORY_UTILIZATION = 0.8
 
 
 def _make_base64_image(
