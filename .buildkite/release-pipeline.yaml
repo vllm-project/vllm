@@ -316,9 +316,9 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129" release-images'
 
-      - label: "Build release image - x86_64 - CUDA 13.4"
+      - label: "Build release image - x86_64 - Rubin CUDA 13.4"
         depends_on: ~
-        id: build-release-image-x86-cuda-13-4
+        id: build-release-image-x86-rubin-cuda-13-4
         agents:
           queue: cpu_queue_release
         commands:
@@ -345,9 +345,9 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134" release-images'
 
-      - label: "Build release image - aarch64 - CUDA 13.4"
+      - label: "Build release image - aarch64 - Rubin CUDA 13.4"
         depends_on: ~
-        id: build-release-image-arm64-cuda-13-4
+        id: build-release-image-arm64-rubin-cuda-13-4
         agents:
           queue: arm64_cpu_queue_release
         commands:
@@ -571,18 +571,18 @@ steps:
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129" release-manifests'
 
-      - label: "Create multi-arch manifest - CUDA 13.4"
+      - label: "Create multi-arch manifest - Rubin CUDA 13.4"
         depends_on:
-          - build-release-image-x86-cuda-13-4
-          - build-release-image-arm64-cuda-13-4
-        id: create-multi-arch-manifest-cuda-13-4
+          - build-release-image-x86-rubin-cuda-13-4
+          - build-release-image-arm64-rubin-cuda-13-4
+        id: create-multi-arch-manifest-rubin-cuda-13-4
         agents:
           queue: small_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu134 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu134 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134"
-          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.4" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134" release-manifests'
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: Rubin CUDA 13.4" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134" release-manifests'
 
       - label: "Create multi-arch manifest - CUDA 13.0 - Ubuntu 24.04"
         depends_on:
@@ -656,9 +656,9 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-      - label: "Publish nightly multi-arch image to DockerHub - CUDA 13.4"
+      - label: "Publish nightly multi-arch Rubin image to DockerHub - CUDA 13.4"
         depends_on:
-          - create-multi-arch-manifest-cuda-13-4
+          - create-multi-arch-manifest-rubin-cuda-13-4
         if: build.env("NIGHTLY") == "1"
         agents:
           queue: small_cpu_queue_release
