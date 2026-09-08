@@ -1798,7 +1798,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         dtype: torch.dtype,
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
-    ) -> EncoderCudaGraphCaptureInputs:
+    ):
         patch_grid = (
             cast("tuple[int, int]", axis_keys[0])
             if axis_keys
@@ -1823,7 +1823,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         device: torch.device,
         dtype: torch.dtype,
         patch_grid: tuple[int, int],
-    ) -> EncoderCudaGraphCaptureInputs:
+    ):
         th, tw = patch_grid
         pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
         max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
@@ -1856,7 +1856,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
-    ) -> EncoderCudaGraphReplayBuffers:
+    ):
         _ = max_batch_size
         _ = max_frames_per_batch
         video = self.get_input_modality(mm_kwargs) == "video"
