@@ -96,6 +96,13 @@ class DeepseekV4ForConditionalGeneration(
     delegates through ``language_model`` via the protocol defaults.
     """
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+        "wqkv": ["wqkv"],
+    }
+
     # The MoE router needs raw token ids to detect image sentinel tokens
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
