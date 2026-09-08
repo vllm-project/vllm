@@ -568,6 +568,7 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::ImageEmbeds { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }
                     | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),

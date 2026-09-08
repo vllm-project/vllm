@@ -68,6 +68,8 @@ pub struct LoadModelBackendsOptions {
     /// Disable frontend-side multimodal preprocessing and render the model as
     /// language-only.
     pub language_model_only: bool,
+    /// Allow metadata-only image embedding inputs.
+    pub enable_mm_embeds: bool,
     /// How to serialize `message.content` when rendering the chat template.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional server-default chat template override, provided either as an

@@ -67,6 +67,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
+            enable_mm_embeds: false,
             chat_template: config.chat_template.clone(),
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),

@@ -44,7 +44,7 @@ impl HfChatBackend {
     ) -> Result<Self> {
         let model_config = load_model_config(files.config_path.as_deref())?;
         let model_type = model_config.model_type().unwrap_or_default();
-        let multimodal_model_info = if options.language_model_only {
+        let mut multimodal_model_info = if options.language_model_only {
             None
         } else {
             MultimodalModelInfo::from_paths(
@@ -60,6 +60,9 @@ impl HfChatBackend {
                 options.limit_mm_per_prompt.clone(),
             )?
         };
+        if let Some(info) = multimodal_model_info.as_mut() {
+            info.enable_mm_embeds = options.enable_mm_embeds;
+        }
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
 
         let renderer = options.renderer.resolve(model_type);
@@ -233,6 +236,7 @@ mod tests {
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
+                enable_mm_embeds: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),

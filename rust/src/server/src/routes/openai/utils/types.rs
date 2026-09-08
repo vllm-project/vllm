@@ -152,6 +152,8 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    #[serde(rename = "image_embeds")]
+    ImageEmbeds { image_embeds: Value, uuid: String },
     #[serde(rename = "video_url")]
     VideoUrl {
         video_url: VideoUrl,
