@@ -1914,7 +1914,6 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
-    worker._failed_recv_pending = set()
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
@@ -1943,12 +1942,29 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     np.testing.assert_array_equal(device_read.args[4], [7])
     worker.nixl_wrapper.send_notif.assert_not_called()
 
-    assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
-        "request"
-    }
+    assert worker._pop_done_transfers(worker._recving_transfers) == {"request"}
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
     )
+
+
+def test_mixed_memory_read_failure_does_not_notify_producer():
+    """A failed half of a split READ must suppress its success notification."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._recving_metadata = {"request": MagicMock()}
+    worker._recving_transfers = {"request": [101, 102]}
+    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
+    worker._is_hma_required = True
+    worker._failed_recv_reqs = MagicMock()
+    worker._log_failure = MagicMock()  # type: ignore[method-assign]
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
+
+    worker._pop_done_transfers(worker._recving_transfers)
+
+    assert "request" not in worker._pending_recv_notifs
+    worker.nixl_wrapper.send_notif.assert_not_called()
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
@@ -2773,9 +2789,9 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=([1, 2, 3], [7, 8]),
+        local_block_ids=([1, 2, 3],),
         kv_transfer_params={
-            "remote_block_ids": ([4, 5, 6], [9, 10]),
+            "remote_block_ids": ([4, 5, 6],),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -2797,7 +2813,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
 
     # Check that blocks were marked invalid
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {1, 2, 3, 7, 8}
+    assert invalid_blocks == {1, 2, 3}
 
     # Check that request appears in get_finished
     _, done_recving = connector.get_finished(finished_req_ids=set())
@@ -2986,11 +3002,18 @@ def test_failed_request_skips_kv_postprocessing(
 def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     default_vllm_config, dist_init
 ):
-    """Report a split READ failure only after every handle has stopped.
+    """A request whose handles fail in different polls must not crash the engine.
 
-    Reporting while another READ is live lets the scheduler reuse destination
-    blocks that NIXL may still write. The request must be reported exactly once,
-    after all of its handles reach a terminal state.
+    One transfer handle is created per remote rank, and when a peer goes away
+    they do not all fail in the same poll: one errors while another is still
+    PROC. The first failure reports the request via _failed_recv_reqs and
+    get_finished() pops its metadata; when the remaining handles fail in a
+    later poll, the request must be cleaned up without being reported again.
+
+    Reporting twice kills the EngineCore: the scheduler's assert in
+    _update_from_kv_xfer_finished only expects a finished recv for a request
+    still waiting for KVs, having moved this one out of
+    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
     """
     vllm_config = create_vllm_config()
     connector = NixlConnector(
@@ -3037,21 +3060,20 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     ):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id not in done_recving
-    assert request_id in worker._recving_metadata
+    assert request_id in done_recving
+    assert request_id not in worker._recving_metadata
     assert worker._recving_transfers[request_id] == [second]
 
-    # Poll 2: once the second handle fails, report and clean up the request.
+    # Poll 2: the second handle fails too. The request was already reported,
+    # so it must not be reported a second time: the scheduler has since moved
+    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
+    # finished recv for a request in that state. Its remaining handles are
+    # still released and the transfer entry removed.
     with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id in done_recving
-    assert request_id not in worker._recving_metadata
-    assert request_id not in worker._recving_transfers
-
-    # Subsequent polls must not report it again.
-    _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id not in done_recving
+    assert request_id not in worker._recving_transfers
 
 
 def _set_test_speculative_config(

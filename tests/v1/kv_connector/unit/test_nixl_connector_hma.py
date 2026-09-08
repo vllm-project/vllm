@@ -925,6 +925,7 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
         block_len_per_layer=[100, 100, 100],
     )
     worker.region_group_ids = [0, 0, 1]
+    worker._uses_region_group_mapping = True
 
     result = worker._compute_desc_ids(
         block_ids=([1, 2], [7]),
@@ -957,6 +958,7 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
         block_len_per_layer=[100, 100],
     )
     worker.region_group_ids = [0, 1]
+    worker._uses_region_group_mapping = True
 
     result = worker._compute_desc_ids(
         block_ids=([4], [8]),

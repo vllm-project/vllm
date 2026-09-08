@@ -174,6 +174,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.dst_num_blocks = {}
     worker.dst_region_num_blocks = {}
     worker.dst_region_group_ids = {}
+    worker.dst_uses_region_group_mapping = {}
     worker.dst_region_mem_types = {}
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}

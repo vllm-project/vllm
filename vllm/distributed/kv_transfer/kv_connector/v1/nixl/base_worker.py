@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
-import contextlib
 import itertools
 import logging
 import os
@@ -168,6 +167,7 @@ class NixlBaseConnectorWorker:
         physical_blocks_per_logical: int,
         region_num_blocks: list[int] | None = None,
         region_group_ids: list[int] | None = None,
+        uses_region_group_mapping: bool | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
@@ -200,15 +200,22 @@ class NixlBaseConnectorWorker:
         if num_ssm_regions == 0:
             if region_group_ids is None:
                 region_group_ids = self.region_group_ids
+                if uses_region_group_mapping is None:
+                    uses_region_group_mapping = self._uses_region_group_mapping
             assert len(region_group_ids) == self.num_regions
+            if uses_region_group_mapping is None:
+                uses_region_group_mapping = len(set(region_group_ids)) > 1
             region_group_ids_array = np.asarray(region_group_ids, dtype=np.int32)
-            region_num_blocks_array = np.asarray(region_num_blocks, dtype=np.int32)
-            if np.unique(region_group_ids_array).size == 1:
+            if not uses_region_group_mapping:
+                # NOTE (NickLucche) With HMA, every kv group has the same number
+                # of layers and layers from different groups share the same kv
+                # tensor. E.g., for block_ids=[[1, 2], [3]], blocks [1, 2] need
+                # to be read across all regions, as does [3], while blocks from
+                # different groups never overlap. We can therefore flatten the
+                # block ids and compute all descriptor ids at once.
                 block_arr = np.concatenate(
                     [np.asarray(group, dtype=np.int32) for group in block_ids]
                 )[None, :]
-                if block_arr.size and block_arr.max() >= region_num_blocks_array.min():
-                    raise IndexError("KV block ID exceeds its NIXL region capacity")
                 return (region_offsets[:, None] + block_arr).ravel()
             desc_ids = []
             for group_id, group in enumerate(block_ids):
@@ -220,8 +227,6 @@ class NixlBaseConnectorWorker:
                 )[:, None]
                 assert region_ids.size > 0
                 group_blocks = np.asarray(group, dtype=np.int32)[None, :]
-                if group_blocks.max() >= region_num_blocks_array[region_ids].min():
-                    raise IndexError("KV block ID exceeds its NIXL region capacity")
                 desc_ids.append((region_offsets[region_ids] + group_blocks).ravel())
             if not desc_ids:
                 return np.array([], dtype=np.int64)
@@ -596,6 +601,7 @@ class NixlBaseConnectorWorker:
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
         self.region_group_ids: list[int] = []
+        self._uses_region_group_mapping = False
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
         self.region_mem_types: list[str] = []
@@ -637,6 +643,7 @@ class NixlBaseConnectorWorker:
         self.dst_num_blocks: dict[EngineId, int] = {}
         self.dst_region_num_blocks: dict[EngineId, list[int]] = {}
         self.dst_region_group_ids: dict[EngineId, list[int]] = {}
+        self.dst_uses_region_group_mapping: dict[EngineId, bool] = {}
         self.dst_region_mem_types: dict[EngineId, list[str]] = {}
         self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
@@ -659,7 +666,6 @@ class NixlBaseConnectorWorker:
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
-        self._failed_recv_pending: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1496,6 +1502,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
         self.region_mem_types = region_mem_types
+        self._uses_region_group_mapping = len(set(self.region_group_ids)) > 1
         self._mixed_mem_types = len(set(region_mem_types)) > 1
         if self._has_mamba:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
@@ -1529,6 +1536,9 @@ class NixlBaseConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
         self.dst_region_group_ids[self.engine_id] = self.region_group_ids
+        self.dst_uses_region_group_mapping[self.engine_id] = (
+            self._uses_region_group_mapping
+        )
         self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
         if self._has_mamba:
@@ -2018,6 +2028,9 @@ class NixlBaseConnectorWorker:
                 self.region_group_ids
                 if len(self.region_group_ids) == num_remote_regions
                 else [0] * num_remote_regions
+            )
+            self.dst_uses_region_group_mapping[engine_id] = (
+                len(set(self.dst_region_group_ids[engine_id])) > 1
             )
             self.dst_region_mem_types[engine_id] = (
                 nixl_agent_meta.region_mem_types
@@ -2528,7 +2541,7 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers, is_recv=True)
+        done_recving = self._pop_done_transfers(self._recving_transfers)
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2687,9 +2700,7 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(
-        self, transfers: dict[str, list[int]], *, is_recv: bool = False
-    ) -> set[str]:
+    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
@@ -2700,7 +2711,6 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
-            failed = req_id in self._failed_recv_pending
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
@@ -2708,8 +2718,7 @@ class NixlBaseConnectorWorker:
                         # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
-                        with contextlib.suppress(Exception):
-                            self.nixl_wrapper.release_xfer_handle(handle)
+                        self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
                         continue
@@ -2720,9 +2729,7 @@ class NixlBaseConnectorWorker:
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
-                        self.nixl_wrapper.release_xfer_handle(handle)
-                        self.xfer_stats.record_failed_transfer()
-                        failed = True
+                        self._handle_failed_transfer(req_id, handle)
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
@@ -2730,27 +2737,19 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    with contextlib.suppress(Exception):
-                        self.nixl_wrapper.release_xfer_handle(handle)
-                    self.xfer_stats.record_failed_transfer()
-                    failed = True
+                    self._handle_failed_transfer(req_id, handle)
 
-            if in_progress:
+            if not in_progress:
+                # Only report request as completed when all transfers are done.
+                # A request failed in an earlier poll was already reported via
+                # _failed_recv_reqs and its metadata popped by get_finished();
+                # don't report it again, just drop the remaining handles.
+                if req_id in self._recving_metadata:
+                    done_req_ids.add(req_id)
+                    self._send_pending_recv_notifs(req_id)
+                del transfers[req_id]
+            else:
                 transfers[req_id] = in_progress
-                if is_recv and failed:
-                    self._failed_recv_pending.add(req_id)
-                continue
-
-            del transfers[req_id]
-            if is_recv and failed:
-                self._failed_recv_pending.discard(req_id)
-                self._report_failed_recv(req_id)
-                continue
-            if is_recv and req_id not in self._recving_metadata:
-                continue
-            done_req_ids.add(req_id)
-            if is_recv:
-                self._send_pending_recv_notifs(req_id)
         return done_req_ids
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
@@ -2762,26 +2761,20 @@ class NixlBaseConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        if handle is not None:
-            with contextlib.suppress(Exception):
-                self.nixl_wrapper.release_xfer_handle(handle)
-        self.xfer_stats.record_failed_transfer()
-        if self._recving_transfers.get(req_id):
-            self._failed_recv_pending.add(req_id)
-            return
-        self._report_failed_recv(req_id)
-
-    def _report_failed_recv(self, req_id: str) -> None:
-        meta = self._recving_metadata.get(req_id)
-        if meta is None:
-            self._pending_recv_notifs.pop(req_id, None)
-            return
-        if not self._is_hma_required:
-            self._invalid_block_ids.put(
-                {block_id for group in meta.local_block_ids for block_id in group}
-            )
-        self._failed_recv_reqs.put(req_id)
+        # (multi-read) One handle is created per remote rank, and they do not
+        # all fail in the same _pop_done_transfers poll. The request is
+        # reported failed on the first one, which pops its metadata in
+        # get_finished(); on the later failures only the handle cleanup is left.
+        # TODO (NickLucche) handle failed transfer for HMA.
+        # A split READ's notification is sent only after every handle succeeds.
         self._pending_recv_notifs.pop(req_id, None)
+        if (meta := self._recving_metadata.get(req_id)) is not None:
+            if not self._is_hma_required:
+                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+            self._failed_recv_reqs.put(req_id)
+        if handle is not None:
+            self.nixl_wrapper.release_xfer_handle(handle)
+        self.xfer_stats.record_failed_transfer()
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
@@ -3176,6 +3169,7 @@ class NixlBaseConnectorWorker:
         self.dst_num_blocks.pop(engine_id, None)
         self.dst_region_num_blocks.pop(engine_id, None)
         self.dst_region_group_ids.pop(engine_id, None)
+        self.dst_uses_region_group_mapping.pop(engine_id, None)
         self.dst_region_mem_types.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
         if self.transfer_topo is not None:

@@ -46,10 +46,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
-#  11: Add per-region transfer geometry to NixlAgentMetadata
-#  12: Add per-region memory types to NixlAgentMetadata
+#  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 12
+NIXL_CONNECTOR_VERSION: int = 11
 
 
 @dataclass

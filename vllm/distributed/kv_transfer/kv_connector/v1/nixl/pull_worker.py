@@ -414,6 +414,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if read_spec.block_ids_by_region
                 else self.dst_region_group_ids[dst_engine_id]
             ),
+            uses_region_group_mapping=(
+                self.num_regions > 1
+                if read_spec.block_ids_by_region
+                else self.dst_uses_region_group_mapping[dst_engine_id]
+            ),
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -425,6 +430,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 list(range(self.num_regions))
                 if read_spec.block_ids_by_region
                 else self.region_group_ids
+            ),
+            uses_region_group_mapping=(
+                self.num_regions > 1
+                if read_spec.block_ids_by_region
+                else self._uses_region_group_mapping
             ),
         )
 
