@@ -570,10 +570,8 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def _create_attention_instances(self) -> dict[int, Attention]:
-        """
-        Create `Attention` instances to inform KV cache allocation.
-        """
+    def _create_attention_instances(self):
+        """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
