@@ -405,18 +405,21 @@ def test_v2_model_runner_supports_extract_hidden_states():
 def test_v2_model_runner_requires_uva(monkeypatch):
     """Without UVA (pinned host memory, opt-in on WSL2) the V2 runner cannot
     build its buffers and would die at init_device with a bare "UVA is not
-    available"; the default has to fall back to V1 at config time, and forcing
-    V2 has to fail there with an actionable message."""
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    available"; forcing V2 has to fail at config time with an actionable
+    message, and the default has to fall back to V1 there."""
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: False)
 
+    # Explicit V2 must reach the validator from __post_init__.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="UVA"):
+        VllmConfig()
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     config = VllmConfig()
     unsupported = config._get_v2_model_runner_unsupported_features()
     assert any("UVA" in feature for feature in unsupported)
     assert config.use_v2_model_runner is False
-    with pytest.raises(ValueError, match="UVA"):
-        config._validate_v2_model_runner()
 
     # With UVA available the entry is the only thing that flipped.
     monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: True)
