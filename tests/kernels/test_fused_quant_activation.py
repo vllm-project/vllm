@@ -91,7 +91,7 @@ class MockLinearFp8Static(torch.nn.Module):
 
     def __init__(self, input_scale: torch.Tensor):
         super().__init__()
-        self.input_quant_key = kFp8StaticTensorSym
+        self._input_quant_key = kFp8StaticTensorSym
         self.input_scale = input_scale
 
 
@@ -100,13 +100,19 @@ class MockLinearFp8Dynamic128(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.input_quant_key = kFp8Dynamic128Sym
+        self._input_quant_key = kFp8Dynamic128Sym
 
 
 class MockLinearNoQuant(torch.nn.Module):
-    """Mock linear layer with no input_quant_key (no fusion)."""
+    """Mock linear layer with no input quantization key."""
 
     pass
+
+
+class MockLinearRequiresUnquantized(MockLinearFp8Static):
+    """Mock consumer that needs the original activation for another branch."""
+
+    requires_unquantized_input = True
 
 
 @pytest.mark.parametrize("num_tokens", [1, 16, 128])
@@ -199,7 +205,7 @@ def test_maybe_fused_act_quant_fallback(
     hidden_size: int,
     dtype: torch.dtype,
 ) -> None:
-    """Test maybe_fused_act_quant falls back when no input_quant_key."""
+    """Test maybe_fused_act_quant falls back without an input quantization key."""
     device = "cuda:0"
     torch.set_default_device(device)
 
@@ -216,3 +222,19 @@ def test_maybe_fused_act_quant_fallback(
 
     ref_out = act_fn(x)
     torch.testing.assert_close(result, ref_out)
+
+
+@torch.inference_mode()
+def test_maybe_fused_act_quant_preserves_required_unquantized_input(
+    default_vllm_config,
+) -> None:
+    device = "cuda:0"
+    act_fn = SiluAndMul()
+    scale = torch.tensor([0.5], device=device, dtype=torch.float32)
+    linear = MockLinearRequiresUnquantized(scale)
+    x = torch.randn(17, 256, dtype=torch.bfloat16, device=device)
+
+    result = maybe_fused_act_quant(act_fn, x, linear)
+
+    assert isinstance(result, torch.Tensor)
+    torch.testing.assert_close(result, act_fn(x))

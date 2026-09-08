@@ -5,7 +5,7 @@ Producer side of the QuantizedActivation contract for activation layers.
 
 Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
-linear advertises a consumable input_quant_key (see quant_activation.py).
+linear advertises a consumable input quantization key (see quant_activation.py).
 Falls back to the plain activation when nothing matches, so a model forward can
 always call maybe_fused_act_quant unconditionally.
 
@@ -19,7 +19,10 @@ from collections.abc import Callable
 import torch
 
 from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
 )
@@ -131,7 +134,7 @@ def _silu_and_mul_nvfp4_dynamic(
     )
 
 
-# (activation module type, consumer input_quant_key) -> fused producer.
+# (activation module type, consumer input quantization key) -> fused producer.
 # Add a row for each supported manual producer.
 _FUSED_ACT_QUANT: dict[tuple[type, QuantKey], Callable] = {
     (SiluAndMul, kFp8StaticTensorSym): _silu_and_mul_fp8_static,
@@ -187,10 +190,10 @@ def maybe_fused_act_quant(
 ) -> "torch.Tensor | QuantizedActivation":
     """Apply act_fn, fusing the downstream linear's input quant when possible.
 
-    Returns a QuantizedActivation when a fused kernel matches
-    (act_fn, linear.input_quant_key), else the plain activated tensor.
+    Returns a QuantizedActivation when a fused kernel matches the activation and
+    the consumer's effective input quantization key, else the plain activation.
     """
-    key = getattr(linear, "input_quant_key", None)
+    key = get_input_quant_key(linear)
     if key is not None:
         registry_key = (type(act_fn), key)
         producer = _FUSED_ACT_QUANT.get(registry_key)

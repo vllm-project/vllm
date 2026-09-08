@@ -25,7 +25,7 @@ requires_sm90 = pytest.mark.skipif(
 class _StaticFp8Linear(torch.nn.Module):
     def __init__(self, input_scale: torch.Tensor) -> None:
         super().__init__()
-        self.input_quant_key = kFp8StaticTensorSym
+        self._input_quant_key = kFp8StaticTensorSym
         self.input_scale = input_scale
 
 
@@ -69,6 +69,52 @@ def test_relu2_static_fp8_quant(o2_relu2_fp8_ops, shape) -> None:
     relu2, quant_fp8 = o2_relu2_fp8_ops
     expected, _ = quant_fp8(relu2(x), scale)
     result = maybe_fused_act_quant(relu2, x, _StaticFp8Linear(scale))
+
+    assert isinstance(result, QuantizedActivation)
+    _assert_quantized_activation(result, x, scale)
+    _assert_fp8_bitwise_equal(result.data, expected)
+
+
+@requires_sm90
+@pytest.mark.parametrize(
+    "enabled_ops",
+    [(), ("relu2",), ("quant_fp8",), ("relu2", "quant_fp8")],
+)
+@torch.inference_mode()
+def test_relu2_static_fp8_quant_ignores_custom_op_dispatch(enabled_ops) -> None:
+    custom_ops = ["none", *(f"+{op}" for op in enabled_ops)]
+    config = VllmConfig(
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=CompilationConfig(custom_ops=custom_ops),
+    )
+    with set_current_vllm_config(config):
+        torch.manual_seed(0)
+        relu2 = ReLUSquaredActivation()
+        quant_fp8 = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        x = torch.randn((17, 5120), device="cuda", dtype=torch.bfloat16)
+        scale = torch.tensor(0.03125, device="cuda", dtype=torch.float32)
+
+        expected, _ = quant_fp8(relu2(x), scale)
+        result = maybe_fused_act_quant(relu2, x, _StaticFp8Linear(scale))
+
+    assert isinstance(result, QuantizedActivation)
+    _assert_quantized_activation(result, x, scale)
+    _assert_fp8_bitwise_equal(result.data, expected)
+
+
+@requires_sm90
+@torch.inference_mode()
+def test_relu2_static_fp8_quant_without_compilation() -> None:
+    config = VllmConfig(optimization_level=OptimizationLevel.O0)
+    with set_current_vllm_config(config):
+        torch.manual_seed(0)
+        relu2 = ReLUSquaredActivation()
+        quant_fp8 = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        x = torch.randn((17, 5120), device="cuda", dtype=torch.bfloat16)
+        scale = torch.tensor(0.03125, device="cuda", dtype=torch.float32)
+
+        expected, _ = quant_fp8(relu2(x), scale)
+        result = maybe_fused_act_quant(relu2, x, _StaticFp8Linear(scale))
 
     assert isinstance(result, QuantizedActivation)
     _assert_quantized_activation(result, x, scale)

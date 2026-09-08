@@ -3,8 +3,6 @@
 
 import torch
 
-from vllm.config import get_cached_compilation_config
-from vllm.config.compilation import CompilationMode
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -40,12 +38,6 @@ def _relu_squared_static_fp8_quant_kernel(
     # Match the O2 native chain by preserving NaN through the FP8 conversion.
     quantized = tl.where(input_is_nan, x, quantized)
     tl.store(output_ptr + offsets, quantized, mask=mask)
-
-
-def is_relu_squared_static_fp8_quant_config_supported() -> bool:
-    """Return whether compiled-Inductor execution is configured."""
-    config = get_cached_compilation_config()
-    return config.mode == CompilationMode.VLLM_COMPILE and config.backend == "inductor"
 
 
 def relu_squared_static_fp8_quant(

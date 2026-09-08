@@ -5,7 +5,9 @@ A QuantizedActivation is a pre-quantized activation produced by a fused kernel
 and consumed directly by a linear layer, letting the layer skip its own input
 quantization. A linear advertises the key its kernel can consume via
 expose_input_quant_key; the kernel validates and reads the activation via
-as_quantized_activation.
+as_quantized_activation. Producers query the effective capability through
+get_input_quant_key, which hides the key when another consumer branch needs the
+original activation.
 """
 
 from dataclasses import dataclass
@@ -36,12 +38,11 @@ class QuantizedActivation:
 
 
 def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
-    """Advertise the kernel's pre-quantized input key on the layer, if any.
+    """Store the kernel's pre-quantized input key on the layer, if any.
 
-    This is the bridge from a kernel's input_quant_key() to the
-    layer.input_quant_key attribute that fusion call sites read. The attribute
-    is left unset when the kernel quantizes its own input, so non-supporting
-    backends never receive a QuantizedActivation.
+    This is the bridge from a kernel's input_quant_key() to the layer capability
+    that fusion call sites read through get_input_quant_key. The raw key is left
+    unset when the kernel quantizes its own input.
 
     TODO(mgoin): Producers also need the consumer's quantization scales (e.g.
     static input scale, global scale). Expose those here as well so producers
@@ -49,7 +50,14 @@ def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
     """
     key = kernel.input_quant_key()
     if key is not None:
-        layer.input_quant_key = key
+        layer._input_quant_key = key
+
+
+def get_input_quant_key(layer: torch.nn.Module) -> QuantKey | None:
+    """Return the pre-quantized input key the complete layer can consume."""
+    if getattr(layer, "requires_unquantized_input", False):
+        return None
+    return getattr(layer, "_input_quant_key", None)
 
 
 def as_quantized_activation(

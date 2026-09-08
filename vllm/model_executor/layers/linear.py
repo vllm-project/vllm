@@ -249,6 +249,8 @@ class LinearBase(PluggableLayer):
         disable_tp: If true, tensor parallelism will be disabled for this layer.
     """
 
+    requires_unquantized_input = False
+
     def __init__(
         self,
         input_size: int,

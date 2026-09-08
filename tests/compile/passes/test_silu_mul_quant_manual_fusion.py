@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fusion.fused_act_quant import (
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     expose_input_quant_key,
+    get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -45,11 +46,11 @@ from vllm.platforms import current_platform
 
 # Mock linear layer for testing fusion paths that don't have real kernel support
 class MockLinearForFusion(torch.nn.Module):
-    """Mock linear layer that exposes input_quant_key for fusion testing."""
+    """Mock linear layer that exposes an input key for fusion testing."""
 
     def __init__(self, quant_key, input_scale=None, input_global_scale=None):
         super().__init__()
-        self.input_quant_key = quant_key
+        self._input_quant_key = quant_key
         if input_scale is not None:
             self.input_scale = input_scale
         if input_global_scale is not None:
@@ -110,7 +111,7 @@ def test_manual_fusion_fp8_static_with_linear(
         # Enable fusion
         expose_input_quant_key(fp8_linear, fp8_linear.kernel)
 
-        if not hasattr(fp8_linear, "input_quant_key"):
+        if get_input_quant_key(fp8_linear) is None:
             pytest.skip(
                 f"Kernel {force_kernel.__name__} doesn't support input_quant_key"
             )
@@ -284,7 +285,7 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
 def test_manual_fusion_fallback_no_key(dtype: torch.dtype):
-    """Test that maybe_fused_act_quant falls back when no input_quant_key."""
+    """Test that maybe_fused_act_quant falls back without an input key."""
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
 
@@ -296,7 +297,7 @@ def test_manual_fusion_fallback_no_key(dtype: torch.dtype):
 
     with set_current_vllm_config(config):
         silu_and_mul = SiluAndMul()
-        # Linear without input_quant_key attribute
+        # Linear without an input quantization key
         mock_linear = torch.nn.Linear(128, 128)
 
         result = maybe_fused_act_quant(silu_and_mul, x, mock_linear)
