@@ -100,7 +100,10 @@ class DeepseekV4ForConditionalGeneration(
         "gate_up_proj": ["w1", "w3"],
         "fused_wqa_wkv": ["wq_a", "wkv"],
         "fused_wkv_wgate": ["wkv", "wgate"],
+
+        # for visual encoder
         "wqkv": ["wqkv"],
+        "w1": ["w1"],
     }
 
     # The MoE router needs raw token ids to detect image sentinel tokens
