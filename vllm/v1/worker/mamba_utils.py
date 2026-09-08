@@ -713,9 +713,10 @@ def validate_mamba_state_copy_funcs(
             f"missing state copy funcs for {mamba_spec.mamba_type}"
         )
         state_copy_funcs = copy_funcs[mamba_spec.mamba_type]
-        assert len(state_copy_funcs) == len(mamba_spec.shapes), (
+        assert 0 < len(state_copy_funcs) <= len(mamba_spec.shapes), (
             f"{mamba_spec.mamba_type} declares {len(mamba_spec.shapes)} states, "
-            f"but provides {len(state_copy_funcs)} state copy funcs"
+            f"but provides {len(state_copy_funcs)} state copy funcs; expected "
+            "a non-empty copyable prefix"
         )
 
 
