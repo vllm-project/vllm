@@ -159,6 +159,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE_SM120"
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [64, 256]
@@ -219,6 +223,12 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
                 return (
                     "FLASHINFER_MLA_SPARSE_SM120 requires index_topk=2048; "
                     f"got {index_topk}"
+                )
+            qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", None)
+            if qk_rope_head_dim is not None and int(qk_rope_head_dim) != 64:
+                return (
+                    "FLASHINFER_MLA_SPARSE_SM120 requires qk_rope_head_dim=64 "
+                    f"for fp8_ds_mla layout; got {qk_rope_head_dim}"
                 )
         return None
 

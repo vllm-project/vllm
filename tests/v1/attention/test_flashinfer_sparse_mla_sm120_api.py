@@ -92,3 +92,33 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+
+
+def test_sm120_backend_rejects_nope_mla_head_size(monkeypatch) -> None:
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+
+    assert FlashInferMLASparseSM120Backend.get_supported_head_sizes() == [576]
+
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                model_type="glm5_next_text", index_topk=2048, qk_rope_head_dim=0
+            ),
+        ),
+    )
+    with set_current_vllm_config(cfg):
+        invalid_reasons = FlashInferMLASparseSM120Backend.validate_configuration(
+            head_size=512,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=256,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=True,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=DeviceCapability(12, 0),
+            attn_type="decoder",
+        )
+
+    assert any("head_size" in r or "qk_rope_head_dim" in r for r in invalid_reasons)

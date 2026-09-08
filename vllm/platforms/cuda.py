@@ -129,10 +129,17 @@ def _get_backend_priorities(
                 *sparse_backends,
             ]
         elif device_capability.major == 12:
-            return [
+            sm120_backends = [
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
+            if head_size == 512:
+                sm120_backends.insert(
+                    1, AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
+                )
+            else:
+                sm120_backends.append(AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90)
+            return sm120_backends
         else:
             sparse_tail = [
                 AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
