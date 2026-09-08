@@ -538,9 +538,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=True,
         max_transformers_version="5.3",
         transformers_version_reason={
-            "vllm": (
-                "vllm upgraded transformers above v5.4 where "
-                "validate_rope() no longer accepts ignore_keys param"
+            "hf": (
+                "Transformers v5.4 removed the ignore_keys param from "
+                "validate_rope(); vLLM patches validate_rope() and is unaffected"
             )
         },
     ),
@@ -808,6 +808,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/command-a-vision-07-2025",
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
         min_transformers_version="5.9.0",
+    ),
+    "CohereCompassForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
