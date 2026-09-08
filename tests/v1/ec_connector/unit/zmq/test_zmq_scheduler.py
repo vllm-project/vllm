@@ -113,6 +113,21 @@ def test_a_producer_does_not_hold_requests_back(vllm_config):
     assert scheduler.ensure_cache_available(_Request("mm0"), 0) is True
 
 
+def test_loaded_item_is_not_waited_for_again(vllm_config):
+    scheduler = _scheduler(vllm_config)
+    request = _Request("mm0", ec_transfer_params={"ec_items": [{"mm_hash": "mm0"}]})
+
+    assert scheduler.ensure_cache_available(request, 0) is False
+    _report_arrival(scheduler, "mm0")
+    assert scheduler.ensure_cache_available(request, 0) is True
+
+    scheduler.update_state_after_alloc(request, 0)
+    scheduler.build_connector_meta(scheduler_output=None)
+
+    # The request can take another scheduling step while the worker loads.
+    assert scheduler.ensure_cache_available(request, 0) is True
+
+
 def test_an_arrived_item_is_loaded_exactly_once(vllm_config):
     """The worker hands the embedding over once, so a second load would find
     nothing staged."""

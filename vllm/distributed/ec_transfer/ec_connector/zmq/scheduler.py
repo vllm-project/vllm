@@ -44,6 +44,8 @@ class ECZmqScheduler:
 
         # Consumer: mm_hashes every rank has staged, ready to be loaded.
         self._ready: set[str] = set()
+        # Items whose staged embedding has been handed to the worker for load.
+        self._loading: set[str] = set()
         # Consumer: mm_hash -> number of ranks that reported it so far.
         self._arrivals: dict[str, int] = {}
         # Consumer: mm_hash -> deadline after which we stop waiting for it.
@@ -81,6 +83,8 @@ class ECZmqScheduler:
         for feature in request.mm_features:
             mm_hash = feature.identifier
             if mm_hash in self._ready:
+                continue
+            if mm_hash in self._loading:
                 continue
             deadline = self._expected.get(mm_hash)
             if deadline is None:
@@ -179,6 +183,7 @@ class ECZmqScheduler:
             # The workers hand the embedding over exactly once, so drop it from
             # the ready set as soon as the load is scheduled.
             self._ready.discard(mm_hash)
+            self._loading.add(mm_hash)
             if mm_hash not in self._pending_loads:
                 self._pending_loads.append(mm_hash)
             return
@@ -205,6 +210,7 @@ class ECZmqScheduler:
 
     def shutdown(self) -> None:
         self._ready.clear()
+        self._loading.clear()
         self._arrivals.clear()
         self._expected.clear()
         self._pending_loads.clear()
