@@ -2,12 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
+from dataclasses import dataclass
 
 import torch
 import torch.types
 
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.utils.torch_utils import PIN_MEMORY
+
+
+@dataclass
+class TrainableTokensWeights:
+    """Absolute embedding or output-head rows selected by token ID."""
+
+    token_indices: torch.Tensor
+    weights: torch.Tensor
 
 
 class LoRALayerWeights:

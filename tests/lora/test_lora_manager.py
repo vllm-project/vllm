@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import nn
+from transformers import LlamaConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
@@ -17,7 +19,11 @@ from vllm.lora.layers import (
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel
-from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import (
+    LoRALayerWeights,
+    PackedLoRALayerWeights,
+    TrainableTokensWeights,
+)
 from vllm.lora.model_manager import (
     DEFAULT_LANGUAGE_WRAPPER_KEY,
     LoRAMapping,
@@ -28,6 +34,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -111,6 +118,243 @@ def create_packed_lora(
             torch.rand([w.shape[0] // len(replaced_module_names), 8], device=device),
         )
     return LoRAModel(lora_id, 8, loras)
+
+
+def _trainable_tokens_manager(dummy_model, vllm_config, capacity=2, tied=True):
+    model = dummy_model
+    model.add_module(
+        "embed_tokens", VocabParallelEmbedding(model.unpadded_vocab_size, 10)
+    )
+    if tied:
+        model.embed_tokens.weight = model.lm_head.weight
+    model.embedding_modules["embed_tokens"] = "input_embeddings"
+    model = model.to(DEVICES[0])
+    ordinary = create_lora(1, model, ["dense1"], device=DEVICES[0])
+    manager = LRUCacheLoRAModelManager(
+        model,
+        1,
+        8,
+        model.unpadded_vocab_size,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=1,
+            max_loras=1,
+            lora_dtype=DEFAULT_DTYPE,
+            max_lora_trainable_tokens=capacity,
+        ),
+        device=torch.device(DEVICES[0]),
+        vllm_config=vllm_config,
+    )
+    return manager, ordinary
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["disabled", "unavailable", "conflict", "hidden_size", "row_count", "token_rank"],
+)
+def test_trainable_tokens_invalid_adapter_preserves_active_slot(
+    default_vllm_config, dist_init, dummy_model, invalid
+):
+    """Invalid selected rows must not evict an adapter from a full LRU cache."""
+    manager, ordinary = _trainable_tokens_manager(
+        dummy_model, default_vllm_config, capacity=0 if invalid == "disabled" else 2
+    )
+    manager.add_adapter(ordinary)
+    manager.activate_adapter(ordinary.id)
+    previous_weights = manager.modules["dense1"].lora_a_stacked[0].clone()
+
+    module_name = "missing_embedding" if invalid == "unavailable" else "embed_tokens"
+    indices = torch.tensor([1, 3])
+    rows = torch.ones(2, 10)
+    if invalid == "hidden_size":
+        rows = torch.ones(2, 9)
+    elif invalid == "row_count":
+        rows = torch.ones(1, 10)
+    elif invalid == "token_rank":
+        indices = indices.unsqueeze(0)
+    loras = {}
+    if invalid == "conflict":
+        loras[module_name] = LoRALayerWeights(
+            module_name,
+            8,
+            8,
+            torch.zeros(8, dummy_model.unpadded_vocab_size),
+            torch.zeros(10, 8),
+        )
+    candidate = LoRAModel(
+        2,
+        8,
+        loras,
+        trainable_tokens={module_name: TrainableTokensWeights(indices, rows)},
+    )
+    with pytest.raises(ValueError):
+        manager.add_adapter(candidate)
+
+    assert set(manager.list_adapters()) == {ordinary.id}
+    assert manager.lora_index_to_id == [ordinary.id]
+    assert not manager.activate_adapter(ordinary.id)
+    torch.testing.assert_close(
+        manager.modules["dense1"].lora_a_stacked[0], previous_weights
+    )
+
+
+@pytest.mark.parametrize("ensure_weight_tying", [False, True])
+def test_trainable_tokens_tied_head_and_slot_reuse(
+    default_vllm_config, dist_init, dummy_model, ensure_weight_tying
+):
+    """PEFT omits tied output rows; both wrappers must reset on ordinary reuse."""
+    manager, ordinary = _trainable_tokens_manager(dummy_model, default_vllm_config)
+    indices = torch.tensor([3, 1])
+    rows = torch.arange(20, dtype=torch.float32).reshape(2, 10)
+    selected = LoRAModel(
+        2,
+        8,
+        {},
+        trainable_tokens={"embed_tokens": TrainableTokensWeights(indices, rows)},
+        ensure_weight_tying=ensure_weight_tying,
+    )
+    manager.add_adapter(selected)
+    manager.activate_adapter(selected.id)
+    assert (
+        selected.trainable_tokens["lm_head"]
+        is selected.trainable_tokens["embed_tokens"]
+    )
+    for name in ("embed_tokens", "lm_head"):
+        buffer = manager.modules[name].trainable_tokens
+        torch.testing.assert_close(buffer.token_ids[0].cpu(), indices)
+        torch.testing.assert_close(
+            buffer.weights[0].cpu(), rows.to(buffer.weights.dtype)
+        )
+
+    # A full LRU cache forces the ordinary adapter to reuse the selected slot.
+    manager.add_adapter(ordinary)
+    manager.activate_adapter(ordinary.id)
+    assert manager.lora_index_to_id == [ordinary.id]
+    for name in ("embed_tokens", "lm_head"):
+        assert torch.all(manager.modules[name].trainable_tokens.token_ids[0] == -1)
+
+
+def test_trainable_tokens_ensure_tying_rejects_conflicting_rows(
+    default_vllm_config, dist_init, dummy_model
+):
+    manager, ordinary = _trainable_tokens_manager(dummy_model, default_vllm_config)
+    manager.add_adapter(ordinary)
+    manager.activate_adapter(ordinary.id)
+    selected = LoRAModel(
+        2,
+        8,
+        {},
+        trainable_tokens={
+            "embed_tokens": TrainableTokensWeights(
+                torch.tensor([1]), torch.ones(1, 10)
+            ),
+            "lm_head": TrainableTokensWeights(torch.tensor([3]), torch.zeros(1, 10)),
+        },
+        ensure_weight_tying=True,
+    )
+    with pytest.raises(ValueError):
+        manager.add_adapter(selected)
+    assert set(manager.list_adapters()) == {ordinary.id}
+    assert manager.lora_index_to_id == [ordinary.id]
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("output_ids", [[1], [3]])
+def test_trainable_tokens_omitted_head_requires_actual_matching_tie(
+    default_vllm_config, dist_init, dummy_model, tied, output_ids
+):
+    """Only genuinely tied rows may be omitted from a declared output target."""
+    manager, ordinary = _trainable_tokens_manager(
+        dummy_model, default_vllm_config, tied=tied
+    )
+    manager.add_adapter(ordinary)
+    manager.activate_adapter(ordinary.id)
+    selected = LoRAModel(
+        2,
+        8,
+        {},
+        trainable_tokens={
+            "embed_tokens": TrainableTokensWeights(torch.tensor([1]), torch.ones(1, 10))
+        },
+        trainable_token_indices={"embed_tokens": [1], "lm_head": output_ids},
+    )
+    if tied and output_ids == [1]:
+        assert manager.add_adapter(selected)
+        assert (
+            selected.trainable_tokens["lm_head"]
+            is selected.trainable_tokens["embed_tokens"]
+        )
+    else:
+        with pytest.raises(ValueError, match="missing"):
+            manager.add_adapter(selected)
+        assert set(manager.list_adapters()) == {ordinary.id}
+        assert manager.lora_index_to_id == [ordinary.id]
+
+
+def test_trainable_tokens_list_cannot_target_only_output_head(
+    default_vllm_config, dist_init, dummy_model
+):
+    manager, _ = _trainable_tokens_manager(dummy_model, default_vllm_config)
+    selected = LoRAModel(
+        1,
+        8,
+        {},
+        trainable_tokens={
+            "lm_head": TrainableTokensWeights(torch.tensor([1]), torch.ones(1, 10))
+        },
+        trainable_token_indices=[1],
+    )
+    with pytest.raises(ValueError, match="input embedding"):
+        manager.add_adapter(selected)
+
+
+@pytest.mark.parametrize("load_inplace", [False, True], ids=["eviction", "inplace"])
+def test_trainable_tokens_worker_rejects_before_removing_active_adapter(
+    default_vllm_config, dist_init, dummy_model, tmp_path, load_inplace
+):
+    """A malformed checkpoint must not evict or replace a healthy active adapter."""
+    weights = create_peft_lora(dummy_model, str(tmp_path), ["dense1"])
+    weights["base_model.model.embed_tokens.token_adapter.trainable_tokens_delta"] = (
+        torch.ones(2, 9)
+    )
+    save_file(weights, str(tmp_path / "adapter_model.safetensors"))
+    config_path = tmp_path / "adapter_config.json"
+    config = json.loads(config_path.read_text())
+    config["trainable_token_indices"] = {"embed_tokens": [1, 3]}
+    config_path.write_text(json.dumps(config))
+
+    manager, ordinary = _trainable_tokens_manager(dummy_model, default_vllm_config)
+    manager.add_adapter(ordinary)
+    manager.activate_adapter(ordinary.id)
+    previous_weights = manager.modules["dense1"].lora_a_stacked[0].clone()
+    model_path = tmp_path / "base"
+    LlamaConfig(vocab_size=manager.vocab_size).save_pretrained(model_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path), max_model_len=16, skip_tokenizer_init=True
+        ),
+        lora_config=manager.lora_config,
+    )
+    worker = LRUCacheWorkerLoRAManager(
+        vllm_config, torch.device(DEVICES[0]), EMBEDDING_MODULES
+    )
+    worker._adapter_manager = manager
+    request = LoRARequest(
+        "invalid",
+        ordinary.id if load_inplace else ordinary.id + 1,
+        str(tmp_path),
+        load_inplace=load_inplace,
+    )
+
+    with pytest.raises(ValueError, match="expected.*2, 10"):
+        worker.add_adapter(request)
+
+    assert worker.list_adapters() == {ordinary.id}
+    assert manager.lora_index_to_id == [ordinary.id]
+    assert not manager.activate_adapter(ordinary.id)
+    torch.testing.assert_close(
+        manager.modules["dense1"].lora_a_stacked[0], previous_weights
+    )
 
 
 def test_replace_submodules(default_vllm_config, dist_init, dummy_model):

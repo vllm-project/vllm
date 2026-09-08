@@ -15,8 +15,10 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    LogitsProcessorWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    VocabParallelEmbeddingWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
@@ -32,6 +34,7 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import (
     SupportsLoRA,
     SupportsMultiModal,
@@ -100,6 +103,13 @@ class LoRAModelManager:
 
         self.adapter_type = "LoRA"
         self.lora_config = lora_config
+        if (
+            lora_config.max_lora_trainable_tokens
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError(
+                "LoRA trainable tokens do not yet support pipeline parallelism."
+            )
         self.device = device
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
@@ -145,6 +155,24 @@ class LoRAModelManager:
             vllm_config and vllm_config.parallel_config.enable_expert_parallel
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
+        self._tied_token_modules: dict[str, list[str]] = {}
+        if lora_config.max_lora_trainable_tokens:
+            embeddings = {
+                name: module
+                for name, module in self.model.named_modules(remove_duplicate=False)
+                if isinstance(module, VocabParallelEmbedding)
+            }
+            for name, module in embeddings.items():
+                if name.rsplit(".", 1)[-1] == "lm_head":
+                    continue
+                heads = [
+                    head_name
+                    for head_name, head in embeddings.items()
+                    if head_name.rsplit(".", 1)[-1] == "lm_head"
+                    and head.weight is module.weight
+                ]
+                if heads:
+                    self._tied_token_modules[name] = heads
         self._create_lora_modules()
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
@@ -343,14 +371,25 @@ class LoRAModelManager:
                 logger.debug(
                     "No LoRA weights found for module %s, skipping.", module_name
                 )
-                continue
-
-            module.set_lora(
-                index,
-                module_lora.lora_a,
-                module_lora.lora_b,
-            )
-            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
+            else:
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                )
+                logger.debug(
+                    "Successfully loaded LoRA weights for module %s.", module_name
+                )
+            if isinstance(
+                module, (VocabParallelEmbeddingWithLoRA, LogitsProcessorWithLoRA)
+            ):
+                token_weights = lora_model.trainable_tokens.get(module_name)
+                if token_weights is None:
+                    module.reset_trainable_tokens(index)
+                else:
+                    module.set_trainable_tokens(
+                        index, token_weights.token_indices, token_weights.weights
+                    )
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -361,8 +400,136 @@ class LoRAModelManager:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
+        self._prepare_trainable_tokens(lora)
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
+
+    def _prepare_trainable_tokens(self, lora: LoRAModel) -> None:
+        if not lora.trainable_tokens:
+            if lora.trainable_token_indices is not None:
+                raise ValueError("Configured trainable token weights are missing.")
+            return
+        token_weights = lora.trainable_tokens.copy()
+        configured: dict[str, list[int]] = {}
+        if isinstance(lora.trainable_token_indices, list):
+            inputs = [
+                name
+                for name in token_weights
+                if isinstance(self.modules.get(name), VocabParallelEmbeddingWithLoRA)
+            ]
+            if len(inputs) != 1:
+                raise ValueError(
+                    "A list of trainable_token_indices requires one input embedding."
+                )
+            configured[inputs[0]] = lora.trainable_token_indices
+        elif isinstance(lora.trainable_token_indices, dict):
+            for pattern, ids in lora.trainable_token_indices.items():
+                matches = [
+                    name
+                    for name, module in self.modules.items()
+                    if (name == pattern or name.endswith("." + pattern))
+                    and isinstance(
+                        module,
+                        (VocabParallelEmbeddingWithLoRA, LogitsProcessorWithLoRA),
+                    )
+                ]
+                if not matches:
+                    raise ValueError(
+                        f"Configured trainable token module {pattern!r} "
+                        "is not available."
+                    )
+                for name in matches:
+                    if name in configured:
+                        raise ValueError(
+                            f"Ambiguous trainable token configuration for {name!r}."
+                        )
+                    configured[name] = ids
+        for embedding, heads in self._tied_token_modules.items():
+            if embedding in token_weights:
+                for head in heads:
+                    if head in token_weights:
+                        input_weights = token_weights[embedding]
+                        output_weights = token_weights[head]
+                        same_ids = torch.equal(
+                            input_weights.token_indices, output_weights.token_indices
+                        )
+                        if (lora.ensure_weight_tying or same_ids) and (
+                            not same_ids
+                            or not torch.equal(
+                                input_weights.weights, output_weights.weights
+                            )
+                        ):
+                            raise ValueError(
+                                f"Trainable token weights for tied modules "
+                                f"{embedding!r} and {head!r} must agree."
+                            )
+                    elif head not in configured or configured[head] == (
+                        token_weights[embedding].token_indices.tolist()
+                    ):
+                        token_weights[head] = token_weights[embedding]
+
+        for name, ids in configured.items():
+            if name not in token_weights:
+                raise ValueError(
+                    f"Configured trainable token weights for {name!r} are missing."
+                )
+            if token_weights[name].token_indices.tolist() != ids:
+                raise ValueError(
+                    f"Trainable token IDs for {name!r} disagree with the configuration."
+                )
+
+        for name, weights in token_weights.items():
+            module = self.modules.get(name)
+            if not isinstance(
+                module, (VocabParallelEmbeddingWithLoRA, LogitsProcessorWithLoRA)
+            ):
+                raise ValueError(
+                    f"Trainable tokens require an enabled embedding or lm_head "
+                    f"LoRA module, but {name!r} is not available."
+                )
+            if self._get_lora_layer_weights(lora, name) is not None:
+                raise ValueError(
+                    f"Combining trainable tokens and ordinary LoRA on {name!r} "
+                    "is not supported."
+                )
+            indices = weights.token_indices
+            rows = weights.weights
+            if indices.ndim != 1 or indices.dtype not in (torch.int32, torch.int64):
+                raise ValueError(
+                    f"Trainable token IDs for {name!r} must be an integer vector."
+                )
+            num_tokens = indices.numel()
+            if not num_tokens:
+                raise ValueError(f"Trainable token IDs for {name!r} must not be empty.")
+            if num_tokens > self.lora_config.max_lora_trainable_tokens:
+                raise ValueError(
+                    f"Trainable token count for {name!r} exceeds "
+                    f"max_lora_trainable_tokens="
+                    f"{self.lora_config.max_lora_trainable_tokens}."
+                )
+            hidden_size = (
+                module.base_layer.embedding_dim
+                if isinstance(module, VocabParallelEmbeddingWithLoRA)
+                else module.hidden_size
+            )
+            if rows.ndim != 2 or rows.shape != (num_tokens, hidden_size):
+                raise ValueError(
+                    f"Trainable token rows for {name!r} have shape "
+                    f"{tuple(rows.shape)}, expected {(num_tokens, hidden_size)}."
+                )
+            if not rows.is_floating_point():
+                raise ValueError(
+                    f"Trainable token rows for {name!r} must be floating point."
+                )
+            token_ids = indices.tolist()
+            if len(set(token_ids)) != num_tokens:
+                raise ValueError(f"Trainable token IDs for {name!r} must be unique.")
+            if min(token_ids) < 0 or max(token_ids) >= self.vocab_size:
+                raise ValueError(
+                    f"Trainable token IDs for {name!r} must be within "
+                    f"the base model vocabulary [0, {self.vocab_size})."
+                )
+        lora.trainable_tokens = token_weights
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
@@ -844,6 +1011,8 @@ class LoRAModelManager:
                 else:
                     self._slice_moe_lora_ep(lora_model, module, module_name)
 
+        if not lora_model.loras:
+            return
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
