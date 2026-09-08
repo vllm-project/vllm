@@ -4,6 +4,7 @@
 from argparse import ArgumentError
 
 import pytest
+import torch
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
@@ -128,11 +129,53 @@ def test_extensible_kv_cache_from_cli():
 
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.enable_extensible_kv_cache
+    assert engine_args.enable_extensible_kv_cache is None
+    assert engine_args.gpu_memory_utilization is None
 
     args = parser.parse_args(["--enable-extensible-kv-cache"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_extensible_kv_cache
+
+    args = parser.parse_args(["--no-enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_extensible_kv_cache_defaults():
+    """Unset, the extensible KV cache is on for the V2 runner on CUDA and the
+    budget is the whole device; turned off, or where unsupported, the standard
+    0.92 default returns. An explicit utilization is always kept."""
+    config = EngineArgs(model="facebook/opt-125m").create_engine_config(
+        UsageContext.OPENAI_API_SERVER
+    )
+    assert config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.gpu_memory_utilization is None
+    assert config.cache_config.resolved_gpu_memory_utilization == 1.0
+
+    config.cache_config.enable_extensible_kv_cache = False
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+
+    config = EngineArgs(
+        model="facebook/opt-125m", enable_extensible_kv_cache=False
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+
+    config = EngineArgs(
+        model="facebook/opt-125m", gpu_memory_utilization=0.5
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.5
+    config.cache_config.enable_extensible_kv_cache = False
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.5
+
+    # Manual KV sizing leaves the feature off by default but rejects an
+    # explicit request.
+    config = EngineArgs(
+        model="facebook/opt-125m", kv_cache_memory_bytes=1 << 30
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not config.cache_config.enable_extensible_kv_cache
+    assert config.cache_config.resolved_gpu_memory_utilization == 0.92
 
 
 def test_extensible_kv_cache_rejects_manual_kv_cache_size():
@@ -161,10 +204,12 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     assert vllm_config.cache_config.enable_extensible_kv_cache
+    assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
     specs = [{"layer": object()}]
     fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
     Executor.resolve_extensible_kv_cache(fake, specs)
     assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
     assert calls == [
         "extensible_kv_cache_unsupported_reason",
         "disable_extensible_kv_cache",

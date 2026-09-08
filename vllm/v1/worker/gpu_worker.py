@@ -89,7 +89,6 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
-    EXTENSIBLE_KV_CACHE_MARGIN_BYTES,
     extend_kv_cache,
     measure_kv_cache_blocks,
 )
@@ -643,7 +642,7 @@ class Worker(WorkerBase):
         logger.debug(
             "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
             format_gib(self.init_snapshot.free_memory),
-            self.cache_config.gpu_memory_utilization,
+            self.cache_config.resolved_gpu_memory_utilization,
             format_gib(self.requested_memory),
         )
         logger.debug(
@@ -659,7 +658,7 @@ class Worker(WorkerBase):
 
         if cudagraph_memory_estimate > 0:
             total_mem = self.init_snapshot.total_memory
-            current_util = self.cache_config.gpu_memory_utilization
+            current_util = self.cache_config.resolved_gpu_memory_utilization
             cg_util_delta = cudagraph_memory_estimate / total_mem
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - cg_util_delta, 4)
@@ -766,6 +765,13 @@ class Worker(WorkerBase):
                 kv_cache_allocation_context=allocation_context,
                 extensible=True,
             )
+            # Warmup commits blocks as it goes; keep the profiled activation
+            # peak free for the steps it runs.
+            kv_cache = self._v2_model_runner().extensible_kv_cache
+            assert kv_cache is not None
+            kv_cache.reserved_headroom_bytes = getattr(
+                self, "peak_activation_memory", 0
+            )
         else:
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
             self.model_runner.initialize_kv_cache(
@@ -788,6 +794,7 @@ class Worker(WorkerBase):
 
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
+        self.requested_memory = request_memory(self.init_snapshot, self.cache_config)
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
         assert self.use_v2_model_runner
@@ -804,22 +811,30 @@ class Worker(WorkerBase):
     def _measure_kv_cache_blocks(self) -> int:
         """Size an extensible KV cache from the memory free after warmup.
 
-        Torch's cached-but-unused pool is left in place: it is memory the engine
-        needed at the warmup peak.
+        Transient activations are kept free in full: the larger of the profiled
+        peak and the peak the warmup steps reached. Torch's cache is emptied
+        first so that peak is measured against truly free memory rather than
+        blocks the allocator happens to hold, which need not be reusable for
+        the large workspaces the first real steps allocate.
         """
         torch.accelerator.synchronize()
         gc.collect()
+        stats = torch.accelerator.memory_stats(self.device)
+        warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
+            "allocated_bytes.all.current", 0
+        )
+        torch.accelerator.empty_cache()
         free_memory, _ = torch.accelerator.get_memory_info(self.device)
         kv_cache = self._v2_model_runner().extensible_kv_cache
         assert kv_cache is not None
+        transient_peak = max(kv_cache.reserved_headroom_bytes, warmup_peak)
         num_blocks = measure_kv_cache_blocks(
             init_free_memory=self.init_snapshot.free_memory,
             free_memory=free_memory,
             committed_bytes=kv_cache.physical_bytes,
             requested_memory=int(self.requested_memory),
             bytes_per_block=kv_cache.bytes_per_block,
-            margin_bytes=EXTENSIBLE_KV_CACHE_MARGIN_BYTES
-            + kv_cache.commit_rounding_overhead,
+            extra_margin_bytes=kv_cache.commit_rounding_overhead + transient_peak,
         )
         num_blocks = (
             reserve_mm_ipc_gpu_memory(
@@ -830,10 +845,12 @@ class Worker(WorkerBase):
             // kv_cache.bytes_per_block
         )
         logger.info(
-            "Memory after warmup: %s GiB free, %s GiB committed to the KV cache; "
-            "%d KV cache blocks (%s GiB) fit within the requested %s GiB.",
+            "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "
+            "%s GiB kept for transient activations; %d KV cache blocks (%s GiB) "
+            "fit within the requested %s GiB.",
             format_gib(free_memory),
             format_gib(kv_cache.physical_bytes),
+            format_gib(transient_peak),
             num_blocks,
             format_gib(num_blocks * kv_cache.bytes_per_block),
             format_gib(self.requested_memory),
@@ -842,6 +859,11 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if self.cache_config.enable_extensible_kv_cache:
+            # Track the transient peak of the warmup steps themselves; they
+            # reach shapes (spec-decode drafts, encoder batches) profiling
+            # does not, and `_measure_kv_cache_blocks` keeps that peak free.
+            torch.accelerator.reset_peak_memory_stats(self.device)
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -938,7 +960,7 @@ class Worker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self.cache_config.resolved_gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage is {format_gib(self.total_consumed)} "
                 f"GiB for consumed memory (weights + non-torch), "

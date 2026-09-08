@@ -1837,7 +1837,7 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
-        self._validate_extensible_kv_cache()
+        self._resolve_extensible_kv_cache()
 
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
@@ -2863,20 +2863,30 @@ class VllmConfig:
 
         return unsupported
 
-    def _validate_extensible_kv_cache(self) -> None:
-        if not self.cache_config.enable_extensible_kv_cache:
-            return
+    def _resolve_extensible_kv_cache(self) -> None:
+        """Settle `enable_extensible_kv_cache`: on where supported if unset, an
+        error if explicitly requested where unsupported.
+        """
         from vllm.platforms import current_platform
 
+        cache_config = self.cache_config
+        requested = cache_config.enable_extensible_kv_cache
+        unsupported = None
         if not current_platform.is_cuda_alike():
-            raise ValueError(
-                "enable_extensible_kv_cache is only supported on CUDA and ROCm."
+            unsupported = "it is only supported on CUDA and ROCm"
+        elif cache_config.kv_cache_memory_bytes is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "kv_cache_memory_bytes overrides"
             )
-        if self.cache_config.kv_cache_memory_bytes is not None:
-            raise ValueError(
-                "enable_extensible_kv_cache sizes the KV cache from measured "
-                "memory and cannot be combined with kv_cache_memory_bytes."
-            )
+        elif not self.use_v2_model_runner:
+            unsupported = "it requires the V2 model runner"
+        elif self.attention_config.hisparse_config is not None:
+            unsupported = "HiSparse allocates its KV cache itself"
+        if requested is None:
+            cache_config.enable_extensible_kv_cache = unsupported is None
+        elif requested and unsupported is not None:
+            raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
