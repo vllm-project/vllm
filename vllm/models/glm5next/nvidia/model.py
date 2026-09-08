@@ -68,6 +68,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -93,6 +94,26 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+# msmodelslim-native ("transformers internal") checkpoints serialize the MHC
+# and KDA gate modules with dotted submodule paths (``attn_hc.fn``,
+# ``self_attn.forget_gate.A_log``) while this model registers flattened names
+# (``hc_attn_fn``, ``self_attn.A_log``). Map at load time; already-flattened
+# checkpoints are unaffected (the substrings simply never match).
+GLM5_TRANSFORMERS_INTERNAL_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_substr={
+        ".self_attn.forget_gate.A_log": ".self_attn.A_log",
+        ".self_attn.forget_gate.dt_bias": ".self_attn.dt_bias",
+        ".self_attn.forget_gate.f_a_proj": ".self_attn.f_a_proj",
+        ".self_attn.forget_gate.f_b_proj": ".self_attn.f_b_proj",
+        ".attn_hc.fn": ".hc_attn_fn",
+        ".attn_hc.base": ".hc_attn_base",
+        ".attn_hc.scale": ".hc_attn_scale",
+        ".ffn_hc.fn": ".hc_ffn_fn",
+        ".ffn_hc.base": ".hc_ffn_base",
+        ".ffn_hc.scale": ".hc_ffn_scale",
+    }
+)
 
 
 class Glm5NextMLP(nn.Module):
@@ -682,7 +703,7 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
+        for _li, layer in enumerate(self._active_layers):
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
@@ -884,8 +905,6 @@ class Glm5NextModel(nn.Module):
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
         return loaded_params
-
-
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
@@ -973,8 +992,35 @@ class Glm5NextForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # msmodelslim-native checkpoints ship the QuaRot MTP rotation
+        # (``rot.weight``) and the draft layer (``layers.<N>.*`` for
+        # N >= num_hidden_layers). The draft weights are loaded by the
+        # separate MTP model when speculative decoding is enabled; without
+        # it they have no module to land in, so drop them here instead of
+        # failing the load (mirrors the reference Ascend implementation).
+        # ``self.config`` is already the text config in some loaders and the
+        # multimodal wrapper in others; unwrap defensively.
+        text_config = self.config
+        if hasattr(text_config, "text_config"):
+            text_config = text_config.text_config
+        first_mtp_layer = text_config.num_hidden_layers
+        num_mtp_layers = getattr(text_config, "num_nextn_predict_layers", 0)
+
+        def _is_mtp_weight(name: str) -> bool:
+            if num_mtp_layers <= 0:
+                return False
+            if name == "rot.weight" or name.endswith(".rot.weight"):
+                return True
+            return any(
+                f".layers.{idx}." in name
+                for idx in range(first_mtp_layer, first_mtp_layer + num_mtp_layers)
+            )
+
+        weights = [(n, w) for n, w in weights if not _is_mtp_weight(n)]
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(
+            weights, mapper=GLM5_TRANSFORMERS_INTERNAL_WEIGHTS_MAPPER
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -998,6 +1044,23 @@ class Glm5NextForConditionalGeneration(
     # matching the GLM-OCR / GLM-4V serialization convention. If the real
     # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
     # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # msmodelslim-native checkpoints ship the QuaRot MTP rotation as a
+        # BARE top-level ``rot.weight``. Without speculative decoding the
+        # draft model that owns it is never built, so drop the key here:
+        # before the Glm4v prefix mapping and language_model delegation,
+        # where a bare key would fail to resolve. Draft-layer weights
+        # (``layers.<N>.*`` for N >= num_hidden_layers) are filtered one
+        # level down in Glm5NextForCausalLM.load_weights, where they arrive
+        # after prefix mapping.
+        weights = [
+            (n, w)
+            for n, w in weights
+            if not (n == "rot.weight" or n.endswith(".rot.weight"))
+        ]
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
