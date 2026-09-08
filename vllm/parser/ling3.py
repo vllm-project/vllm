@@ -72,7 +72,11 @@ class Ling3Parser(Glm47MoeParser):
             return None, model_output
 
         reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning and not content and "<tool_call>" not in model_output:
+        if (
+            reasoning
+            and THINK_END not in model_output
+            and "<tool_call>" not in model_output
+        ):
             return None, reasoning
         return reasoning, content
 
