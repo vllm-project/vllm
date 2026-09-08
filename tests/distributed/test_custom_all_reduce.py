@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import Mock
 
 import pytest
 import ray
@@ -24,6 +25,18 @@ for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
 
 
+@pytest.fixture
+def custom_allreduce():
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator._ptr = 0
+    communicator.mnnvl_only = False
+    communicator.fully_connected = False
+    return communicator
+
+
 @pytest.mark.parametrize(
     ("dtype", "expected"),
     [
@@ -35,16 +48,72 @@ for i, v in enumerate(test_sizes):
     ],
 )
 def test_custom_allreduce_filters_dtype(
+    custom_allreduce,
     dtype: torch.dtype,
     expected: bool,
 ) -> None:
-    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
-    communicator.disabled = False
-    communicator.world_size = 2
-    communicator.max_size = 1024
-    communicator._ptr = 0
+    assert custom_allreduce.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
 
-    assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_cross_node_custom_allreduce_declines_without_launching_ipc(
+    custom_allreduce, monkeypatch, capturing
+):
+    custom_allreduce.mnnvl_only = True
+    custom_allreduce._IS_CAPTURING = capturing
+    custom_allreduce.all_reduce = Mock()
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    assert custom_allreduce.custom_all_reduce(torch.empty(16)) is None
+    custom_allreduce.all_reduce.assert_not_called()
+
+
+@pytest.mark.parametrize("mnnvl_only", [False, True])
+def test_graph_capture_registers_ipc_buffers_only_on_same_node(
+    custom_allreduce, monkeypatch, mnnvl_only
+):
+    custom_allreduce.mnnvl_only = mnnvl_only
+    custom_allreduce.group = object()
+    custom_allreduce.rank = 0
+    get_meta = Mock(return_value=([1], [0]))
+    register = Mock()
+
+    def share_meta(data, **kwargs):
+        data[:] = [[1], [0]]
+
+    broadcast = Mock(side_effect=share_meta)
+    monkeypatch.setattr(car.ops, "get_graph_buffer_ipc_meta", get_meta)
+    monkeypatch.setattr(car.ops, "register_graph_buffers", register)
+    monkeypatch.setattr(car.dist, "get_world_size", lambda **kwargs: 2)
+    monkeypatch.setattr(car.dist, "get_process_group_ranks", lambda **kwargs: [0, 1])
+    monkeypatch.setattr(car.dist, "broadcast_object_list", broadcast)
+
+    with custom_allreduce.capture():
+        assert custom_allreduce._IS_CAPTURING
+
+    assert not custom_allreduce._IS_CAPTURING
+    if mnnvl_only:
+        get_meta.assert_not_called()
+        broadcast.assert_not_called()
+        register.assert_not_called()
+    else:
+        get_meta.assert_called_once_with(0)
+        assert broadcast.call_count == 2
+        register.assert_called_once_with(0, [[1], [1]], [[0], [0]])
+
+
+def test_cross_node_mnnvl_all_gather_and_reduce_scatter_remain_eligible(
+    custom_allreduce, monkeypatch
+):
+    custom_allreduce.mnnvl_only = True
+    custom_allreduce.mnnvl_multicast_ptr = 1
+    custom_allreduce.max_mnnvl_all_gather_size = 1024
+    custom_allreduce.max_mnnvl_reduce_scatter_size = 1024
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    inp = torch.empty(16, 8)
+
+    assert custom_allreduce.should_custom_all_gather(inp)
+    assert custom_allreduce.should_custom_reduce_scatter(inp)
 
 
 @pytest.mark.parametrize(
