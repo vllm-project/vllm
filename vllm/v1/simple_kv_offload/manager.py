@@ -293,6 +293,9 @@ class SimpleCPUOffloadScheduler:
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
 
+        if request.skip_reading_prefix_cache:
+            return 0, False
+
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
 
