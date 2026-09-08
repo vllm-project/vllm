@@ -1,0 +1,174 @@
+# -- Default values for chart vllm
+# -- Declare variables to be passed into your templates.
+
+# -- Image configuration
+image:
+  # -- Image repository
+  repository: "vllm/vllm-openai"
+  # -- Image tag
+  tag: "latest"
+  # -- Container launch command
+  command: ["vllm", "serve", "/data/", "--served-model-name", "opt-125m", "--enforce-eager", "--dtype", "bfloat16", "--block-size", "16", "--host", "0.0.0.0", "--port", "8000"]
+
+# -- Container port
+containerPort: 8000
+# -- Service name
+serviceName:
+# -- Service port
+servicePort: 80
+# -- Additional ports configuration
+extraPorts: []
+
+# -- Number of replicas
+replicaCount: 1
+
+# -- Deployment strategy configuration
+deploymentStrategy: {}
+
+# -- Resource configuration
+resources:
+  requests:
+    # -- Number of CPUs
+    cpu: 4
+    # -- CPU memory configuration
+    memory: 16Gi
+    # -- Number of gpus used
+    nvidia.com/gpu: 1
+  limits:
+    # -- Number of CPUs
+    cpu: 4
+    # -- CPU memory configuration
+    memory: 16Gi
+    # -- Number of gpus used
+    nvidia.com/gpu: 1
+
+# -- Type of gpu used
+gpuModels:
+  - "TYPE_GPU_USED"
+
+# -- Autoscaling configuration
+autoscaling:
+  # -- Enable autoscaling
+  enabled: false
+  # -- Minimum replicas
+  minReplicas: 1
+  # -- Maximum replicas
+  maxReplicas: 100
+  # -- Target CPU utilization for autoscaling
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# -- Configmap
+configs: {}
+
+# -- Secrets configuration
+secrets: {}
+
+# -- External configuration
+externalConfigs: []
+
+# -- Custom Objects configuration
+customObjects: []
+
+# -- Disruption Budget Configuration
+maxUnavailablePodDisruptionBudget: ""
+
+# -- Additional configuration for the init container
+extraInit:
+  # -- Model download functionality (optional)
+  modelDownload:
+    # -- Enable model download job and wait container
+    enabled: true
+    # -- Image configuration for model download operations
+    image:
+      # -- Image repository
+      repository: "amazon/aws-cli"
+      # -- Image tag
+      tag: "2.6.4"
+      # -- Image pull policy
+      pullPolicy: "IfNotPresent"
+    # -- Wait container configuration (init container that waits for model to be ready)
+    waitContainer:
+      # -- Command to execute
+      command: ["/bin/bash"]
+      # -- Arguments for the wait container
+      args:
+        - "-eucx"
+        - "while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done"
+      # -- Environment variables (optional, overrides S3 defaults entirely if specified)
+      # env:
+      #   - name: HUGGING_FACE_HUB_TOKEN
+      #     value: "your-token"
+      #   - name: MODEL_ID
+      #     value: "meta-llama/Llama-2-7b"
+    # -- Download job configuration (job that actually downloads the model)
+    downloadJob:
+      # -- Command to execute
+      command: ["/bin/bash"]
+      # -- Arguments for the download job
+      args:
+        - "-eucx"
+        - "aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data"
+      # -- Environment variables (optional, overrides S3 defaults entirely if specified)
+      # env:
+      #   - name: HUGGING_FACE_HUB_TOKEN
+      #     value: "your-token"
+      #   - name: MODEL_ID
+      #     value: "meta-llama/Llama-2-7b"
+
+  # -- Custom init containers (appended after wait-download-model if modelDownload is enabled)
+  initContainers: []
+  # Example for llm-d sidecar:
+  # initContainers:
+  #   - name: llm-d-routing-proxy
+  #     image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+  #     imagePullPolicy: IfNotPresent
+  #     ports:
+  #       - containerPort: 8080
+  #         name: proxy
+  #     securityContext:
+  #       runAsUser: 1000
+
+  # -- Path of the model on the s3 which hosts model weights and config files
+  s3modelpath: "relative_s3_model_path/opt-125m"
+  # -- Storage size for the PVC
+  pvcStorage: "1Gi"
+  # -- Disable AWS EC2 metadata service
+  awsEc2MetadataDisabled: true
+
+# -- Additional containers configuration
+extraContainers: []
+
+# -- Readiness probe configuration
+readinessProbe:
+  # -- Number of seconds after the container has started before readiness probe is initiated
+  initialDelaySeconds: 5
+  # -- How often (in seconds) to perform the readiness probe
+  periodSeconds: 5
+  # -- Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not ready
+  failureThreshold: 3
+   # -- Configuration of the Kubelet http request on the server
+  httpGet:
+    # -- Path to access on the HTTP server
+    path: /health
+    # -- Name or number of the port to access on the container, on which the server is listening
+    port: 8000
+
+# -- Liveness probe configuration
+livenessProbe:
+ # -- Number of seconds after the container has started before liveness probe is initiated
+  initialDelaySeconds: 15
+  # -- Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not alive
+  failureThreshold: 3
+  # -- How often (in seconds) to perform the liveness probe
+  periodSeconds: 10
+  # -- Configuration of the Kubelet http request on the server
+  httpGet:
+    # -- Path to access on the HTTP server
+    path: /health
+    # -- Name or number of the port to access on the container, on which the server is listening
+    port: 8000
+
+labels:
+  environment: "test"
+  release: "test"

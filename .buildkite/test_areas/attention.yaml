@@ -1,0 +1,45 @@
+group: Attention
+depends_on: 
+  - image-build
+steps:
+- label: ":nvidia: (H100) V1 Attention Shard %N"
+  key: v1-attention-h100-mi300
+  timeout_in_minutes: 85
+  device: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 Attention Shard %N"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 125
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/attention.py
+      - vllm/model_executor/layers/attention
+      - vllm/v1/attention
+      - tests/v1/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (B200) V1 Attention Shard %N"
+  key: v1-attention-b200
+  timeout_in_minutes: 80
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
