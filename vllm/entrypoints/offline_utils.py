@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -195,9 +196,16 @@ class OfflineInferenceMixin:
             ),
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        tok_params = renderer.default_chat_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
+        # The chat template is responsible for emitting BOS/EOS, so do not let
+        # the tokenizer add them again unless the caller asks for it. This
+        # matches the online chat API (`ChatCompletionRequest.add_special_tokens`
+        # defaults to `False`) and avoids a double BOS for multimodal models,
+        # whose processor default is `add_special_tokens=True` (#55197).
+        tokenization_kwargs = {
+            "add_special_tokens": False,
+            **(tokenization_kwargs or {}),
+        }
+        tok_params = renderer.default_chat_tok_params.with_kwargs(**tokenization_kwargs)
         prompt_extras = (
             None
             if mm_processor_kwargs is None
@@ -246,7 +254,7 @@ class OfflineInferenceMixin:
     ) -> Sequence[_P]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and params ({len(params)}) must be the same."
                 )
@@ -262,7 +270,7 @@ class OfflineInferenceMixin:
     ) -> Sequence[LoRARequest | None]:
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
@@ -278,7 +286,7 @@ class OfflineInferenceMixin:
     ) -> Sequence[int]:
         if priority is not None:
             if len(priority) != num_requests:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and priority ({len(priority)}) must be the same."
                 )

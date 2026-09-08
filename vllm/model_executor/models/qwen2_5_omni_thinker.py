@@ -91,6 +91,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -575,7 +576,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
-        is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
@@ -605,39 +605,26 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 if video_audio_item_num != video_updates_num + audio_updates_num:
                     use_audio_in_video = True
 
-        if is_update_applied:
-            mm_placeholders = self._find_mm_placeholders(
+        if use_audio_in_video and "audio" in mm_prompt_updates:
+            # Filter out audio updates - they are embedded in video
+            filtered_updates = {
+                k: v for k, v in mm_prompt_updates.items() if k != "audio"
+            }
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                prompt_ids,
+                filtered_updates,
+            )
+            # Derive audio placeholders from video placeholders
+            mm_placeholders = self._derive_audio_from_video_placeholders(
+                mm_placeholders, mm_prompt_updates
+            )
+        else:
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
-        else:
-            if use_audio_in_video and "audio" in mm_prompt_updates:
-                # Filter out audio updates - they are embedded in video
-                filtered_updates = {
-                    k: v for k, v in mm_prompt_updates.items() if k != "audio"
-                }
-                prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    filtered_updates,
-                )
-                # Derive audio placeholders from video placeholders
-                mm_placeholders = self._derive_audio_from_video_placeholders(
-                    mm_placeholders, mm_prompt_updates
-                )
-            else:
-                prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    mm_prompt_updates,
-                )
 
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         return prompt_ids, mm_placeholders
 
@@ -793,17 +780,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             ),
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=partial(get_replacement_qwen2_vision, modality="image"),
             ),
             PromptReplacement(
                 modality="video",
-                target=video_token,
+                target=[video_token_id],
                 replacement=video_replacement_fn,
             ),
         ]
@@ -999,8 +986,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_feat_lengths, audio_output_lengths = (
@@ -1486,14 +1473,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
 
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.get_language_model().embed_input_ids,
-            is_multimodal=is_multimodal,
-        )
-
         if len(multimodal_embeddings) == 0:
-            return inputs_embeds
+            return super().embed_input_ids(
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
 
         # Check for audio-in-video: interleaved video and audio tokens
         # in the multimodal region. Only use the interleaved path when

@@ -70,6 +70,7 @@ from vllm.multimodal.processing.processor import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
@@ -429,6 +430,9 @@ class NanoNemotronVLMultiModalProcessor(
         hf_processor: NanoNemotronVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -470,7 +474,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="image",
-            target="<image>",
+            target=[vocab["<image>"]],
             replacement=get_image_replacement,
         )
 
@@ -480,6 +484,8 @@ class NanoNemotronVLMultiModalProcessor(
         hf_processor: NanoNemotronVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "video_num_patches" in out_mm_data:
             video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
@@ -546,7 +552,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="video",
-            target="<video>",
+            target=cached_encode(tokenizer, "<video>", add_special_tokens=False),
             replacement=get_video_replacement,
         )
 
@@ -556,13 +562,15 @@ class NanoNemotronVLMultiModalProcessor(
         hf_processor: NanoNemotronVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             return hf_processor.get_audio_repl(audios.get(item_idx))
 
         return PromptReplacement(
             modality="audio",
-            target=AUDIO_CONTEXT,
+            target=cached_encode(tokenizer, AUDIO_CONTEXT, add_special_tokens=False),
             replacement=get_audio_replacement,
         )
 
@@ -734,7 +742,6 @@ class NanoNemotronVLMultiModalProcessor(
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=self.renderer_applies_updates,
             )
 
         mm_placeholder_ranges = {

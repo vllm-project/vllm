@@ -960,6 +960,144 @@ steps:
           DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
+  # ROCk Release Pipeline (x86_64 only)
+  # =============================================================================
+  #
+  # Same shape as the ROCm pipeline above (Jobs 1 and 6 only), but built from
+  # docker/Dockerfile.rock_base and docker/Dockerfile.rock, which install the
+  # ROCm SDK from TheRock wheels instead of the ROCm apt repos.
+  #
+  # Note: ROCm SDK version is determined by ROCM_SDK_VERSION in
+  # docker/Dockerfile.rock_base
+  #
+  # =============================================================================
+
+  - group: "Build ROCk Image"
+    key: "build-rock-image"
+    depends_on: ~
+    steps:
+      # ROCk Job 1: Build ROCk Base Image (with ECR caching)
+      - label: ":rocm: Build ROCk Base Image"
+        id: build-rock-base-image
+        depends_on: ~
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 360
+        commands:
+          - |
+            set -euo pipefail
+
+            # The SDK version, torch wheels and component branches all live in
+            # the Dockerfile, so its hash is the cache key.
+            CACHE_KEY=$$(sha256sum docker/Dockerfile.rock_base | cut -c1-16)
+            ECR_CACHE_TAG="public.ecr.aws/q9t5s3a7/vllm-release-repo:$${CACHE_KEY}-rock-base"
+
+            echo "========================================"
+            echo "ROCk Base Build Configuration"
+            echo "========================================"
+            echo "  CACHE_KEY: $${CACHE_KEY}"
+            echo "  ECR_CACHE_TAG: $${ECR_CACHE_TAG}"
+            echo "========================================"
+
+            # Login to ECR
+            aws ecr-public get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+
+            if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
+              echo "ECR image cache HIT"
+            else
+              echo "CACHE MISS - Building from scratch..."
+
+              DOCKER_BUILDKIT=1 docker buildx build \
+                --file docker/Dockerfile.rock_base \
+                --tag "$${ECR_CACHE_TAG}" \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+                --build-arg SCCACHE_REGION_NAME=us-west-2 \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --push \
+                .
+            fi
+
+            # Save ECR tag for downstream jobs
+            buildkite-agent meta-data set "rock-base-image-tag" "$${ECR_CACHE_TAG}"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      # ROCk Job 2: Build ROCk Release Docker Image
+      - label: ":docker: Build release image - x86_64 - ROCk"
+        id: build-rock-release-image
+        depends_on:
+          - step: block-build-release-images
+            allow_failure: true
+          - step: build-rock-base-image
+            allow_failure: false
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 180
+        commands:
+          - |
+            set -euo pipefail
+
+            # Login to ECR
+            aws ecr-public get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+
+            ECR_IMAGE_TAG="$$(buildkite-agent meta-data get rock-base-image-tag 2>/dev/null || echo '')"
+            if [ -z "$${ECR_IMAGE_TAG}" ]; then
+              echo "ERROR: rock-base-image-tag metadata not found"
+              echo "This should have been set by the build-rock-base-image job"
+              exit 1
+            fi
+
+            docker pull "$${ECR_IMAGE_TAG}"
+
+            # Pass the base image ECR tag to downstream steps (nightly publish)
+            buildkite-agent meta-data set "rock-base-ecr-tag" "$${ECR_IMAGE_TAG}"
+
+            echo "========================================"
+            echo "Building vLLM ROCk release image with:"
+            echo "  BASE_IMAGE: $${ECR_IMAGE_TAG}"
+            echo "  BUILDKITE_COMMIT: $${BUILDKITE_COMMIT}"
+            echo "========================================"
+
+            DOCKER_BUILDKIT=1 docker build \
+              --build-arg max_jobs=16 \
+              --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+              --build-arg SCCACHE_REGION_NAME=us-west-2 \
+              --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+              --build-arg INSTALL_LMCACHE=true \
+              --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rock \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile.rock .
+
+            docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rock
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Publish nightly ROCk image to DockerHub"
+        depends_on:
+          - build-rock-release-image
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh rock rocm100"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly-rocm100- vllm/vllm-openai-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly-rocm100- vllm/vllm-openai-rocm"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+  # =============================================================================
   # Publish to DockerHub and PyPI (at the end so all builds complete first)
   # =============================================================================
 

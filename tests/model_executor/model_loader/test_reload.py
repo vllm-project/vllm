@@ -218,6 +218,21 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+def test_restore_layer_replaces_postprocessed_tensor_attribute():
+    layer = torch.nn.Linear(2, 3, bias=False)
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
+    del layer.weight
+    layer.weight = torch.empty(3, 2)
+
+    restore_layer_on_meta(layer, info)
+
+    assert isinstance(layer.weight, torch.nn.Parameter)
+    assert layer.weight.is_meta
+
+
 def test_materialize_layer_preserves_non_meta_tensors():
     """Ensure that materialize_layer does not overwrite non meta tensors."""
     layer = torch.nn.Linear(2, 3, bias=True)

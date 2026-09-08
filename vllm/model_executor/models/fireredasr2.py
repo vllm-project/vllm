@@ -12,7 +12,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
@@ -216,6 +216,7 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         ret = {
             "audio": self._get_dummy_audios(
