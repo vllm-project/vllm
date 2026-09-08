@@ -176,6 +176,20 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
             gc.disable()
 
 
+def test_prepare_padding_mask_marks_sequence_parallel_padding():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_padding = torch.empty(8, dtype=torch.bool)
+
+    mask = runner._prepare_padding_mask(1, 8)
+
+    assert mask.tolist() == [False, True, True, True, True, True, True, True]
+    assert mask.data_ptr() == runner.is_padding.data_ptr()
+
+    mask = runner._prepare_padding_mask(0, 8)
+
+    assert mask.all()
+
+
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
