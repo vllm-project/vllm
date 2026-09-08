@@ -199,6 +199,33 @@ def _add_unfinished_request(
     )
 
 
+def test_pending_load_for_non_chosen_connector_is_dropped():
+    """A MultiConnector loser must not turn its proposed load into a save."""
+    scheduler = _make_bare_scheduler()
+    request = SimpleNamespace(
+        request_id="req-0",
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=False,
+    )
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+    meta = scheduler.build_connector_meta(_make_pending_load_scheduler_output())
+
+    # MultiConnector exposes the real allocation to every child, but only the
+    # chosen child receives external tokens. The losing store connector must
+    # neither retain those blocks for a pending load nor enqueue a save from
+    # the rejected speculative LoadSpec.
+    assert scheduler._unfinished_requests["req-0"][1] == ()
+    assert meta.requests == []
+    assert "req-0" not in scheduler.load_specs
+    assert "req-0" not in scheduler._request_trackers
+
+
 def test_update_state_excludes_nontransfer_groups():
     """Store metadata must match the worker's registered cache groups."""
     scheduler = _make_bare_scheduler()
