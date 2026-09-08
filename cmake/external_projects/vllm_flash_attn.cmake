@@ -40,7 +40,7 @@ else()
           vllm-flash-attn
           # TODO: revert to vllm-project/flash-attention once the companion PR lands.
           GIT_REPOSITORY https://github.com/simon-veitner-redhat/flash-attention.git
-          GIT_TAG 302d75d205daac7faadea534093ae3afd8361ec4
+          GIT_TAG d6eaee69513ea5b56b1fa4cb807f55e4c222ded1
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
