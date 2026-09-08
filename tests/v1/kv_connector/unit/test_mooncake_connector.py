@@ -1491,8 +1491,12 @@ async def test_register_with_bootstrap_gives_up_at_deadline(monkeypatch):
     import httpx
 
     port = get_open_port()
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "1")
     monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_RETRY_INTERVAL", 0.05)
-    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_DEADLINE", 0.3)
+    # A refused connection fails fast, but on a host where the port is
+    # filtered rather than refused a single attempt would otherwise run to
+    # the full default before the deadline is noticed.
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_HTTP_TIMEOUT", 0.2)
     monkeypatch.setattr(
         mooncake_connector, "get_mooncake_bootstrap_addr", lambda _: ("127.0.0.1", port)
     )

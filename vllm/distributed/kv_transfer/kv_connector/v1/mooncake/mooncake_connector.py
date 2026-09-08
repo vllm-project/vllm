@@ -68,9 +68,9 @@ logger = init_logger(__name__)
 
 # Bootstrap registration runs while every prefiller worker is initializing, so
 # the server (a thread of the global rank 0 worker) may be slow to respond.
+# The overall deadline is VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT.
 _BOOTSTRAP_REGISTER_HTTP_TIMEOUT = 30.0
 _BOOTSTRAP_REGISTER_RETRY_INTERVAL = 1.0
-_BOOTSTRAP_REGISTER_DEADLINE = 300.0
 
 try:
     from mooncake.engine import TransferEngine
@@ -1101,12 +1101,17 @@ class MooncakeConnectorWorker:
             pp_rank=self.pp_rank,
             addr=worker_addr,
         )
-        deadline = time.perf_counter() + _BOOTSTRAP_REGISTER_DEADLINE
+        start = time.perf_counter()
+        deadline = start + envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
         while True:
+            # Never let a single attempt outlive the deadline, so a server
+            # that silently drops packets is not waited on for a further
+            # _BOOTSTRAP_REGISTER_HTTP_TIMEOUT past it.
+            attempt_timeout = min(
+                _BOOTSTRAP_REGISTER_HTTP_TIMEOUT, deadline - time.perf_counter()
+            )
             try:
-                async with httpx.AsyncClient(
-                    timeout=_BOOTSTRAP_REGISTER_HTTP_TIMEOUT
-                ) as client:
+                async with httpx.AsyncClient(timeout=attempt_timeout) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
@@ -1121,15 +1126,23 @@ class MooncakeConnectorWorker:
                 # repeat.
                 if time.perf_counter() >= deadline:
                     logger.error(
-                        "Timed out after %.1fs registering %s with bootstrap "
-                        "server at %s: %r",
-                        _BOOTSTRAP_REGISTER_DEADLINE,
+                        "Gave up after %.1fs registering %s with bootstrap "
+                        "server at %s: %r. Raise "
+                        "VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT (currently "
+                        "%ds) if startup is legitimately slower than this.",
+                        time.perf_counter() - start,
                         payload,
                         url,
                         e,
+                        envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT,
                     )
                     raise
-                await asyncio.sleep(_BOOTSTRAP_REGISTER_RETRY_INTERVAL)
+                await asyncio.sleep(
+                    min(
+                        _BOOTSTRAP_REGISTER_RETRY_INTERVAL,
+                        max(0.0, deadline - time.perf_counter()),
+                    )
+                )
             except Exception as e:
                 err_msg = (
                     e.response.text if isinstance(e, httpx.HTTPStatusError) else repr(e)
