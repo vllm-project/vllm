@@ -453,6 +453,7 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             distributed_executor_backend=None,
             pipeline_parallel_size=1,
             enable_dbo=False,
+            use_ubatching=False,
             enable_elastic_ep=False,
         ),
         compilation_config=SimpleNamespace(
