@@ -9,8 +9,16 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
-import torch
+from dataclasses import dataclass
+from typing import Any
 
+import torch
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.third_party.flash_linear_attention.ops.op import exp
 from vllm.triton_utils import tl, triton
 
@@ -199,6 +207,167 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
+class Glm5NextFusedRecurrentKdaFwdKernel(
+    VllmTritonJitKernel["Glm5NextFusedRecurrentKdaFwdKernel.CompileKey"]
+):
+    kernel = staticmethod(fused_recurrent_gated_delta_rule_fwd_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        io_dtype: torch.dtype
+        state_dtype: torch.dtype
+        scale: float
+        num_heads: int
+        head_dim: int
+        stride_indices_seq: int
+        is_spec_decoding: bool
+        lower_bound: float
+
+    def dispatch(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        scale: float,
+        num_heads: int,
+        head_dim: int,
+        max_query_len: int,
+        is_spec_decoding: bool,
+        lower_bound: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            scale=scale,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            stride_indices_seq=max_query_len if is_spec_decoding else 1,
+            is_spec_decoding=is_spec_decoding,
+            lower_bound=lower_bound,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        scale: float,
+        num_heads: int,
+        head_dim: int,
+        max_query_len: int,
+        lower_bound: float,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            scale=scale,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            max_query_len=max_query_len,
+            is_spec_decoding=(False, True),
+            lower_bound=lower_bound,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h, d = compile_key.num_heads, compile_key.head_dim
+        t = compile_key.stride_indices_seq
+        io = compile_key.io_dtype
+        spec = compile_key.is_spec_decoding
+        return {
+            "q": TritonWarmupTensor(io, shape=(1, t, h, d)),
+            "k": TritonWarmupTensor(io, shape=(1, t, h, d)),
+            "v": TritonWarmupTensor(io, shape=(1, t, h, d)),
+            "g": TritonWarmupTensor(io, shape=(1, t, h, d)),
+            "beta": TritonWarmupTensor(io, shape=(1, t, h)),
+            "o": TritonWarmupTensor(io, shape=(1, t, h, d)),
+            "h0": TritonWarmupTensor(compile_key.state_dtype, shape=(2, h, d, d)),
+            "ht": TritonWarmupTensor(compile_key.state_dtype, shape=(2, h, d, d)),
+            "cu_seqlens": TritonWarmupTensor(torch.int32, shape=(2,)),
+            "ssm_state_indices": TritonWarmupTensor(
+                torch.int32,
+                shape=(1, t) if spec else (1,),
+            ),
+            "num_accepted_tokens": (
+                TritonWarmupTensor(torch.int32, shape=(1,)) if spec else None
+            ),
+            "a_log": TritonWarmupTensor(torch.float32, shape=(h,)),
+            "g_bias": TritonWarmupTensor(torch.float32, shape=(h * d,)),
+            "scale": compile_key.scale,
+            "inplace_final_state": True,
+            "use_qk_l2norm_in_kernel": True,
+            "is_kda": True,
+            "sigmoid_beta": True,
+            "compute_gate": True,
+            "lower_bound": compile_key.lower_bound,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        h0,
+        ht,
+        cu_seqlens,
+        ssm_state_indices,
+        num_accepted_tokens,
+        a_log,
+        g_bias,
+        *,
+        scale: float,
+        inplace_final_state: bool,
+        use_qk_l2norm_in_kernel: bool,
+        is_kda: bool,
+        sigmoid_beta: bool,
+        compute_gate: bool,
+        lower_bound: float,
+    ) -> LaunchSpec:
+        b, t, h, k_dim = k.shape
+        hv, v_dim = v.shape[2:]
+        n = b if cu_seqlens is None else cu_seqlens.shape[0] - 1
+        block_k = triton.next_power_of_2(k_dim)
+        block_v = min(triton.next_power_of_2(v_dim), 8 if is_kda else 32)
+        n_k = triton.cdiv(k_dim, block_k)
+        n_v = triton.cdiv(v_dim, block_v)
+        assert n_k == 1, "NK > 1 is not supported yet"
+        if ssm_state_indices is None:
+            stride_indices_seq, stride_indices_tok = 1, 1
+        elif len(ssm_state_indices.shape) == 1:
+            stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
+        else:
+            stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+        return (n_k, n_v, n * hv), {
+            "scale": scale,
+            "N": n,
+            "T": t,
+            "B": b,
+            "H": h,
+            "HV": hv,
+            "K": k_dim,
+            "V": v_dim,
+            "BK": block_k,
+            "BV": block_v,
+            "stride_init_state_token": h0.stride(0),
+            "stride_final_state_token": ht.stride(0),
+            "stride_indices_seq": stride_indices_seq,
+            "stride_indices_tok": stride_indices_tok,
+            "IS_BETA_HEADWISE": len(beta.shape) == len(v.shape),
+            "USE_QK_L2NORM_IN_KERNEL": use_qk_l2norm_in_kernel,
+            "INPLACE_FINAL_STATE": inplace_final_state,
+            "IS_KDA": is_kda,
+            "SIGMOID_BETA": sigmoid_beta,
+            "COMPUTE_GATE": compute_gate,
+            "SAFE_GATE": True,
+            "LOWER_BOUND": lower_bound,
+            "num_warps": 1,
+            "num_stages": 3,
+        }
+
+
 def fused_recurrent_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -213,70 +382,36 @@ def fused_recurrent_gated_delta_rule_fwd(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    _, T, _, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, "NK > 1 is not supported yet"
-    num_stages = 3
-    num_warps = 1
 
-    o = q.new_empty(NK, *v.shape)
+    o = q.new_empty(1, *v.shape)
     if inplace_final_state:
         final_state = initial_state
     else:
         final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
 
-    stride_init_state_token = initial_state.stride(0)
-    stride_final_state_token = final_state.stride(0)
-
-    if ssm_state_indices is None:
-        stride_indices_seq, stride_indices_tok = 1, 1
-    elif ssm_state_indices.ndim == 1:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
-    else:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
-
-    grid = (NK, NV, N * HV)
-    fused_recurrent_gated_delta_rule_fwd_kernel[grid](
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        o=o,
-        h0=initial_state,
-        ht=final_state,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        num_accepted_tokens=num_accepted_tokens,
+    _FUSED_RECURRENT_GATED_DELTA_RULE_FWD_KERNEL(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        o,
+        initial_state,
+        final_state,
+        cu_seqlens,
+        ssm_state_indices,
+        num_accepted_tokens,
+        None,
+        None,
         scale=scale,
-        N=N,
-        T=T,
-        B=B,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
-        stride_indices_tok=stride_indices_tok,
-        IS_BETA_HEADWISE=beta.ndim == v.ndim,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        INPLACE_FINAL_STATE=inplace_final_state,
-        IS_KDA=False,
-        SIGMOID_BETA=False,
-        a_log=None,
-        g_bias=None,
-        COMPUTE_GATE=False,
-        SAFE_GATE=True,
-        LOWER_BOUND=-5.0,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        inplace_final_state=inplace_final_state,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        is_kda=False,
+        sigmoid_beta=False,
+        compute_gate=False,
+        lower_bound=-5.0,
     )
     o = o.squeeze(0)
     return o, final_state
@@ -654,3 +789,6 @@ def fused_recurrent_gated_delta_rule(
         use_qk_l2norm_in_kernel,
     )
     return o, final_state
+
+
+_FUSED_RECURRENT_GATED_DELTA_RULE_FWD_KERNEL = Glm5NextFusedRecurrentKdaFwdKernel()

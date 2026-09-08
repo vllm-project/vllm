@@ -12,8 +12,17 @@ helpers (select pools -> expand to tokens -> append tail).
 
 from __future__ import annotations
 
-import torch
+from dataclasses import dataclass
+from typing import Any
 
+import torch
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -235,6 +244,126 @@ def _kpool_softmax_rotate_write_cache_kernel(
         tl.store(compressed_scale_ptr + row, scale)
 
 
+class Glm5NextKpoolCompressKernel(
+    VllmTritonJitKernel["Glm5NextKpoolCompressKernel.CompileKey"]
+):
+    kernel = staticmethod(_kpool_softmax_rotate_write_cache_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        page_size: int
+        pool_size: int
+        head_dim: int
+        round_scale: bool
+        has_write_mask: bool
+        return_compressed: bool
+        write_cache: bool
+
+    def dispatch(
+        self,
+        *,
+        page_size: int,
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+        has_write_mask: bool,
+        return_compressed: bool,
+        write_cache: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            page_size=page_size,
+            pool_size=pool_size,
+            head_dim=head_dim,
+            round_scale=round_scale,
+            has_write_mask=has_write_mask,
+            return_compressed=return_compressed,
+            write_cache=write_cache,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        page_sizes: tuple[int, ...],
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            page_size=page_sizes,
+            pool_size=pool_size,
+            head_dim=head_dim,
+            round_scale=round_scale,
+            has_write_mask=True,
+            return_compressed=False,
+            write_cache=True,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        p, d = compile_key.pool_size, compile_key.head_dim
+        page = compile_key.page_size
+        return {
+            "buf_fp8": TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, page, d + 4)),
+            "buf_fp32": TritonWarmupTensor(
+                torch.float32, shape=(1, page, (d + 4) // 4)
+            ),
+            "slot_k": TritonWarmupTensor(torch.bfloat16, shape=(1, p, d)),
+            "slot_score": TritonWarmupTensor(torch.bfloat16, shape=(1, p, d)),
+            "ape": TritonWarmupTensor(torch.float32, shape=(p, d)),
+            "loc": TritonWarmupTensor(torch.int64, shape=(1,)),
+            "write_mask": TritonWarmupTensor(torch.bool, shape=(1,)),
+            "compressed_k": TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, d)),
+            "compressed_scale": TritonWarmupTensor(torch.float32, shape=(1,)),
+            "page_size": page,
+            "pool_size": p,
+            "head_dim": d,
+            "round_scale": compile_key.round_scale,
+            "has_write_mask": compile_key.has_write_mask,
+            "return_compressed": compile_key.return_compressed,
+            "write_cache": compile_key.write_cache,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        buf_fp8,
+        buf_fp32,
+        slot_k,
+        slot_score,
+        ape,
+        loc,
+        write_mask,
+        compressed_k,
+        compressed_scale,
+        *,
+        page_size: int,
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+        has_write_mask: bool,
+        return_compressed: bool,
+        write_cache: bool,
+    ) -> LaunchSpec:
+        return (slot_k.shape[0],), {
+            "slot_k_stride_0": slot_k.stride(0),
+            "slot_k_stride_1": slot_k.stride(1),
+            "slot_score_stride_0": slot_score.stride(0),
+            "slot_score_stride_1": slot_score.stride(1),
+            "ape_stride_0": ape.stride(0),
+            "PAGE_SIZE": page_size,
+            "BUF_NUMEL_PER_PAGE": buf_fp8.stride(0),
+            "POOL_SIZE": slot_k.shape[1],
+            "HEAD_DIM": head_dim,
+            "S_OFFSET_NBYTES_IN_PAGE": page_size * head_dim,
+            "FP8_MAX": FP8_MAX,
+            "PRESHUFFLE": page_size > 1,
+            "ROUND_SCALE": round_scale,
+            "HAS_WRITE_MASK": has_write_mask,
+            "RETURN_COMPRESSED": return_compressed,
+            "WRITE_CACHE": write_cache,
+            "BLOCK_D": triton.next_power_of_2(head_dim),
+        }
+
+
 def kpool_compress_and_write_cache(
     kv_cache: torch.Tensor,
     slot_k: torch.Tensor,
@@ -296,10 +425,6 @@ def kpool_compress_and_write_cache(
 
     buf_fp8 = buf.view(FP8_DTYPE)
     buf_fp32 = buf.view(torch.float32)
-    # bytes per page (last dim of kv_cache) viewed as uint8
-    buf_numel_per_page = buf.stride(0)
-    s_offset_nbytes_in_page = page_size * head_dim
-
     if return_compressed:
         compressed_k = torch.empty(
             (slot_k.shape[0], head_dim),
@@ -316,7 +441,7 @@ def kpool_compress_and_write_cache(
     if page_size > 1:
         assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
 
-    _kpool_softmax_rotate_write_cache_kernel[(slot_k.shape[0],)](
+    _KPOOL_COMPRESS_KERNEL(
         buf_fp8,
         buf_fp32,
         slot_k,
@@ -326,23 +451,13 @@ def kpool_compress_and_write_cache(
         write_mask,
         compressed_k,
         compressed_scale,
-        slot_k.stride(0),
-        slot_k.stride(1),
-        slot_score.stride(0),
-        slot_score.stride(1),
-        ape.stride(0),
-        PAGE_SIZE=page_size,
-        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
-        POOL_SIZE=slot_k.shape[1],
-        HEAD_DIM=head_dim,
-        S_OFFSET_NBYTES_IN_PAGE=s_offset_nbytes_in_page,
-        FP8_MAX=FP8_MAX,
-        PRESHUFFLE=page_size > 1,
-        ROUND_SCALE=round_scale,
-        HAS_WRITE_MASK=has_write_mask,
-        RETURN_COMPRESSED=return_compressed,
-        WRITE_CACHE=write_cache,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        page_size=page_size,
+        pool_size=pool_size,
+        head_dim=head_dim,
+        round_scale=round_scale,
+        has_write_mask=has_write_mask,
+        return_compressed=return_compressed,
+        write_cache=write_cache,
     )
 
     if return_compressed:
@@ -398,6 +513,61 @@ def _kpool_tail_seed_kernel(
     )
 
 
+class Glm5NextKpoolTailSeedKernel(
+    VllmTritonJitKernel["Glm5NextKpoolTailSeedKernel.CompileKey"]
+):
+    kernel = staticmethod(_kpool_tail_seed_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        n_tokens: int
+        head_dim: int
+        pool_size: int
+
+    def dispatch(self, *, n_tokens: int, head_dim: int, pool_size: int) -> CompileKey:
+        return self.CompileKey(
+            n_tokens=triton_scalar_specialization_rep(n_tokens),
+            head_dim=head_dim,
+            pool_size=pool_size,
+        )
+
+    def get_warmup_keys(self, *, head_dim: int, pool_size: int) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            n_tokens=(1, 2, 16), head_dim=head_dim, pool_size=pool_size
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        n, d, p = compile_key.n_tokens, compile_key.head_dim, compile_key.pool_size
+        return {
+            "key_ptr": TritonWarmupTensor(torch.bfloat16, shape=(n, d)),
+            "score_ptr": TritonWarmupTensor(torch.bfloat16, shape=(n, d)),
+            "tslot_ptr": TritonWarmupTensor(torch.int32, shape=(n + p,)),
+            "tail_ptr": TritonWarmupTensor(torch.bfloat16, shape=(1, 2, p, d)),
+            "n_tokens": n,
+            "kpool": p,
+            "head_dim": d,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        key_ptr,
+        score_ptr,
+        tslot_ptr,
+        tail_ptr,
+        n_tokens: int,
+        kpool: int,
+        head_dim: int,
+    ) -> LaunchSpec:
+        return (n_tokens,), {
+            "HEAD_DIM": head_dim,
+            "KPOOL": kpool,
+            "TAIL_BLOCK_ELEMS": tail_ptr.stride(0),
+            "KPOOL_HEAD": tail_ptr.stride(1),
+            "BLOCK_D": triton.next_power_of_2(head_dim),
+        }
+
+
 def kpool_seed_tail_cache(
     tail_kv_cache: torch.Tensor,
     key: torch.Tensor,
@@ -412,18 +582,7 @@ def kpool_seed_tail_cache(
     n = tslot.shape[0]
     if n == 0:
         return
-    _kpool_tail_seed_kernel[(n,)](
-        key,
-        gate_score,
-        tslot,
-        tail_kv_cache,
-        n,
-        TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
-        KPOOL_HEAD=tail_kv_cache.stride(1),
-        HEAD_DIM=head_dim,
-        KPOOL=kpool,
-        BLOCK_D=triton.next_power_of_2(head_dim),
-    )
+    _KPOOL_TAIL_SEED_KERNEL(key, gate_score, tslot, tail_kv_cache, n, kpool, head_dim)
 
 
 # Update each request's tail during decode and write completed pools.
@@ -603,6 +762,113 @@ def _kpool_decode_update_batched_kernel(
         )
 
 
+class Glm5NextKpoolDecodeUpdateKernel(
+    VllmTritonJitKernel["Glm5NextKpoolDecodeUpdateKernel.CompileKey"]
+):
+    kernel = staticmethod(_kpool_decode_update_batched_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        next_n: int
+        page_size: int
+        pool_size: int
+        head_dim: int
+        round_scale: bool
+
+    def dispatch(
+        self,
+        *,
+        next_n: int,
+        page_size: int,
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            next_n=triton_scalar_specialization_rep(next_n),
+            page_size=page_size,
+            pool_size=pool_size,
+            head_dim=head_dim,
+            round_scale=round_scale,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        page_sizes: tuple[int, ...],
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            next_n=(1, 2, 16),
+            page_size=page_sizes,
+            pool_size=pool_size,
+            head_dim=head_dim,
+            round_scale=round_scale,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        n, p, d = compile_key.next_n, compile_key.pool_size, compile_key.head_dim
+        page = compile_key.page_size
+        return {
+            "buf_fp8": TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, page, d + 4)),
+            "buf_fp32": TritonWarmupTensor(
+                torch.float32, shape=(1, page, (d + 4) // 4)
+            ),
+            "tail_kv_ptr": TritonWarmupTensor(torch.bfloat16, shape=(1, 2, p, d)),
+            "tail_slot_mapping": TritonWarmupTensor(torch.int32, shape=(1, n)),
+            "key": TritonWarmupTensor(torch.bfloat16, shape=(1, n, d)),
+            "slot_score": TritonWarmupTensor(torch.bfloat16, shape=(1, n, d)),
+            "ape": TritonWarmupTensor(torch.float32, shape=(p, d)),
+            "slot_mapping": TritonWarmupTensor(torch.int32, shape=(1, n)),
+            "positions": TritonWarmupTensor(torch.int32, shape=(1, n)),
+            "page_size": page,
+            "pool_size": p,
+            "head_dim": d,
+            "round_scale": compile_key.round_scale,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        buf_fp8,
+        buf_fp32,
+        tail_kv_ptr,
+        tail_slot_mapping,
+        key,
+        slot_score,
+        ape,
+        slot_mapping,
+        positions,
+        *,
+        page_size: int,
+        pool_size: int,
+        head_dim: int,
+        round_scale: bool,
+    ) -> LaunchSpec:
+        num_requests, next_n = key.shape[:2]
+        return (num_requests,), {
+            "key_stride_b": key.stride(0),
+            "key_stride_t": key.stride(1),
+            "ss_stride_b": slot_score.stride(0),
+            "ss_stride_t": slot_score.stride(1),
+            "ape_stride_0": ape.stride(0),
+            "NEXT_N": next_n,
+            "PAGE_SIZE": page_size,
+            "BUF_NUMEL_PER_PAGE": buf_fp8.stride(0),
+            "POOL_SIZE": pool_size,
+            "TAIL_BLOCK_ELEMS": tail_kv_ptr.stride(0),
+            "KPOOL_HEAD": tail_kv_ptr.stride(1),
+            "HEAD_DIM": head_dim,
+            "S_OFFSET_NBYTES_IN_PAGE": page_size * head_dim,
+            "FP8_MAX": FP8_MAX,
+            "PRESHUFFLE": page_size > 1,
+            "ROUND_SCALE": round_scale,
+            "BLOCK_D": triton.next_power_of_2(head_dim),
+        }
+
+
 def kpool_decode_update_and_maybe_write_cache_batched(
     kv_cache: torch.Tensor,
     tail_kv_cache: torch.Tensor,
@@ -672,33 +938,20 @@ def kpool_decode_update_and_maybe_write_cache_batched(
     if page_size > 1:
         assert page_size % 16 == 0, "ROCm preshuffle requires 16-token tiles"
 
-    _kpool_decode_update_batched_kernel[(num_requests,)](
+    _KPOOL_DECODE_UPDATE_KERNEL(
         buf_fp8,
         buf_fp32,
         tail_kv_cache,
         tail_slot_mapping,
         key,
-        key.stride(0),
-        key.stride(1),
         slot_score,
-        slot_score.stride(0),
-        slot_score.stride(1),
         ape,
-        ape.stride(0),
         slot_mapping,
         positions,
-        next_n,
-        PAGE_SIZE=page_size,
-        BUF_NUMEL_PER_PAGE=buf.stride(0),
-        POOL_SIZE=pool_size,
-        TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
-        KPOOL_HEAD=tail_kv_cache.stride(1),
-        HEAD_DIM=head_dim,
-        S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
-        FP8_MAX=FP8_MAX,
-        PRESHUFFLE=page_size > 1,
-        ROUND_SCALE=round_scale,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        page_size=page_size,
+        pool_size=pool_size,
+        head_dim=head_dim,
+        round_scale=round_scale,
     )
 
 
@@ -858,6 +1111,63 @@ def _expand_pools_and_append_tail_kernel(
     tl.store(out_ptr + row * out_s0 + cols, result, mask=mask)
 
 
+class Glm5NextExpandPoolsAndAppendTailKernel(
+    VllmTritonJitKernel["Glm5NextExpandPoolsAndAppendTailKernel.CompileKey"]
+):
+    kernel = staticmethod(_expand_pools_and_append_tail_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        pool_size: int
+        topk: int
+        out_cols: int
+
+    def dispatch(self, *, pool_size: int, topk: int, out_cols: int) -> CompileKey:
+        return self.CompileKey(
+            pool_size=pool_size,
+            topk=triton_scalar_specialization_rep(topk),
+            out_cols=triton_scalar_specialization_rep(out_cols),
+        )
+
+    def get_warmup_keys(self, *, pool_size: int, topk: int) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            pool_size=pool_size, topk=topk, out_cols=topk + pool_size - 1
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        topk = compile_key.topk
+        if topk == 1:
+            topk = compile_key.pool_size
+        elif topk == 2:
+            topk = compile_key.pool_size + 1
+        topk = max(1, topk // compile_key.pool_size) * compile_key.pool_size
+        return {
+            "pool_ids": TritonWarmupTensor(
+                torch.int32, shape=(1, topk // compile_key.pool_size)
+            ),
+            "seq_lens": TritonWarmupTensor(torch.int32, shape=(1,)),
+            "out": TritonWarmupTensor(
+                torch.int32, shape=(1, topk + compile_key.pool_size - 1)
+            ),
+            "pool_size": compile_key.pool_size,
+        }
+
+    @kernel_launcher
+    def __call__(self, pool_ids, seq_lens, out, pool_size: int) -> LaunchSpec:
+        rows, n_groups = pool_ids.shape
+        topk = n_groups * pool_size
+        out_cols = topk + pool_size - 1
+        block_cols = 128
+        return (rows, triton.cdiv(out_cols, block_cols)), {
+            "topk": topk,
+            "out_cols": out_cols,
+            "POOL_SIZE": pool_size,
+            "BLOCK_COLS": block_cols,
+            "pid_s0": pool_ids.stride(0),
+            "out_s0": out.stride(0),
+        }
+
+
 def expand_pools_and_append_tail(
     pool_ids: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -876,17 +1186,11 @@ def expand_pools_and_append_tail(
     topk = n_groups * pool_size
     out_cols = topk + pool_size - 1
     out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
-    BLOCK_COLS = 128
-    n_tiles = triton.cdiv(out_cols, BLOCK_COLS)
-    _expand_pools_and_append_tail_kernel[(rows, n_tiles)](
-        pool_ids,
-        seq_lens,
-        out,
-        topk,
-        out_cols,
-        POOL_SIZE=pool_size,
-        BLOCK_COLS=BLOCK_COLS,
-        pid_s0=pool_ids.stride(0),
-        out_s0=out.stride(0),
-    )
+    _EXPAND_POOLS_AND_APPEND_TAIL_KERNEL(pool_ids, seq_lens, out, pool_size)
     return out
+
+
+_KPOOL_COMPRESS_KERNEL = Glm5NextKpoolCompressKernel()
+_KPOOL_TAIL_SEED_KERNEL = Glm5NextKpoolTailSeedKernel()
+_KPOOL_DECODE_UPDATE_KERNEL = Glm5NextKpoolDecodeUpdateKernel()
+_EXPAND_POOLS_AND_APPEND_TAIL_KERNEL = Glm5NextExpandPoolsAndAppendTailKernel()

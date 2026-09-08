@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -22,6 +21,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v32.common.kernels import (
+    _FUSED_EH_NORM_KERNEL,
+    fused_eh_norm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -33,7 +36,6 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .ops.fused_eh_norm import fused_eh_norm
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
@@ -141,6 +143,8 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             assert isinstance(self_attn, Glm5NextMLAAttention)
             self._mtp_mla_attns.append(self_attn.mla_attn)
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _FUSED_EH_NORM_KERNEL.register_warmup()
 
     def set_skip_topk(self, skip: bool):
         # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
