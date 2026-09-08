@@ -2004,7 +2004,10 @@ class FlashInferImpl(AttentionImpl):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         needs_nvfp4_fp8_out = (
-            self.is_kvcache_nvfp4 and output_scale is None and output.dtype != FP8_DTYPE
+            self.is_kvcache_nvfp4
+            and self.dcp_world_size == 1
+            and output_scale is None
+            and output.dtype != FP8_DTYPE
         )
 
         if self.bmm2_scale is None:
