@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from mcp.types import ListToolsResult
 
 
@@ -58,14 +60,14 @@ def post_process_tools_description(
 ) -> "ListToolsResult":
     # Adapt the MCP tool result for Harmony
     for tool in list_tools_result.tools:
-        tool.inputSchema = trim_schema(tool.inputSchema)
+        tool.input_schema = trim_schema(tool.input_schema)
 
     # Some tools schema don't need to be part of the prompt (e.g. simple text
     # in text out for Python)
     list_tools_result.tools = [
         tool
         for tool in list_tools_result.tools
-        if getattr(tool.annotations, "include_in_prompt", True)
+        if (tool.meta or {}).get("include_in_prompt", True)
     ]
 
     return list_tools_result
@@ -121,13 +123,13 @@ class MCPToolServer(ToolServer):
             list_tools_response = post_process_tools_description(list_tools_response)
 
             tool_from_mcp = ToolNamespaceConfig(
-                name=initialize_response.serverInfo.name,
+                name=initialize_response.server_info.name,
                 description=initialize_response.instructions,
                 tools=[
                     ToolDescription.new(
                         name=tool.name,
                         description=tool.description,
-                        parameters=tool.inputSchema,
+                        parameters=tool.input_schema,
                     )
                     for tool in list_tools_response.tools
                 ],
@@ -232,3 +234,16 @@ class DemoToolServer(ToolServer):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]
+
+
+async def init_tool_server(args: "Namespace") -> ToolServer | None:
+    tool_server = getattr(args, "tool_server", None)
+    if tool_server == "demo":
+        demo_server = DemoToolServer()
+        await demo_server.init_and_validate()
+        return demo_server
+    if tool_server:
+        mcp_server = MCPToolServer()
+        await mcp_server.add_tool_server(tool_server)
+        return mcp_server
+    return None

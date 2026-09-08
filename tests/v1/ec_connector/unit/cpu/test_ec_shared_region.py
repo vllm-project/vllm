@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for ECSharedRegion (the mmap substrate)."""
 
+import contextlib
+import ctypes
+import errno
+import mmap
 import os
 import uuid
 from unittest.mock import MagicMock, patch
@@ -28,6 +32,39 @@ def region() -> ECSharedRegion:
     r = _make_region()
     yield r
     r.cleanup()
+
+
+@contextlib.contextmanager
+def _region(**kwargs):
+    """Context manager: create one region, clean up on exit."""
+    r = _make_region(**kwargs)
+    try:
+        yield r
+    finally:
+        r.cleanup()
+
+
+def _page_residency(mmap_obj: mmap.mmap, length: int) -> list[bool]:
+    """Return Linux page-residency bits for a writable mmap."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        mincore = libc.mincore
+    except AttributeError:
+        pytest.skip("mincore is unavailable")
+
+    page_count = (length + mmap.PAGESIZE - 1) // mmap.PAGESIZE
+    mincore.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    mincore.restype = ctypes.c_int
+    vector = (ctypes.c_ubyte * page_count)()
+    address = ctypes.addressof(ctypes.c_ubyte.from_buffer(mmap_obj))
+    result = mincore(ctypes.c_void_p(address), length, vector)
+    if result != 0:
+        raise OSError(ctypes.get_errno())
+    return [bool(value & 1) for value in vector]
 
 
 # ── mmap sharing between two instances ───────────────────────────────────────
@@ -107,6 +144,167 @@ def test_wait_for_file_size_times_out_when_file_stays_empty(tmp_path):
             _wait_for_file_size(fd, expected_size=4096, timeout=0.05)
     finally:
         os.close(fd)
+
+
+# ── MADV_POPULATE_WRITE pre-faulting / fallback ──────────────────────────────
+
+
+def test_madvise_success_selects_madvise_population(monkeypatch):
+    """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
+    helper must never be invoked on a kernel that accepts the advice.
+
+    Spies on both helpers so we can verify call counts: 1 probe call over a
+    single page + 1 populate call over the whole flat region, fallback 0 times.
+    """
+    from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
+
+    madvise_calls: list[tuple[int, int, int]] = []
+    fallback_calls: list[tuple[int, int]] = []
+
+    def _spy_madvise(mm, off, ln):
+        madvise_calls.append((off, ln, id(mm)))
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+
+    monkeypatch.setattr(esr, "_madvise_populate_write", _spy_madvise)
+    monkeypatch.setattr(esr, "_fallback_populate_write", _spy_fallback)
+
+    num_blocks, block_size_bytes = 4, mmap.PAGESIZE
+    with _region(num_blocks=num_blocks, block_size_bytes=block_size_bytes):
+        total = num_blocks * block_size_bytes
+        mmap_id = madvise_calls[0][2]
+        assert madvise_calls == [
+            (0, mmap.PAGESIZE, mmap_id),  # probe
+            (0, total, mmap_id),  # flat pre-fault of the whole region
+        ]
+        assert fallback_calls == [], (
+            "native-path constructor must not invoke the fallback helper"
+        )
+
+
+def test_madvise_einval_selects_fallback_for_whole_region(monkeypatch):
+    """An EINVAL probe must select the fallback for the whole flat region.
+
+    This is the regression under test: on Linux < 5.14 the constant is absent
+    from the `mmap` module, so advice=23 reaches a kernel that rejects it and
+    every ECSharedRegion construction used to abort with EINVAL.
+    """
+    from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
+
+    fallback_calls: list[tuple[int, int]] = []
+    real_fallback = esr._fallback_populate_write
+
+    def _raise_einval(mm, off, ln):
+        raise OSError(errno.EINVAL, "simulated unsupported kernel")
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+        return real_fallback(mm, off, ln)
+
+    monkeypatch.setattr(esr, "_madvise_populate_write", _raise_einval)
+    monkeypatch.setattr(esr, "_fallback_populate_write", _spy_fallback)
+
+    num_blocks, block_size_bytes = 4, mmap.PAGESIZE
+    with _region(num_blocks=num_blocks, block_size_bytes=block_size_bytes) as r:
+        assert fallback_calls == [(0, num_blocks * block_size_bytes)]
+        # Region is still fully usable after taking the fallback path.
+        r.blocks[0, :4] = torch.tensor([1, 2, 3, 4], dtype=torch.int8)
+        assert r.blocks[0, :4].tolist() == [1, 2, 3, 4]
+
+
+def test_non_creator_does_not_probe_or_populate(monkeypatch):
+    """Only the creator pre-faults. A second opener must not probe the advice
+    nor re-touch pages the creator already populated."""
+    from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
+
+    instance_id = str(uuid.uuid4())
+    r1 = ECSharedRegion(
+        engine_id=instance_id, num_blocks=4, block_size_bytes=mmap.PAGESIZE
+    )
+    try:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            esr,
+            "_madvise_populate_write",
+            lambda mm, off, ln: calls.append("madvise"),
+        )
+        monkeypatch.setattr(
+            esr,
+            "_fallback_populate_write",
+            lambda mm, off, ln: calls.append("fallback"),
+        )
+        r2 = ECSharedRegion(
+            engine_id=instance_id, num_blocks=4, block_size_bytes=mmap.PAGESIZE
+        )
+        try:
+            assert not r2._is_creator
+            assert calls == []
+        finally:
+            r2.cleanup()
+    finally:
+        r1.cleanup()
+
+
+def test_fallback_populate_write_preserves_bytes_and_faults_pages():
+    """Fallback preserves existing bytes and touches every target page.
+
+    `|= 0` rather than `= 0` matters here: a peer worker may already have
+    written EC data into the shared mmap before we pre-fault it.
+    """
+    from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
+
+    size = 3 * mmap.PAGESIZE
+    if not hasattr(mmap, "MADV_DONTNEED"):
+        pytest.skip("MADV_DONTNEED is unavailable")
+
+    mmap_obj = mmap.mmap(
+        -1,
+        size,
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+    )
+    try:
+        mmap_obj.madvise(mmap.MADV_DONTNEED, 0, size)
+        if any(_page_residency(mmap_obj, size)):
+            pytest.skip("kernel did not discard anonymous mmap pages")
+
+        mmap_obj[0] = 0xAB
+        assert _page_residency(mmap_obj, size) == [True, False, False]
+
+        esr._fallback_populate_write(mmap_obj, 0, size)
+
+        assert _page_residency(mmap_obj, size) == [True, True, True]
+        assert mmap_obj[0] == 0xAB
+    finally:
+        mmap_obj.close()
+
+
+def test_madvise_unexpected_oserror_propagates(monkeypatch):
+    """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
+    propagate out of __init__, not be silently masked by the fallback branch.
+    """
+    from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
+
+    monkeypatch.setattr(
+        esr,
+        "_madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EIO, "simulated I/O failure")
+        ),
+    )
+    engine_id = str(uuid.uuid4())
+    try:
+        with pytest.raises(OSError) as exc_info:
+            ECSharedRegion(
+                engine_id=engine_id, num_blocks=4, block_size_bytes=mmap.PAGESIZE
+            )
+        assert exc_info.value.errno == errno.EIO
+    finally:
+        # __init__ raised past the unlink-owning cleanup(), so drop the
+        # backing file here rather than leaking it into /dev/shm.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(f"/dev/shm/vllm_ec_{engine_id}.mmap")
 
 
 # ── pin_memory ───────────────────────────────────────────────────────────────

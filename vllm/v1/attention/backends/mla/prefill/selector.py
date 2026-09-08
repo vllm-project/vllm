@@ -107,6 +107,10 @@ def get_mla_prefill_backend(
     """
     from vllm.platforms import current_platform
 
+    if current_platform.is_cpu():
+        logger.info_once("Using CPU SDPA MLA prefill backend.")
+        return MLAPrefillBackendEnum.CPU.get_class()
+
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
         logger.info_once(

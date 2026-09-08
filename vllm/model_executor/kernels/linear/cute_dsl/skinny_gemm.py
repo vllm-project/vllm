@@ -151,17 +151,6 @@ class ShapeDynamicSkinnyGemm:
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
 
-    def request_warmup(
-        self,
-        dtype: torch.dtype,
-        shapes: Iterable[tuple[int, int, int]],
-    ) -> None:
-        """Request compilation of ``(M, N, K)`` shapes before graph capture."""
-        self.request_warmup_configs(
-            dtype,
-            (self._config(m, n, k) for m, n, k in shapes),
-        )
-
     def request_warmup_configs(
         self,
         dtype: torch.dtype,

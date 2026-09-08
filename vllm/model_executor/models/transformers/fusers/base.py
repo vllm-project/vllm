@@ -20,10 +20,14 @@ if TYPE_CHECKING:
 class BaseFuser(ABC):
     """A detected fusion and how to apply it.
 
-    `match` analyses the module *class* once (cached, see `get_fuser`); `fuse`
+    `match` analyses the module *class* once (cached, see `get_fusers`); `fuse`
     then applies the fusion to an instance in `recursive_replace`, returning the
     module to install in its place.
     """
+
+    redefines_forward: ClassVar[bool] = True
+    """Whether `fuse` gives the module a different forward,
+    by rewriting its source or by returning a different module in its place."""
 
     @abstractmethod
     def info(self, name: str) -> str:
@@ -55,6 +59,17 @@ class BaseFuser(ABC):
         """`packed_modules_mapping` entries this fuser contributes (none unless
         it stacks weights)."""
         return {}
+
+
+def fused_head_size(module: nn.Module, vllm_config: "VllmConfig") -> int:
+    """The head size of `module`, which head counts are derived from.
+
+    Prefer the module's own `head_dim`, which Transformers sets per instance:
+    the model-wide value is the largest head size across layers, so on a
+    heterogeneous checkpoint it would divide out the wrong number of heads, and
+    it is the text head size, so it does not describe a vision tower at all.
+    """
+    return getattr(module, "head_dim", None) or vllm_config.model_config.get_head_size()
 
 
 def local_output_sizes(merged_name: str) -> str:
