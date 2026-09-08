@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -13,6 +18,361 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
+
+
+def _flashinfer_dcp_parity_case(config, rank, world, next_n, seed, q_scale, k_scale):
+    from vllm import _custom_ops as ops
+    from vllm.distributed import get_dcp_group
+    from vllm.forward_context import set_forward_context
+    from vllm.utils.deep_gemm import get_num_sms, get_paged_mqa_logits_metadata
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepSeekV32IndexerDecodeMetadata,
+        DeepseekV32IndexerMetadata,
+    )
+    from vllm.v1.attention.ops.dcp import MLADCPManager
+
+    device = torch.device(f"cuda:{rank}")
+    torch.manual_seed(seed)
+    # GLM-5.3 dimensions. MTP3 verifies the current token plus three drafts.
+    heads, index_heads, index_dim, topk = 64, 32, 128, 2048
+    block_size, interleave, kv_rank, rope_dim = 64, 64, 512, 64
+    lengths = [5, 65, 129, 193, 257, 2049, 4097, 8193]
+    if next_n == 1:
+        lengths = [1, 63, 64, 65, 255, 256, 257, 2049, 8193]
+    batch, tokens = len(lengths), len(lengths) * next_n
+    capacity = ((max(lengths) + 255) // 256) * 256
+    bounds = (
+        torch.tensor(lengths, device=device, dtype=torch.int32)[:, None]
+        - next_n
+        + 1
+        + torch.arange(next_n, device=device)
+    ).to(torch.int32)
+
+    # Generate all inputs before any rank/layout-dependent allocation or RNG use.
+    q = torch.randn(
+        tokens, heads, kv_rank + rope_dim, device=device, dtype=torch.bfloat16
+    )
+    index_q = torch.randn(
+        tokens, index_heads, index_dim, device=device, dtype=torch.bfloat16
+    ).to(torch.float8_e4m3fn)
+    weights = torch.rand(tokens, index_heads, device=device) / index_heads**0.5
+    index_k = torch.randn(
+        batch, capacity, index_dim, device=device, dtype=torch.bfloat16
+    )
+    kv = torch.randn(
+        batch, capacity, kv_rank + rope_dim, device=device, dtype=torch.bfloat16
+    )
+    input_hashes = {
+        name: hashlib.sha256(
+            tensor.view(torch.uint8).cpu().numpy().tobytes()
+        ).hexdigest()
+        for name, tensor in (
+            ("query", q),
+            ("index_query", index_q),
+            ("index_weights", weights),
+            ("index_keys", index_k),
+            ("mla_kv", kv),
+        )
+    }
+    q_fp8, _ = ops.scaled_fp8_quant(
+        q.flatten(1), torch.tensor(q_scale, device=device, dtype=torch.float32)
+    )
+    q_fp8 = q_fp8.view_as(q)
+    positions = torch.arange(capacity, device=device)
+    owned = positions[(positions // interleave) % world == rank]
+    local_capacity = owned.numel()
+    blocks_per_req = local_capacity // block_size
+    num_blocks = batch * blocks_per_req + 1
+    # Unused page plus shuffled physical blocks expose logical/physical mixups.
+    block_table = (
+        torch.randperm(num_blocks - 1, device=device)
+        .add(1)
+        .reshape(batch, blocks_per_req)
+        .to(torch.int32)
+    )
+    local_positions = torch.arange(local_capacity, device=device)
+    slots = (
+        block_table[:, local_positions // block_size].long() * block_size
+        + local_positions % block_size
+    ).flatten()
+    index_cache = torch.zeros(
+        num_blocks, block_size, index_dim + 4, dtype=torch.uint8, device=device
+    )
+    ops.indexer_k_quant_and_cache(
+        index_k[:, owned].reshape(-1, index_dim), index_cache, slots, 128, "ue8m0"
+    )
+    kv_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        kv_rank + rope_dim,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    local_kv = kv[:, owned].reshape(-1, kv_rank + rope_dim)
+    ops.concat_and_cache_mla(
+        local_kv[:, :kv_rank],
+        local_kv[:, kv_rank:],
+        kv_cache,
+        slots,
+        "fp8",
+        torch.tensor(k_scale, device=device, dtype=torch.float32),
+    )
+    local_bounds = get_dcp_local_seq_lens(bounds, world, rank, interleave)
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=block_table,
+        seq_lens=local_bounds,
+        decode_lens=torch.full((batch,), next_n, dtype=torch.int32, device=device),
+        requires_padding=False,
+        schedule_metadata=get_paged_mqa_logits_metadata(
+            local_bounds, block_size, get_num_sms()
+        ),
+        global_seq_lens=bounds if world > 1 else None,
+    )
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=local_bounds[:, -1],
+        max_seq_len=local_capacity,
+        slot_mapping=torch.full((tokens,), -1, dtype=torch.int64, device=device),
+        num_decodes=batch,
+        num_decode_tokens=tokens,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    indices = torch.empty(tokens, topk, dtype=torch.int32, device=device)
+    with set_forward_context({"indexer": metadata}, config):
+        sparse_indexer.sparse_attn_indexer(
+            hidden_states=q,
+            k_cache_prefix="indexer",
+            kv_cache=index_cache,
+            q_quant=index_q,
+            q_scale=None,
+            k=None,
+            weights=weights,
+            quant_block_size=128,
+            scale_fmt="ue8m0",
+            topk_tokens=topk,
+            head_dim=index_dim,
+            max_model_len=local_capacity,
+            total_seq_lens=batch * local_capacity,
+            topk_indices_buffer=indices,
+            skip_k_cache_insert=True,
+            use_pcp=False,
+            dense_mha_metadata_layer_name="",
+            dcp_rank=rank,
+            dcp_world_size=world,
+            cp_kv_cache_interleave_size=interleave,
+        )
+    valid = indices >= 0
+    assert (indices[valid] < bounds.flatten()[:, None].expand_as(indices)[valid]).all()
+    torch.testing.assert_close(valid.sum(1), bounds.flatten().clamp_max(topk).long())
+    manager = None
+    if world > 1:
+        manager = MLADCPManager(
+            config,
+            device,
+            heads // world,
+            kv_rank + rope_dim,
+            kv_rank,
+            torch.float8_e4m3fn,
+            torch.bfloat16,
+            None,
+            True,
+            False,
+        )
+        query = manager.query_gather(q_fp8.chunk(world, dim=1)[rank].contiguous())
+        torch.testing.assert_close(query.view(torch.uint8), q_fp8.view(torch.uint8))
+    else:
+        query = q_fp8
+
+    # Set up the kernel-facing layer, with no projection weights or model load.
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.scale = (192 + rope_dim) ** -0.5
+    impl.qk_nope_head_dim, impl.kv_lora_rank = 192, kv_rank
+    impl.qk_rope_head_dim, impl.kv_cache_dtype = rope_dim, "fp8"
+    impl.topk_indices_buffer, impl.dcp_world_size, impl.dcp_rank = indices, world, rank
+    impl._workspace_buffer = None
+    impl.bmm1_scale = impl.bmm2_scale = None
+    impl.is_nope_mla, impl.need_to_return_lse_for_decode = False, True
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=torch.arange(
+            batch, device=device, dtype=torch.int32
+        ).repeat_interleave(next_n),
+        block_table=block_table,
+        block_size=block_size,
+        cp_kv_cache_interleave_size=interleave,
+    )
+    partial, lse = impl.forward_mqa(
+        query,
+        kv_cache,
+        attn_metadata,
+        SimpleNamespace(_q_scale_float=q_scale, _k_scale_float=k_scale),
+    )
+    assert lse is not None
+    assert torch.isfinite(partial).all()
+    empty = local_bounds.flatten() == 0
+    assert (partial[empty] == 0).all() and torch.isneginf(lse[empty]).all()
+    if manager is not None:
+        out = manager.combine(partial, lse)
+        out = get_dcp_group().all_gather(out, dim=1)
+        lse = get_dcp_group().all_gather(lse.unsqueeze(0), dim=0).logsumexp(0)
+        # The real indexer collective must produce the same set on every rank.
+        gathered_ids = get_dcp_group().all_gather(indices.unsqueeze(0), dim=0)
+        assert (gathered_ids.sort(-1).values == indices.sort(-1).values).all()
+    else:
+        out = partial
+    result = {
+        "input_hashes": input_hashes,
+        "out": out.cpu(),
+        "lse": lse.cpu(),
+        "indices": indices.cpu(),
+        "causal_bounds": bounds.cpu(),
+        "query_fp8": q_fp8.view(torch.uint8).cpu(),
+    }
+    if world == 1:
+        # Independent FP32 SDPA on the very same quantized Q/K/V catches a
+        # common error on both paths, especially a missing FP8 scale.
+        canonical_kv = (
+            kv_cache.view(-1, kv_rank + rope_dim)
+            .float()[slots]
+            .reshape(batch, capacity, kv_rank + rope_dim)
+            * k_scale
+        )
+        reference = torch.empty(tokens, heads, kv_rank, device=device)
+        reference_lse = torch.empty(tokens, heads, device=device)
+        for row in range(tokens):
+            selected = canonical_kv[row // next_n, indices[row, valid[row]].long()]
+            scores = (q_fp8[row].float() * q_scale) @ selected.T * impl.scale
+            reference[row] = scores.softmax(-1) @ selected[:, :kv_rank]
+            reference_lse[row] = scores.logsumexp(-1)
+        result.update(sdpa=reference.cpu(), sdpa_lse=reference_lse.cpu())
+    return result
+
+
+def _flashinfer_dcp_parity_worker(rank, world, directory):
+    from datetime import timedelta
+
+    from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    torch.accelerator.set_device_index(rank)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=world,
+            decode_context_parallel_size=world,
+            cp_kv_cache_interleave_size=64,
+            dcp_comm_backend="a2a",
+        )
+    )
+    directory = Path(directory)
+    try:
+        with set_current_vllm_config(config):
+            init_distributed_environment(
+                world_size=world,
+                rank=rank,
+                local_rank=rank,
+                backend="nccl",
+                distributed_init_method=f"file://{directory / f'store-{world}'}",
+                timeout=timedelta(minutes=5),
+            )
+            initialize_model_parallel(world, decode_context_model_parallel_size=world)
+            init_workspace_manager(torch.device(f"cuda:{rank}"))
+            for seed in (0, 42):
+                for next_n in (1, 4):
+                    for q_scale, k_scale in ((1.0, 1.0), (0.5, 0.25)):
+                        result = _flashinfer_dcp_parity_case(
+                            config, rank, world, next_n, seed, q_scale, k_scale
+                        )
+                        if rank == 0:
+                            name = f"s{seed}-n{next_n}-q{q_scale}-k{k_scale}"
+                            torch.save(result, directory / f"tp{world}-{name}.pt")
+                            print(
+                                f"ATTENTION_PARITY captured TP{world} {name}",
+                                flush=True,
+                            )
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(100),
+    reason="FlashInfer TRTLLM sparse MLA requires SM100",
+)
+def test_flashinfer_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path):
+    """Real FP8 indexer + FlashInfer + DCP collectives match unsharded TP1.
+
+    Requires four SM100 GPUs. No fake logits, selected indices, attention
+    kernels, or collectives. Artifacts retain the actual output tensors.
+    TRTLLM_RAGGED prefill and FLASHMLA_SPARSE are outside this decode test.
+    """
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
+    for world in (1, 4):
+        torch.multiprocessing.spawn(
+            _flashinfer_dcp_parity_worker,
+            args=(world, str(tmp_path)),
+            nprocs=world,
+            join=True,
+        )
+    metrics = []
+    for ref_path in sorted(tmp_path.glob("tp1-*.pt")):
+        ref = torch.load(ref_path, weights_only=True)
+        candidate = torch.load(
+            ref_path.with_name(ref_path.name.replace("tp1-", "tp4-")), weights_only=True
+        )
+        delta = candidate["out"].float() - ref["out"].float()
+        metrics.append(
+            {
+                "case": ref_path.stem.removeprefix("tp1-"),
+                "max_abs": delta.abs().max().item(),
+                "relative_l2": (delta.norm() / ref["out"].float().norm()).item(),
+                "lse_max_abs": (candidate["lse"] - ref["lse"]).abs().max().item(),
+                "index_set_mismatches": (
+                    candidate["indices"].sort(-1).values
+                    != ref["indices"].sort(-1).values
+                )
+                .any(-1)
+                .sum()
+                .item(),
+            }
+        )
+    assert len(metrics) == 8
+    (tmp_path / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    print(json.dumps(metrics, indent=2))
+    for ref_path in sorted(tmp_path.glob("tp1-*.pt")):
+        ref = torch.load(ref_path, weights_only=True)
+        candidate = torch.load(
+            ref_path.with_name(ref_path.name.replace("tp1-", "tp4-")), weights_only=True
+        )
+        torch.testing.assert_close(
+            candidate["query_fp8"], ref["query_fp8"], rtol=0, atol=0
+        )
+        assert candidate["input_hashes"] == ref["input_hashes"]
+        torch.testing.assert_close(candidate["causal_bounds"], ref["causal_bounds"])
+        torch.testing.assert_close(
+            candidate["indices"].sort(-1).values,
+            ref["indices"].sort(-1).values,
+            rtol=0,
+            atol=0,
+        )
+        for actual in (ref["out"], candidate["out"]):
+            torch.testing.assert_close(
+                actual.float(), ref["sdpa"], rtol=0.01, atol=0.002
+            )
+        torch.testing.assert_close(candidate["out"], ref["out"], rtol=0.01, atol=0.002)
+        torch.testing.assert_close(candidate["lse"], ref["lse"], rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(ref["lse"], ref["sdpa_lse"], rtol=1e-4, atol=1e-4)
+    assert all(case["relative_l2"] < 0.005 for case in metrics)
 
 
 @pytest.fixture
