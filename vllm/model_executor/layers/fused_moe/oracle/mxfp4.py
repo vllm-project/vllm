@@ -396,6 +396,12 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
+_FLEXIBLE_ACTIVATION_BACKENDS = {
+    Mxfp4MoeBackend.HUMMING,
+    Mxfp4MoeBackend.EMULATION,
+}
+
+
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
     args = get_current_vllm_config().model_config.quantization_config
@@ -463,10 +469,15 @@ def _filter_by_activation(
         return [
             b
             for b in backends
-            if _backend_activation_key(b) == requested_activation_key
-            or b == Mxfp4MoeBackend.EMULATION
+            if b in _FLEXIBLE_ACTIVATION_BACKENDS
+            or _backend_activation_key(b) == requested_activation_key
         ]
-    bf16 = [b for b in backends if _backend_activation_key(b) is None]
+    bf16 = [
+        b
+        for b in backends
+        if b in _FLEXIBLE_ACTIVATION_BACKENDS
+        or _backend_activation_key(b) is None
+    ]
     return bf16 if bf16 else backends
 
 
@@ -561,7 +572,7 @@ def select_mxfp4_moe_backend(
         for requested_backend in requested_backends:
             act_key = (
                 requested_activation_key
-                if requested_backend == Mxfp4MoeBackend.EMULATION
+                if requested_backend in _FLEXIBLE_ACTIVATION_BACKENDS
                 else _backend_activation_key(requested_backend)
             )
             try:

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kMxfp4Static,
+    kMxfp6E3M2Dynamic,
     kMxfp8Dynamic,
 )
 from vllm.utils.import_utils import has_humming
@@ -41,6 +42,58 @@ def test_mxfp4_weight_with_block_fp8_activation_is_supported():
 def test_mxfp4_weight_with_per_token_fp8_activation_still_supported():
     """The pre-existing per-token FP8 pairing must keep working."""
     assert HummingExpertsBase._supports_quant_scheme(kMxfp4Static, kFp8DynamicTokenSym)
+
+
+@pytest.mark.parametrize(
+    "activation_key",
+    [kFp8Dynamic128Sym, kMxfp6E3M2Dynamic],
+)
+def test_mxfp4_oracle_defers_humming_activation_validation(activation_key):
+    """Humming supports multiple activation formats, so the MXFP4 oracle must
+    leave compatibility validation to the Humming experts implementation."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _filter_by_activation,
+    )
+
+    assert _filter_by_activation([Mxfp4MoeBackend.HUMMING], activation_key) == [
+        Mxfp4MoeBackend.HUMMING
+    ]
+
+
+def test_mxfp4_oracle_forwards_requested_activation_to_humming(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4
+
+    monkeypatch.setattr(
+        mxfp4,
+        "_resolve_activation_key",
+        lambda activation_key: kFp8Dynamic128Sym,
+    )
+    selected = {}
+
+    def select_backend(backend, config, weight_key, activation_key, activation_format):
+        selected["activation_key"] = activation_key
+        return backend, object
+
+    monkeypatch.setattr(mxfp4, "_return_or_raise", select_backend)
+    config = SimpleNamespace(
+        moe_backend="humming",
+        moe_parallel_config=SimpleNamespace(use_batched_activation_format=False),
+    )
+
+    mxfp4.select_mxfp4_moe_backend(config)
+
+    assert selected["activation_key"] == kFp8Dynamic128Sym
+
+
+def test_humming_rejects_unsupported_mxfp4_activation():
+    """Deferring oracle filtering does not bypass Humming's compatibility
+    validation."""
+    assert not HummingExpertsBase._supports_quant_scheme(
+        kMxfp4Static, kMxfp6E3M2Dynamic
+    )
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
@@ -155,6 +208,37 @@ def test_checkpoint_activations_drive_humming_input_schema(
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+def test_checkpoint_activation_is_passed_to_mxfp4_oracle(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
+    )
+
+    selected = {}
+
+    def select_backend(moe, activation_key=None):
+        selected["activation_key"] = activation_key
+        return Mxfp4MoeBackend.HUMMING, object
+
+    monkeypatch.setattr(
+        ct_mxfp4.CutlassExpertsMxfp4, "_supports_current_device", lambda: True
+    )
+    monkeypatch.setattr(ct_mxfp4, "select_mxfp4_moe_backend", select_backend)
+    input_quant = _ct_input_quant(
+        dynamic=True, strategy="group", group_size=128
+    )
+
+    ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(
+        SimpleNamespace(w13_num_shards=2, moe_backend="humming"),
+        input_quant=input_quant,
+    )
+
+    assert selected["activation_key"] == kFp8Dynamic128Sym
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
 def test_weight_only_checkpoint_keeps_bf16_activations():
     """No ``input_activations`` means W4A16: Humming dequantizes the weights."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
@@ -199,7 +283,10 @@ def test_compressed_tensors_mxfp4_moe_backend_selects_humming(
     monkeypatch.setattr(
         ct_mxfp4,
         "select_mxfp4_moe_backend",
-        lambda moe: (Mxfp4MoeBackend.HUMMING, sentinel_experts),
+        lambda moe, activation_key=None: (
+            Mxfp4MoeBackend.HUMMING,
+            sentinel_experts,
+        ),
     )
 
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(

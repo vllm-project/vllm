@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
     from vllm.utils.humming import HummingInputSchema
@@ -118,6 +119,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.input_quant = input_quant
+        self.humming_input_schema = None
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         # Backend selection must match the weight preparation below: CUTLASS
         # swizzles scales, b12x and XPU consume checkpoint packing, Humming
@@ -125,7 +127,20 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
         if moe.moe_backend in ORACLE_MOE_BACKENDS:
-            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
+            activation_key = None
+            if moe.moe_backend == "humming" and has_humming():
+                self.humming_input_schema = _humming_input_schema(self.input_quant)
+                if self.humming_input_schema is not None:
+                    from vllm.model_executor.layers.quantization.utils.humming_utils import (  # noqa: E501
+                        input_schema_to_quant_key,
+                    )
+
+                    activation_key = input_schema_to_quant_key(
+                        self.humming_input_schema
+                    )
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=activation_key
+            )
             assert experts_cls is not None
             self.experts_cls = experts_cls
             self.use_cutlass_mxfp4 = False
@@ -280,7 +295,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_weight=layer.w2_weight,
                 w13_weight_scale=layer.w13_weight_scale,
                 w2_weight_scale=layer.w2_weight_scale,
-                humming_input_schema=_humming_input_schema(self.input_quant),
+                humming_input_schema=self.humming_input_schema,
             )
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
