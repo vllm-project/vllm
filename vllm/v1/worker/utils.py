@@ -680,7 +680,16 @@ def copy_kv_cache_blocks_inplace(
     indices: torch.Tensor | None = None
     seen: set[tuple[torch.device, int]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
-    for cache in kv_caches:
+    # Hybrid models may bind a layer's cache as a tuple of tensors (one entry
+    # per cache role, e.g. latent + indexer pools). Flatten so every physical
+    # tensor is copied once; non-tensor entries are skipped defensively.
+    flattened: list[torch.Tensor] = []
+    for cache_entry in kv_caches:
+        entries = (
+            cache_entry if isinstance(cache_entry, (tuple, list)) else (cache_entry,)
+        )
+        flattened.extend(c for c in entries if isinstance(c, torch.Tensor))
+    for cache in flattened:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. data_ptr distinguishes per-layer views of a shared allocation.
         key = (cache.device, cache.data_ptr())
