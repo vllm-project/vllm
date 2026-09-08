@@ -17,9 +17,19 @@ A single grid (T, hc_mult+1) drives both norms: task 0 is enorm on
 inputs_embeds[token, :], task k+1 is hnorm on previous_hidden_states[token, k, :].
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 
 @triton.jit
@@ -40,164 +50,291 @@ def _rmsnorm_row(
     tl.store(out_row_ptr + block, y.to(out_row_ptr.dtype.element_ty), mask=mask)
 
 
-@triton.jit
-def _fused_mtp_input_rmsnorm_kernel(
-    inputs_embeds_ptr,
-    positions_ptr,
-    prev_hidden_ptr,
-    enorm_weight_ptr,
-    hnorm_weight_ptr,
-    enorm_out_ptr,
-    hnorm_out_ptr,
-    eps,
-    HIDDEN: tl.constexpr,
-    HC_MULT: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+class FusedMTPInputRMSNormKernel(
+    VllmTritonJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
 ):
-    # int64 token index so per-token offsets don't overflow int32 at
-    # large num_tokens (matches the convention in fused_q_kv_rmsnorm).
-    token_idx = tl.program_id(0).to(tl.int64)
-    pid_task = tl.program_id(1)
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        hidden: int
+        hc_mult: int
+        block_size: int
+        eps: float
 
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < HIDDEN
+    @staticmethod
+    @triton.jit
+    def kernel(
+        inputs_embeds_ptr,
+        positions_ptr,
+        prev_hidden_ptr,
+        enorm_weight_ptr,
+        hnorm_weight_ptr,
+        enorm_out_ptr,
+        hnorm_out_ptr,
+        eps,
+        HIDDEN: tl.constexpr,
+        HC_MULT: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # int64 token index so per-token offsets don't overflow int32 at
+        # large num_tokens (matches the convention in fused_q_kv_rmsnorm).
+        token_idx = tl.program_id(0).to(tl.int64)
+        pid_task = tl.program_id(1)
 
-    if pid_task == 0:
-        # enorm path: load inputs_embeds[token, :] then zero-mask at pos==0.
-        # Math is preserved: pos==0 → x=0 → variance=0 → RMSNorm output is 0
-        # regardless of weight, matching torch.where(pos==0, 0, x) + RMSNorm.
-        pos = tl.load(positions_ptr + token_idx)
-        keep = pos != 0
-        x = tl.load(
-            inputs_embeds_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0
+        block = tl.arange(0, BLOCK_SIZE)
+        mask = block < HIDDEN
+
+        if pid_task == 0:
+            # enorm path: load inputs_embeds[token, :] then zero-mask at pos==0.
+            # Math is preserved: pos==0 → x=0 → variance=0 → RMSNorm output is 0
+            # regardless of weight, matching torch.where(pos==0, 0, x) + RMSNorm.
+            pos = tl.load(positions_ptr + token_idx)
+            keep = pos != 0
+            x = tl.load(
+                inputs_embeds_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0
+            )
+            x = tl.where(keep, x, 0.0)
+            _rmsnorm_row(
+                x,
+                enorm_weight_ptr,
+                enorm_out_ptr + token_idx * HIDDEN,
+                block,
+                mask,
+                eps,
+                HIDDEN,
+            )
+        else:
+            # hnorm path: load prev_hidden[token, slot, :].
+            slot = pid_task - 1
+            row_offset = (token_idx * HC_MULT + slot) * HIDDEN
+            x = tl.load(prev_hidden_ptr + row_offset + block, mask=mask, other=0.0)
+            _rmsnorm_row(
+                x,
+                hnorm_weight_ptr,
+                hnorm_out_ptr + row_offset,
+                block,
+                mask,
+                eps,
+                HIDDEN,
+            )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        hidden: int,
+        hc_mult: int,
+        eps: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            hidden=hidden,
+            hc_mult=hc_mult,
+            block_size=next_power_of_2(hidden),
+            eps=eps,
         )
-        x = tl.where(keep, x, 0.0)
-        _rmsnorm_row(
-            x,
-            enorm_weight_ptr,
-            enorm_out_ptr + token_idx * HIDDEN,
-            block,
-            mask,
-            eps,
-            HIDDEN,
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        if int(getattr(hf_config, "num_nextn_predict_layers", 0) or 0) <= 0:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            dtype=vllm_config.model_config.dtype,
+            hidden=int(hf_config.hidden_size),
+            hc_mult=int(hf_config.hc_mult),
+            eps=float(hf_config.rms_norm_eps),
         )
-    else:
-        # hnorm path: load prev_hidden[token, slot, :].
-        slot = pid_task - 1
-        row_offset = (token_idx * HC_MULT + slot) * HIDDEN
-        x = tl.load(prev_hidden_ptr + row_offset + block, mask=mask, other=0.0)
-        _rmsnorm_row(
-            x,
-            hnorm_weight_ptr,
-            hnorm_out_ptr + row_offset,
-            block,
-            mask,
-            eps,
-            HIDDEN,
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            inputs_embeds=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hidden),
+            ),
+            positions=TritonWarmupTensor(torch.int64),
+            previous_hidden_states=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hc_mult, compile_key.hidden),
+            ),
+            enorm_weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.hidden,),
+            ),
+            hnorm_weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.hidden,),
+            ),
+            _outputs=(
+                TritonWarmupTensor(
+                    compile_key.dtype,
+                    shape=(1, compile_key.hidden),
+                ),
+                TritonWarmupTensor(
+                    compile_key.dtype,
+                    shape=(1, compile_key.hc_mult, compile_key.hidden),
+                ),
+            ),
+            eps=compile_key.eps,
+            hc_mult=compile_key.hc_mult,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        inputs_embeds: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        enorm_weight: torch.Tensor,
+        hnorm_weight: torch.Tensor,
+        eps: float,
+        hc_mult: int,
+        *,
+        _outputs: tuple[Any, Any] | None = None,
+    ) -> LaunchSpec:
+        num_tokens, hidden = inputs_embeds.shape
+        if _outputs is None:
+            assert inputs_embeds.ndim == 2
+            assert previous_hidden_states.ndim == 3
+            assert previous_hidden_states.shape[1] == hc_mult
+            assert inputs_embeds.shape[0] == previous_hidden_states.shape[0], (
+                "token dim mismatch"
+            )
+            assert (
+                hidden
+                == previous_hidden_states.shape[2]
+                == enorm_weight.shape[0]
+                == hnorm_weight.shape[0]
+            )
+            assert (
+                inputs_embeds.is_contiguous() and previous_hidden_states.is_contiguous()
+            )
+            assert enorm_weight.is_contiguous() and hnorm_weight.is_contiguous()
+            _outputs = (
+                torch.empty_like(inputs_embeds),
+                torch.empty_like(previous_hidden_states),
+            )
+
+        enorm_out, hnorm_out = _outputs
+        grid = None if num_tokens == 0 else (num_tokens, hc_mult + 1)
+        return (
+            grid,
+            dict(
+                prev_hidden_ptr=previous_hidden_states,
+                enorm_out_ptr=enorm_out,
+                hnorm_out_ptr=hnorm_out,
+                HIDDEN=hidden,
+                HC_MULT=hc_mult,
+                BLOCK_SIZE=next_power_of_2(hidden),
+            ),
+            _outputs,
         )
 
 
-@triton.jit
-def _mtp_shared_head_rmsnorm_kernel(
-    x_ptr,
-    weight_ptr,
-    out_ptr,
-    eps,
-    HIDDEN: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+class MTPSharedHeadRMSNormKernel(
+    VllmTritonJitKernel["MTPSharedHeadRMSNormKernel.CompileKey"]
 ):
-    token_idx = tl.program_id(0).to(tl.int64)
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < HIDDEN
-    x = tl.load(x_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0)
-    _rmsnorm_row(
-        x,
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        hidden: int
+        block_size: int
+        eps: float
+
+    @staticmethod
+    @triton.jit
+    def kernel(
+        x_ptr,
         weight_ptr,
-        out_ptr + token_idx * HIDDEN,
-        block,
-        mask,
+        out_ptr,
         eps,
-        HIDDEN,
-    )
+        HIDDEN: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        token_idx = tl.program_id(0).to(tl.int64)
+        block = tl.arange(0, BLOCK_SIZE)
+        mask = block < HIDDEN
+        x = tl.load(x_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0)
+        _rmsnorm_row(
+            x,
+            weight_ptr,
+            out_ptr + token_idx * HIDDEN,
+            block,
+            mask,
+            eps,
+            HIDDEN,
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        hidden: int,
+        eps: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            hidden=hidden,
+            block_size=next_power_of_2(hidden),
+            eps=eps,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        if int(getattr(hf_config, "num_nextn_predict_layers", 0) or 0) <= 0:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            dtype=vllm_config.model_config.dtype,
+            hidden=int(hf_config.hidden_size),
+            eps=float(hf_config.rms_norm_eps),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            hidden_states=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hidden),
+            ),
+            weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.hidden,),
+            ),
+            _output=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.hidden),
+            ),
+            eps=compile_key.eps,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        *,
+        _output: Any | None = None,
+    ) -> LaunchSpec:
+        num_tokens, hidden = hidden_states.shape
+        if _output is None:
+            assert hidden_states.ndim == 2
+            assert hidden_states.is_contiguous()
+            assert weight.is_contiguous()
+            _output = torch.empty_like(hidden_states)
+
+        grid = None if num_tokens == 0 else (num_tokens,)
+        return (
+            grid,
+            dict(
+                x_ptr=hidden_states,
+                out_ptr=_output,
+                HIDDEN=hidden,
+                BLOCK_SIZE=next_power_of_2(hidden),
+            ),
+            _output,
+        )
 
 
-def mtp_shared_head_rmsnorm(
-    hidden_states: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    """RMSNorm for MTP's SharedHead.norm, on (T, H) bf16 input.
-
-    Uses the same ``_rmsnorm_row`` body as ``fused_mtp_input_rmsnorm`` so the
-    MTP draft path runs one consistent RMSNorm implementation end to end.
-    """
-    assert hidden_states.ndim == 2
-    assert hidden_states.is_contiguous()
-    assert weight.is_contiguous()
-    num_tokens, hidden = hidden_states.shape
-    out = torch.empty_like(hidden_states)
-    if num_tokens == 0:
-        return out
-    block_size = triton.next_power_of_2(hidden)
-    _mtp_shared_head_rmsnorm_kernel[(num_tokens,)](
-        hidden_states,
-        weight,
-        out,
-        eps,
-        HIDDEN=hidden,
-        BLOCK_SIZE=block_size,
-    )
-    return out
-
-
-def fused_mtp_input_rmsnorm(
-    inputs_embeds: torch.Tensor,
-    positions: torch.Tensor,
-    previous_hidden_states: torch.Tensor,
-    enorm_weight: torch.Tensor,
-    hnorm_weight: torch.Tensor,
-    eps: float,
-    hc_mult: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (enorm_out, hnorm_out).
-
-    enorm_out has the same shape as inputs_embeds (2D, [T, H]).
-    hnorm_out has the same shape as previous_hidden_states (3D, [T, hc_mult, H]).
-    previous_hidden_states must already be reshaped to 3D.
-    """
-    assert inputs_embeds.ndim == 2
-    assert previous_hidden_states.ndim == 3
-    assert previous_hidden_states.shape[1] == hc_mult
-    assert inputs_embeds.shape[0] == previous_hidden_states.shape[0], (
-        "token dim mismatch"
-    )
-    assert (
-        inputs_embeds.shape[1]
-        == previous_hidden_states.shape[2]
-        == enorm_weight.shape[0]
-        == hnorm_weight.shape[0]
-    )
-    assert inputs_embeds.is_contiguous() and previous_hidden_states.is_contiguous()
-    assert enorm_weight.is_contiguous() and hnorm_weight.is_contiguous()
-
-    num_tokens, hidden = inputs_embeds.shape
-    enorm_out = torch.empty_like(inputs_embeds)
-    hnorm_out = torch.empty_like(previous_hidden_states)
-    if num_tokens == 0:
-        return enorm_out, hnorm_out
-
-    block_size = triton.next_power_of_2(hidden)
-    _fused_mtp_input_rmsnorm_kernel[(num_tokens, hc_mult + 1)](
-        inputs_embeds,
-        positions,
-        previous_hidden_states,
-        enorm_weight,
-        hnorm_weight,
-        enorm_out,
-        hnorm_out,
-        eps,
-        HIDDEN=hidden,
-        HC_MULT=hc_mult,
-        BLOCK_SIZE=block_size,
-    )
-    return enorm_out, hnorm_out
+_FUSED_MTP_INPUT_RMSNORM_KERNEL = FusedMTPInputRMSNormKernel()
+_MTP_SHARED_HEAD_RMSNORM_KERNEL = MTPSharedHeadRMSNormKernel()

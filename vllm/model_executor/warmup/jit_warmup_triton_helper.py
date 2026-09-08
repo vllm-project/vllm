@@ -15,7 +15,13 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 
 CompileKeyT = TypeVar("CompileKeyT")
-LaunchSpec = tuple[tuple[int, ...], dict[str, Any]]
+# ``(grid, launch_kwargs)`` or ``(grid, launch_kwargs, outputs)`` for
+# self-allocating kernels. ``grid=None`` skips the launch (e.g. empty batch)
+# but still returns the declared outputs.
+LaunchSpec = (
+    tuple[tuple[int, ...] | None, dict[str, Any]]
+    | tuple[tuple[int, ...] | None, dict[str, Any], Any]
+)
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -91,6 +97,7 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     kernel: ClassVar[Any]
     _warming = False
+    _warming_compile_key: CompileKeyT | None = None
 
     @abstractmethod
     def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
@@ -100,10 +107,12 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     def compile(self, compile_key: CompileKeyT) -> None:
         inputs = self.warmup_inputs(compile_key)
         self._warming = True
+        self._warming_compile_key = compile_key
         try:
             cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
+            self._warming_compile_key = None
 
     @cached_property
     def _kernel_arg_names(self) -> tuple[str, ...]:
@@ -119,11 +128,14 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     def launch(
         self,
-        grid: tuple[int, ...],
+        grid: tuple[int, ...] | None,
         inputs: Mapping[str, Any],
         /,
+        *,
+        kernel: Any = None,
         **kwargs: Any,
     ) -> Any:
+        kernel = kernel if kernel is not None else self.kernel
         runtime_launcher = kwargs.pop("_runtime_launcher", None)
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         for name, value in inputs.items():
@@ -131,22 +143,36 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             if target in self._kernel_arg_names and target not in kwargs:
                 kwargs[target] = value
         if self._warming:
-            warmup = getattr(self.kernel, "warmup", None)
+            if (
+                self._warming_compile_key is not None
+                and "launch_pdl" in kwargs
+                and hasattr(self._warming_compile_key, "launch_pdl")
+            ):
+                kwargs["launch_pdl"] = self._warming_compile_key.launch_pdl
+            warmup = getattr(kernel, "warmup", None)
             assert warmup is not None
             return warmup(grid=(1,), **kwargs)
+        if grid is None:
+            return None
         if runtime_launcher is not None:
             regular_args = [
                 kwargs.pop(name)
                 for name in self._kernel_arg_names[:runtime_launcher_arg_count]
             ]
-            return runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
-        return self.kernel[grid](**kwargs)
+            return runtime_launcher(kernel, grid, *regular_args, **kwargs)
+        return kernel[grid](**kwargs)
 
 
 def kernel_launcher(
     call_fn: Callable[..., LaunchSpec],
-) -> Callable[..., None]:
-    """Launch a Triton kernel from a declarative ``__call__`` specification."""
+) -> Callable[..., Any]:
+    """Launch a Triton kernel from a declarative ``__call__`` specification.
+
+    ``call_fn`` returns either ``(grid, launch_kwargs)`` or, when it allocates
+    its own outputs, ``(grid, launch_kwargs, outputs)``. The declared outputs are
+    returned to the caller. A ``grid`` of ``None`` skips the launch (e.g. an
+    empty-token batch) while still returning the outputs.
+    """
     signature = inspect.signature(call_fn)
 
     @wraps(call_fn)
@@ -154,14 +180,20 @@ def kernel_launcher(
         self: VllmTritonJitKernel[Any],
         *args: Any,
         **kwargs: Any,
-    ) -> None:
-        grid, launch_kwargs = call_fn(self, *args, **kwargs)
+    ) -> Any:
+        spec = call_fn(self, *args, **kwargs)
+        if len(spec) == 3:
+            grid, launch_kwargs, outputs = spec
+        else:
+            grid, launch_kwargs = spec
+            outputs = None
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
         inputs = {
             name: value for name, value in bound.arguments.items() if name != "self"
         }
         self.launch(grid, inputs, **launch_kwargs)
+        return outputs
 
     return wrapper
 
