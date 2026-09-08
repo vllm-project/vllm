@@ -1448,3 +1448,55 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("abort_stage", ["queued", "prefill", "decode"])
+def test_abort_requests_updates_finished_stats(abort_stage: str):
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+
+    request_stats = output_processor.request_states[request.request_id].stats
+    assert request_stats is not None
+    request_stats.queued_ts = 1.0
+    if abort_stage != "queued":
+        request_stats.scheduled_ts = 2.0
+    if abort_stage == "decode":
+        request_stats.first_token_ts = 3.0
+        request_stats.last_token_ts = 5.0
+        request_stats.num_generation_tokens = 3
+
+    iteration_stats = IterationStats()
+    output_processor.abort_requests(
+        [request.request_id], internal=True, iteration_stats=iteration_stats
+    )
+
+    assert not output_processor.has_unfinished_requests()
+    assert len(iteration_stats.finished_requests) == 1
+    finished = iteration_stats.finished_requests[0]
+    assert finished.finish_reason == FinishReason.ABORT
+    assert finished.request_id == request.external_req_id
+    assert finished.num_prompt_tokens == len(request.prompt_token_ids or [])
+    assert finished.queued_time == (None if abort_stage == "queued" else 1.0)
+
+    if abort_stage == "decode":
+        assert finished.prefill_time == 1.0
+        assert finished.decode_time == 2.0
+        assert finished.inference_time == 3.0
+        assert finished.mean_time_per_output_token == 1.0
+    else:
+        assert finished.prefill_time is None
+        assert finished.decode_time is None
+        assert finished.inference_time is None
+        assert finished.mean_time_per_output_token is None
