@@ -8,9 +8,10 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, Llama4PythonicToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    PythonicToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser,
+    ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -37,10 +38,12 @@ pub mod names {
     pub const KIMI_K3: &str = "kimi_k3";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
+    pub const LLAMA4_PYTHONIC: &str = "llama4_pythonic";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
+    pub const PYTHONIC: &str = "pythonic";
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
@@ -84,10 +87,12 @@ impl ToolParserFactory {
             .register_unified_dummy(names::KIMI_K3)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
+            .register_parser::<Llama4PythonicToolParser>(names::LLAMA4_PYTHONIC)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
+            .register_parser::<PythonicToolParser>(names::PYTHONIC)
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
