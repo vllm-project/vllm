@@ -35,7 +35,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsQuant
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
@@ -326,14 +326,9 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-class NemotronHMTP(nn.Module, SupportsPP):
+class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
     """NemotronH MTP model."""
 
-    # Quant configs name modules in checkpoint space ("language_model.mtp.layers.0*"),
-    # but this draft is built under "mtp" (maybe_prefix below). SupportsQuant only
-    # re-roots exclude_modules when the model defines a mapper, so without one the
-    # exclusions never match and the MTP experts are wrongly quantized. Mirrors the
-    # prefix handling load_weights() already does by hand.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"language_model.": ""},
         orig_to_new_substr={"embeddings": "embed_tokens"},
@@ -356,14 +351,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
         config = draft_model_config.hf_config.get_text_config()
         self.vllm_config = vllm_config
         self.config = config
-        self.quant_config = get_draft_quant_config(vllm_config)
-        if self.quant_config is not None:
-            self.quant_config.apply_vllm_mapper(
-                self.hf_to_vllm_mapper.get_rename_mapper()
-            )
-            self.quant_config.packed_modules_mapping.update(
-                self.packed_modules_mapping
-            )
         # Needed for load_weights mapping
         self.mtp_start_layer_idx = config.num_hidden_layers
 
@@ -395,6 +382,11 @@ class NemotronHMTP(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+    @staticmethod
+    def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
+        vllm_config = kwargs.get("vllm_config")
+        return get_draft_quant_config(vllm_config)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
