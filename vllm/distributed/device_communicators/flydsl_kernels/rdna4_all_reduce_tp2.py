@@ -3,8 +3,8 @@
 
 """FlyDSL kernels dedicated to two-rank RDNA4 all-reduce.
 
-This family contains both the small-message mapped-memory kernels and the
-direct peer one-shot kernel. The launcher names identify the transport.
+This family contains the small-message mapped-memory kernels and the
+graph-only direct-peer kernel. The launcher names identify the transport.
 """
 
 from __future__ import annotations
@@ -83,23 +83,18 @@ def _load_pointer(array_addr, index):
 
 
 @cache
-def make_p2p_tp2_one_shot_launcher(
-    *, blocks: int, threads: int, chunk_packs: int, direct_input: bool = False
-):
+def make_p2p_tp2_one_shot_launcher(*, blocks: int, threads: int):
     if not 0 < blocks <= 80:
         raise ValueError(f"one-shot blocks must be in [1, 80], got {blocks}")
     if threads not in (256, 512):
         raise ValueError(f"one-shot threads must be 256 or 512, got {threads}")
-    if chunk_packs < threads or chunk_packs % threads:
-        raise ValueError("chunk_packs must be a positive multiple of threads")
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
     def tp2_allreduce_bf16_p2p_one_shot(
         rank: Int32,
         self_signal: Int64,
         signal_ptrs_addr: Int64,
-        staging0_ptrs_addr: Int64,
-        staging1_ptrs_addr: Int64,
+        input_ptrs_addr: Int64,
         input_addr: Int64,
         output_addr: Int64,
         numel: Int32,
@@ -111,13 +106,7 @@ def make_p2p_tp2_one_shot_launcher(
             self_signal + fx.Int64(_SG_FLAG_OFFSET) + fx.Int64(bid) * fx.Int64(4)
         )
         ticket = fx.Int32(_load_i32_acquire(flag_addr)) + fx.Int32(1)
-        use_staging1 = (ticket & fx.Int32(1)) == fx.Int32(0)
-        local_staging0 = _load_pointer(staging0_ptrs_addr, 0)
-        local_staging1 = _load_pointer(staging1_ptrs_addr, 0)
-        peer_staging0 = _load_pointer(staging0_ptrs_addr, 1)
-        peer_staging1 = _load_pointer(staging1_ptrs_addr, 1)
-        local_staging = use_staging1.select(local_staging1, local_staging0)
-        peer_staging = use_staging1.select(peer_staging1, peer_staging0)
+        peer_input = _load_pointer(input_ptrs_addr, 1)
         pack_count = numel // fx.Int32(8)
         block_packs = (pack_count + fx.Int32(blocks) - fx.Int32(1)) // fx.Int32(blocks)
         block_begin = bid * block_packs
@@ -125,22 +114,6 @@ def make_p2p_tp2_one_shot_launcher(
         block_end = (candidate_block_end < pack_count).select(
             candidate_block_end, pack_count
         )
-        if const_expr(direct_input):
-            rounds = fx.Int32(1)
-        else:
-            rounds = (
-                block_end - block_begin + fx.Int32(chunk_packs) - fx.Int32(1)
-            ) // fx.Int32(chunk_packs)
-
-        first_chunk_end = block_begin + fx.Int32(chunk_packs)
-        first_chunk_end = (first_chunk_end < block_end).select(
-            first_chunk_end, block_end
-        )
-        if const_expr(not direct_input):
-            for pack in range(block_begin + tid, first_chunk_end, fx.Int32(threads)):
-                _store_pack(local_staging, pack, _load_pack(input_addr, pack))
-
-        gpu.barrier()
         peer_signal = _load_pointer(signal_ptrs_addr, peer_rank)
         block_slot = bid * fx.Int32(8)
         peer_ready_addr = (
@@ -154,76 +127,45 @@ def make_p2p_tp2_one_shot_launcher(
             + fx.Int64(block_slot + peer_rank) * fx.Int64(4)
         )
         ticket_epoch = ticket & fx.Int32(0x7FFFF)
-
-        for round_index in range(fx.Int32(0), rounds, fx.Int32(1)):
-            if const_expr(direct_input):
-                chunk_begin = block_begin
-                chunk_end = block_end
-            else:
-                chunk_begin = block_begin + round_index * fx.Int32(chunk_packs)
-                candidate_chunk_end = chunk_begin + fx.Int32(chunk_packs)
-                chunk_end = (candidate_chunk_end < block_end).select(
-                    candidate_chunk_end, block_end
-                )
-            progress = (ticket_epoch << fx.Int32(12)) | (round_index + fx.Int32(1))
-
-            if tid == fx.Int32(0):
-                _store_i32_release(peer_ready_addr, progress)
+        progress = (ticket_epoch << fx.Int32(12)) | fx.Int32(1)
+        if tid == fx.Int32(0):
+            _store_i32_release(peer_ready_addr, progress)
+            observed = fx.Int32(_load_i32_acquire(local_ready_addr))
+            observed_epoch = observed >> fx.Int32(12)
+            while observed_epoch != ticket_epoch:
+                _sleep_one()
                 observed = fx.Int32(_load_i32_acquire(local_ready_addr))
                 observed_epoch = observed >> fx.Int32(12)
-                observed_chunk = observed & fx.Int32(0xFFF)
-                while (observed_epoch != ticket_epoch) | (
-                    observed_chunk < round_index + fx.Int32(1)
-                ):
-                    _sleep_one()
-                    observed = fx.Int32(_load_i32_acquire(local_ready_addr))
-                    observed_epoch = observed >> fx.Int32(12)
-                    observed_chunk = observed & fx.Int32(0xFFF)
-            gpu.barrier()
+        gpu.barrier()
 
-            if const_expr(not direct_input):
-                next_begin = chunk_end
-                next_candidate_end = next_begin + fx.Int32(chunk_packs)
-                next_end = (next_candidate_end < block_end).select(
-                    next_candidate_end, block_end
-                )
-            for pack in range(chunk_begin + tid, chunk_end, fx.Int32(threads)):
-                _store_pack(
-                    output_addr,
-                    pack,
-                    _add_bf16_pack(
-                        _load_pack(input_addr, pack),
-                        _load_pack(peer_staging, pack),
-                    ),
-                )
-                if const_expr(not direct_input):
-                    next_pack = next_begin + (pack - chunk_begin)
-                    if next_pack < next_end:
-                        _store_pack(
-                            local_staging,
-                            next_pack,
-                            _load_pack(input_addr, next_pack),
-                        )
-            gpu.barrier()
+        for pack in range(block_begin + tid, block_end, fx.Int32(threads)):
+            _store_pack(
+                output_addr,
+                pack,
+                _add_bf16_pack(
+                    _load_pack(input_addr, pack),
+                    _load_pack(peer_input, pack),
+                ),
+            )
+        gpu.barrier()
 
-        if const_expr(direct_input):
-            peer_done_addr = (
-                peer_signal
-                + fx.Int64(_SG_END_OFFSET)
-                + fx.Int64(block_slot + rank) * fx.Int64(4)
-            )
-            local_done_addr = (
-                self_signal
-                + fx.Int64(_SG_END_OFFSET)
-                + fx.Int64(block_slot + peer_rank) * fx.Int64(4)
-            )
-            if tid == fx.Int32(0):
-                _store_i32_release(peer_done_addr, ticket_epoch)
+        peer_done_addr = (
+            peer_signal
+            + fx.Int64(_SG_END_OFFSET)
+            + fx.Int64(block_slot + rank) * fx.Int64(4)
+        )
+        local_done_addr = (
+            self_signal
+            + fx.Int64(_SG_END_OFFSET)
+            + fx.Int64(block_slot + peer_rank) * fx.Int64(4)
+        )
+        if tid == fx.Int32(0):
+            _store_i32_release(peer_done_addr, ticket_epoch)
+            observed_done = fx.Int32(_load_i32_acquire(local_done_addr))
+            while observed_done < ticket_epoch:
+                _sleep_one()
                 observed_done = fx.Int32(_load_i32_acquire(local_done_addr))
-                while observed_done < ticket_epoch:
-                    _sleep_one()
-                    observed_done = fx.Int32(_load_i32_acquire(local_done_addr))
-            gpu.barrier()
+        gpu.barrier()
 
         if tid == fx.Int32(0):
             _store_i32_release(flag_addr, ticket)
@@ -235,8 +177,7 @@ def make_p2p_tp2_one_shot_launcher(
         rank: Int32,
         self_signal: Int64,
         signal_ptrs_addr: Int64,
-        staging0_ptrs_addr: Int64,
-        staging1_ptrs_addr: Int64,
+        input_ptrs_addr: Int64,
         input_addr: Int64,
         output_addr: Int64,
         numel: Int32,
@@ -246,8 +187,7 @@ def make_p2p_tp2_one_shot_launcher(
             rank,
             self_signal,
             signal_ptrs_addr,
-            staging0_ptrs_addr,
-            staging1_ptrs_addr,
+            input_ptrs_addr,
             input_addr,
             output_addr,
             numel,
@@ -258,10 +198,8 @@ def make_p2p_tp2_one_shot_launcher(
             stream=stream,
         )
 
-    direct_suffix = "_directinput" if direct_input else ""
     launch_p2p_one_shot.func.__name__ = (
-        f"launch_tp2_bf16_p2p_one_shot_b{blocks}_t{threads}_p{chunk_packs}"
-        f"{direct_suffix}"
+        f"launch_tp2_bf16_p2p_one_shot_b{blocks}_t{threads}_directinput"
     )
     return launch_p2p_one_shot
 

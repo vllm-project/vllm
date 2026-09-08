@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-mode="${1:?usage: run_rdna4_all_reduce_geak.sh correctness|benchmark|full-benchmark|profile}"
+mode="${1:?usage: benchmark_rdna4_all_reduce.sh correctness|benchmark|full-benchmark|profile}"
 lock_dir=/tmp/team_gpu_locks
 mkdir -p "$lock_dir"
 
@@ -27,13 +27,13 @@ tp4_sizes="8KiB,32KiB,64KiB,128KiB,192KiB,192.015625KiB,256KiB,384KiB,512KiB,768
 
 case "$mode" in
   correctness)
-    common=(--providers pynccl,routed --executions eager,graph --iterations 1 --warmup 1 --samples 1)
+    common=(--providers "pynccl,routed" --executions "eager,graph" --iterations 1 --warmup 1 --samples 1)
     ;;
   benchmark)
-    common=(--providers pynccl,routed --executions eager,graph --warmup 10 --samples 3)
+    common=(--providers "pynccl,routed" --executions "eager,graph" --warmup 10 --samples 3)
     ;;
   full-benchmark)
-    common=(--providers pynccl,routed --executions eager,graph --warmup 20 --samples 7)
+    common=(--providers "pynccl,routed" --executions "eager,graph" --warmup 20 --samples 7)
     ;;
   profile)
     # One streaming case keeps profiler traces compact while exposing the P2P

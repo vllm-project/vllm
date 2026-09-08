@@ -250,7 +250,7 @@ def test_flydsl_probe_fails_closed(monkeypatch, error):
 
 def test_public_router_has_no_eager_flydsl_imports():
     tree = ast.parse(Path(rdna4_module.__file__).read_text())
-    eager_flydsl_imports = []
+    eager_flydsl_imports: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.Import):
             eager_flydsl_imports.extend(

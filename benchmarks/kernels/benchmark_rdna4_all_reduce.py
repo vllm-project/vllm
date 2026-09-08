@@ -201,7 +201,7 @@ def _make_runner(
     if execution == "eager":
 
         def run_eager() -> None:
-            if selected in {"rdna4", "rdna4_raw"}:
+            if selected == "rdna4":
                 result = rdna4.custom_all_reduce(inp, out=out)
             elif selected == "aiter":
                 result = aiter_ar.all_reduce(inp, out=out, registered_input=False)
@@ -213,7 +213,7 @@ def _make_runner(
         return run_eager, selected
 
     graph = torch.cuda.CUDAGraph()
-    if selected in {"rdna4", "rdna4_raw"}:
+    if selected == "rdna4":
         with rdna4.capture(), torch.cuda.graph(graph):
             result = rdna4.custom_all_reduce(inp, out=out)
             if result is None:
@@ -240,7 +240,7 @@ def _measure(
 ) -> list[float]:
     for _ in range(warmup):
         run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     timings = []
     for _ in range(samples):
         start = torch.cuda.Event(enable_timing=True)
@@ -256,7 +256,7 @@ def _measure(
 
 def _correctness(run: Callable[[], None], out: torch.Tensor, expected: float) -> None:
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(
         out,
         torch.full_like(out, expected),
@@ -267,7 +267,7 @@ def _correctness(run: Callable[[], None], out: torch.Tensor, expected: float) ->
 
 def _worker(rank: int, args: argparse.Namespace, port: int) -> None:
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(rank)
     dist.init_process_group(
         backend="gloo",
         init_method=f"tcp://127.0.0.1:{port}",
@@ -433,7 +433,7 @@ def _worker(rank: int, args: argparse.Namespace, port: int) -> None:
                         f"{result.size_bytes}B"
                     )
     finally:
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize()
         dist.barrier()
         rdna4.close()
         pynccl.destroy()
@@ -466,7 +466,6 @@ def parse_args() -> argparse.Namespace:
         "aiter",
         "pynccl",
         "rdna4",
-        "rdna4_raw",
         "routed",
     }
     invalid_executions = set(args.executions) - {"eager", "graph"}
@@ -475,10 +474,10 @@ def parse_args() -> argparse.Namespace:
             f"invalid providers={sorted(invalid_providers)} "
             f"or executions={sorted(invalid_executions)}"
         )
-    if args.world_size > torch.cuda.device_count():
+    if args.world_size > torch.accelerator.device_count():
         parser.error(
             f"world size {args.world_size} requires more than "
-            f"{torch.cuda.device_count()} visible GPUs"
+            f"{torch.accelerator.device_count()} visible GPUs"
         )
     args.sizes = (
         [_parse_size(value) for value in _csv(args.sizes)]

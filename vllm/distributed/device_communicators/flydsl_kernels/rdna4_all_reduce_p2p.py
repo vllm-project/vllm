@@ -187,10 +187,9 @@ def make_p2p_tp4_push_rsag_launcher(
     *,
     blocks: int,
     threads: int = 512,
-    direct_output: bool = False,
     copy_load_nontemporal: bool = False,
 ):
-    """Build the shape-dynamic TP4 BF16 push-RSAG launcher."""
+    """Build the graph-only, direct-output TP4 BF16 push-RSAG launcher."""
     world_size = 4
     if not 0 < blocks <= MAX_BLOCKS:
         raise ValueError(f"blocks must be in [1, {MAX_BLOCKS}], got {blocks}")
@@ -208,7 +207,6 @@ def make_p2p_tp4_push_rsag_launcher(
         receive_ptrs_address: Int64,
         tmp_ptrs_address: Int64,
         input_address: Int64,
-        output_address: Int64,
         numel: Int32,
     ):
         thread = fx.thread_idx.x
@@ -285,26 +283,12 @@ def make_p2p_tp4_push_rsag_launcher(
                         )
                         accumulator = accumulator + value
                     reduced = accumulator.to(fx.BFloat16).bitcast(fx.Int32)
-                    if direct_output:
-                        _store_pack(
-                            receive_ptrs[peer],
-                            local_partition_start + relative_pack,
-                            reduced,
-                            nontemporal=peer != 0,
-                        )
-                    elif peer == 0:
-                        _store_pack(
-                            output_address,
-                            local_partition_start + relative_pack,
-                            reduced,
-                        )
-                    else:
-                        _store_pack(
-                            receive_ptrs[peer],
-                            local_partition_start + relative_pack,
-                            reduced,
-                            nontemporal=True,
-                        )
+                    _store_pack(
+                        receive_ptrs[peer],
+                        local_partition_start + relative_pack,
+                        reduced,
+                        nontemporal=peer != 0,
+                    )
 
         gpu.barrier()
         _sync(
@@ -317,17 +301,6 @@ def make_p2p_tp4_push_rsag_launcher(
             table_offset=_SG_END_OFFSET,
         )
 
-        if not direct_output:
-            # Peer partitions now reside in the local receive allocation.
-            local_receive = receive_ptrs[0]
-            for owner_offset in range_constexpr(1, world_size):
-                if peer_group == fx.Int32(owner_offset):
-                    owner = (rank + fx.Int32(owner_offset)) & fx.Int32(world_size - 1)
-                    owner_start = owner * part_packs
-                    for relative_pack in range(relative_start, part_packs, stride):
-                        value = _load_pack(local_receive, owner_start + relative_pack)
-                        _store_pack(output_address, owner_start + relative_pack, value)
-
     flat_wg_size_attr = f"{threads},{threads}"
 
     @flyc.jit
@@ -338,7 +311,6 @@ def make_p2p_tp4_push_rsag_launcher(
         receive_ptrs_address: Int64,
         tmp_ptrs_address: Int64,
         input_address: Int64,
-        output_address: Int64,
         numel: Int32,
         stream: Stream = Stream(None),  # noqa: B008
     ):
@@ -349,7 +321,6 @@ def make_p2p_tp4_push_rsag_launcher(
             receive_ptrs_address,
             tmp_ptrs_address,
             input_address,
-            output_address,
             numel,
             value_attrs={"rocdl.flat_work_group_size": flat_wg_size_attr},
         ).launch(
@@ -358,10 +329,9 @@ def make_p2p_tp4_push_rsag_launcher(
             stream=stream,
         )
 
-    suffix = "_direct" if direct_output else ""
     load_suffix = "_loadnt" if copy_load_nontemporal else ""
     launch_p2p_tp4_push_rsag.func.__name__ = (
-        f"launch_p2p_tp4_push_rsag_bf16_b{blocks}_t{threads}{load_suffix}{suffix}"
+        f"launch_p2p_tp4_push_rsag_bf16_b{blocks}_t{threads}{load_suffix}_direct"
     )
     return launch_p2p_tp4_push_rsag
 
@@ -371,13 +341,10 @@ def make_p2p_tp4_pull_launcher(
     *,
     blocks: int,
     threads: int = 512,
-    copy_load_nontemporal: bool = False,
     chunk_bytes: int = 32 * 1024 * 1024,
-    two_shot: bool = False,
     tail_safe: bool = False,
-    direct_input: bool = False,
 ):
-    """Build a chunk-ready TP4 BF16 staged peer-pull launcher."""
+    """Build the graph-only TP4 BF16 two-shot peer-pull launcher."""
     world_size = 4
     if not 0 < blocks <= MAX_BLOCKS:
         raise ValueError(f"blocks must be in [1, {MAX_BLOCKS}], got {blocks}")
@@ -386,7 +353,7 @@ def make_p2p_tp4_pull_launcher(
     chunk_packs = chunk_bytes // _PACK_BYTES
     if chunk_bytes % _PACK_BYTES or chunk_packs % (blocks * threads):
         raise ValueError("chunk_bytes must be a multiple of blocks * threads * 16")
-    if two_shot and chunk_packs % world_size:
+    if chunk_packs % world_size:
         raise ValueError("two-shot chunks must split evenly across ranks")
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
@@ -396,7 +363,6 @@ def make_p2p_tp4_pull_launcher(
         signal_ptrs_address: Int64,
         output_ptrs_address: Int64,
         input_ptrs_address: Int64,
-        input_address: Int64,
         output_address: Int64,
         numel: Int32,
     ):
@@ -408,25 +374,11 @@ def make_p2p_tp4_pull_launcher(
         pack_count = numel // fx.Int32(_PACK_ELEMENTS)
         relative_pack_start = block * fx.Int32(threads) + thread
         stride = fx.Int32(blocks * threads)
-        local_staging = _load_pointer(input_ptrs_address, 0)
         chunk_count = (pack_count + fx.Int32(chunk_packs - 1)) // fx.Int32(chunk_packs)
         flag_address = (
             self_signal + fx.Int64(_SG_FLAG_OFFSET) + fx.Int64(block) * fx.Int64(4)
         )
         base_ticket = fx.Int32(_load_i32_acquire(flag_address))
-
-        if const_expr(not direct_input):
-            first_chunk_end = (pack_count < fx.Int32(chunk_packs)).select(
-                pack_count, fx.Int32(chunk_packs)
-            )
-            for pack in range(relative_pack_start, first_chunk_end, stride):
-                value = _load_pack(
-                    input_address,
-                    pack,
-                    nontemporal=copy_load_nontemporal,
-                )
-                _store_pack(local_staging, pack, value)
-            gpu.barrier()
 
         # Captured direct inputs are IPC-registered after graph capture.
         # Publishing entry proves that peer streams completed their producers.
@@ -435,42 +387,11 @@ def make_p2p_tp4_pull_launcher(
             rank=rank,
             block=block,
             thread=thread,
-            ticket=(base_ticket + chunk_count)
-            if const_expr(direct_input)
-            else (base_ticket + fx.Int32(1)),
+            ticket=base_ticket + chunk_count,
             table_offset=_SG_START_OFFSET,
         )
 
         for chunk in range(chunk_count):
-            if const_expr(not direct_input):
-                next_chunk = chunk + fx.Int32(1)
-                if next_chunk < chunk_count:
-                    next_chunk_start = next_chunk * fx.Int32(chunk_packs)
-                    next_chunk_limit = next_chunk_start + fx.Int32(chunk_packs)
-                    next_chunk_end = (pack_count < next_chunk_limit).select(
-                        pack_count, next_chunk_limit
-                    )
-                    for pack in range(
-                        next_chunk_start + relative_pack_start,
-                        next_chunk_end,
-                        stride,
-                    ):
-                        value = _load_pack(
-                            input_address,
-                            pack,
-                            nontemporal=copy_load_nontemporal,
-                        )
-                        _store_pack(local_staging, pack, value)
-                    gpu.barrier()
-                    _publish_progress(
-                        signal_ptrs=signal_ptrs,
-                        rank=rank,
-                        block=block,
-                        thread=thread,
-                        ticket=base_ticket + next_chunk + fx.Int32(1),
-                        table_offset=_SG_START_OFFSET,
-                    )
-
             _wait_progress(
                 self_signal=self_signal,
                 block=block,
@@ -500,141 +421,107 @@ def make_p2p_tp4_pull_launcher(
             chunk_start = chunk * fx.Int32(chunk_packs)
             chunk_limit = chunk_start + fx.Int32(chunk_packs)
             chunk_end = (pack_count < chunk_limit).select(pack_count, chunk_limit)
-            if two_shot:
-                if const_expr(tail_safe):
-                    wave_packs = fx.Int32(32)
-                    part_packs = (
-                        (chunk_end - chunk_start)
-                        // fx.Int32(world_size * 32)
-                        * wave_packs
-                    )
-                    remainder_packs = (
-                        chunk_end - chunk_start - part_packs * fx.Int32(world_size)
-                    )
-                else:
-                    part_packs = (chunk_end - chunk_start) // fx.Int32(world_size)
-                owner_start = chunk_start + rank * part_packs
-                if const_expr(tail_safe):
-                    owner_packs = (rank == fx.Int32(world_size - 1)).select(
-                        part_packs + remainder_packs,
-                        part_packs,
-                    )
-                else:
-                    owner_packs = part_packs
-                for relative_pack in range(
-                    relative_pack_start,
-                    owner_packs,
-                    stride,
-                ):
-                    pack = owner_start + relative_pack
-                    value0 = _load_pack(rank0, pack)
-                    value1 = _load_pack(rank1, pack)
-                    value2 = _load_pack(rank2, pack)
-                    value3 = _load_pack(rank3, pack)
-                    accumulator = value0.bitcast(fx.BFloat16).to(fx.Float32)
-                    accumulator = accumulator + value1.bitcast(fx.BFloat16).to(
-                        fx.Float32
-                    )
-                    accumulator = accumulator + value2.bitcast(fx.BFloat16).to(
-                        fx.Float32
-                    )
-                    accumulator = accumulator + value3.bitcast(fx.BFloat16).to(
-                        fx.Float32
-                    )
-                    _store_pack(
-                        output_address,
-                        pack,
-                        accumulator.to(fx.BFloat16).bitcast(fx.Int32),
-                    )
-
-                gpu.barrier()
-                _publish_progress(
-                    signal_ptrs=signal_ptrs,
-                    rank=rank,
-                    block=block,
-                    thread=thread,
-                    ticket=base_ticket + chunk + fx.Int32(1),
-                    table_offset=_SG_END_OFFSET,
+            if const_expr(tail_safe):
+                wave_packs = fx.Int32(32)
+                part_packs = (
+                    (chunk_end - chunk_start) // fx.Int32(world_size * 32) * wave_packs
                 )
-                _wait_progress(
-                    self_signal=self_signal,
-                    block=block,
-                    thread=thread,
-                    ticket=base_ticket + chunk + fx.Int32(1),
-                    table_offset=_SG_END_OFFSET,
+                remainder_packs = (
+                    chunk_end - chunk_start - part_packs * fx.Int32(world_size)
                 )
-
-                peer1_output = _load_pointer(output_ptrs_address, 1)
-                peer2_output = _load_pointer(output_ptrs_address, 2)
-                peer3_output = _load_pointer(output_ptrs_address, 3)
-                owner1_start = (
-                    chunk_start
-                    + ((rank + fx.Int32(1)) & fx.Int32(world_size - 1)) * part_packs
-                )
-                owner2_start = (
-                    chunk_start
-                    + ((rank + fx.Int32(2)) & fx.Int32(world_size - 1)) * part_packs
-                )
-                owner3_start = (
-                    chunk_start
-                    + ((rank + fx.Int32(3)) & fx.Int32(world_size - 1)) * part_packs
-                )
-                for relative_pack in range(
-                    relative_pack_start,
-                    part_packs,
-                    stride,
-                ):
-                    value1 = _load_pack(peer1_output, owner1_start + relative_pack)
-                    value2 = _load_pack(peer2_output, owner2_start + relative_pack)
-                    value3 = _load_pack(peer3_output, owner3_start + relative_pack)
-                    _store_pack(output_address, owner1_start + relative_pack, value1)
-                    _store_pack(output_address, owner2_start + relative_pack, value2)
-                    _store_pack(output_address, owner3_start + relative_pack, value3)
-
-                if const_expr(tail_safe):
-                    remainder_start = chunk_start + part_packs * fx.Int32(world_size)
-                    rank3_output = _load_pointer(
-                        output_ptrs_address,
-                        (fx.Int32(world_size - 1) - rank) & fx.Int32(world_size - 1),
-                    )
-                    for relative_pack in range(
-                        relative_pack_start,
-                        remainder_packs,
-                        stride,
-                    ):
-                        value = _load_pack(
-                            rank3_output,
-                            remainder_start + relative_pack,
-                        )
-                        _store_pack(
-                            output_address,
-                            remainder_start + relative_pack,
-                            value,
-                        )
             else:
-                for pack in range(
-                    chunk_start + relative_pack_start,
-                    chunk_end,
+                part_packs = (chunk_end - chunk_start) // fx.Int32(world_size)
+            owner_start = chunk_start + rank * part_packs
+            if const_expr(tail_safe):
+                owner_packs = (rank == fx.Int32(world_size - 1)).select(
+                    part_packs + remainder_packs,
+                    part_packs,
+                )
+            else:
+                owner_packs = part_packs
+            for relative_pack in range(
+                relative_pack_start,
+                owner_packs,
+                stride,
+            ):
+                pack = owner_start + relative_pack
+                value0 = _load_pack(rank0, pack)
+                value1 = _load_pack(rank1, pack)
+                value2 = _load_pack(rank2, pack)
+                value3 = _load_pack(rank3, pack)
+                accumulator = value0.bitcast(fx.BFloat16).to(fx.Float32)
+                accumulator = accumulator + value1.bitcast(fx.BFloat16).to(fx.Float32)
+                accumulator = accumulator + value2.bitcast(fx.BFloat16).to(fx.Float32)
+                accumulator = accumulator + value3.bitcast(fx.BFloat16).to(fx.Float32)
+                _store_pack(
+                    output_address,
+                    pack,
+                    accumulator.to(fx.BFloat16).bitcast(fx.Int32),
+                )
+
+            gpu.barrier()
+            _publish_progress(
+                signal_ptrs=signal_ptrs,
+                rank=rank,
+                block=block,
+                thread=thread,
+                ticket=base_ticket + chunk + fx.Int32(1),
+                table_offset=_SG_END_OFFSET,
+            )
+            _wait_progress(
+                self_signal=self_signal,
+                block=block,
+                thread=thread,
+                ticket=base_ticket + chunk + fx.Int32(1),
+                table_offset=_SG_END_OFFSET,
+            )
+
+            peer1_output = _load_pointer(output_ptrs_address, 1)
+            peer2_output = _load_pointer(output_ptrs_address, 2)
+            peer3_output = _load_pointer(output_ptrs_address, 3)
+            owner1_start = (
+                chunk_start
+                + ((rank + fx.Int32(1)) & fx.Int32(world_size - 1)) * part_packs
+            )
+            owner2_start = (
+                chunk_start
+                + ((rank + fx.Int32(2)) & fx.Int32(world_size - 1)) * part_packs
+            )
+            owner3_start = (
+                chunk_start
+                + ((rank + fx.Int32(3)) & fx.Int32(world_size - 1)) * part_packs
+            )
+            for relative_pack in range(
+                relative_pack_start,
+                part_packs,
+                stride,
+            ):
+                value1 = _load_pack(peer1_output, owner1_start + relative_pack)
+                value2 = _load_pack(peer2_output, owner2_start + relative_pack)
+                value3 = _load_pack(peer3_output, owner3_start + relative_pack)
+                _store_pack(output_address, owner1_start + relative_pack, value1)
+                _store_pack(output_address, owner2_start + relative_pack, value2)
+                _store_pack(output_address, owner3_start + relative_pack, value3)
+
+            if const_expr(tail_safe):
+                remainder_start = chunk_start + part_packs * fx.Int32(world_size)
+                rank3_output = _load_pointer(
+                    output_ptrs_address,
+                    (fx.Int32(world_size - 1) - rank) & fx.Int32(world_size - 1),
+                )
+                for relative_pack in range(
+                    relative_pack_start,
+                    remainder_packs,
                     stride,
                 ):
-                    value0 = _load_pack(rank0, pack)
-                    value1 = _load_pack(rank1, pack)
-                    value2 = _load_pack(rank2, pack)
-                    value3 = _load_pack(rank3, pack)
-                    accumulator = value0.bitcast(fx.BFloat16).to(fx.Float32)
-                    accumulator = accumulator + value1.bitcast(fx.BFloat16).to(
-                        fx.Float32
-                    )
-                    accumulator = accumulator + value2.bitcast(fx.BFloat16).to(
-                        fx.Float32
-                    )
-                    accumulator = accumulator + value3.bitcast(fx.BFloat16).to(
-                        fx.Float32
+                    value = _load_pack(
+                        rank3_output,
+                        remainder_start + relative_pack,
                     )
                     _store_pack(
                         output_address,
-                        pack,
-                        accumulator.to(fx.BFloat16).bitcast(fx.Int32),
+                        remainder_start + relative_pack,
+                        value,
                     )
 
         gpu.barrier()
@@ -666,7 +553,6 @@ def make_p2p_tp4_pull_launcher(
         signal_ptrs_address: Int64,
         output_ptrs_address: Int64,
         input_ptrs_address: Int64,
-        input_address: Int64,
         output_address: Int64,
         numel: Int32,
         stream: Stream = Stream(None),  # noqa: B008
@@ -677,7 +563,6 @@ def make_p2p_tp4_pull_launcher(
             signal_ptrs_address,
             output_ptrs_address,
             input_ptrs_address,
-            input_address,
             output_address,
             numel,
             value_attrs={"rocdl.flat_work_group_size": flat_wg_size_attr},
@@ -687,13 +572,10 @@ def make_p2p_tp4_pull_launcher(
             stream=stream,
         )
 
-    load_suffix = "_loadnt" if copy_load_nontemporal else ""
-    algorithm_suffix = "_twoshot" if two_shot else ""
     tail_suffix = "_tail" if tail_safe else ""
-    direct_input_suffix = "_directinput" if direct_input else ""
     launch_p2p_tp4_pull.func.__name__ = (
         f"launch_p2p_tp4_pull_bf16_b{blocks}_t{threads}_c{chunk_bytes}"
-        f"{load_suffix}{algorithm_suffix}{tail_suffix}{direct_input_suffix}"
+        f"_twoshot{tail_suffix}_directinput"
     )
     return launch_p2p_tp4_pull
 
@@ -703,7 +585,6 @@ def make_p2p_hierarchical_tp8_launcher(
     *,
     blocks: int,
     threads: int = 512,
-    copy_load_nontemporal: bool = False,
     local_copy_threads: int = 0,
 ):
     """Build a topology-aware direct-output TP8 BF16 all-reduce launcher."""
@@ -767,7 +648,6 @@ def make_p2p_hierarchical_tp8_launcher(
                         value = _load_pack(
                             input_address,
                             owner_input_start + relative_pack,
-                            nontemporal=copy_load_nontemporal,
                         )
                         _store_pack(
                             owner_tmp,
@@ -911,13 +791,11 @@ def make_p2p_hierarchical_tp8_launcher(
             stream=stream,
         )
 
-    load_suffix = "_loadnt" if copy_load_nontemporal else ""
     local_copy_suffix = (
         f"_copythreads{local_copy_threads}" if local_copy_threads != threads else ""
     )
     launch_p2p_hierarchical_tp8.func.__name__ = (
-        f"launch_p2p_hierarchical_tp8_b{blocks}_t{threads}"
-        f"{load_suffix}{local_copy_suffix}"
+        f"launch_p2p_hierarchical_tp8_b{blocks}_t{threads}{local_copy_suffix}"
     )
     return launch_p2p_hierarchical_tp8
 

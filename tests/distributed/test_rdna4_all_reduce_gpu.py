@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 
 def _worker(rank, world_size, port, element_counts):
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(rank)
     dist.init_process_group(
         backend="gloo",
         init_method=f"tcp://127.0.0.1:{port}",
@@ -48,14 +48,14 @@ def _worker(rank, world_size, port, element_counts):
             inp = torch.full((numel,), rank + 1, dtype=torch.bfloat16, device=device)
             out = torch.empty_like(inp)
             graph = torch.cuda.CUDAGraph()
-            torch.cuda.synchronize(device)
+            torch.accelerator.synchronize()
             dist.barrier()
             with communicator.capture(), torch.cuda.graph(graph):
                 result = communicator.custom_all_reduce(inp, out=out)
                 assert result is out
             for _ in range(16):
                 graph.replay()
-            torch.cuda.synchronize(device)
+            torch.accelerator.synchronize()
             torch.testing.assert_close(
                 out,
                 torch.full_like(out, expected),
@@ -63,7 +63,7 @@ def _worker(rank, world_size, port, element_counts):
                 atol=0,
             )
     finally:
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize()
         dist.barrier()
         communicator.close()
         dist.destroy_process_group()
@@ -94,7 +94,8 @@ def _run(world_size, element_counts):
 
 @multi_gpu_test(num_gpus=2)
 def test_rdna4_all_reduce_tp2():
-    _run(2, (8, 32_768))
+    # Cover both mapped memory and the first direct-P2P graph size.
+    _run(2, (8, 32_768, 32_776))
 
 
 @multi_gpu_test(num_gpus=4)
