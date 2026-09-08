@@ -42,7 +42,7 @@ HC_EPS = 1e-6
 MAGNITUDE = 2.0
 DEVICE = "cuda"
 
-TOKENS = [1, 2, 7, 16, 65, 300, 1024]
+TOKENS = [1, 2, 7, 16, 127, 128, 129, 300, 1024]
 HIDDEN = [512, 4096, 6144]
 DTYPES = [torch.bfloat16, torch.float16]
 
@@ -198,7 +198,7 @@ def test_ihc_gate_math_sanity() -> None:
     torch.testing.assert_close(post, expected_post, atol=1e-6, rtol=1e-6)
 
 
-@pytest.mark.parametrize("tokens", [1, 5, 64])
+@pytest.mark.parametrize("tokens", [1, 5, 128])
 def test_ihc_opcheck(tokens: int) -> None:
     hidden = 512
     x = torch.randn(tokens, HC, hidden, dtype=torch.bfloat16, device=DEVICE)
@@ -228,15 +228,16 @@ def _run_all_ops(tokens: int, hidden: int) -> None:
     triton_ihc_post(y, x, post)
 
 
-def test_ihc_warmup_covers_compile_keys() -> None:
-    """One launch per op at startup compiles every Triton variant the model
-    will use: the token count is not part of the compile key (what
-    ``hy_v4_ihc_warmup`` relies on)."""
-    hidden = 512
+def test_ihc_warmup_token_sizes_cover_compile_keys() -> None:
+    """Running the ops at ``warmup_token_sizes`` compiles every Triton variant
+    reachable below ``max_tokens`` (what ``hy_v4_ihc_warmup`` relies on)."""
+    hidden, max_tokens = 512, 2048
     device_index = torch.accelerator.current_device_index()
     kernels = (
         triton_ihc._ihc_pre_stage1,
         triton_ihc._ihc_pre_stage2,
+        triton_ihc._ihc_stats_kernel,
+        triton_ihc._ihc_apply_kernel,
         triton_ihc._ihc_post_kernel,
     )
     if not all(hasattr(k, "device_caches") for k in kernels):
@@ -249,11 +250,14 @@ def test_ihc_warmup_covers_compile_keys() -> None:
             if device_index in k.device_caches
         )
 
-    _run_all_ops(1, hidden)
+    sizes = triton_ihc.warmup_token_sizes(hidden, HC, max_tokens, device_index)
+    assert len(sizes) < 64, sizes
+    for tokens in sizes:
+        _run_all_ops(tokens, hidden)
     torch.accelerator.synchronize()
     warmed = compiled_variants()
     assert warmed > 0
-    for tokens in (2, 3, 16, 17, 64, 300, 1024, 2048):
+    for tokens in [*range(1, max_tokens + 1, 13), 127, 128, 129, max_tokens]:
         _run_all_ops(tokens, hidden)
     torch.accelerator.synchronize()
     assert compiled_variants() == warmed

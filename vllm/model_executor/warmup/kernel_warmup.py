@@ -163,7 +163,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes,
     )
-    hy_v4_ihc_warmup(worker.get_model(), dtype=worker.model_config.dtype)
+    hy_v4_ihc_warmup(
+        worker.get_model(),
+        dtype=worker.model_config.dtype,
+        max_tokens=worker.scheduler_config.max_num_batched_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
+    )
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
