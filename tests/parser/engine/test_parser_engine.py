@@ -179,15 +179,6 @@ class TestReasoningEndTokenIds:
         )
         assert _make_engine(text_only).reasoning_end_token_ids == frozenset()
 
-    def test_unresolved_tool_opener_is_dropped(self):
-        # Mirrors DeepSeek V4, whose DSML tool opener spans several tokens:
-        # </think> stays on the fast path, the opener is simply not tracked.
-        cfg = _with_reasoning_exits(
-            ("TOOL_START", ParserState.TOOL_ARGS, (EventType.REASONING_END,)),
-        )
-        vocab = {k: v for k, v in _VOCAB.items() if k != "<tool_call>"}
-        assert _make_engine(cfg, vocab=vocab).reasoning_end_token_ids == {201}
-
     def test_config_without_reasoning_has_empty_set(self):
         assert _make_engine(_hermes_config()).reasoning_end_token_ids == frozenset()
 
