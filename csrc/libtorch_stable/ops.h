@@ -258,8 +258,9 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         int64_t head_dim, double eps,
                         torch::stable::Tensor& q_weight,
                         torch::stable::Tensor& k_weight,
-                        torch::stable::Tensor& cos_sin_cache, bool is_neox,
-                        torch::stable::Tensor& position_ids,
+                        std::optional<torch::stable::Tensor> cos_sin_cache,
+                        bool is_neox,
+                        std::optional<torch::stable::Tensor> position_ids,
                         int64_t forced_token_heads_per_warp);
 
 torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(

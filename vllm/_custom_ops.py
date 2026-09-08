@@ -338,11 +338,16 @@ def fused_qk_norm_rope(
     eps: float,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None,
     is_neox: bool,
-    position_ids: torch.Tensor,
+    position_ids: torch.Tensor | None,
     forced_token_heads_per_warp: int = -1,
 ) -> None:
+    """Fused per-head Q/K RMSNorm + RoPE, in-place on `qkv`.
+
+    Pass ``cos_sin_cache=None`` and ``position_ids=None`` for NoPE layers,
+    where only the QK norm is applied.
+    """
     torch.ops._C.fused_qk_norm_rope(
         qkv,
         num_heads_q,

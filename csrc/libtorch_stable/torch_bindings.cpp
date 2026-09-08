@@ -420,12 +420,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                 Tensor cos_sin_cache, bool is_neox, int "
       "rope_dim_offset=0, bool inverse=False) -> ()");
 
-  // Function for fused QK Norm and RoPE
+  // Function for fused QK Norm and RoPE. cos_sin_cache and position_ids are
+  // both None for NoPE layers, where only QK Norm is applied.
   ops.def(
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
       "int num_heads_k, int num_heads_v, int head_dim, float eps, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids, "
+      "Tensor q_weight, Tensor k_weight, Tensor? cos_sin_cache, "
+      "bool is_neox, Tensor? position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
   ops.def(

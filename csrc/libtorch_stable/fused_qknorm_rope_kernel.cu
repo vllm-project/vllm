@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cuda_runtime.h>
+#include <optional>
 #include <type_traits>
 
 #include "torch_utils.h"
@@ -99,8 +100,10 @@ using namespace vllm::cuda_async;
 // scalar_t_cache: data type of cos/sin cache
 // head_dim: the dimension of each head
 // interleave: interleave=!is_neox.
+// enable_rope: when false (NoPE layers) only QK Norm is applied and
+//     cos_sin_cache/position_ids may be null with rotary_dim == 0.
 template <typename scalar_t_in, typename scalar_t_cache, int head_dim,
-          bool interleave>
+          bool interleave, bool enable_rope>
 __global__ void fusedQKNormRopeKernel(
     void* qkv_void,                  // Combined QKV tensor
     int const num_heads_q,           // Number of query heads
@@ -231,64 +234,69 @@ __global__ void fusedQKNormRopeKernel(
       elements[i] *= rms_rcp * weight;
     }
 
-    // Apply RoPE to normalized elements
-    float elements2[numElemsPerThread];  // Additional buffer required for RoPE.
+    if constexpr (enable_rope) {
+      // Apply RoPE to normalized elements
+      // Additional buffer required for RoPE.
+      float elements2[numElemsPerThread];
 
-    int64_t pos_id = position_ids[tokenIdx];
+      int64_t pos_id = position_ids[tokenIdx];
 
-    // Calculate cache pointer for this position - similar to
-    // pos_encoding_kernels.cu
-    T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
-    int const embed_dim = rotary_dim / 2;
-    T_cache const* cos_ptr = cache_ptr;
-    T_cache const* sin_ptr = cache_ptr + embed_dim;
-    int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
-    if (laneId < rotary_lanes) {
-      if constexpr (interleave) {
-        // Perform interleaving. Use pre-computed cos/sin values.
+      // Calculate cache pointer for this position - similar to
+      // pos_encoding_kernels.cu
+      T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
+      int const embed_dim = rotary_dim / 2;
+      T_cache const* cos_ptr = cache_ptr;
+      T_cache const* sin_ptr = cache_ptr + embed_dim;
+      int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
+      if (laneId < rotary_lanes) {
+        if constexpr (interleave) {
+          // Perform interleaving. Use pre-computed cos/sin values.
 #pragma unroll
-        for (int i = 0; i < numElemsPerThread / 2; ++i) {
-          int const idx0 = 2 * i;
-          int const idx1 = 2 * i + 1;
-          // Global dimension index in the head
-          int const dim_idx = laneId * numElemsPerThread + idx0;
+          for (int i = 0; i < numElemsPerThread / 2; ++i) {
+            int const idx0 = 2 * i;
+            int const idx1 = 2 * i + 1;
+            // Global dimension index in the head
+            int const dim_idx = laneId * numElemsPerThread + idx0;
 
-          float const val0 = elements[idx0];
-          float const val1 = elements[idx1];
+            float const val0 = elements[idx0];
+            float const val1 = elements[idx1];
 
-          int const half_dim = dim_idx / 2;
-          float const cos_val =
-              CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
-          float const sin_val =
-              CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
+            int const half_dim = dim_idx / 2;
+            float const cos_val =
+                CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
+            float const sin_val =
+                CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
 
-          elements[idx0] = val0 * cos_val - val1 * sin_val;
-          elements[idx1] = val0 * sin_val + val1 * cos_val;
-        }
-      } else {
-        // Before data exchange with in warp, we need to sync.
-        __syncwarp();
-        int pairOffset = (rotary_dim / 2) / numElemsPerThread;
-        // Get the data from the other half of the warp. Use pre-computed
-        // cos/sin values.
-#pragma unroll
-        for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-
-          if (laneId < pairOffset) {
-            elements2[i] = -elements2[i];
+            elements[idx0] = val0 * cos_val - val1 * sin_val;
+            elements[idx1] = val0 * sin_val + val1 * cos_val;
           }
-          int dim_idx = laneId * numElemsPerThread + i;
+        } else {
+          // Before data exchange with in warp, we need to sync.
+          __syncwarp();
+          int pairOffset = (rotary_dim / 2) / numElemsPerThread;
+          // Get the data from the other half of the warp. Use pre-computed
+          // cos/sin values.
+#pragma unroll
+          for (int i = 0; i < numElemsPerThread; i++) {
+            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
 
-          dim_idx = (dim_idx * 2) % rotary_dim;
-          int half_dim = dim_idx / 2;
-          float cos_val = CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
-          float sin_val = CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
+            if (laneId < pairOffset) {
+              elements2[i] = -elements2[i];
+            }
+            int dim_idx = laneId * numElemsPerThread + i;
 
-          elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            dim_idx = (dim_idx * 2) % rotary_dim;
+            int half_dim = dim_idx / 2;
+            float cos_val =
+                CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
+            float sin_val =
+                CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
+
+            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+          }
+          // __shfl_xor_sync does not provide memfence. Need to sync again.
+          __syncwarp();
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
-        __syncwarp();
       }
     }
     // Store.
@@ -321,7 +329,7 @@ __global__ void fusedQKNormRopeKernel(
 // When HEADS_PER_WARP > 1 the warp reuses the loaded cos/sin across all heads,
 // hiding global-memory latency and improving occupancy for large batches.
 template <typename scalar_t_in, typename scalar_t_cache, int head_dim,
-          bool interleave, int HEADS_PER_WARP>
+          bool interleave, bool enable_rope, int HEADS_PER_WARP>
 __global__ void fusedQKNormRopeKernelNTokenHeads(
     void* qkv_void, int const num_heads_q, int const num_heads_k,
     int const num_heads_v, float const eps, void const* q_weight_void,
@@ -425,21 +433,26 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     cp_async_commit_group();  // commit group 0 (QKV)
 
     // === Group 1: async load cos/sin into smem (issued second). ===
-    int64_t const pos_id = position_ids[tokenIdx];
-    T_cache const* const cache_ptr = cos_sin_cache + pos_id * rotary_dim;
-    int const copy_bytes = rotary_dim * static_cast<int>(sizeof(T_cache));
-    int const num_copies = (copy_bytes + 15) / 16;
-    for (int copyId = laneId; copyId < num_copies; copyId += 32) {
-      char* smem_ptr =
-          reinterpret_cast<char*>(&smem[warpId * rotary_dim]) + copyId * 16;
-      const char* glob_ptr =
-          reinterpret_cast<const char*>(cache_ptr) + copyId * 16;
-      cp_async_shared_global_16_cg(smem_ptr, glob_ptr);
-    }
-    cp_async_commit_group();  // commit group 1 (cos/sin)
+    if constexpr (enable_rope) {
+      int64_t const pos_id = position_ids[tokenIdx];
+      T_cache const* const cache_ptr = cos_sin_cache + pos_id * rotary_dim;
+      int const copy_bytes = rotary_dim * static_cast<int>(sizeof(T_cache));
+      int const num_copies = (copy_bytes + 15) / 16;
+      for (int copyId = laneId; copyId < num_copies; copyId += 32) {
+        char* smem_ptr =
+            reinterpret_cast<char*>(&smem[warpId * rotary_dim]) + copyId * 16;
+        const char* glob_ptr =
+            reinterpret_cast<const char*>(cache_ptr) + copyId * 16;
+        cp_async_shared_global_16_cg(smem_ptr, glob_ptr);
+      }
+      cp_async_commit_group();  // commit group 1 (cos/sin)
 
-    // wait<1>: allow at most 1 pending group (group 1) → group 0 (QKV) is done.
-    cp_async_wait_group<1>();
+      // wait<1>: at most 1 pending group (group 1) → group 0 (QKV) is done.
+      cp_async_wait_group<1>();
+    } else {
+      // NoPE: no cos/sin to stage, so group 0 (QKV) is the only group.
+      cp_async_wait_group<0>();
+    }
 
     float elements[numElemsPerThread];
     float elements2[numElemsPerThread];
@@ -498,40 +511,43 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
         elements[i] *= rms_rcp * (isQ ? q_w[i] : k_w[i]);
       }
 
-      // On first head: wait for group 1 (cos/sin) before RoPE.
-      if (k == 0) cp_async_wait_group<0>();
+      if constexpr (enable_rope) {
+        // On first head: wait for group 1 (cos/sin) before RoPE.
+        if (k == 0) cp_async_wait_group<0>();
 
-      // === Part 2: RoPE using cos/sin from shared memory. ===
-      if (laneId < rotary_lanes) {
-        if constexpr (interleave) {
+        // === Part 2: RoPE using cos/sin from shared memory. ===
+        if (laneId < rotary_lanes) {
+          if constexpr (interleave) {
 #pragma unroll
-          for (int i = 0; i < numElemsPerThread / 2; ++i) {
-            int const idx0 = 2 * i;
-            int const idx1 = 2 * i + 1;
-            int const dim_idx = laneId * numElemsPerThread + idx0;
-            float const val0 = elements[idx0];
-            float const val1 = elements[idx1];
-            int const half_dim = dim_idx / 2;
-            float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
-            float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
-            elements[idx0] = val0 * cos_val - val1 * sin_val;
-            elements[idx1] = val0 * sin_val + val1 * cos_val;
-          }
-        } else {
-          __syncwarp();
-          int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+            for (int i = 0; i < numElemsPerThread / 2; ++i) {
+              int const idx0 = 2 * i;
+              int const idx1 = 2 * i + 1;
+              int const dim_idx = laneId * numElemsPerThread + idx0;
+              float const val0 = elements[idx0];
+              float const val1 = elements[idx1];
+              int const half_dim = dim_idx / 2;
+              float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
+              float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
+              elements[idx0] = val0 * cos_val - val1 * sin_val;
+              elements[idx1] = val0 * sin_val + val1 * cos_val;
+            }
+          } else {
+            __syncwarp();
+            int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
-          for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-            if (laneId < pairOffset) elements2[i] = -elements2[i];
-            int dim_idx = laneId * numElemsPerThread + i;
-            dim_idx = (dim_idx * 2) % rotary_dim;
-            int const half_dim = dim_idx / 2;
-            float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
-            float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
-            elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            for (int i = 0; i < numElemsPerThread; i++) {
+              elements2[i] =
+                  __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+              if (laneId < pairOffset) elements2[i] = -elements2[i];
+              int dim_idx = laneId * numElemsPerThread + i;
+              dim_idx = (dim_idx * 2) % rotary_dim;
+              int const half_dim = dim_idx / 2;
+              float const cos_val = CacheConverter::convert(cos_smem[half_dim]);
+              float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
+              elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
+            }
+            __syncwarp();
           }
-          __syncwarp();
         }
       }
 
@@ -569,6 +585,28 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     const bool INTERLEAVE = false;                       \
     __VA_ARGS__                                          \
   }
+
+// With RoPE disabled (NoPE layers) the interleave flag is dead code, so only
+// one extra instantiation is added instead of two. nope_supported must be a
+// constant expression; it keeps the NoPE kernel out of the cache dtypes the
+// host never launches it with.
+#define DISPATCH_ROPE_INTERLEAVE(enable_rope, nope_supported, interleave,  \
+                                 ENABLE_ROPE, INTERLEAVE, ...)             \
+  if (!(enable_rope)) {                                                    \
+    if constexpr (nope_supported) {                                        \
+      const bool ENABLE_ROPE = false;                                      \
+      const bool INTERLEAVE = false;                                       \
+      __VA_ARGS__                                                          \
+    } else {                                                               \
+      STD_TORCH_CHECK(false,                                               \
+                      "fusedQKNormRope without RoPE requires the cos/sin " \
+                      "cache type to match the QKV type");                 \
+    }                                                                      \
+  } else                                                                   \
+    DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                          \
+      const bool ENABLE_ROPE = true;                                       \
+      __VA_ARGS__                                                          \
+    })
 
 namespace {
 // The empirical value for small batch: overlapping with the predecessor QKV
@@ -613,7 +651,8 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
                            int const rotary_dim, float const eps,
                            void const* q_weight, void const* k_weight,
                            void const* cos_sin_cache, bool const interleave,
-                           int64_t const* position_ids, cudaStream_t stream) {
+                           bool const enable_rope, int64_t const* position_ids,
+                           cudaStream_t stream) {
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
   int const totalQKHeads = num_heads_q + num_heads_k;
@@ -622,33 +661,42 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
   dim3 gridDim(gridSize);
   dim3 blockDim(blockSize);
   bool const enable_pdl = num_tokens <= kPDLEnableTokens;
+  // NoPE has no cos/sin cache, so fused_qk_norm_rope launches it with the
+  // cache type set to the QKV type; other cache types are unreachable.
+  constexpr bool nope_supported = std::is_same_v<scalar_t_in, scalar_t_cache>;
   switch (head_dim) {
     case 64:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
-      });
+      DISPATCH_ROPE_INTERLEAVE(
+          enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE, {
+            launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64,
+                                                INTERLEAVE, ENABLE_ROPE>,
+                          gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                          num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                          k_weight, cos_sin_cache, position_ids, num_tokens,
+                          rotary_dim);
+          });
       break;
     case 128:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 128, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
-      });
+      DISPATCH_ROPE_INTERLEAVE(
+          enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE, {
+            launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache,
+                                                128, INTERLEAVE, ENABLE_ROPE>,
+                          gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                          num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                          k_weight, cos_sin_cache, position_ids, num_tokens,
+                          rotary_dim);
+          });
       break;
     case 256:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 256, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
-      });
+      DISPATCH_ROPE_INTERLEAVE(
+          enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE, {
+            launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache,
+                                                256, INTERLEAVE, ENABLE_ROPE>,
+                          gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                          num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                          k_weight, cos_sin_cache, position_ids, num_tokens,
+                          rotary_dim);
+          });
       break;
     default:
       STD_TORCH_CHECK(
@@ -664,8 +712,8 @@ void launchFusedQKNormRopeNTokenHeads(
     int const num_heads_k, int const num_heads_v, int const head_dim,
     int const rotary_dim, float const eps, void const* q_weight,
     void const* k_weight, void const* cos_sin_cache, bool const interleave,
-    int64_t const* position_ids, int const token_heads_per_warp,
-    cudaStream_t stream) {
+    bool const enable_rope, int64_t const* position_ids,
+    int const token_heads_per_warp, cudaStream_t stream) {
   STD_TORCH_CHECK(token_heads_per_warp == 1 || token_heads_per_warp == 2 ||
                       token_heads_per_warp == 4 || token_heads_per_warp == 8,
                   "token_heads_per_warp must be 1, 2, 4, or 8, got ",
@@ -676,7 +724,7 @@ void launchFusedQKNormRopeNTokenHeads(
     launchFusedQKNormRope<scalar_t_in, scalar_t_cache>(
         qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
         rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
-        position_ids, stream);
+        enable_rope, position_ids, stream);
     return;
   }
 
@@ -692,7 +740,7 @@ void launchFusedQKNormRopeNTokenHeads(
       launchFusedQKNormRope<scalar_t_in, scalar_t_cache>(
           qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
           rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
-          position_ids, stream);
+          enable_rope, position_ids, stream);
       return;
     }
   }
@@ -719,43 +767,54 @@ void launchFusedQKNormRopeNTokenHeads(
   size_t const smem_bytes =
       warpsPerBlock * static_cast<size_t>(rotary_dim) * cache_elem_size +
       warpsPerBlock * qkv_smem_per_warp;
+  // See launchFusedQKNormRope: NoPE only runs with cache type == QKV type.
+  constexpr bool nope_supported = std::is_same_v<scalar_t_in, scalar_t_cache>;
 
-#define LAUNCH_N_TOKEN_HEADS(N)                                               \
-  do {                                                                        \
-    switch (head_dim) {                                                       \
-      case 64:                                                                \
-        DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
-          launchWithPDL(                                                      \
-              fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               64, INTERLEAVE, (N)>,          \
-              gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
-              num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
-        });                                                                   \
-        break;                                                                \
-      case 128:                                                               \
-        DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
-          launchWithPDL(                                                      \
-              fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               128, INTERLEAVE, (N)>,         \
-              gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
-              num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
-        });                                                                   \
-        break;                                                                \
-      case 256:                                                               \
-        DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
-          launchWithPDL(                                                      \
-              fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               256, INTERLEAVE, (N)>,         \
-              gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
-              num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
-        });                                                                   \
-        break;                                                                \
-      default:                                                                \
-        STD_TORCH_CHECK(false, "Unsupported head dimension: ", head_dim);     \
-    }                                                                         \
+#define LAUNCH_N_TOKEN_HEADS(N)                                                \
+  do {                                                                         \
+    switch (head_dim) {                                                        \
+      case 64:                                                                 \
+        DISPATCH_ROPE_INTERLEAVE(                                              \
+            enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE,  \
+            {                                                                  \
+              launchWithPDL(fusedQKNormRopeKernelNTokenHeads<                  \
+                                scalar_t_in, scalar_t_cache, 64, INTERLEAVE,   \
+                                ENABLE_ROPE, (N)>,                             \
+                            gridDim, blockDim, smem_bytes, stream, enable_pdl, \
+                            qkv, num_heads_q, num_heads_k, num_heads_v, eps,   \
+                            q_weight, k_weight, cos_sin_cache, position_ids,   \
+                            num_tokens, rotary_dim);                           \
+            });                                                                \
+        break;                                                                 \
+      case 128:                                                                \
+        DISPATCH_ROPE_INTERLEAVE(                                              \
+            enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE,  \
+            {                                                                  \
+              launchWithPDL(fusedQKNormRopeKernelNTokenHeads<                  \
+                                scalar_t_in, scalar_t_cache, 128, INTERLEAVE,  \
+                                ENABLE_ROPE, (N)>,                             \
+                            gridDim, blockDim, smem_bytes, stream, enable_pdl, \
+                            qkv, num_heads_q, num_heads_k, num_heads_v, eps,   \
+                            q_weight, k_weight, cos_sin_cache, position_ids,   \
+                            num_tokens, rotary_dim);                           \
+            });                                                                \
+        break;                                                                 \
+      case 256:                                                                \
+        DISPATCH_ROPE_INTERLEAVE(                                              \
+            enable_rope, nope_supported, interleave, ENABLE_ROPE, INTERLEAVE,  \
+            {                                                                  \
+              launchWithPDL(fusedQKNormRopeKernelNTokenHeads<                  \
+                                scalar_t_in, scalar_t_cache, 256, INTERLEAVE,  \
+                                ENABLE_ROPE, (N)>,                             \
+                            gridDim, blockDim, smem_bytes, stream, enable_pdl, \
+                            qkv, num_heads_q, num_heads_k, num_heads_v, eps,   \
+                            q_weight, k_weight, cos_sin_cache, position_ids,   \
+                            num_tokens, rotary_dim);                           \
+            });                                                                \
+        break;                                                                 \
+      default:                                                                 \
+        STD_TORCH_CHECK(false, "Unsupported head dimension: ", head_dim);      \
+    }                                                                          \
   } while (0)
 
   if (token_heads_per_warp == 2) {
@@ -781,45 +840,57 @@ void fused_qk_norm_rope(
     double eps,           // Epsilon for RMS normalization
     torch::stable::Tensor& q_weight,  // RMSNorm weights for query [head_dim]
     torch::stable::Tensor& k_weight,  // RMSNorm weights for key [head_dim]
-    torch::stable::Tensor& cos_sin_cache,  // Cos/sin cache [max_position,
-                                           // head_dim]
-    bool is_neox,  // Whether RoPE is applied in Neox style
-    torch::stable::Tensor& position_ids,  // Position IDs for RoPE [num_tokens]
-    int64_t forced_token_heads_per_warp   // -1 = auto-select, >0 = forced value
+    std::optional<torch::stable::Tensor>
+        cos_sin_cache,  // Cos/sin cache [max_position, rotary_dim]; omit for
+                        // NoPE layers (QK Norm only)
+    bool is_neox,       // Whether RoPE is applied in Neox style
+    std::optional<torch::stable::Tensor>
+        position_ids,  // Position IDs for RoPE [num_tokens]; omit for NoPE
+    int64_t forced_token_heads_per_warp  // -1 = auto-select, >0 = forced value
 ) {
   // Input validation
   CHECK_INPUT(qkv);
-  CHECK_INPUT(position_ids);
   CHECK_INPUT(q_weight);
   CHECK_INPUT(k_weight);
-  CHECK_INPUT(cos_sin_cache);
-  CHECK_TYPE(position_ids, torch::headeronly::ScalarType::Long);
+
+  // NoPE layers pass neither cos_sin_cache nor position_ids: QK Norm only.
+  bool const enable_rope = cos_sin_cache.has_value();
+  STD_TORCH_CHECK(enable_rope == position_ids.has_value(),
+                  "cos_sin_cache and position_ids must both be provided (RoPE) "
+                  "or both be omitted (NoPE)");
 
   STD_TORCH_CHECK(qkv.dim() == 2,
                   "QKV tensor must be 2D: [num_tokens, "
                   "(num_heads_q+num_heads_k+num_heads_v)*head_dim]");
-  STD_TORCH_CHECK(position_ids.dim() == 1,
-                  "Position IDs must be 1D: [num_tokens]");
   STD_TORCH_CHECK(q_weight.dim() == 1, "Query weights must be 1D: [head_dim]");
   STD_TORCH_CHECK(k_weight.dim() == 1, "Key weights must be 1D: [head_dim]");
-  STD_TORCH_CHECK(cos_sin_cache.dim() == 2,
-                  "Cos/sin cache must be 2D: [max_position, head_dim]");
   STD_TORCH_CHECK(q_weight.size(0) == head_dim,
                   "Query weights size must match head dimension");
   STD_TORCH_CHECK(k_weight.size(0) == head_dim,
                   "Key weights size must match head dimension");
-
-  STD_TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
-  STD_TORCH_CHECK(cos_sin_cache.size(1) <= head_dim,
-                  "rotary_dim must be less than or equal to head_dim");
 
   STD_TORCH_CHECK(qkv.scalar_type() == q_weight.scalar_type() &&
                       qkv.scalar_type() == k_weight.scalar_type(),
                   "qkv, q_weight and k_weight must have the same dtype");
 
   int64_t num_tokens = qkv.size(0);
-  STD_TORCH_CHECK(position_ids.size(0) == num_tokens,
-                  "Number of tokens in position_ids must match QKV");
+
+  int64_t rotary_dim = 0;
+  if (enable_rope) {
+    CHECK_INPUT((*position_ids));
+    CHECK_INPUT((*cos_sin_cache));
+    CHECK_TYPE((*position_ids), torch::headeronly::ScalarType::Long);
+    STD_TORCH_CHECK(position_ids->dim() == 1,
+                    "Position IDs must be 1D: [num_tokens]");
+    STD_TORCH_CHECK(cos_sin_cache->dim() == 2,
+                    "Cos/sin cache must be 2D: [max_position, rotary_dim]");
+    STD_TORCH_CHECK(cos_sin_cache->size(1) % 2 == 0, "rotary_dim must be even");
+    STD_TORCH_CHECK(cos_sin_cache->size(1) <= head_dim,
+                    "rotary_dim must be less than or equal to head_dim");
+    STD_TORCH_CHECK(position_ids->size(0) == num_tokens,
+                    "Number of tokens in position_ids must match QKV");
+    rotary_dim = cos_sin_cache->size(1);
+  }
 
   int64_t total_heads = num_heads_q + num_heads_k + num_heads_v;
   STD_TORCH_CHECK(
@@ -864,18 +935,32 @@ void fused_qk_norm_rope(
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
         using qkv_scalar_t = scalar_t;
+        if (!enable_rope) {
+          // NoPE: no cos/sin cache, so reuse the QKV dtype as the (unused)
+          // cache type to avoid extra kernel instantiations.
+          tensorrt_llm::kernels::launchFusedQKNormRopeNTokenHeads<qkv_scalar_t,
+                                                                  qkv_scalar_t>(
+              qkv.data_ptr(), static_cast<int>(num_tokens),
+              static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
+              static_cast<int>(num_heads_v), static_cast<int>(head_dim),
+              /*rotary_dim=*/0, static_cast<float>(eps), q_weight.data_ptr(),
+              k_weight.data_ptr(), /*cos_sin_cache=*/nullptr,
+              /*interleave=*/false, /*enable_rope=*/false,
+              /*position_ids=*/nullptr, token_heads_per_warp, stream);
+          return;
+        }
         VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-            cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
+            cos_sin_cache->scalar_type(), "fused_qk_norm_rope_kernel", [&] {
               using cache_scalar_t = scalar_t;
               tensorrt_llm::kernels::launchFusedQKNormRopeNTokenHeads<
                   qkv_scalar_t, cache_scalar_t>(
                   qkv.data_ptr(), static_cast<int>(num_tokens),
                   static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
                   static_cast<int>(num_heads_v), static_cast<int>(head_dim),
-                  static_cast<int>(cos_sin_cache.size(1)),
-                  static_cast<float>(eps), q_weight.data_ptr(),
-                  k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
-                  reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
+                  static_cast<int>(rotary_dim), static_cast<float>(eps),
+                  q_weight.data_ptr(), k_weight.data_ptr(),
+                  cos_sin_cache->data_ptr(), !is_neox, /*enable_rope=*/true,
+                  reinterpret_cast<int64_t const*>(position_ids->data_ptr()),
                   token_heads_per_warp, stream);
             });
       });

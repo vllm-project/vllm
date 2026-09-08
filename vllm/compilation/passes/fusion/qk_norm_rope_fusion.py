@@ -53,6 +53,10 @@ class QkNormRopePattern:
                          eps, q_weight, k_weight, cos_sin_cache, is_neox,
                          positions.view(-1))
       return split(qkv, [qsz, kvsz, kvsz], -1)
+
+    With enable_rope=False (NoPE layers), the RoPE step is absent from both the
+    pattern and the fused op, which is called with cos_sin_cache=None and
+    position_ids=None so that only the QK norm runs.
     """
 
     def __init__(
@@ -63,6 +67,7 @@ class QkNormRopePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
+        enable_rope: bool = True,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -72,21 +77,28 @@ class QkNormRopePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
-        self.rope_matcher = MatcherRotaryEmbedding(
-            is_neox=is_neox,
-            head_size=self.head_dim,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            use_flashinfer=self.rope_flashinfer,
+        self.enable_rope = enable_rope
+        self.rope_matcher = (
+            MatcherRotaryEmbedding(
+                is_neox=is_neox,
+                head_size=self.head_dim,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                use_flashinfer=self.rope_flashinfer,
+            )
+            if enable_rope
+            else None
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
         # Sample inputs to help pattern tracing
         T = 5
         qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
-        positions = empty_i64(T)
         q_weight = empty_bf16(1, self.head_dim)
         k_weight = empty_bf16(1, self.head_dim)
+        if not self.enable_rope:
+            return [qkv, q_weight, k_weight]
+        positions = empty_i64(T)
         if self.rope_flashinfer:
             cos_sin_cache = empty_fp32(4096, self.head_dim)
         else:
@@ -98,6 +110,34 @@ class QkNormRopePattern:
             k_weight,
             cos_sin_cache,
         ]
+
+    def _fused_op(
+        self,
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor | None,
+        position_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        result = auto_functionalized(
+            FUSED_QK_ROPE_OP,
+            qkv=qkv,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            num_heads_v=self.num_kv_heads,
+            head_dim=self.head_dim,
+            eps=self.eps,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+            position_ids=position_ids,
+            forced_token_heads_per_warp=-1,
+        )
+        result_qkv = result[1]
+
+        # Split back to q,k,v and return
+        return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
 
     @staticmethod
     def wrap_trace_fn(
@@ -120,6 +160,10 @@ class QkNormRopePattern:
         view_to_reshape(gm)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
+        if not self.enable_rope:
+            self.register_nope(pm_pass)
+            return
+
         def pattern(
             qkv: torch.Tensor,
             positions: torch.Tensor,
@@ -149,6 +193,7 @@ class QkNormRopePattern:
             k_flat = k_normed_by_head.view(k.shape)
 
             # RoPE: apply to flattened q/k
+            assert self.rope_matcher is not None
             q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
             return q_rope, k_rope, v
 
@@ -159,29 +204,63 @@ class QkNormRopePattern:
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            # Run fused qk_norm_rope op
-            result = auto_functionalized(
-                FUSED_QK_ROPE_OP,
-                qkv=qkv,
-                num_heads_q=self.num_heads,
-                num_heads_k=self.num_kv_heads,
-                num_heads_v=self.num_kv_heads,
-                head_dim=self.head_dim,
-                eps=self.eps,
-                q_weight=q_weight,
-                k_weight=k_weight,
-                cos_sin_cache=cos_sin_cache,
-                is_neox=self.is_neox,
-                position_ids=positions.view(-1),
-                forced_token_heads_per_warp=-1,
+            return self._fused_op(
+                qkv, q_weight, k_weight, cos_sin_cache, positions.view(-1)
             )
-            result_qkv = result[1]
-
-            # Split back to q,k,v and return
-            return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
 
         # NOTE: use fx_view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            QkNormRopePattern.wrap_trace_fn(
+                pm.fwd_only,
+                QkNormRopePattern.fx_view_to_reshape,
+            ),
+            pm_pass,
+        )
+
+    def register_nope(self, pm_pass: PatternMatcherPass) -> None:
+        """QK norm only (NoPE layers): no positions/cos_sin_cache involved."""
+
+        def pattern(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # split qkv -> q,k,v
+            try:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            except ValueError as e:
+                # register_replacement treats RuntimeError as a trace mismatch.
+                raise RuntimeError from e
+
+            # Q path: view -> RMS -> view back to q.shape
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
+            q_normed_by_head = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+            q_flat = q_normed_by_head.view(q.shape)
+
+            # K path: view -> RMS -> view back to k.shape
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
+            k_normed_by_head = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+            k_flat = k_normed_by_head.view(k.shape)
+
+            return q_flat, k_flat, v
+
+        def replacement(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            return self._fused_op(
+                qkv, q_weight, k_weight, cos_sin_cache=None, position_ids=None
+            )
+
         pm.register_replacement(
             pattern,
             replacement,
@@ -199,7 +278,9 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
 
     Registers patterns for both standard vLLM ops and ROCm AITER ops
     (when AITER is enabled), so the fusion fires regardless of which
-    RMSNorm/RoPE implementation the graph uses.
+    RMSNorm/RoPE implementation the graph uses. QK-norm-only (NoPE) patterns
+    are registered as well, so interleaved RoPE/NoPE models fuse both kinds
+    of layer.
     """
 
     @enable_fake_mode
@@ -261,6 +342,16 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                             is_neox=neox,
                             rope_flashinfer=rope_flashinfer,
                         ).register(self.patterns)
+                # NoPE layers: QK norm without RoPE. is_neox is irrelevant
+                # here, so a single pattern per (geometry, eps) is enough.
+                QkNormRopePattern(
+                    head_dim=head_dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    eps=epsilon,
+                    is_neox=True,
+                    enable_rope=False,
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

@@ -47,6 +47,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         vllm_config: VllmConfig,
         dtype: torch.dtype,
         test_scattered_split: bool = False,
+        use_rope: bool = True,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         super().__init__()
@@ -72,17 +73,24 @@ class QKNormRoPETestModel(torch.nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=self.eps)
         self.k_norm = RMSNorm(self.head_dim, eps=self.eps)
-        self.rotary_emb = RotaryEmbedding(
-            self.head_dim,
-            rotary_dim=self.rotary_dim,
-            max_position_embeddings=4096,
-            base=10000,
-            is_neox_style=is_neox,
-            dtype=self.dtype,
+        # NoPE layers (use_rope=False) apply QK norm without RoPE.
+        self.rotary_emb = (
+            RotaryEmbedding(
+                self.head_dim,
+                rotary_dim=self.rotary_dim,
+                max_position_embeddings=4096,
+                base=10000,
+                is_neox_style=is_neox,
+                dtype=self.dtype,
+            )
+            if use_rope
+            else None
         )
         self.test_scattered_split = test_scattered_split
         self.enable_rms_norm_custom_op = self.q_norm.enabled()
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
+        self.enable_rope_custom_op = (
+            self.rotary_emb is not None and self.rotary_emb.enabled()
+        )
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
         if self.test_scattered_split:
@@ -97,11 +105,14 @@ class QKNormRoPETestModel(torch.nn.Module):
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.rotary_emb is not None:
+            q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
     def ops_in_model_before(self) -> list[OpOverload | OpOverloadPacket]:
         ops: list[OpOverload | OpOverloadPacket] = [torch.ops.vllm_ir.rms_norm]
+        if self.rotary_emb is None:
+            return ops
         if self.enable_rope_custom_op:
             if self.rotary_emb.use_flashinfer:
                 ops.append(FLASHINFER_ROTARY_OP)
@@ -198,6 +209,91 @@ def test_qk_norm_rope_fusion(
         torch._dynamo.mark_dynamic(pos_unfused, 0)
         model_unfused = torch.compile(model, backend=backend_baseline)
         q_unfused, k_unfused, v_unfused = model_unfused(qkv_unfused, pos_unfused)
+
+        if dtype == torch.float16:
+            ATOL, RTOL = (2e-3, 2e-3)
+        else:
+            ATOL, RTOL = (1e-2, 1e-2)
+
+        torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
+
+        assert fusion_pass.matched_count == 1
+
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())
+
+
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on cuda and rocm platform",
+)
+def test_qk_norm_nope_fusion(eps, enable_rms_norm_custom_op, dtype):
+    """NoPE layers fuse into fused_qk_norm_rope with RoPE disabled."""
+    if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
+        pytest.skip("fused_qk_norm_rope custom op not available")
+
+    torch.set_default_device(current_platform.device_type)
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(0)
+
+    custom_ops = ["+rms_norm"] if enable_rms_norm_custom_op else []
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops,
+            pass_config=PassConfig(
+                enable_qk_norm_rope_fusion=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+
+    num_heads, num_kv_heads, head_dim = 16, 4, 128
+    T = 5
+
+    with (
+        set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        model = QKNormRoPETestModel(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            eps=eps,
+            is_neox=True,
+            vllm_config=vllm_config,
+            dtype=dtype,
+            use_rope=False,
+        )
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        coalesce_pass = SplitCoalescingPass(vllm_config)
+        fusion_pass = QKNormRoPEFusionPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(noop_pass, coalesce_pass, fusion_pass, cleanup_pass)
+        backend_baseline = TestBackend(noop_pass, cleanup_pass)
+
+        qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
+        pos = torch.arange(T, dtype=torch.long, device=qkv.device)
+        qkv_unfused = qkv.clone()
+        pos_unfused = pos.clone()
+
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(pos, 0)
+        q_fused, k_fused, v_fused = torch.compile(model, backend=backend)(qkv, pos)
+
+        torch._dynamo.mark_dynamic(qkv_unfused, 0)
+        torch._dynamo.mark_dynamic(pos_unfused, 0)
+        q_unfused, k_unfused, v_unfused = torch.compile(
+            model, backend=backend_baseline
+        )(qkv_unfused, pos_unfused)
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)

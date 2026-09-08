@@ -135,7 +135,8 @@ class PassConfig:
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    """Enable fused Q/K RMSNorm + RoPE pass. Also fuses Q/K RMSNorm alone on
+    NoPE layers."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
