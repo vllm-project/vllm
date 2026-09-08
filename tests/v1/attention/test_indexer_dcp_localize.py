@@ -297,8 +297,8 @@ def _sparse_dcp_parity_case(
         "query_bytes": q_input.view(torch.uint8).cpu(),
     }
     if world == 1:
-        # Independent FP32 SDPA on the very same quantized Q/K/V catches a
-        # common error on both paths, especially a missing FP8 scale.
+        # FP32 SDPA with the indexer's selected tokens checks shared attention
+        # kernel errors, especially missing FP8 scales; it does not check top-k.
         if is_flashmla:
             raw = kv_cache.view(-1, kv_cache.shape[-1])[slots].contiguous()
             latent = raw[:, :kv_rank].contiguous().view(torch.float8_e4m3fn)
@@ -435,7 +435,7 @@ def _mla_dcp_parity_worker(rank, world, directory, backend):
 )
 @pytest.mark.parametrize("backend", ["flashinfer", "flashmla"])
 def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
-    """Real FP8 indexer + sparse backend + DCP collectives match unsharded TP1.
+    """Real sparse decode/MTP outputs with DCP interleave64 match unsharded TP1.
 
     Requires four SM100 GPUs. No fake logits, selected indices, attention
     kernels, or collectives. Artifacts retain the actual output tensors.
@@ -443,6 +443,8 @@ def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
     indices are exact and natural-log LSE is checked at 1e-4.
     This kernel-facing test also exercises multi-token attention below the
     separate backend MTP compatibility checks; it does not change those checks.
+    Sparse prefill kernels and fused model-level cache population are not
+    covered. The FP32 oracle checks attention given the indexer's selections.
     """
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
