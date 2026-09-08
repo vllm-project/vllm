@@ -366,6 +366,13 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
+        # Declared up front so the IPC reuse check in finalize_weights can use
+        # direct attribute access; filled by the DeepGEMM transform (normal
+        # load) or pre-populated by the weight cache IPC loader.
+        self.register_buffer("_mega_l1_packed", None, persistent=False)
+        self.register_buffer("_mega_l1_scale", None, persistent=False)
+        self.register_buffer("_mega_l2_packed", None, persistent=False)
+        self.register_buffer("_mega_l2_scale", None, persistent=False)
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -384,7 +391,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         # Weight cache IPC engine: the daemon already ran the DeepGEMM transform
         # and shared the results as buffers. Reuse them zero-copy and drop the
         # raw packed params so the loader does not allocate empty placeholders.
-        if getattr(self, "_mega_l1_packed", None) is not None:
+        if self._mega_l1_packed is not None:
             self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
             self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
             self._drop_raw_mega_weights()

@@ -17,8 +17,8 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor parallelism is supported; pipeline, data, and expert parallelism
-are rejected at launch.
+Only tensor and expert parallelism are supported; pipeline and data
+parallelism are rejected at launch.
 """
 
 import fcntl
@@ -291,17 +291,16 @@ def _run_daemon(
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
-    """Reject every parallelism mode other than tensor parallelism."""
+    """Reject parallelism modes other than tensor/expert parallelism."""
     unsupported = {
         "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
         "data parallelism": parallel_config.data_parallel_size > 1,
-        "expert parallelism": parallel_config.enable_expert_parallel,
     }
     for name, enabled in unsupported.items():
         if enabled:
             raise ValueError(
-                f"The weight cache daemon only supports tensor parallelism; "
-                f"{name} is not supported"
+                f"The weight cache daemon only supports tensor and expert "
+                f"parallelism; {name} is not supported"
             )
 
 
