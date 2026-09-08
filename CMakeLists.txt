@@ -1122,7 +1122,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
       "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
     cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
-      "8.0;8.6;8.9;9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+      "8.0;8.6;8.9;9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_KDA_DECODE_ARCHS)
     set(FUSED_KDA_DECODE_SRC
