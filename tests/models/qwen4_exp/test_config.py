@@ -20,7 +20,7 @@ from vllm.models.qwen4_exp.config import (
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import spawn_new_process_for_each_test
 
 
 def _text_config(**kwargs) -> Qwen4ExpTextConfig:
@@ -92,7 +92,7 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
     assert returned_multi_hidden is multi_hidden
 
 
-@fork_new_process_for_each_test
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("backend", ["amd", "nvidia"])
 def test_qwen4_exp_mtp_remaps_mixed_precision_layer_indices(backend: str) -> None:
     mtp_module = import_module(f"vllm.models.qwen4_exp.{backend}.mtp")
