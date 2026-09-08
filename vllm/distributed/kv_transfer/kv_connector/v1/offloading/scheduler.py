@@ -1025,6 +1025,10 @@ class OffloadingConnectorScheduler:
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
+        if req_status.req_context.load_tier_filter.is_empty:
+            req_status.update_num_hit_chunks(num_computed_tokens)
+            return 0, False
+
         num_hit_tokens: int | None
         if request.skip_reading_prefix_cache:
             num_hit_tokens = 0

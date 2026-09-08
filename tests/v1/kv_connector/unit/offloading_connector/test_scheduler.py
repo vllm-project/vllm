@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -187,15 +188,17 @@ def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
 
 def _make_partial_tail_request(
     scheduler: OffloadingConnectorScheduler,
+    kv_transfer_params: dict[str, Any] | None = None,
 ) -> MagicMock:
     request = MagicMock()
     request.request_id = "req"
-    request.kv_transfer_params = None
+    request.kv_transfer_params = kv_transfer_params
     request.num_prompt_tokens = 30
     request.num_tokens = 30
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
     request.all_token_ids = list(range(30))
     request.lora_request = None
+    request.skip_reading_prefix_cache = False
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
@@ -379,6 +382,20 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_empty_kv_load_tiers_skips_partial_tail_lookup():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(
+        scheduler, kv_transfer_params={"kv_load_tiers": []}
+    )
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (0, False)
+    scheduler.manager.lookup.assert_not_called()
+    assert all(
+        state.num_hit_chunks == 1 for state in scheduler._req_status["req"].group_states
+    )
 
 
 def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
@@ -2839,6 +2856,49 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     )
 
     # The external lookup must have been completely skipped.
+    runner.manager.lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_empty_kv_load_tiers_disables_external_load(
+    request_runner, async_scheduling: bool
+):
+    """An empty load-tier list recomputes while preserving the store path."""
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+
+    runner.new_request(token_ids=[0] * tokens_per_chunk)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+    )
+
+    runner.scheduler.reset_prefix_cache()
+    runner.manager.lookup.reset_mock()
+    runner.new_request(
+        token_ids=[0] * tokens_per_chunk,
+        kv_transfer_params={"kv_load_tiers": []},
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(),
+        expected_stored=(0, 1, 2),
+    )
+
     runner.manager.lookup.assert_not_called()
 
 
