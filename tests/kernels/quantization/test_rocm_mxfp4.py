@@ -630,6 +630,7 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     )
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 @pytest.mark.parametrize(
     ("shape", "supported"),
     [
@@ -652,6 +653,7 @@ def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
     assert _asm_fp4_scale_swizzle_supported(weight_scale) is supported
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_asm_fp4_scale_swizzle_rejects_non_2d():
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         _asm_fp4_scale_swizzle_supported,
@@ -665,6 +667,7 @@ def test_asm_fp4_scale_swizzle_rejects_non_2d():
     )
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale():
     """A misaligned weight_scale must disable ASM and take the Triton path."""
     from torch.nn.parameter import Parameter
