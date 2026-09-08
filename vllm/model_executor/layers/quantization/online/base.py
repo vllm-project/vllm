@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Mapping
 from enum import Enum
 from types import MappingProxyType
@@ -10,6 +11,7 @@ import torch
 
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
+    QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
 )
@@ -55,9 +57,6 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
-)
-from vllm.model_executor.layers.quantization.online.utils import (
-    get_activation_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
@@ -107,7 +106,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
 
 def _find_matching_targets(
     prefix: str,
-    targets: Mapping[str, str],
+    targets: Mapping[str, str | QuantSpec],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> list[str]:
     per_shard_matches = find_matching_patterns(
@@ -128,8 +127,8 @@ def _find_matching_targets(
         )
 
     matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
-    quant_key_strs = {targets[pattern] for pattern in matched_patterns}
-    if len(quant_key_strs) > 1:
+    target_values = [targets[pattern] for pattern in matched_patterns]
+    if any(target != target_values[0] for target in target_values[1:]):
         raise ValueError(
             f"Found different quantization_config.targets values for the "
             f"shards of {prefix}: {matched_patterns}. vLLM requires all "
@@ -297,18 +296,20 @@ class OnlineQuantizationConfig(QuantizationConfig):
         quant_method_cls = self._get_method_cls(quant_spec, table, layer)
         if quant_method_cls is None:
             return None
+
+        assert quant_spec is not None
+
         if isinstance(layer, RoutedExperts):
             assert issubclass(quant_method_cls, OnlineMoEMethodBase)
-            activation_quant_key = get_activation_quant_key(
-                quant_method_cls.default_activation_quant_key, "moe"
-            )
         else:
             assert isinstance(layer, LinearBase)
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            activation_quant_key = get_activation_quant_key(
-                quant_method_cls.default_activation_quant_key, "linear"
-            )
-        assert quant_spec is not None
+
+        if "activation" not in quant_spec.fields_set:
+            activation_quant_key = quant_method_cls.default_activation_quant_key
+        else:
+            activation_quant_key = quant_spec.activation
+
         return (
             source,
             quant_key_str,
@@ -360,13 +361,36 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"one target."
             )
         target_pattern = matches[0]
-        quant_key_str = self.args.targets[target_pattern]
-        shorthand = _ONLINE_SHORTHANDS[quant_key_str]
+        target = self.args.targets[target_pattern]
+        if isinstance(target, str):
+            shorthand = _ONLINE_SHORTHANDS[target]
+            quant_key_str = target
+            quant_spec = (
+                shorthand.linear if isinstance(layer, LinearBase) else shorthand.moe
+            )
+        else:
+            quant_spec = target
+            target_config: dict[str, str | None] = {"weight": str(quant_spec)}
+
+            # TODO: QuantKey itself should define `__str__`,
+            # instead of having this logic.
+            if "activation" in quant_spec.fields_set:
+                target_config["activation"] = (
+                    next(
+                        (
+                            name
+                            for name, known_quant_key in QUANT_KEY_NAMES.items()
+                            if known_quant_key == quant_spec.activation
+                        ),
+                        str(quant_spec.activation),
+                    )
+                    if quant_spec.activation is not None
+                    else None
+                )
+            quant_key_str = json.dumps(target_config, separators=(",", ":"))
         if isinstance(layer, LinearBase):
-            quant_spec = shorthand.linear
             table = _ONLINE_LINEAR_METHODS
         elif isinstance(layer, RoutedExperts):
-            quant_spec = shorthand.moe
             table = _ONLINE_MOE_METHODS
         else:
             raise ValueError(
@@ -376,7 +400,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         if quant_spec is None:
             raise ValueError(
-                f"targets pattern {target_pattern} = {quant_key_str} does "
+                f"targets pattern {target_pattern} = {target} does "
                 f"not define a QuantSpec for {type(layer).__name__} layers "
                 f"(matched at {prefix})."
             )

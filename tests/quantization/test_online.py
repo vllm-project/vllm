@@ -776,6 +776,21 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             Mxfp4OnlineMoEMethod,
             id="mxfp4_null_activation_override",
         ),
+        pytest.param(
+            GRANITE_MODEL_NAME,
+            "online",
+            {
+                "targets": {
+                    "*experts*": {
+                        "weight": "mxfp4",
+                        "activation": "mxfp8",
+                    },
+                }
+            },
+            UnquantizedLinearMethod,
+            Mxfp4OnlineMoEMethod,
+            id="targets_activation_override",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -802,7 +817,18 @@ def test_online_quantization(
 
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
-    if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
+    target_specs = (
+        online_quant_args.get("targets", {})
+        if isinstance(online_quant_args, dict)
+        else {}
+    )
+    uses_mxfp4_targets = any(
+        isinstance(spec, dict) and spec.get("weight") == "mxfp4"
+        for spec in target_specs.values()
+    )
+    if (quant_scheme == "mxfp4" or uses_mxfp4_targets) and not (
+        on_gfx950() or on_gfx942()
+    ):
         pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
 
     if current_platform.is_rocm():
@@ -879,6 +905,8 @@ def test_online_quantization(
         assert moe._quant_method.activation_quant_key == quant_utils.kMxfp8Dynamic
     elif isinstance(moe_args, dict) and "activation" in moe_args:
         assert moe._quant_method.activation_quant_key is None
+    elif isinstance(target_specs.get("*experts*"), dict):
+        assert moe._quant_method.activation_quant_key == quant_utils.kMxfp8Dynamic
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
         o_proj.quant_method.kernel, MarlinMxfp8LinearKernel
@@ -892,6 +920,8 @@ def test_online_quantization(
         assert o_proj.weight.dtype == MXFP8_VALUE_DTYPE
     elif quant_scheme == "mxfp4":
         assert o_proj.weight.dtype == torch.uint8
+    elif expected_linear_cls is UnquantizedLinearMethod:
+        assert o_proj.weight.dtype == torch.bfloat16
     elif current_platform.is_cuda() or current_platform.is_xpu():
         assert o_proj.weight.dtype == torch.float8_e4m3fn
     elif current_platform.is_rocm():
@@ -1135,15 +1165,32 @@ def test_online_quantization_targets_reject_unsupported_layer() -> None:
         config.get_quant_method(lm_head, "lm_head")
 
 
-def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
+@pytest.mark.parametrize(
+    ("target_quantization", "expected_target_summary"),
+    [
+        ("mxfp4", "mxfp4"),
+        (
+            {"weight": "mxfp4", "activation": "mxfp8"},
+            '{"weight":"mxfp4","activation":"mxfp8"}',
+        ),
+    ],
+)
+def test_log_online_quantization(
+    default_vllm_config,
+    monkeypatch,
+    target_quantization,
+    expected_target_summary,
+) -> None:
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*experts*": target_quantization})
+    )
     config.quantized_layers = {
         "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
         "model.layers.1.mlp.down_proj": ("linear", "fp8_per_tensor", None),
-        "model.layers.0.self_attn.qkv_proj": (
+        "model.layers.0.block_sparse_moe.experts": (
             "targets",
-            "mxfp4",
-            r"re:.*qkv_proj.*",
+            expected_target_summary,
+            "*experts*",
         ),
     }
     default_vllm_config.quant_config = config
@@ -1159,9 +1206,9 @@ def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantized 3 layers of types: mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
-        "re:.*qkv_proj.*, mxfp4)"
+        "Quantized 3 layers of types: block_sparse_moe.experts: 1 (from targets: "
+        f"*experts*, {expected_target_summary}); mlp.down_proj: 2 (from linear: "
+        "fp8_per_tensor)"
     ]
 
 

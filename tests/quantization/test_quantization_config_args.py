@@ -163,6 +163,7 @@ def test_resolve_merges_explicit_over_shorthand():
 
     assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
+    assert "activation" not in args.linear.fields_set
 
 
 def test_resolve_preserves_explicit_null_activation():

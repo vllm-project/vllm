@@ -145,6 +145,7 @@ class QuantSpec:
                 str(quant_key),
             )
 
+        # TODO: QuantKey itself should define `__str__`, instead of having this logic.
         return quant_key_str(self.weight)
 
 
@@ -166,11 +167,12 @@ class QuantizationConfigArgs:
     """Layers to skip quantization for. Online quantization also supports
     fnmatch-style patterns."""
 
-    targets: dict[str, str] | None = None
+    targets: dict[str, str | QuantSpec] | None = None
     """Per-layer online quantization overrides, keyed by exact layer name or
     regex patterns with a `re:`, or fnmatch-style patterns for online
-    quantization, mapping to an online shorthand name (see
-    `_ONLINE_SHORTHANDS`). A layer that matches no pattern is left unquantized.
+    quantization. A target can map to an online shorthand name (see
+    `_ONLINE_SHORTHANDS`) or a quantization spec containing `weight` and
+    `activation` keys. A layer that matches no pattern is left unquantized.
     Mutually exclusive with `linear` and `moe`.
     """
 
@@ -199,16 +201,25 @@ class QuantizationConfigArgs:
             return v
         if not isinstance(v, dict):
             raise TypeError(f"targets must be a dict, got {type(v).__name__}")
-        for pattern, shorthand in v.items():
+        targets: dict[str, str | QuantSpec] = {}
+        for pattern, target in v.items():
             if not isinstance(pattern, str):
                 raise ValueError(
                     f"targets keys must be strings, got {type(pattern).__name__}"
                 )
-            if not isinstance(shorthand, str) or shorthand not in _ONLINE_SHORTHANDS:
+            if isinstance(target, str):
+                if target not in _ONLINE_SHORTHANDS:
+                    raise ValueError(
+                        f"targets[{pattern}] = {target} is not a valid "
+                        f"online shorthand name; expected one of "
+                        f"{sorted(_ONLINE_SHORTHANDS)}"
+                    )
+            elif isinstance(target, dict):
+                target = QuantSpec(**target)
+            elif not isinstance(target, QuantSpec):
                 raise ValueError(
-                    f"targets[{pattern}] = {shorthand} is not a valid "
-                    f"online shorthand name; expected one of "
-                    f"{sorted(_ONLINE_SHORTHANDS)}"
+                    f"targets[{pattern}] must be an online shorthand name or "
+                    f"a quantization spec, got {type(target).__name__}"
                 )
             if pattern.startswith("re:"):
                 try:
@@ -217,7 +228,8 @@ class QuantizationConfigArgs:
                     raise ValueError(
                         f"targets key {pattern} is not a valid regex: {e}"
                     ) from e
-        return v
+            targets[pattern] = target
+        return targets
 
     @model_validator(mode="after")
     def _validate_targets_exclusivity(self) -> "QuantizationConfigArgs":
@@ -332,20 +344,18 @@ def resolve_quantization_config(
         if base_spec is None:
             return override_spec
 
-        values = {
-            "weight": (
-                override_spec.weight
-                if "weight" in override_spec.fields_set
-                else base_spec.weight
-            )
-        }
+        weight = (
+            override_spec.weight
+            if "weight" in override_spec.fields_set
+            else base_spec.weight
+        )
 
         if "activation" in override_spec.fields_set:
-            values["activation"] = override_spec.activation
-        else:
-            values["activation"] = base_spec.activation
+            return QuantSpec(weight=weight, activation=override_spec.activation)
+        if "activation" in base_spec.fields_set:
+            return QuantSpec(weight=weight, activation=base_spec.activation)
 
-        return QuantSpec(**values)
+        return QuantSpec(weight=weight)
 
     return QuantizationConfigArgs(
         linear=merge_spec(base.linear, quantization_config.linear),
