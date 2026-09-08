@@ -886,7 +886,7 @@ def unknown_step_keys_from_log(
         return None
     log = re.sub(r"\x1b_bk;t=\d*\x07", "", log)
     log = re.sub(r"\x1b\[[0-9;]*[mK]", "", log)
-    match = re.search(r"Unknown CI step key\(s\): (.*)", log)
+    match = re.search(r"ValueError: Unknown CI step key\(s\): (.*)", log)
     if not match:
         return None
     keys = [key.strip() for key in match.group(1).strip().split(",")]

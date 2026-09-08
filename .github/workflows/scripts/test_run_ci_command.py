@@ -1082,7 +1082,11 @@ class RunCiCommandTest(unittest.TestCase):
             ],
             job_logs=[
                 "\x1b_bk;t=1753795200000\x07\x1b[31mTraceback\x1b[0m\n"
-                "\x1b_bk;t=1753795200001\x07ValueError: "
+                '\x1b_bk;t=1753795200001\x07  File "/app/pipeline_generator.py"'
+                ", line 420, in generate\n"
+                '\x1b_bk;t=1753795200002\x07    raise ValueError(f"Unknown CI '
+                "step key(s): {', '.join(sorted(missing))}\")\n"
+                "\x1b_bk;t=1753795200003\x07ValueError: "
                 "Unknown CI step key(s): amd-multi-modal-processor\n"
             ],
         )
