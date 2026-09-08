@@ -651,7 +651,7 @@ def test_hash_aligned_query_end_uses_regular_partial_tail():
 
     assert new_blocks is not None
     mamba_manager = manager.coordinator.single_type_managers[1]
-    assert mamba_manager._checkpoint_positions[request.request_id] == 0
+    assert request.request_id not in mamba_manager._checkpoints
     mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
     assert sum(not block.is_null for block in mamba_blocks) == 1
 
