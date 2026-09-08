@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import field
 from typing import Annotated, Any, cast
 
 import regex as re
@@ -98,7 +99,7 @@ class QuantSpec:
     activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
-    _fields_set: frozenset[str] = Field(init=False, repr=False, exclude=True)
+    _fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
     """Names explicitly provided when constructing this spec."""
 
     @field_validator("weight", mode="before")
@@ -135,7 +136,10 @@ class QuantSpec:
             return next(
                 (
                     name
-                    for name, known_quant_key in QUANT_KEY_NAMES.items()
+                    for name, known_quant_key in (
+                        *QUANT_KEY_NAMES.items(),
+                        *_WEIGHT_QUANT_KEY_NAMES.items(),
+                    )
                     if known_quant_key == quant_key
                 ),
                 str(quant_key),

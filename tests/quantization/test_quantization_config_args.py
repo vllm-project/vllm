@@ -49,7 +49,7 @@ def test_args_resolve_ambiguous_strings_by_field():
 
 def test_quant_spec_resolves_string_to_quant_key():
     spec = QuantSpec(weight="mxfp8", activation="fp8_per_token")
-    assert spec.weight == kMxfp8Dynamic
+    assert spec.weight == kMxfp8Static
     assert spec.activation == kFp8DynamicTokenSym
 
 
@@ -57,6 +57,13 @@ def test_quant_spec_accepts_quant_key_directly():
     spec = QuantSpec(weight=kFp8StaticTensorSym)
     assert spec.weight is kFp8StaticTensorSym
     assert spec.activation is None
+
+
+def test_quant_spec_equality_ignores_explicit_field_metadata():
+    assert QuantSpec(weight=kFp8StaticTensorSym) == QuantSpec(
+        weight=kFp8StaticTensorSym,
+        activation=None,
+    )
 
 
 def test_quant_spec_string_representation_uses_quantization_name():
@@ -153,6 +160,7 @@ def test_resolve_merges_explicit_over_shorthand():
         "fp8_per_tensor",
         {"linear": "fp8_per_block"},
     )
+
     assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
 

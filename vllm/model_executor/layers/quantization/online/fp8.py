@@ -12,8 +12,6 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
@@ -36,6 +34,7 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     create_fp8_quant_key,

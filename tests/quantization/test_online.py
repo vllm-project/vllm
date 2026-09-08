@@ -287,14 +287,9 @@ def test_online_moe_methods_resolve_activation_quant_key(
 
 
 def test_online_mxfp8_moe_rejects_explicit_null_activation() -> None:
-    class TestRoutedExperts(RoutedExperts):
-        def __init__(self):
-            torch.nn.Module.__init__(self)
-            self.moe_config = object()
-
     with pytest.raises(NotImplementedError, match="activation=null"):
         Mxfp8OnlineMoEMethod(
-            layer=TestRoutedExperts(),
+            moe=object(),
             activation_quant_key=None,
         )
 
@@ -687,30 +682,33 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
     ("model_name,quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls"),
     [
         # simple case - quantization='fp8_per_tensor'
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_tensor",
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            id="fp8_per_tensor",
         ),
         # simple case - quantization='fp8_per_block'
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_block",
             None,
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
+            id="fp8_per_block",
         ),
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_channel",
             None,
             Fp8PtpcOnlineLinearMethod,
             Fp8PtpcOnlineMoEMethod,
+            id="fp8_per_channel",
         ),
         # quantization='online' with per-layer-kind overrides
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "online",
             {
@@ -719,9 +717,10 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            id="per_layer_kind_overrides",
         ),
         # quantization='online' with per-layer target patterns
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "online",
             {
@@ -732,9 +731,10 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            id="targets",
         ),
         # ignore with direct layer name
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_tensor",
             # qkv_proj is fused from q_proj/k_proj/v_proj. The shard regex
@@ -742,13 +742,15 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             {"ignore": ["model.layers.1.self_attn.o_proj", "re:.*[qkv]_proj"]},
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            id="ignore",
         ),
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "mxfp4",
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
+            id="mxfp4",
         ),
         pytest.param(
             PARTIALLY_PREQUANTIZED_MODEL_NAME,
@@ -759,6 +761,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             id="partially_prequantized_checkpoint",
         ),
         pytest.param(
+            GRANITE_MODEL_NAME,
             "mxfp4",
             {"moe": {"weight": "mxfp4", "activation": "mxfp8"}},
             Mxfp4OnlineLinearMethod,
@@ -766,22 +769,13 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             id="mxfp4_activation_override",
         ),
         pytest.param(
+            GRANITE_MODEL_NAME,
             "mxfp4",
             {"moe": {"weight": "mxfp4", "activation": None}},
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
             id="mxfp4_null_activation_override",
         ),
-    ],
-    ids=[
-        "fp8_per_tensor",
-        "fp8_per_block",
-        "fp8_per_channel",
-        "per_layer_kind_overrides",
-        "targets",
-        "ignore",
-        "mxfp4",
-        "partially_prequantized_checkpoint",
     ],
 )
 @pytest.mark.parametrize(
