@@ -1454,7 +1454,10 @@ def validate_chat_template(chat_template: Path | str | None):
                 )
 
     else:
-        raise TypeError(f"{type(chat_template)} is not a valid chat template type")
+        raise VLLMValidationError(
+            f"{type(chat_template)} is not a valid chat template type",
+            parameter="chat_template",
+        )
 
 
 def _load_chat_template(
