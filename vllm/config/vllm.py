@@ -1900,6 +1900,16 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if (
+            self.attention_config.hisparse_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "HiSparse requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager or use connectors that "
+                "support HMA."
+            )
+
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
