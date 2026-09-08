@@ -17,7 +17,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -68,6 +68,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadingSpec,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -130,8 +131,8 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
     )
     sched = OffloadingConnectorScheduler(
-        spec,
-        config,
+        cast(OffloadingSpec, spec),
+        cast(VllmConfig, config),
         KVCacheConfig(num_blocks=256, kv_cache_tensors=[], kv_cache_groups=groups),
     )
     request = MagicMock()
@@ -156,6 +157,7 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
     if left_state == "pending":
         assert manager.prepare_store([left_key], state.req_context) is not None
     if left_state == "loading":
+        assert sched._chunks_being_loaded is not None
         sched._chunks_being_loaded.add(left_key)
 
     external, load_async = sched.get_num_new_matched_tokens(request, 0)
@@ -164,17 +166,30 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         assert not load_async
         return
     assert external == boundary and load_async
+    assert external is not None
     pool = BlockPool(256, enable_caching=True, hash_block_size=8)
     managers = []
     for i, group in enumerate(groups):
-        cls = FullAttentionManager if i == 0 else SlidingWindowManager
-        m = cls(
-            kv_cache_spec=group.kv_cache_spec,
-            block_pool=pool,
-            enable_caching=True,
-            kv_cache_group_id=i,
-            scheduler_block_size=256,
-        )
+        kv_cache_spec = group.kv_cache_spec
+        m: FullAttentionManager | SlidingWindowManager
+        if i == 0:
+            assert isinstance(kv_cache_spec, FullAttentionSpec)
+            m = FullAttentionManager(
+                kv_cache_spec=kv_cache_spec,
+                block_pool=pool,
+                enable_caching=True,
+                kv_cache_group_id=i,
+                scheduler_block_size=256,
+            )
+        else:
+            assert isinstance(kv_cache_spec, SlidingWindowSpec)
+            m = SlidingWindowManager(
+                kv_cache_spec=kv_cache_spec,
+                block_pool=pool,
+                enable_caching=True,
+                kv_cache_group_id=i,
+                scheduler_block_size=256,
+            )
         m.add_local_computed_blocks(request.request_id, [], 0, external)
         managers.append(m)
     for m in managers:
