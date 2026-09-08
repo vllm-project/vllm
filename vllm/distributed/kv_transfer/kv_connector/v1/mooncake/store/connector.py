@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    KVLoadRange,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -228,6 +229,23 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens
+        )
+
+    @property
+    def supports_load_range(self) -> bool:
+        return bool(
+            self.connector_scheduler and self.connector_scheduler.supports_load_range
+        )
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        load_range: KVLoadRange,
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_alloc_for_range(
+            request, blocks, load_range
         )
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:

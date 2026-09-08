@@ -136,6 +136,50 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     }'
 ```
 
+#### Piecewise Store and P/D prefix loading
+
+By default, `MultiConnector` loads from the first connector with a cache hit.
+To let the decoder load a Store prefix and receive the remaining prompt KV
+from the prefiller, enable the `range_aware` load policy and put
+`MooncakeStoreConnector` before `MooncakeConnector` on both engines. The
+decoder configuration is:
+
+```json
+{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+        "load_policy": "range_aware",
+        "connectors": [
+            {
+                "kv_connector": "MooncakeStoreConnector",
+                "kv_role": "kv_consumer"
+            },
+            {
+                "kv_connector": "MooncakeConnector",
+                "kv_role": "kv_consumer"
+            }
+        ]
+    }
+}
+```
+
+On the prefiller, use the same connector order with outer and
+`MooncakeConnector` roles set to `kv_producer`, and the Store role set to
+`kv_both`.
+
+For example, if Store covers tokens `[0, 1024)` and the prefiller covers
+`[0, 1056)`, the decoder loads `[0, 1024)` from Store and receives
+`[1024, 1056)` from the prefiller. The decoder's suffix block list selects the
+same end-anchored blocks on the prefiller, so the P/D transfer contains only
+that suffix. Boundaries between sources must be scheduler-block aligned; the
+final endpoint may be partial. Piecewise loading supports hybrid attention
+layouts, including packed Full/MLA and sliding-window groups. Requests with
+recurrent-state groups such as Mamba use single-source loading.
+
+If ranges cannot be composed at aligned boundaries, MultiConnector falls back
+to the single connector with the longest available prefix.
+
 To also offload newly completed decode KV blocks, add the following extra
 configuration to the decoder's `MooncakeStoreConnector` entry.
 

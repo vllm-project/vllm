@@ -1304,31 +1304,34 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
-        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
+        load_spec = req_meta.load_spec
+        assert load_spec is not None
+        token_len = load_spec.token_len
         req_id = req_meta.req_id
-        mask_num = (
-            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size
-            * self.block_size
-        )
+        mask_num = load_spec.vllm_cached_tokens // self.block_size * self.block_size
 
         # Skip chunks the consumer's per-group spec wouldn't populate
         # locally (e.g. SWA pre-window) even if the producer stored them.
         load_mask_per_group = self.coord.load_mask(req_meta.block_hashes, token_len)
         tail_key_boundaries = {
             boundary.group_id: boundary.num_tokens
-            for boundary in (
-                req_meta.load_spec.tail_key_boundaries  # type: ignore[union-attr]
-            )
+            for boundary in load_spec.tail_key_boundaries
         }
 
         addr_list: list[list[int]] = []
         size_list: list[list[int]] = []
         key_list: list[str] = []
         block_id_list: list[int] = []
-        for g_idx, db in enumerate(self.token_databases):
+        load_group_ids = load_spec.load_group_ids
+        group_ids = (
+            range(len(self.token_databases))
+            if load_group_ids is None
+            else load_group_ids
+        )
+        for g_idx in group_ids:
             if not self.group_participates[g_idx]:
                 continue
+            db = self.token_databases[g_idx]
             mask = load_mask_per_group[g_idx]
             chunks: list[tuple[int, int]] = []
             store_shard_ids: list[StoreShardId] = []
@@ -1357,6 +1360,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             addr_list.extend(g_addrs)
             size_list.extend(g_sizes)
             block_id_list.extend(g_block_ids)
+
+        if not key_list:
+            self.set_finished_request(req_id)
+            self.request_queue.task_done()
+            return
 
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
