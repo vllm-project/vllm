@@ -2411,10 +2411,10 @@ def test_watermark_key_must_fit_in_64_bits():
         WatermarkConfig(key=2**64)
 
 
-def test_hmac_watermark_generation_is_rejected():
+def test_unknown_watermark_prf_is_rejected():
     with pytest.raises(ValidationError):
         pydantic.TypeAdapter(WatermarkConfig).validate_python(
-            {"key": 42, "prf": "hmac_sha256"}
+            {"key": 42, "prf": "unsupported"}
         )
 
 

@@ -17,9 +17,9 @@ vllm serve MODEL \
   --watermark-config '{"algorithm":"gumbel","key":42}'
 ```
 
-Watermarking is disabled when `--watermark-config` is omitted. Gumbel is the
-default algorithm within an enabled `WatermarkConfig`. When watermarking is
-configured, it is enabled for requests by default.
+Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
+`gumbel`) is the default algorithm within an enabled `WatermarkConfig`. When
+watermarking is configured, it is enabled for requests by default.
 
 Requests can opt out without changing the engine-level algorithm or key:
 
@@ -87,12 +87,6 @@ Watermarked generation currently supports the `philox` PRF:
   resistance. vLLM versions its input mapping and provides compatibility
   vectors so generation and detection remain interoperable.
 
-vLLM also provides `hmac_sha256`, a cryptographically secure reference PRF based
-on [HMAC](https://doi.org/10.1007/3-540-68697-5_1) and standardized by
-[RFC 2104](https://www.rfc-editor.org/rfc/rfc2104). It remains available to
-detectors and downstream implementations, but cannot be selected for generation
-because its full-vocabulary CPU implementation is prohibitively slow.
-
 ## Detection
 
 The detector primitives operate on token IDs and do not require model weights:
@@ -109,7 +103,7 @@ print(result.p_value, result.is_watermarked)
 ```
 
 The tokenizer, algorithm, PRF, key, and context width must match generation.
-Gumbel detection scores repeated contexts once by default so identical PRF
+Gumbel-max detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.

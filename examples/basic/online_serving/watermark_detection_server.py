@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--key", required=True, type=int)
-    parser.add_argument("--prf", choices=("philox", "hmac_sha256"), default="philox")
+    parser.add_argument("--prf", choices=("philox",), default="philox")
     parser.add_argument("--context-width", type=int, default=4)
     parser.add_argument("--p-value-threshold", type=float, default=0.01)
     parser.add_argument("--host", default="127.0.0.1")

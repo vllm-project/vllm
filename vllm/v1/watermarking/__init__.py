@@ -8,7 +8,6 @@ from vllm.v1.watermarking.gumbel import (
     GumbelWatermarker,
 )
 from vllm.v1.watermarking.prfs import (
-    HMACSHA256PRF,
     PhiloxPRF,
     WatermarkPRF,
     create_prf,
@@ -18,7 +17,6 @@ from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 __all__ = [
     "GumbelWatermarkDetector",
     "GumbelWatermarker",
-    "HMACSHA256PRF",
     "PhiloxPRF",
     "WatermarkDetection",
     "WatermarkDetector",

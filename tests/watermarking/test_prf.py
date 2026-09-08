@@ -5,34 +5,25 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.watermarking.prfs import HMACSHA256PRF, PhiloxPRF, WatermarkPRF
+from vllm.v1.watermarking.prfs import PhiloxPRF
 
 
-@pytest.mark.parametrize(
-    ("prf", "expected_mantissas"),
-    [
-        (PhiloxPRF(42), [[1661833, 10571167], [9742331, 13375724]]),
-        (HMACSHA256PRF(42), [[6202050, 16483231], [11455363, 10557370]]),
-    ],
-)
-def test_prf_compatibility_vector(
-    prf: WatermarkPRF, expected_mantissas: list[list[int]]
-):
+def test_philox_compatibility_vector():
     contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
     token_ids = torch.tensor([7, 8])
+    expected_mantissas = [[1661833, 10571167], [9742331, 13375724]]
     expected = (
         (torch.tensor(expected_mantissas, dtype=torch.float64) + 1) / (2**24 + 1)
     ).to(torch.float32)
 
-    assert torch.equal(prf.uniform(contexts, token_ids), expected)
+    assert torch.equal(PhiloxPRF(42).uniform(contexts, token_ids), expected)
 
 
-@pytest.mark.parametrize("prf", [PhiloxPRF(42), HMACSHA256PRF(42)])
-def test_prf_pairs_contexts_with_target_tokens(prf: WatermarkPRF):
+def test_prf_pairs_contexts_with_target_tokens():
     contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
     token_ids = torch.tensor([[7], [8]])
 
-    assert prf.uniform(contexts, token_ids).shape == (2, 1)
+    assert PhiloxPRF(42).uniform(contexts, token_ids).shape == (2, 1)
 
 
 @pytest.mark.skipif(

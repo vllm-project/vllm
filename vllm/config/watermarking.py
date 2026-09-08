@@ -9,7 +9,7 @@ from typing_extensions import Self
 from vllm.config.utils import config
 
 WatermarkingAlgorithm = Literal["gumbel"]
-WatermarkPRFName = Literal["philox", "hmac_sha256"]
+WatermarkPRFName = Literal["philox"]
 
 _SPECULATIVE_DECODING_SUPPORT: dict[WatermarkingAlgorithm, bool] = {
     "gumbel": False,
@@ -26,7 +26,7 @@ class WatermarkConfig:
     """Algorithm used to watermark generated text."""
     context_width: int = Field(default=4, ge=1)
     """Number of prior output tokens used by the watermark PRF."""
-    prf: Literal["philox"] = "philox"
+    prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
     @model_validator(mode="after")
