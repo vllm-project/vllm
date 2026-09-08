@@ -52,6 +52,12 @@ class XingChen4ReasoningParser(ReasoningParser):
         # explicitly disables thinking, the generated output is pure content
         # and contains no ``</think>`` marker. Defaults to ``False`` (thinking
         # on) so behaviour stays safe even if ``adjust_request`` is not called.
+        #
+        # NOTE: ``extract_reasoning`` re-derives this flag from the request's
+        # ``chat_template_kwargs`` because the API server may run
+        # ``adjust_request`` on a *different* parser instance than the one
+        # that performs extraction (see ``OnlineRenderer.render_chat``), so
+        # instance state is not reliable for the non-streaming path.
         self._reasoning_disabled: bool = False
 
         self.start_token = START_THINK
@@ -78,6 +84,22 @@ class XingChen4ReasoningParser(ReasoningParser):
     # Per-request setup
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_reasoning_disabled(request) -> bool:
+        """Resolve the ``enable_thinking`` flag from a request.
+
+        Reads from ``request.chat_template_kwargs`` directly so the result is
+        correct regardless of which parser instance runs extraction (the API
+        server may call ``adjust_request`` on a throwaway parser, leaving the
+        instance used for ``extract_reasoning`` with stale state).
+        """
+        kwargs = getattr(request, "chat_template_kwargs", None)
+        if isinstance(kwargs, dict):
+            value = kwargs.get("enable_thinking", kwargs.get("thinking"))
+            if value is not None:
+                return not bool(value)
+        return False
+
     def adjust_request(self, request):
         """Capture whether thinking is disabled for this request.
 
@@ -87,13 +109,7 @@ class XingChen4ReasoningParser(ReasoningParser):
         never leak state between requests.
         """
         request.skip_special_tokens = False
-        enabled = True
-        kwargs = getattr(request, "chat_template_kwargs", None)
-        if isinstance(kwargs, dict):
-            value = kwargs.get("enable_thinking", kwargs.get("thinking"))
-            if value is not None:
-                enabled = bool(value)
-        self._reasoning_disabled = not enabled
+        self._reasoning_disabled = self._is_reasoning_disabled(request)
         return request
 
     # ------------------------------------------------------------------
@@ -149,7 +165,10 @@ class XingChen4ReasoningParser(ReasoningParser):
         # (the marker already sits at the end of the prompt). The whole output
         # is regular content, not reasoning.
         if self.end_token not in text:
-            if self._reasoning_disabled:
+            # Resolve the flag from the request rather than instance state,
+            # because the parser instance running extraction may not be the
+            # one ``adjust_request`` was called on.
+            if self._is_reasoning_disabled(request):
                 # reasoning=None, content=text (thinking off)
                 return None, text or None
             return text or None, None
