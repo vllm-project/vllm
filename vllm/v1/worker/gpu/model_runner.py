@@ -473,7 +473,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler,
                     self.speculative_config,
                     self.device,
-                    self.model_config.dtype,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -12,12 +12,6 @@ import torch.nn as nn
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
-    VllmTritonJitKernel,
-    kernel_launcher,
-    triton_scalar_specialization_rep,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
@@ -94,16 +88,6 @@ class RejectionSampler(nn.Module):
                 device=device,
             )
         self.synthetic_mode = self.synthetic_conditional_rates is not None
-        _REJECTION_GREEDY_SAMPLE_KERNEL.register_warmup(
-            synthetic_mode=self.synthetic_mode
-        )
-        _REJECTION_RANDOM_SAMPLE_KERNEL.register_warmup(
-            synthetic_mode=self.synthetic_mode
-        )
-        _EXPAND_KERNEL.register_warmup()
-        _SAMPLE_RECOVERED_TOKENS_KERNEL.register_warmup(
-            use_fp64_gumbel=self.use_fp64_gumbel
-        )
 
     def forward(
         self,
@@ -469,7 +453,7 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
-        _REJECTION_GREEDY_SAMPLE_KERNEL(
+        rejection_greedy_sample_kernel[(batch_size,)](
             output_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,
@@ -479,7 +463,7 @@ def rejection_sample(
             max_spec_len,
             uniform_probs,
             synthetic_conditional_rates,
-            synthetic_mode=synthetic_mode,
+            SYNTHETIC_MODE=synthetic_mode,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
@@ -504,7 +488,7 @@ def rejection_sample(
 
     # Rejection sampling for random sampling requests.
     assert uniform_probs is not None
-    _REJECTION_RANDOM_SAMPLE_KERNEL(
+    rejection_random_sample_kernel[(batch_size,)](
         output_token_ids,
         cu_num_draft_tokens,
         draft_token_ids,
@@ -517,8 +501,8 @@ def rejection_sample(
         max_spec_len,
         vocab_size,
         synthetic_conditional_rates,
-        no_draft_probs=draft_probs is None,
-        synthetic_mode=synthetic_mode,
+        NO_DRAFT_PROBS=draft_probs is None,
+        SYNTHETIC_MODE=synthetic_mode,
     )
     return output_token_ids
 
@@ -610,13 +594,13 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    _EXPAND_KERNEL(
+    expand_kernel[(batch_size,)](
         expanded_x,
         x,
         cu_num_tokens,
         replace_from,
         replace_to,
-        max_num_tokens=MAX_SPEC_LEN,  # To avoid recompilation.
+        MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
     )
     return expanded_x
 
@@ -711,7 +695,7 @@ def sample_recovered_tokens(
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     BLOCK_SIZE = 8192
-    _SAMPLE_RECOVERED_TOKENS_KERNEL(
+    sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
         recovered_token_ids,
         cu_num_draft_tokens,
         draft_token_ids,
@@ -720,9 +704,8 @@ def sample_recovered_tokens(
         inv_q,
         vocab_size,
         BLOCK_SIZE,
-        max_spec_len=max_spec_len,
-        no_draft_probs=draft_probs is None,
-        use_fp64_gumbel=use_fp64_gumbel,
+        NO_DRAFT_PROBS=draft_probs is None,
+        USE_FP64_GUMBEL=use_fp64_gumbel,
     )
     return recovered_token_ids
 
@@ -968,249 +951,3 @@ def sample_recovered_tokens_kernel(
 
     recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
-
-
-class RejectionGreedySampleKernel(
-    VllmTritonJitKernel["RejectionGreedySampleKernel.CompileKey"]
-):
-    kernel = staticmethod(rejection_greedy_sample_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        synthetic_mode: bool
-
-    def dispatch(self, *, synthetic_mode: bool) -> CompileKey:
-        return self.CompileKey(synthetic_mode=synthetic_mode)
-
-    def get_warmup_keys(self, *, synthetic_mode: bool) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(synthetic_mode=synthetic_mode)
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        return dict(
-            output_token_ids=int32_ptr,
-            cu_num_draft_tokens=int32_ptr,
-            draft_token_ids=int32_ptr,
-            target_argmax=TritonWarmupTensor(torch.int64),
-            bonus_token_ids=TritonWarmupTensor(torch.int64),
-            is_greedy=TritonWarmupTensor(torch.bool),
-            max_spec_len=5,
-            uniform_probs=TritonWarmupTensor(torch.float64),
-            synthetic_conditional_rates=TritonWarmupTensor(torch.float32),
-            synthetic_mode=compile_key.synthetic_mode,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        output_token_ids: torch.Tensor,
-        cu_num_draft_tokens: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-        target_argmax: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        is_greedy: torch.Tensor | None,
-        max_spec_len: int,
-        uniform_probs: torch.Tensor | None,
-        synthetic_conditional_rates: torch.Tensor | None,
-        *,
-        synthetic_mode: bool,
-    ) -> tuple[tuple[int, ...], dict[str, object]]:
-        return (output_token_ids.shape[0],), dict(
-            SYNTHETIC_MODE=synthetic_mode,
-        )
-
-
-class RejectionRandomSampleKernel(
-    VllmTritonJitKernel["RejectionRandomSampleKernel.CompileKey"]
-):
-    kernel = staticmethod(rejection_random_sample_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        vocab_size: int
-        no_draft_probs: bool
-        synthetic_mode: bool
-
-    def dispatch(
-        self, *, vocab_size: int, no_draft_probs: bool, synthetic_mode: bool
-    ) -> CompileKey:
-        return self.CompileKey(
-            vocab_size=triton_scalar_specialization_rep(vocab_size),
-            no_draft_probs=no_draft_probs,
-            synthetic_mode=synthetic_mode,
-        )
-
-    def get_warmup_keys(self, *, synthetic_mode: bool) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            vocab_size=(2, 16),
-            no_draft_probs=(False, True),
-            synthetic_mode=synthetic_mode,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        return dict(
-            output_token_ids=int32_ptr,
-            cu_num_draft_tokens=int32_ptr,
-            draft_token_ids=int32_ptr,
-            draft_probs=None if compile_key.no_draft_probs else float32_ptr,
-            target_probs=float32_ptr,
-            bonus_token_ids=TritonWarmupTensor(torch.int64),
-            recovered_token_ids=int32_ptr,
-            uniform_probs=TritonWarmupTensor(torch.float64),
-            is_greedy=TritonWarmupTensor(torch.bool),
-            max_spec_len=5,
-            vocab_size=compile_key.vocab_size,
-            synthetic_conditional_rates=float32_ptr,
-            no_draft_probs=compile_key.no_draft_probs,
-            synthetic_mode=compile_key.synthetic_mode,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        output_token_ids: torch.Tensor,
-        cu_num_draft_tokens: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor | None,
-        target_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        recovered_token_ids: torch.Tensor,
-        uniform_probs: torch.Tensor,
-        is_greedy: torch.Tensor,
-        max_spec_len: int,
-        vocab_size: int,
-        synthetic_conditional_rates: torch.Tensor | None,
-        *,
-        no_draft_probs: bool,
-        synthetic_mode: bool,
-    ) -> tuple[tuple[int, ...], dict[str, object]]:
-        return (output_token_ids.shape[0],), dict(
-            NO_DRAFT_PROBS=no_draft_probs,
-            SYNTHETIC_MODE=synthetic_mode,
-        )
-
-
-class ExpandKernel(VllmTritonJitKernel["ExpandKernel.CompileKey"]):
-    kernel = staticmethod(expand_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        dtype: torch.dtype
-        max_num_tokens: int
-
-    def dispatch(self, *, dtype: torch.dtype, max_num_tokens: int) -> CompileKey:
-        return self.CompileKey(dtype=dtype, max_num_tokens=max_num_tokens)
-
-    def get_warmup_keys(self) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            dtype=(torch.float32, torch.int64), max_num_tokens=MAX_SPEC_LEN
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
-        data_ptr = TritonWarmupTensor(compile_key.dtype)
-        return dict(
-            output=data_ptr,
-            input=data_ptr,
-            cu_num_tokens=TritonWarmupTensor(torch.int32),
-            replace_from=0,
-            replace_to=0,
-            max_num_tokens=compile_key.max_num_tokens,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        output: torch.Tensor,
-        input: torch.Tensor,
-        cu_num_tokens: torch.Tensor,
-        replace_from: int,
-        replace_to: int,
-        *,
-        max_num_tokens: int,
-    ) -> tuple[tuple[int, ...], dict[str, object]]:
-        return (input.shape[0],), dict(MAX_NUM_TOKENS=max_num_tokens)
-
-
-class SampleRecoveredTokensKernel(
-    VllmTritonJitKernel["SampleRecoveredTokensKernel.CompileKey"]
-):
-    kernel = staticmethod(sample_recovered_tokens_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        vocab_size: int
-        block_size: int
-        no_draft_probs: bool
-        use_fp64_gumbel: bool
-
-    def dispatch(
-        self,
-        *,
-        vocab_size: int,
-        block_size: int,
-        no_draft_probs: bool,
-        use_fp64_gumbel: bool,
-    ) -> CompileKey:
-        return self.CompileKey(
-            vocab_size=triton_scalar_specialization_rep(vocab_size),
-            block_size=block_size,
-            no_draft_probs=no_draft_probs,
-            use_fp64_gumbel=use_fp64_gumbel,
-        )
-
-    def get_warmup_keys(self, *, use_fp64_gumbel: bool) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            vocab_size=(2, 16),
-            block_size=8192,
-            no_draft_probs=(False, True),
-            use_fp64_gumbel=use_fp64_gumbel,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        return dict(
-            output_token_ids=int32_ptr,
-            cu_num_draft_tokens=int32_ptr,
-            draft_token_ids=int32_ptr,
-            draft_probs=None if compile_key.no_draft_probs else float32_ptr,
-            target_probs=float32_ptr,
-            inv_q=TritonWarmupTensor(
-                torch.float64 if compile_key.use_fp64_gumbel else torch.float32
-            ),
-            vocab_size=compile_key.vocab_size,
-            block_size=compile_key.block_size,
-            max_spec_len=5,
-            no_draft_probs=compile_key.no_draft_probs,
-            use_fp64_gumbel=compile_key.use_fp64_gumbel,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        output_token_ids: torch.Tensor,
-        cu_num_draft_tokens: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor | None,
-        target_probs: torch.Tensor,
-        inv_q: torch.Tensor,
-        vocab_size: int,
-        block_size: int,
-        *,
-        max_spec_len: int,
-        no_draft_probs: bool,
-        use_fp64_gumbel: bool,
-    ) -> tuple[tuple[int, ...], dict[str, object]]:
-        return (cu_num_draft_tokens.shape[0], max_spec_len), dict(
-            BLOCK_SIZE=block_size,
-            NO_DRAFT_PROBS=no_draft_probs,
-            USE_FP64_GUMBEL=use_fp64_gumbel,
-        )
-
-
-_REJECTION_GREEDY_SAMPLE_KERNEL = RejectionGreedySampleKernel()
-_REJECTION_RANDOM_SAMPLE_KERNEL = RejectionRandomSampleKernel()
-_EXPAND_KERNEL = ExpandKernel()
-_SAMPLE_RECOVERED_TOKENS_KERNEL = SampleRecoveredTokensKernel()

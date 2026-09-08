@@ -171,14 +171,14 @@ def _gemma4_routing_kernel(
 class Gemma4RoutingKernel(
     VllmTritonJitKernel["Gemma4RoutingKernel.CompileKey"]
 ):
+    kernel = staticmethod(_gemma4_routing_kernel)
+
     @dataclass(frozen=True)
     class CompileKey:
         num_experts: int
         topk: int
         block_e: int
         num_warps: int
-
-    kernel = staticmethod(_gemma4_routing_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -241,9 +241,6 @@ class Gemma4RoutingKernel(
             BLOCK_E=block_e,
             num_warps=num_warps,
         )
-
-
-_GEMMA4_ROUTING_KERNEL = Gemma4RoutingKernel()
 
 
 def gemma4_fused_routing_kernel_triton(
@@ -1833,3 +1830,6 @@ class Gemma4ForCausalLM(
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(_weight_iterator(), mapper=mapper)
+
+
+_GEMMA4_ROUTING_KERNEL = Gemma4RoutingKernel()
