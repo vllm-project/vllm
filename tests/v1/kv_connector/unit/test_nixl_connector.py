@@ -2118,7 +2118,9 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     np.testing.assert_array_equal(device_read.args[4], [7])
     worker.nixl_wrapper.send_notif.assert_not_called()
 
-    assert worker._pop_done_transfers(worker._recving_transfers) == {"request"}
+    assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
+        "request"
+    }
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
     )
@@ -2133,12 +2135,14 @@ def test_mixed_memory_read_failure_does_not_notify_producer():
     worker._failed_inflight_recvs = set()
     worker._is_hma_required = True
     worker._failed_recv_reqs = MagicMock()
+    worker._failed_recv_pending = set()
+    worker._host_stager = None
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
 
-    worker._pop_done_transfers(worker._recving_transfers)
+    worker._pop_done_transfers(worker._recving_transfers, is_recv=True)
 
     assert "request" not in worker._pending_recv_notifs
     worker.nixl_wrapper.send_notif.assert_not_called()

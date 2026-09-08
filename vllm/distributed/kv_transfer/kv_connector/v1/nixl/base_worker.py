@@ -2918,7 +2918,7 @@ class NixlBaseConnectorWorker:
         return True
 
     def _pop_done_transfers(
-        self, transfers: dict[str, list[int]], *, is_recv: bool
+        self, transfers: dict[str, list[int]], *, is_recv: bool = False
     ) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
@@ -2931,7 +2931,7 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
-            failed = req_id in self._failed_recv_pending
+            failed = is_recv and req_id in self._failed_recv_pending
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
