@@ -135,10 +135,9 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
         self.is_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
         )
-        self.use_attn_reduce_scatter_for_moe = self.is_sequence_parallel
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -173,7 +172,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                is_sequence_parallel=self.is_sequence_parallel,
+                sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.mlp",
             )
         else:
@@ -234,7 +233,7 @@ class Qwen3_5Model(Qwen3NextModel):
         )
         parallel_config = vllm_config.parallel_config
         self.is_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
         )
 

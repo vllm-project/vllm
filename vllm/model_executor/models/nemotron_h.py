@@ -144,7 +144,7 @@ class NemotronHMoE(nn.Module):
             config.moe_latent_size if self.use_latent_moe else config.hidden_size
         )
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel
 
         self.gate = GateLinear(
             config.hidden_size,

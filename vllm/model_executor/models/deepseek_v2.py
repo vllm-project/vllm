@@ -305,7 +305,7 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel
 
         if config.hidden_act != "silu":
             raise ValueError(
@@ -1285,8 +1285,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
         # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
         # send/receive sequence-parallel hidden_states across stages.
-        self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
+        self.use_sequence_parallel = (
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
         )
@@ -1305,7 +1305,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
-            reduce_results=not self.use_sequence_parallel_moe,
+            reduce_results=not self.use_sequence_parallel,
         )
 
         if is_moe_layer:
@@ -1340,7 +1340,7 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         full_num_tokens = positions.shape[0]
         input_is_sequence_parallel = (
-            self.use_sequence_parallel_moe
+            self.use_sequence_parallel
             and residual is not None
             and hidden_states.shape[0] != full_num_tokens
         )
@@ -1374,7 +1374,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 # first layer.
                 residual *= 1.0 / self.routed_scaling_factor
 
-        if self.use_sequence_parallel_moe:
+        if self.use_sequence_parallel:
             tp_world_size = get_tensor_model_parallel_world_size()
             # small trick using minus, eg. -17 % 8 = 7
             sp_pad = (-hidden_states.shape[0]) % tp_world_size
@@ -1386,7 +1386,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_sequence_parallel_moe:
+        if self.use_sequence_parallel:
             hidden_states = self.mlp(
                 hidden_states,
                 already_sequence_parallel=True,
@@ -1523,7 +1523,7 @@ class DeepseekV2Model(nn.Module):
             # all gather if we need to use the whole states
             if (
                 hidden_states.shape[0] != positions.shape[0]
-                and not layer.use_sequence_parallel_moe
+                and not layer.use_sequence_parallel
             ):
                 combined_states = torch.cat([hidden_states, residual], dim=-1)
                 combined_states = tensor_model_parallel_all_gather(combined_states, 0)

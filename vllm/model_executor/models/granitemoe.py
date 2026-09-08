@@ -268,7 +268,7 @@ class GraniteMoeDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            is_sequence_parallel=parallel_config.use_sequence_parallel_moe,
+            is_sequence_parallel=parallel_config.use_sequence_parallel,
             prefix=f"{prefix}.block_sparse_moe",
         )
 

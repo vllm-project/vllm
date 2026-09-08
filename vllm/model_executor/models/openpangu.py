@@ -146,7 +146,7 @@ class OpenPanguMoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel
         check_ffn_act_fn(config.hidden_act)
 
         self.gate = ReplicatedLinear(

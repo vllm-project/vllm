@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.lora.layers.column_parallel_linear import ColumnParallelLinearWithLoRA
 from vllm.lora.layers.row_parallel_linear import RowParallelLinearWithLoRA
 from vllm.model_executor import parameter as parameter_module
@@ -81,6 +82,34 @@ def _row_layer(*, sequence_parallel: bool = True) -> RowParallelLinear:
         sequence_parallel=sequence_parallel,
         return_bias=False,
     )
+
+
+def test_sequence_parallel_layers_switch_back_to_tp_per_forward(monkeypatch):
+    """A short dense step keeps all tokens and uses TP all-reduce."""
+    all_gather = Mock(side_effect=AssertionError("unexpected all-gather"))
+    reduce_scatter = Mock(side_effect=AssertionError("unexpected reduce-scatter"))
+    all_reduce = Mock(side_effect=lambda x: x * 2)
+    monkeypatch.setattr(linear_module, "tensor_model_parallel_all_gather", all_gather)
+    monkeypatch.setattr(
+        linear_module, "tensor_model_parallel_reduce_scatter", reduce_scatter
+    )
+    monkeypatch.setattr(linear_module, "tensor_model_parallel_all_reduce", all_reduce)
+    column, row = _column_layer(), _row_layer()
+    inputs = torch.ones(3, 4)
+    partial = torch.ones(3, 8)
+    with override_forward_context(
+        ForwardContext(
+            no_compile_layers={},
+            attn_metadata={},
+            slot_mapping={},
+            sequence_parallel_enabled=False,
+        )
+    ):
+        assert column.prepare_input(inputs) is inputs
+        torch.testing.assert_close(row.reduce_output(partial), partial * 2)
+    all_reduce.assert_called_once()
+    all_gather.assert_not_called()
+    reduce_scatter.assert_not_called()
 
 
 def test_column_parallel_linear_gathers_sequence_shards(monkeypatch) -> None:

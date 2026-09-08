@@ -20,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.forward_context import is_sequence_parallel_enabled
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
@@ -623,7 +624,7 @@ class ColumnParallelLinear(LinearBase):
         input_: torch.Tensor,
         unpadded_size: int | None = None,
     ) -> torch.Tensor:
-        if self.sequence_parallel and self.tp_size > 1:
+        if self.sequence_parallel and self.tp_size > 1 and is_sequence_parallel_enabled():
             input_ = tensor_model_parallel_all_gather(input_, dim=0)
             if unpadded_size is not None:
                 input_ = input_[:unpadded_size]
@@ -1805,7 +1806,7 @@ class RowParallelLinear(LinearBase):
     def reduce_output(self, output_parallel: torch.Tensor) -> torch.Tensor:
         if not self.reduce_results or self.tp_size == 1:
             return output_parallel
-        if self.sequence_parallel:
+        if self.sequence_parallel and is_sequence_parallel_enabled():
             padding = (-output_parallel.shape[0]) % self.tp_size
             if padding:
                 pad = (0, 0) * (output_parallel.ndim - 1) + (0, padding)

@@ -329,7 +329,7 @@ class MoEMixin(MixtureOfExperts):
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
-                                self.parallel_config.use_sequence_parallel_moe
+                                self.parallel_config.use_sequence_parallel
                             ),
                             gate=gate,
                             shared_experts=shared_experts,

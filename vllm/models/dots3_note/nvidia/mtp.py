@@ -90,7 +90,7 @@ class Dots3NoteMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel
         if not is_sequence_parallel:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         hidden_states, _ = self.shared_head.norm(hidden_states, residual)

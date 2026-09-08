@@ -78,7 +78,7 @@ class InternS2MobiusMetaMoeBlock(nn.Module):
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel
 
         if self.tp_size > self.n_routed_experts:
             raise ValueError(
@@ -146,7 +146,7 @@ class InternS2MobiusSharedExpertBlock(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
-        is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel
         self.shared_expert_gate = ReplicatedLinear(
             config.hidden_size,
             1,
@@ -185,7 +185,7 @@ class InternS2MobiusDecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.num_blocks = config.num_blocks
         self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
         )
 

@@ -127,7 +127,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             residual=None,
         )
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
-        if self.mtp_block.use_sequence_parallel_moe:
+        if self.mtp_block.use_sequence_parallel:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[: positions.shape[0]]
         # Recycle the post-final-norm hidden into the next draft step.

@@ -82,6 +82,7 @@ class Qwen2MoeMLP(nn.Module):
         is_sequence_parallel: bool = False,
         disable_tp: bool = False,
         prefix: str = "",
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         disable_tp = disable_tp or is_sequence_parallel
@@ -92,6 +93,7 @@ class Qwen2MoeMLP(nn.Module):
             quant_config=quant_config,
             disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
+            sequence_parallel=sequence_parallel,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -101,6 +103,7 @@ class Qwen2MoeMLP(nn.Module):
             reduce_results=reduce_results,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
+            sequence_parallel=sequence_parallel,
         )
         if hidden_act != "silu":
             raise ValueError(

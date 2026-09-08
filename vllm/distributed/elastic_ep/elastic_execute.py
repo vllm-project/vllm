@@ -354,7 +354,7 @@ class ElasticEPScalingExecutor:
     def _make_eep_moe_config(self, module, dp_group, ep_group):
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = get_tp_group().world_size
-        sp_size = tp_size if parallel_config.use_sequence_parallel_moe else 1
+        sp_size = tp_size if parallel_config.use_sequence_parallel else 1
         moe_parallel_config = FusedMoEParallelConfig.make(
             tp_size_=tp_size,
             pcp_size_=get_pcp_group().world_size,

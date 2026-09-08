@@ -368,7 +368,7 @@ class MLPBlock(torch.nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.is_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and vllm_config.lora_config is None
         )
 

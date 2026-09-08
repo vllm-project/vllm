@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...models.registry import HF_EXAMPLE_MODELS, _HfExamplesInfo
+from ...models.utils import check_logprobs_close
 from ...utils import compare_all_settings, create_new_process_for_each_test
 
 logger = init_logger("test_sequence_parallel")
@@ -29,6 +30,54 @@ logger = init_logger("test_sequence_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
 NVFP4_MODEL_INFO = _HfExamplesInfo(NVFP4_MODEL_ID)
+
+
+@pytest.mark.parametrize("is_moe", [False, True])
+def test_qwen35_explicit_sp_dp1(vllm_runner, is_moe):
+    """Compare SP with TP across long prefill, threshold and decode steps."""
+    model_env = "SP_MOE_MODEL" if is_moe else "SP_DENSE_MODEL"
+    model = os.environ.get(model_env)
+    if model is None:
+        pytest.skip(f"Set {model_env} to a local Qwen3.5 model")
+    if not current_platform.is_cuda() or current_platform.device_count() < 2:
+        pytest.skip("Requires two CUDA GPUs")
+
+    outputs = []
+    for enabled in (False, True):
+        with vllm_runner(
+            model,
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            distributed_executor_backend="mp",
+            enable_expert_parallel=is_moe,
+            all2all_backend="allgather_reducescatter",
+            enable_sequence_parallel=enabled,
+            enforce_eager=True,
+            max_model_len=2048,
+            max_num_batched_tokens=1536,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+        ) as runner:
+            token_ids = runner.llm.get_tokenizer().encode(
+                "Explain sequence parallelism.", add_special_tokens=False
+            )
+            step_outputs = []
+            for size in (1001, 1000, 17):
+                prompt = (token_ids * (size // len(token_ids) + 1))[:size]
+                step_outputs.extend(
+                    runner.generate_greedy_logprobs(
+                        [prompt], max_tokens=8, num_logprobs=5
+                    )
+                )
+            outputs.append(step_outputs)
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="SP off",
+        name_1="SP on",
+        always_check_logprobs=True,
+        warn_on_mismatch=False,
+    )
 
 
 class ParallelSetup(NamedTuple):
