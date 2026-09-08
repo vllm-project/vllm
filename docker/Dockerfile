@@ -1044,7 +1044,9 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-# Copy examples and benchmarks at the end to minimize cache invalidation
+# Copy examples, benchmarks, and the license at the end to minimize cache
+# invalidation.
+COPY LICENSE LICENSE
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
