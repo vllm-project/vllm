@@ -35,7 +35,7 @@ from vllm.config import (
     WatermarkConfig,
     update_config,
 )
-from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
@@ -559,6 +559,23 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
     assert config.compilation_config.cudagraph_capture_sizes == []
     assert config.compilation_config.max_cudagraph_capture_size == 0
+
+
+def test_resolve_cudagraph_mode_rejects_unsafe_attn_fusion():
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(fuse_attn_quant=True),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    compilation_config.set_splitting_ops_for_v1("fake", data_parallel_size=1)
+
+    with pytest.raises(
+        ValueError, match="fuse_attn_quant without use_inductor_graph_partition"
+    ):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            AttentionCGSupport.UNIFORM_BATCH,
+            "FakeAttentionBackend",
+        )
 
 
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():

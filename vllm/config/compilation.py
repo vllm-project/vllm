@@ -1403,6 +1403,18 @@ class CompilationConfig:
             cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
             and min_cg_support != AttentionCGSupport.ALWAYS
         ):
+            if (
+                self.pass_config.fuse_attn_quant
+                and not self.use_inductor_graph_partition
+            ):
+                raise ValueError(
+                    "fuse_attn_quant without use_inductor_graph_partition "
+                    "requires an attention backend that supports FULL "
+                    "cudagraphs for mixed batches; "
+                    f"{min_cg_attn_backend} only supports {min_cg_support}. "
+                    "Either enable use_inductor_graph_partition or disable "
+                    "fuse_attn_quant."
+                )
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
                 f"with {min_cg_attn_backend} backend (support: "
