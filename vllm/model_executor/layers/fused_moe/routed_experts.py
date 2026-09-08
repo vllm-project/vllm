@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
+    resolve_quant_method,
 )
 
 if TYPE_CHECKING:
@@ -199,7 +200,7 @@ class RoutedExperts(PluggableLayer):
         """
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix)
+            quant_method = resolve_quant_method(quant_config, self, prefix)
         if quant_method is None:
             quant_method = UnquantizedFusedMoEMethod(moe_config)
         assert isinstance(quant_method, FusedMoEMethodBase)
