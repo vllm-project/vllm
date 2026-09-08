@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.backends.zentorch_sdpa import (
     should_use_zentorch_sdpa,
-    zentorch_encoder_sdpa,
+    zentorch_sdpa_attn,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -396,11 +396,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
             AttentionType.ENCODER,
         )
         if is_encoder_attention:
-            if self.use_zentorch_sdpa and has_zentorch_op(["zentorch_sdpa"]):
+            if self.use_zentorch_sdpa and has_zentorch_op(["zentorch_sdpa_attn"]):
                 # Encoder attention never reads the KV cache back, so the
                 # zentorch path attends the packed QKV directly instead of
                 # staging it through the scratch encoder cache.
-                zentorch_encoder_sdpa(
+                zentorch_sdpa_attn(
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
                     value[:num_actual_tokens],
