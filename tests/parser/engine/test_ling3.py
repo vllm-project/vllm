@@ -42,6 +42,19 @@ def test_ling3_defaults_thinking_on():
     assert content == "answer"
 
 
+def test_ling3_closed_reasoning_without_answer_stays_reasoning():
+    """``</think>`` with nothing after it is finished reasoning, not content."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser("ling3")
+    parser = parser_cls(_tokenizer())
+
+    reasoning, content = parser.extract_reasoning(
+        "<think>reason</think>", _test_request()
+    )
+
+    assert reasoning == "reason"
+    assert content is None
+
+
 def test_ling3_disable_thinking_keeps_reasoning_as_content():
     parser_cls = ReasoningParserManager.get_reasoning_parser("ling3")
     parser = parser_cls(
