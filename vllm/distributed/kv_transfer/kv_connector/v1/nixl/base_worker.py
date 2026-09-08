@@ -206,13 +206,13 @@ class NixlBaseConnectorWorker:
             if uses_region_group_mapping is None:
                 uses_region_group_mapping = len(set(region_group_ids)) > 1
             region_group_ids_array = np.asarray(region_group_ids, dtype=np.int32)
+            # NOTE (NickLucche) With HMA, every kv group has the same number of layers
+            # and layers from different groups share the same kv tensor.
+            # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be
+            # read across all regions, same for [3], but group0-group1 blocks will
+            # always differ (different areas). Therefore we can just flatten the
+            # block_ids and compute the descs ids for all groups at once.
             if not uses_region_group_mapping:
-                # NOTE (NickLucche) With HMA, every kv group has the same number
-                # of layers and layers from different groups share the same kv
-                # tensor. E.g., for block_ids=[[1, 2], [3]], blocks [1, 2] need
-                # to be read across all regions, as does [3], while blocks from
-                # different groups never overlap. We can therefore flatten the
-                # block ids and compute all descriptor ids at once.
                 block_arr = np.concatenate(
                     [np.asarray(group, dtype=np.int32) for group in block_ids]
                 )[None, :]
