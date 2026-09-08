@@ -1448,3 +1448,43 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+def test_abort_requests_updates_finished_stats(runner: str):
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=(
+            SamplingParams(detokenize=False) if runner == "generate" else None
+        ),
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+    )
+    queue = RequestOutputCollector(
+        output_kind=(
+            request.sampling_params.output_kind
+            if runner == "generate"
+            else request.pooling_params.output_kind
+        ),
+        request_id=request.request_id,
+    )
+    output_processor.add_request(request, None, queue=queue)
+
+    iteration_stats = IterationStats()
+    output_processor.abort_requests(
+        [request.request_id], internal=True, iteration_stats=iteration_stats
+    )
+
+    assert len(iteration_stats.finished_requests) == 1
+    finished = iteration_stats.finished_requests[0]
+    assert finished.finish_reason == FinishReason.ABORT
+    assert finished.request_id == request.external_req_id
+    assert finished.num_prompt_tokens == len(request.prompt_token_ids or [])
+    assert not output_processor.has_unfinished_requests()

@@ -492,7 +492,12 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def abort_requests(
+        self,
+        request_ids: Iterable[str],
+        internal: bool,
+        iteration_stats: IterationStats | None = None,
+    ) -> list[str]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -528,7 +533,12 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self.lora_states.request_finished(request_id, req_state.lora_name)
+                if iteration_stats is not None:
+                    self._update_stats_from_finished(
+                        req_state, FinishReason.ABORT, iteration_stats
+                    )
+                else:
+                    self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
                 if req_state.queue is not None and (
@@ -550,7 +560,11 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
+                    child_reqs = self.abort_requests(
+                        child_reqs,
+                        internal=True,
+                        iteration_stats=iteration_stats,
+                    )
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
