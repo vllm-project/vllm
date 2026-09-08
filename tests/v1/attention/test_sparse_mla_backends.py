@@ -3347,23 +3347,36 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     return SimpleNamespace(fa4=fa4_calls, trtllm=trtllm_calls, lse=lse)
 
 
-def test_fa4_sparse_decode_kernel_correctness():
+@pytest.mark.parametrize(
+    "num_heads,return_lse", [(128, False), (16, True)], ids=["heads128", "heads16_lse"]
+)
+def test_fa4_sparse_decode_kernel_correctness(num_heads, return_lse):
     from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
         FlashAttnMLASparseFA4Impl,
     )
 
     _require_fa4()
     counts = [0, 1, 127, 128, 129, 2047, 2048]
-    inputs = _fa4_inputs(counts, num_heads=128, topk=2048, num_blocks=64)
-    impl = _fa4_impl(topk_indices_buffer=inputs.topk_indices, scale=inputs.scale)
+    inputs = _fa4_inputs(counts, num_heads=num_heads, topk=2048, num_blocks=64)
+    impl = _fa4_impl(
+        topk_indices_buffer=inputs.topk_indices,
+        scale=inputs.scale,
+        need_to_return_lse_for_decode=return_lse,
+    )
     q = (inputs.ql_nope, inputs.q_pe)
 
     with torch.inference_mode():
         out, lse = FlashAttnMLASparseFA4Impl.forward_mqa(
             impl, q, inputs.kv_cache, inputs.metadata, None
         )
-
-    assert lse is None
+        if not return_lse:
+            assert lse is None
+        else:
+            out_fused, lse_fused = FlashAttnMLASparseFA4Impl.forward_mqa(
+                impl, torch.cat(q, dim=-1), inputs.kv_cache, inputs.metadata, None
+            )
+            assert lse.shape == (len(counts), num_heads)
+            assert torch.equal(out, out_fused) and torch.equal(lse, lse_fused)
 
     kv_flat = inputs.kv_cache.view(-1, inputs.kv_lora_rank + inputs.rope_dim)
     keys = kv_flat[inputs.topk_indices.clamp(min=0).long()].float()
@@ -3371,8 +3384,7 @@ def test_fa4_sparse_decode_kernel_correctness():
     scores = (scores * inputs.scale).masked_fill(
         (inputs.topk_indices < 0)[:, None, :], float("-inf")
     )
-    # The all-sentinel row softmaxes to NaN here, while the kernel's own
-    # masking writes the exact zero row, so the backend needs no post-masking.
+    # The all-sentinel row softmaxes to NaN here; the kernel writes (0, -inf).
     probs = torch.softmax(scores, dim=-1).nan_to_num()
     torch.testing.assert_close(
         out.float(),
@@ -3380,59 +3392,104 @@ def test_fa4_sparse_decode_kernel_correctness():
         rtol=0.01,
         atol=0.01,
     )
+    if return_lse:
+        torch.testing.assert_close(
+            lse, torch.logsumexp(scores, dim=-1), rtol=0, atol=5e-3
+        )
 
 
+@pytest.mark.parametrize("dcp", [1, 2], ids=["native", "dcp2"])
 @pytest.mark.parametrize("num_decode_tokens", [7, 3])
-def test_fa4_sparse_routes_whole_batches(monkeypatch, num_decode_tokens):
-    """A uniform decode batch -- a multi-token spec-decode request included --
-    goes to FA4 whole, and a batch with any prefill row goes to FlashInfer's
-    kernel whole."""
+def test_fa4_sparse_routes_whole_batches(monkeypatch, num_decode_tokens, dcp):
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
     from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
         FlashAttnMLASparseFA4Impl,
     )
 
     counts = [1, 2, 3, 4, 5, 6, 7]
     num_tokens = len(counts)
-    inputs = _fa4_inputs(counts, device="cpu")
+    # The query is all-gathered before forward_mqa: more heads than the impl's.
+    kernel_heads = 16 * dcp
+    inputs = _fa4_inputs(counts, num_heads=kernel_heads, device="cpu")
     inputs.metadata.num_decode_tokens = num_decode_tokens
-    calls = _record_fa4_kernels(monkeypatch, 16, device="cpu")
-    # The shared index group converts once for every layer of the group.
+    calls = _record_fa4_kernels(monkeypatch, kernel_heads, device="cpu")
+    valid_counts = inputs.valid_counts.clone()
     index_group = MagicMock()
-    index_group.convert_logical_to_physical_topk.return_value = (
-        inputs.topk_indices,
-        inputs.valid_counts,
+    q = (inputs.ql_nope, inputs.q_pe)
+    if dcp > 1:
+        # This rank's share after filtering: token 0 owns none of its top-k.
+        valid_counts[0] = 0
+        index_filter = MagicMock(return_value=(inputs.topk_indices, valid_counts))
+        monkeypatch.setattr(
+            fa4_sparse, "triton_filter_and_convert_dcp_index", index_filter
+        )
+        # mla_attention fuses the query before the DCP all-gather.
+        q = torch.cat(q, dim=-1)
+    else:
+        # The shared index group converts once for every layer of the group.
+        index_group.convert_logical_to_physical_topk.return_value = (
+            inputs.topk_indices,
+            valid_counts,
+        )
+    impl = _fa4_impl(
+        topk_indices_buffer=inputs.topk_indices,
+        index_group=index_group,
+        dcp_world_size=dcp,
+        dcp_rank=dcp - 1,
+        need_to_return_lse_for_decode=dcp > 1,
     )
-    impl = _fa4_impl(topk_indices_buffer=inputs.topk_indices, index_group=index_group)
 
     with torch.inference_mode():
         out, lse = FlashAttnMLASparseFA4Impl.forward_mqa(
-            impl, (inputs.ql_nope, inputs.q_pe), inputs.kv_cache, inputs.metadata, None
+            impl, q, inputs.kv_cache, inputs.metadata, None
         )
 
-    assert lse is None
+    if dcp == 1:
+        assert lse is None
+    else:
+        kwargs = index_filter.call_args.kwargs
+        assert (kwargs["dcp_size"], kwargs["dcp_rank"]) == (dcp, dcp - 1)
+        assert kwargs["cp_kv_cache_interleave_size"] == 1
+        # The flat-cache addressing must match the non-DCP converter's wiring.
+        assert kwargs["BLOCK_STRIDE_ROWS"] == inputs.block_size
+        assert kwargs["NUM_TOPK_TOKENS"] == inputs.topk
+        assert lse.shape == (num_tokens, kernel_heads)
+
     if num_decode_tokens == num_tokens:
         (fa4,) = calls.fa4
         assert calls.trtllm == []
-        assert fa4["gather_kv_valid_length"] is inputs.valid_counts
+        assert fa4["return_softmax_lse"] is (dcp > 1)
+        assert fa4["gather_kv_valid_length"] is valid_counts
         # Every token is its own one-row FA4 sequence, spec-decode rows included.
         assert fa4["max_seqlen_q"] == 1
         assert fa4["cu_seqlens_q"].tolist() == list(range(num_tokens + 1))
-        # The qv kernel takes the two halves of the query.
+        # The qv kernel takes the two halves, fused query or not.
         assert fa4["q"].shape[-1] == inputs.rope_dim
         assert fa4["q_v"].shape[-1] == inputs.kv_lora_rank
         assert (out == 1.0).all()
-    else:
-        (trtllm,) = calls.trtllm
-        assert calls.fa4 == []
-        assert trtllm["query"].shape[0] == num_tokens
-        assert trtllm["seq_lens"] is inputs.valid_counts
-        # The top-k width comes from the buffer, which index_kpool can widen
-        # past ``metadata.topk_tokens``.
-        assert trtllm["sparse_mla_top_k"] == inputs.topk
+        if dcp > 1:
+            # FA4's LSE is natural log already, so it is passed through untouched.
+            torch.testing.assert_close(lse, calls.lse(num_tokens), rtol=0, atol=0)
+        return
+
+    (trtllm,) = calls.trtllm
+    assert calls.fa4 == []
+    assert trtllm["return_lse"] is (dcp > 1)
+    assert trtllm["query"].shape[0] == num_tokens
+    assert trtllm["seq_lens"] is valid_counts
+    assert trtllm["sparse_mla_top_k"] == inputs.topk
+    if dcp == 1:
         assert (out == 2.0).all()
+        return
+    expected = calls.lse(num_tokens) * math.log(2.0)
+    torch.testing.assert_close(lse[1:], expected[1:], rtol=0, atol=1e-5)
+    assert (out[1:] == 2.0).all()
+    # Token 0 owns no slot on this rank: the DCP merge identity.
+    assert (out[0] == 0).all()
+    assert torch.isneginf(lse[0]).all()
 
 
-def _fa4_gate(local_heads, *, hisparse=False):
+def _fa4_gate(local_heads, *, dcp_size=1, hisparse=False):
     """``validate_configuration`` on a fixed SM100, not the running GPU's."""
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -3450,6 +3507,7 @@ def _fa4_gate(local_heads, *, hisparse=False):
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: local_heads, model_config
     )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
     if hisparse:
         vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
@@ -3466,28 +3524,28 @@ def _fa4_gate(local_heads, *, hisparse=False):
             use_per_head_quant_scales=False,
             device_capability=DeviceCapability(10, 0),
             attn_type="decoder",
+            use_dcp=dcp_size > 1,
         )
 
 
 @pytest.mark.parametrize(
-    "local_heads,supported",
-    # The gather kernel tiles the query heads of one token; it has no layout
-    # for other per-rank head counts.
-    [(16, True), (128, True), (12, False)],
+    "local_heads,dcp_size,supported",
+    [(16, 1, True), (128, 1, True), (12, 1, False), (16, 2, True), (16, 8, False)],
 )
-def test_fa4_sparse_supports_head_counts(monkeypatch, local_heads, supported):
+def test_fa4_sparse_supports_head_counts(monkeypatch, local_heads, dcp_size, supported):
     import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
 
     monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: True)
     monkeypatch.setattr(fa4_sparse, "_fa4_cute_mla_available", lambda: None)
 
-    reasons = _fa4_gate(local_heads)
+    reasons = _fa4_gate(local_heads, dcp_size=dcp_size)
 
     if supported:
         assert reasons == []
     else:
         (reason,) = reasons
         assert "heads" in reason
+        assert ("DCP-gathered" in reason) == (dcp_size > 1)
 
 
 def test_fa4_sparse_gates_flashinfer_and_hisparse(monkeypatch):
