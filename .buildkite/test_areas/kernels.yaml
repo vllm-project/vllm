@@ -312,8 +312,10 @@ steps:
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
+  - csrc/libtorch_stable/quantization/fp4/
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
@@ -349,6 +351,8 @@ steps:
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/models/quantization/test_nvfp4.py
   commands:
     - nvidia-smi
     - |
