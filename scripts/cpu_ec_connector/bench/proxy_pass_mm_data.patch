@@ -1,0 +1,99 @@
+diff --git a/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py b/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py
+index cc7704d049..ce34aaf7ae 100644
+--- a/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py
++++ b/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py
+@@ -90,10 +90,24 @@ def encoder_rr_assignment(
+ # Diagnostic switch: forward the original request to the decoder so the
+ # only difference from the rewrite path is the rewrite itself.
+ NO_REWRITE = False
++# Keep the media in the decode request, but still assign a uuid and carry the
++# connector's transfer params. Those are independent of the grid substitution:
++# the uuid makes both instances agree on the cache key, and the params tell the
++# consumer's connector where the published embedding lives. Without them a
++# peer-to-peer transport has no way to locate a peer's entry, so --no-rewrite
++# silently disables the transfer rather than only the grid optimisation.
++PASS_MM_DATA = False
+ 
+ 
+ # Grid metadata reported by the encoder instance, keyed by item index.
+ # Empty when the encoder did not report any (then nothing is rewritten).
++def _payload_mode() -> str:
++    """What the decode request carries, for the STAGE log line."""
++    if PASS_MM_DATA:
++        return "data"
++    return "no-rewrite" if NO_REWRITE else "rewrite"
++
++
+ def content_uuid(item: dict) -> str:
+     """Cache key for a multimodal item, derived from its content.
+ 
+@@ -238,7 +252,7 @@ async def fanout_encoder_primer(
+         # the cache key by hashing it, so the encoder must do the same -- passing
+         # a uuid here would make the two disagree and silently defeat the EC
+         # transfer, leaving the decoder to encode the image itself.
+-        item_uuid = None if NO_REWRITE else content_uuid(item)
++        item_uuid = None if (NO_REWRITE and not PASS_MM_DATA) else content_uuid(item)
+         if item_uuid is not None:
+             item_uuids[idx] = item_uuid
+ 
+@@ -490,7 +504,8 @@ async def forward_non_stream(
+         _t0 = time.perf_counter()
+         item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
+         _t1 = time.perf_counter()
+-        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
++        keep_media = NO_REWRITE or PASS_MM_DATA
++        req_data = req_data if keep_media else rewrite_for_decode(req_data, item_meta)
+         _t2 = time.perf_counter()
+ 
+         # Step 2: Process through Prefill instance
+@@ -509,7 +524,7 @@ async def forward_non_stream(
+             _t3 = time.perf_counter()
+             logger.info(
+                 "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f",
+-                "no-rewrite" if NO_REWRITE else "rewrite",
++                _payload_mode(),
+                 (_t1 - _t0) * 1e3,
+                 (_t2 - _t1) * 1e3,
+                 (_t3 - _t2) * 1e3,
+@@ -532,7 +547,8 @@ async def forward_stream(
+         _t0 = time.perf_counter()
+         item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
+         _t1 = time.perf_counter()
+-        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
++        keep_media = NO_REWRITE or PASS_MM_DATA
++        req_data = req_data if keep_media else rewrite_for_decode(req_data, item_meta)
+         _t2 = time.perf_counter()
+ 
+         # Step 2: Process through Prefill instance
+@@ -559,7 +575,7 @@ async def forward_stream(
+ 
+         logger.info(
+             "STAGE %s encode=%.1f rewrite=%.2f decode_ttfb=%.1f decode_total=%.1f",
+-            "no-rewrite" if NO_REWRITE else "rewrite",
++            _payload_mode(),
+             (_t1 - _t0) * 1e3,
+             (_t2 - _t1) * 1e3,
+             ((_first or _t3) - _t2) * 1e3,
+@@ -755,6 +771,14 @@ if __name__ == "__main__":
+         action="store_true",
+         help="Forward images to the decoder unchanged (for stage-timing A/B).",
+     )
++    parser.add_argument(
++        "--pass-mm-data",
++        action="store_true",
++        help="Forward the media to the decoder unchanged, but still assign a "
++        "uuid and carry the connector's transfer params. Separates the grid "
++        "substitution from the transfer itself: a peer-to-peer connector needs "
++        "the params to locate a peer's entry, which --no-rewrite withholds.",
++    )
+     parser.add_argument(
+         "--encode-servers-urls",
+         required=True,
+@@ -776,6 +800,7 @@ if __name__ == "__main__":
+ 
+     args = parser.parse_args()
+     NO_REWRITE = args.no_rewrite
++    PASS_MM_DATA = args.pass_mm_data
+     app.state.e_urls = [
+         u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
+     ]

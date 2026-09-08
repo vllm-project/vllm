@@ -1,0 +1,500 @@
+<title>Grid Hints vs Pixels</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+
+<style>
+  :root {
+    --ground: #f6f7f8;
+    --surface: #ffffff;
+    --surface-sunk: #eef1f3;
+    --ink: #12161c;
+    --ink-soft: #3c4551;
+    --muted: #59636f;
+    --rule: #e2e6ea;
+    --series-pixels: #b45309;
+    --series-hints: #0d9488;
+    --good: #15803d;
+    --bad: #b42318;
+    --shadow: 0 1px 2px rgba(18, 22, 28, .06), 0 8px 24px -16px rgba(18, 22, 28, .18);
+
+    --step--1: clamp(.78rem, .77rem + .05vw, .82rem);
+    --step-0: clamp(1rem, .98rem + .1vw, 1.06rem);
+    --step-1: clamp(1.2rem, 1.14rem + .3vw, 1.4rem);
+    --step-2: clamp(1.5rem, 1.38rem + .6vw, 1.9rem);
+    --step-3: clamp(2rem, 1.7rem + 1.4vw, 2.9rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1319;
+      --surface: #161b22;
+      --surface-sunk: #1c222b;
+      --ink: #e6eaf0;
+      --ink-soft: #c3ccd8;
+      --muted: #8a95a5;
+      --rule: #232a33;
+      --series-pixels: #c98214;
+      --series-hints: #12a594;
+      --good: #4ade80;
+      --bad: #f87171;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 30px -18px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f1319;
+    --surface: #161b22;
+    --surface-sunk: #1c222b;
+    --ink: #e6eaf0;
+    --ink-soft: #c3ccd8;
+    --muted: #8a95a5;
+    --rule: #232a33;
+    --series-pixels: #c98214;
+    --series-hints: #12a594;
+    --good: #4ade80;
+    --bad: #f87171;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 30px -18px rgba(0, 0, 0, .8);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Serif", Georgia, serif;
+    font-size: var(--step-0);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 1rem + 3vw, 4rem) clamp(1.1rem, .6rem + 2.5vw, 2.5rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  h1, h2, h3, .ui { font-family: "IBM Plex Sans", system-ui, sans-serif; }
+  h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.15; }
+  h1 { font-size: var(--step-3); font-weight: 600; letter-spacing: -.02em; }
+  h2 { font-size: var(--step-2); font-weight: 600; letter-spacing: -.01em; }
+  h3 { font-size: var(--step-1); font-weight: 600; }
+  p { margin: 0; max-width: 68ch; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .92em; }
+  code { background: var(--surface-sunk); padding: .1em .35em; border-radius: 3px; }
+
+  .eyebrow {
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: var(--step--1);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--muted);
+  }
+
+  header { display: flex; flex-direction: column; gap: 1rem; }
+  header p.lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 54ch; }
+
+  .runmeta {
+    display: flex; flex-wrap: wrap; gap: .4rem 1.5rem;
+    font-family: "IBM Plex Mono", monospace; font-size: var(--step--1);
+    color: var(--muted); padding-top: .75rem; border-top: 1px solid var(--rule);
+  }
+  .runmeta b { color: var(--ink-soft); font-weight: 500; }
+
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  .verdict {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+    box-shadow: var(--shadow); padding: clamp(1.1rem, .8rem + 1.4vw, 1.9rem);
+    display: flex; flex-direction: column; gap: 1.5rem;
+  }
+  .stats { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+  .stat { display: flex; flex-direction: column; gap: .2rem; }
+  .stat .n {
+    font-family: "IBM Plex Sans", sans-serif; font-weight: 600;
+    font-size: clamp(1.9rem, 1.5rem + 1.6vw, 2.6rem); line-height: 1;
+    letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+  }
+  .stat .k { font-family: "IBM Plex Sans", sans-serif; font-size: var(--step--1); color: var(--muted); }
+  .stat.hints .n { color: var(--series-hints); }
+  .stat.ok .n { color: var(--good); }
+
+  figure { margin: 0; display: flex; flex-direction: column; gap: .9rem; }
+  .legend { display: flex; gap: 1.25rem; align-items: center; flex-wrap: wrap;
+            font-family: "IBM Plex Sans", sans-serif; font-size: var(--step--1); }
+  .legend span { display: inline-flex; align-items: center; gap: .45rem; color: var(--ink-soft); }
+  .swatch { width: .85rem; height: .55rem; border-radius: 2px; display: inline-block; }
+  .chartbox { position: relative; overflow-x: auto; background: var(--surface);
+              border: 1px solid var(--rule); border-radius: 4px; padding: 1rem .75rem .5rem; }
+  figcaption { font-size: var(--step--1); color: var(--muted); max-width: 68ch; }
+
+  .tip {
+    position: absolute; pointer-events: none; opacity: 0; transform: translate(-50%, -115%);
+    background: var(--ink); color: var(--ground); padding: .4rem .6rem; border-radius: 3px;
+    font-family: "IBM Plex Mono", monospace; font-size: .74rem; white-space: nowrap;
+    transition: opacity .12s ease; z-index: 5;
+  }
+
+  .scroller { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-family: "IBM Plex Mono", monospace; font-size: var(--step--1); }
+  caption { text-align: left; padding: .8rem 1rem; color: var(--muted); font-family: "IBM Plex Sans", sans-serif; }
+  th, td { padding: .5rem .8rem; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { font-family: "IBM Plex Sans", sans-serif; font-weight: 600; color: var(--muted);
+             font-size: .74rem; text-transform: uppercase; letter-spacing: .07em; }
+  tbody td { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.arm-hints td:first-child { color: var(--series-hints); font-weight: 500; }
+  tr.arm-pixels td:first-child { color: var(--series-pixels); font-weight: 500; }
+  td.win { color: var(--series-hints); font-weight: 500; }
+
+  .checks { display: grid; gap: .75rem; }
+  .check { display: grid; grid-template-columns: auto 1fr; gap: .3rem .75rem;
+           background: var(--surface); border: 1px solid var(--rule);
+           border-left: 3px solid var(--good); border-radius: 3px; padding: .8rem 1rem; }
+  .check .mark { color: var(--good); font-family: "IBM Plex Sans", sans-serif; font-weight: 700; }
+  .check h3 { font-size: var(--step-0); }
+  .check p { grid-column: 2; font-size: var(--step--1); color: var(--muted); }
+
+  .cause { background: var(--surface); border: 1px solid var(--rule);
+           border-left: 3px solid var(--bad); border-radius: 3px; padding: .9rem 1rem;
+           display: flex; flex-direction: column; gap: .3rem; }
+  .cause h3 { font-size: var(--step-0); }
+  .cause p { font-size: var(--step--1); color: var(--muted); }
+
+  ul.plain { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .55rem; max-width: 68ch; }
+  ul.plain li { color: var(--ink-soft); }
+
+  dl.flags { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: .45rem 1.25rem;
+             font-family: "IBM Plex Mono", monospace; font-size: var(--step--1); }
+  dl.flags dt { color: var(--series-hints); white-space: nowrap; }
+  dl.flags dd { margin: 0; color: var(--muted); }
+
+  a { color: var(--series-hints); text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--series-hints); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">vLLM · encoder-cache connector · EPD disaggregation</span>
+    <h1>Grid Hints vs Pixels</h1>
+    <p class="lede">Sending the decode instance a patch grid instead of the image raises throughput
+      1.23–1.28× at low concurrency and cuts time-to-first-token by a third — then the advantage
+      decays to nothing by concurrency 32, as the decode GPU becomes the constraint.</p>
+    <div class="runmeta">
+      <span><b>branch</b> p2p_nixl_ec_connector @ 0be69a42c9</span>
+      <span><b>model</b> Qwen2.5-VL-7B-Instruct</span>
+      <span><b>images</b> 2048×2048 · 5,329 embeds</span>
+      <span><b>hardware</b> 2× H100 80GB</span>
+      <span><b>runs</b> 2 reps × 6 load points × 2 arms</span>
+    </div>
+  </header>
+
+  <section class="verdict">
+    <div class="stats">
+      <div class="stat hints">
+        <span class="n">1.26×</span>
+        <span class="k">throughput at concurrency 1</span>
+      </div>
+      <div class="stat hints">
+        <span class="n">0.71×</span>
+        <span class="k">time-to-first-token at concurrency 1</span>
+      </div>
+      <div class="stat hints">
+        <span class="n">−48%</span>
+        <span class="k">decode stage, 270 → 140 ms</span>
+      </div>
+      <div class="stat">
+        <span class="n">1.02×</span>
+        <span class="k">throughput at concurrency 32 — the effect is gone</span>
+      </div>
+    </div>
+    <p>The mechanism is visible in the stage timings: the decode instance's time-to-first-byte
+      roughly halves while the encode stage holds constant. That is the duplicated image transform
+      disappearing from the decode side, which is exactly what the change removes.</p>
+  </section>
+
+  <section>
+    <span class="eyebrow">Result</span>
+    <h2>Throughput scales better with hints at every concurrency</h2>
+    <figure>
+      <div class="legend">
+        <span><i class="swatch" style="background: var(--series-pixels)"></i> Pixels forwarded (baseline)</span>
+        <span><i class="swatch" style="background: var(--series-hints)"></i> Grid hint substituted</span>
+      </div>
+      <div class="chartbox">
+        <svg id="chart" viewBox="0 0 760 320" width="100%" height="320"
+             role="img" aria-label="Output throughput in tokens per second, by client concurrency, for both arms"></svg>
+        <div class="tip" id="tip"></div>
+      </div>
+      <figcaption>Mean of two replications; output tokens per second. Bars are labelled directly, so
+        identity never rests on colour alone. The ratio narrows as concurrency rises and the GPU
+        becomes the constraint — a CPU-side saving matters less once it isn't the bottleneck.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <span class="eyebrow">Full sweep</span>
+    <h2>Both replications, arm order alternated</h2>
+    <div class="scroller">
+      <table>
+        <caption>Rep 1 ran baseline first, rep 2 ran grid first. The hint arm wins in both orders,
+          so the ~25% position penalty seen in earlier runs is not confounding this.</caption>
+        <thead>
+          <tr><th>Arm</th><th>Rep</th><th>Conc.</th><th>TTFT p50 ms</th><th>TTFT p99 ms</th>
+            <th>Out tok/s</th><th>×base</th><th>Encode ms</th><th>Decode TTFB ms</th><th>Dec queue</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Reproduction</span>
+    <h2>Against the numbers the PR published</h2>
+    <div class="scroller">
+      <table>
+        <caption>Matched at concurrency 1–8. Above that our curve falls away while theirs holds — see scope.</caption>
+        <thead>
+          <tr><th>Concurrency</th><th>Our throughput ratio</th><th>PR's published ratio</th>
+            <th>Our TTFT ratio</th><th>PR's published TTFT</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td class="win">1.28 / 1.23</td><td>1.31</td><td class="win">0.69</td><td>0.66–0.83</td></tr>
+          <tr><td>2</td><td class="win">1.24 / 1.24</td><td>1.23</td><td class="win">0.70</td><td>0.66–0.83</td></tr>
+          <tr><td>4</td><td class="win">1.14 / 1.15</td><td>1.23</td><td class="win">0.76</td><td>0.66–0.83</td></tr>
+          <tr><td>8</td><td class="win">1.12 / 1.13</td><td>1.22</td><td class="win">0.74</td><td>0.66–0.83</td></tr>
+          <tr><td>16</td><td>1.04 / 1.07</td><td>1.19</td><td>0.84</td><td>0.66–0.83</td></tr>
+          <tr><td>32</td><td>1.02 / 1.02</td><td>1.23</td><td>0.91</td><td>0.66–0.83</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Validity</span>
+    <h2>Why these numbers can be trusted</h2>
+    <div class="checks">
+      <div class="check">
+        <span class="mark">✓</span><h3>Nothing was queueing</h3>
+        <p>Peak <code>vllm:num_requests_waiting</code> was 0 at the encoder at every load point, so the
+          encoder never queued. The decode instance stayed at 0–2 through concurrency 8, then rose
+          to 5–8 at 16 and 17–18 at 32 — so the two highest points are partly queue measurements and
+          the clean comparison is concurrency 1 through 8. Sampled once per second and sliced per
+          load point.</p>
+      </div>
+      <div class="check">
+        <span class="mark">✓</span><h3>The encode stage is flat between arms</h3>
+        <p>148.6 / 149.7 / 164.8 / 189.2 ms against 153.9 / 150.5 / 153.2 / 168.1 ms. The encoder
+          receives identical requests in both arms, so a flat encode stage is what correctness looks
+          like. An earlier 50% gap here was queue depth wearing a stage's name.</p>
+      </div>
+      <div class="check">
+        <span class="mark">✓</span><h3>Order was alternated and the effect survived</h3>
+        <p>Grid wins by the same margin whether it runs first or second, and baseline reproduces to
+          within 2–5% across reps.</p>
+      </div>
+      <div class="check">
+        <span class="mark">✓</span><h3>Both arms were verified to have engaged</h3>
+        <p>The proxy rewrote 112 of 112 image references in the hint arm and exactly 0 in the
+          baseline arm, asserted per load point rather than assumed.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Earlier measurements</span>
+    <h2>What made the first attempts meaningless</h2>
+    <p>An earlier round of this comparison reported no effect at all, and a spurious 50% penalty on
+      the encode stage. Both came from the harness, not the code under test.</p>
+    <div class="cause">
+      <h3>The encoder could only ever process one image at a time</h3>
+      <p><code>--max-num-batched-tokens 8192</code> against 5,350 tokens per 2048² image made two
+        image requests unbatchable, pinning the encoder at ~25 req/s. Raised to 65,536 for the
+        encode-only instance, it now batches up to 9 requests per step.</p>
+    </div>
+    <div class="cause">
+      <h3>All 400 requests were fired at once</h3>
+      <p><code>--request-rate inf</code> with no concurrency limit put ~400 requests in a queue that
+        drained at 25/s. Median TTFT was 20 seconds, and every stage timing was queue depth divided
+        by service rate. Bounded concurrency replaced it.</p>
+    </div>
+    <div class="cause">
+      <h3>The tell was that total time never changed</h3>
+      <p>All four cells of the earlier 2×2 completed in 56.2–56.6 s with identical throughput while
+        the stage numbers moved by 50%. Time was being relabelled, not saved — the signature of a
+        queueing artefact rather than a real effect.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Corrections</span>
+    <h2>Claims made earlier that these runs disprove</h2>
+    <ul class="plain">
+      <li><b>"There is nothing to win on this hardware."</b> Argued from 128 mostly-idle CPU cores
+        and a GPU-bound decode instance. Wrong: the image transform sits on each request's
+        <i>serial</i> path — prefill cannot start until it finishes — so spare cores elsewhere can't
+        absorb it. Removing it cuts ~130 ms from every request's TTFT.</li>
+      <li><b>"Grid mode makes the encode leg ~50% slower."</b> Reported from four runs at
+        rate=inf. It was queue depth, and it vanishes entirely under bounded concurrency.</li>
+      <li><b>"The earlier fast runs were fast because they had no proxy."</b> They had the proxy.
+        They were fast because 1288×728 images fit six per batch under the 8192-token budget, while
+        2048² images fit one.</li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="eyebrow">Scope</span>
+    <h2>What this does not establish</h2>
+    <ul class="plain">
+      <li>120 prompts per load point and two replications. Enough to separate a 15–26% effect from
+        run-to-run noise of 2–5%; not enough for a confidence interval.</li>
+      <li>The image pool is real photographs Lanczos-enlarged to 2048², measured at 0.17 MB per
+        megapixel against 0.13 for a native crop — so payload behaviour is representative, but the
+        images are not natively that size.</li>
+      <li>Our advantage disappears above concurrency 8, where the PR's held. The decode instance's queue
+        grows 0 → 2 → 5 → 17 across the sweep while the encoder's stays at 0, so past c=8 this box is
+        decode-GPU-bound and a decode-side CPU saving has nothing left to buy. Their larger MoE model
+        likely shifted that balance.</li>
+      <li>This is <code>ECExampleConnector</code> over shared filesystem. Whether the NIXL transport
+        inherits the same benefit is a separate comparison.</li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="eyebrow">Configuration</span>
+    <h2>Exact settings</h2>
+    <dl class="flags">
+      <dt>encoder</dt><dd>GPU 0 · ec_producer · --mm-processor-device cpu · --mm-tensor-ipc torch_shm
+        · --mm-processor-cache-type lru · --max-num-batched-tokens 65536</dd>
+      <dt>decode</dt><dd>GPU 1 · ec_consumer · --enable-mm-embeds · --max-num-batched-tokens 8192</dd>
+      <dt>proxy</dt><dd>disagg_epd_proxy.py · --prefill-servers-urls disable · baseline adds --no-rewrite</dd>
+      <dt>load</dt><dd>vllm bench serve · openai-chat · custom_image · --disable-shuffle
+        · --custom-ensure-client-side-data · --custom-output-len 32 · --num-prompts 120</dd>
+      <dt>workload</dt><dd>96-image pool, zipf 1.1 reuse, 112 image references in the sent prefix</dd>
+    </dl>
+  </section>
+</div>
+
+<script>
+  const sweep = [
+    { arm: "pixels", rep: 1, c: 1, ttft: 438.21, p99: 1428.68, tok: 41.12, ratio: "1.00", enc: 147.55, dec: 266.8, q: 0 },
+    { arm: "pixels", rep: 1, c: 2, ttft: 479.73, p99: 1087.71, tok: 79.56, ratio: "1.00", enc: 147.6, dec: 308.8, q: 0 },
+    { arm: "pixels", rep: 1, c: 4, ttft: 625.53, p99: 1036.97, tok: 119.56, ratio: "1.00", enc: 158.3, dec: 413.7, q: 1 },
+    { arm: "pixels", rep: 1, c: 8, ttft: 900.53, p99: 1762.95, tok: 150.3, ratio: "1.00", enc: 172.3, dec: 639.95, q: 2 },
+    { arm: "pixels", rep: 1, c: 16, ttft: 1267.1, p99: 2779.84, tok: 178.21, ratio: "1.00", enc: 195.4, dec: 886.2, q: 5 },
+    { arm: "pixels", rep: 1, c: 32, ttft: 1924.21, p99: 4426.76, tok: 195.79, ratio: "1.00", enc: 197.4, dec: 1384.95, q: 17 },
+    { arm: "hints", rep: 1, c: 1, ttft: 301.49, p99: 957.25, tok: 52.48, ratio: "1.28", enc: 146.45, dec: 136.15, q: 0 },
+    { arm: "hints", rep: 1, c: 2, ttft: 330.34, p99: 653.37, tok: 98.71, ratio: "1.24", enc: 148.85, dec: 141.05, q: 0 },
+    { arm: "hints", rep: 1, c: 4, ttft: 483.08, p99: 907.59, tok: 136.21, ratio: "1.14", enc: 161.05, dec: 283.1, q: 1 },
+    { arm: "hints", rep: 1, c: 8, ttft: 662.93, p99: 1477.0, tok: 168.84, ratio: "1.12", enc: 170.2, dec: 429.3, q: 2 },
+    { arm: "hints", rep: 1, c: 16, ttft: 1143.49, p99: 2499.91, tok: 184.74, ratio: "1.04", enc: 191.9, dec: 673.65, q: 5 },
+    { arm: "hints", rep: 1, c: 32, ttft: 1700.89, p99: 4572.27, tok: 200.01, ratio: "1.02", enc: 205.8, dec: 1148.15, q: 17 },
+    { arm: "hints", rep: 2, c: 1, ttft: 306.38, p99: 1057.5, tok: 51.46, ratio: "1.23", enc: 146.9, dec: 135.5, q: 0 },
+    { arm: "hints", rep: 2, c: 2, ttft: 331.01, p99: 674.5, tok: 99.54, ratio: "1.24", enc: 143.85, dec: 140.2, q: 0 },
+    { arm: "hints", rep: 2, c: 4, ttft: 455.94, p99: 891.0, tok: 139.09, ratio: "1.15", enc: 153.1, dec: 256.55, q: 1 },
+    { arm: "hints", rep: 2, c: 8, ttft: 671.34, p99: 1336.95, tok: 168.21, ratio: "1.13", enc: 168.75, dec: 419.5, q: 2 },
+    { arm: "hints", rep: 2, c: 16, ttft: 947.13, p99: 2366.71, tok: 190.1, ratio: "1.07", enc: 189.2, dec: 574.85, q: 7 },
+    { arm: "hints", rep: 2, c: 32, ttft: 1718.36, p99: 5245.85, tok: 196.08, ratio: "1.02", enc: 223.6, dec: 1106.95, q: 18 },
+    { arm: "pixels", rep: 2, c: 1, ttft: 424.24, p99: 1305.55, tok: 41.91, ratio: "1.00", enc: 138.9, dec: 261.8, q: 0 },
+    { arm: "pixels", rep: 2, c: 2, ttft: 475.78, p99: 1016.48, tok: 80.11, ratio: "1.00", enc: 144.3, dec: 302.0, q: 0 },
+    { arm: "pixels", rep: 2, c: 4, ttft: 606.84, p99: 1037.87, tok: 121.05, ratio: "1.00", enc: 148.75, dec: 402.7, q: 1 },
+    { arm: "pixels", rep: 2, c: 8, ttft: 929.22, p99: 1848.38, tok: 148.42, ratio: "1.00", enc: 177.3, dec: 646.55, q: 2 },
+    { arm: "pixels", rep: 2, c: 16, ttft: 1216.52, p99: 2603.28, tok: 178.14, ratio: "1.00", enc: 186.85, dec: 901.05, q: 7 },
+    { arm: "pixels", rep: 2, c: 32, ttft: 1831.24, p99: 5179.98, tok: 192.53, ratio: "1.00", enc: 205.9, dec: 1261.65, q: 18 },
+  ];
+
+  const label = { pixels: "Pixels", hints: "Grid hint" };
+  const tbody = document.getElementById("tbody");
+  for (const r of [...sweep].sort((a, b) => a.rep - b.rep || a.arm.localeCompare(b.arm) || a.c - b.c)) {
+    const tr = document.createElement("tr");
+    tr.className = "arm-" + r.arm;
+    const cells = [label[r.arm], r.rep, r.c, r.ttft.toFixed(1), r.p99.toFixed(1),
+                   r.tok.toFixed(2), r.ratio, r.enc.toFixed(1), r.dec.toFixed(1), r.q];
+    cells.forEach((v, i) => {
+      const td = document.createElement("td");
+      td.textContent = v;
+      if (i === 6 && r.arm === "hints") td.className = "win";
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+
+  // Grouped bars: mean of both reps, one group per concurrency level.
+  const levels = [1, 2, 4, 8, 16, 32];
+  const mean = (arm, c) => {
+    const rows = sweep.filter(r => r.arm === arm && r.c === c);
+    return rows.reduce((s, r) => s + r.tok, 0) / rows.length;
+  };
+  const data = levels.map(c => ({ c, pixels: mean("pixels", c), hints: mean("hints", c) }));
+
+  const W = 760, H = 320, padL = 52, padR = 16, padT = 26, padB = 46;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const yMax = 220;
+  const y = v => padT + plotH - (v / yMax) * plotH;
+  const svg = document.getElementById("chart");
+  const ns = "http://www.w3.org/2000/svg";
+  const el = (n, a) => { const e = document.createElementNS(ns, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+  for (const gv of [0, 55, 110, 165, 220]) {
+    svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: y(gv), y2: y(gv),
+      stroke: "var(--rule)", "stroke-width": gv === 0 ? 1.5 : 1 }));
+    const t = el("text", { x: padL - 10, y: y(gv) + 4, "text-anchor": "end",
+      fill: "var(--muted)", "font-size": 11, "font-family": "IBM Plex Mono, monospace" });
+    t.textContent = gv;
+    svg.appendChild(t);
+  }
+  const yl = el("text", { x: padL - 10, y: padT - 10, "text-anchor": "end", fill: "var(--muted)",
+    "font-size": 10, "font-family": "IBM Plex Sans, sans-serif" });
+  yl.textContent = "tok/s";
+  svg.appendChild(yl);
+
+  const tip = document.getElementById("tip");
+  const groupW = plotW / data.length;
+  const barW = 26, gap = 2;
+  data.forEach((d, i) => {
+    const cx = padL + groupW * i + groupW / 2;
+    const xs = { pixels: cx - barW - gap / 2, hints: cx + gap / 2 };
+    for (const arm of ["pixels", "hints"]) {
+      const v = d[arm];
+      const bar = el("rect", {
+        x: xs[arm], y: y(v), width: barW, height: padT + plotH - y(v),
+        rx: 4, fill: `var(--series-${arm})`, tabindex: 0,
+        role: "img", "aria-label": `${label[arm]}, concurrency ${d.c}: ${v.toFixed(1)} tokens per second`
+      });
+      const show = ev => {
+        const box = svg.getBoundingClientRect();
+        tip.style.left = (xs[arm] + barW / 2) / W * box.width + "px";
+        tip.style.top = y(v) / H * box.height + "px";
+        tip.textContent = `${label[arm]} · c=${d.c} · ${v.toFixed(1)} tok/s`;
+        tip.style.opacity = 1;
+      };
+      const hide = () => { tip.style.opacity = 0; };
+      bar.addEventListener("mouseenter", show);
+      bar.addEventListener("focus", show);
+      bar.addEventListener("mouseleave", hide);
+      bar.addEventListener("blur", hide);
+      svg.appendChild(bar);
+
+      const vl = el("text", { x: xs[arm] + barW / 2, y: y(v) - 7, "text-anchor": "middle",
+        fill: "var(--ink-soft)", "font-size": 11, "font-family": "IBM Plex Mono, monospace" });
+      vl.textContent = v.toFixed(0);
+      svg.appendChild(vl);
+    }
+    const xl = el("text", { x: cx, y: H - padB + 20, "text-anchor": "middle",
+      fill: "var(--ink-soft)", "font-size": 12, "font-family": "IBM Plex Mono, monospace" });
+    xl.textContent = "c=" + d.c;
+    svg.appendChild(xl);
+
+    const rl = el("text", { x: cx, y: H - padB + 36, "text-anchor": "middle",
+      fill: "var(--series-hints)", "font-size": 10.5, "font-family": "IBM Plex Sans, sans-serif" });
+    rl.textContent = (d.hints / d.pixels).toFixed(2) + "×";
+    svg.appendChild(rl);
+  });
+</script>

@@ -1,0 +1,932 @@
+{
+  "args": {
+    "photo_source": "hf-tar:ofsoundof/LSDIR:shard-00.tar.gz",
+    "out_dir": "/vllm-workspace/bench/wl",
+    "pool_size": "96",
+    "buckets": "2048x2048:1.0",
+    "jpeg_quality": "85",
+    "allow_upscale": "True",
+    "min_source_mp": "0.8",
+    "rounds": "0",
+    "num_requests": "400",
+    "reuse": "zipf:1.1",
+    "mm_fraction": "0.8",
+    "multi_image_fraction": "0.15",
+    "images_per_request": "2",
+    "prefix_tokens": "32",
+    "interleave_sizes": "True",
+    "hidden_dim": "3584",
+    "element_size": "2",
+    "merge_stride": "28",
+    "seed": "1234",
+    "reuse_pool": "False",
+    "self_check": "True"
+  },
+  "bytes_per_embed": 7168,
+  "pool": [
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0000.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 622295,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0001.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 463974,
+      "upscale": 2.943
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0002.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 684865,
+      "upscale": 2.081
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0003.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 481401,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0004.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 539508,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0005.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 630574,
+      "upscale": 2.798
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0006.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 551852,
+      "upscale": 2.338
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0007.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 901505,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0008.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 741281,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0009.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 391647,
+      "upscale": 2.547
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0010.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 793082,
+      "upscale": 2.188
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0011.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 686351,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0012.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 670900,
+      "upscale": 2.338
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0013.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 422597,
+      "upscale": 2.586
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0014.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 779843,
+      "upscale": 1.835
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0015.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 917693,
+      "upscale": 2.107
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0016.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 615628,
+      "upscale": 1.778
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0017.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1080817,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0018.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 554486,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0019.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 771092,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0020.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 551420,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0021.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 654792,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0022.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 593206,
+      "upscale": 2.276
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0023.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1243516,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0024.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 511965,
+      "upscale": 1.962
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0025.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 775007,
+      "upscale": 1.69
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0026.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 494026,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0027.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 714699,
+      "upscale": 2.473
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0028.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 731515,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0029.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 581879,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0030.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 447557,
+      "upscale": 2.16
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0031.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 881675,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0032.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 534653,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0033.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 880031,
+      "upscale": 1.237
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0034.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 637687,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0035.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 564322,
+      "upscale": 2.276
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0036.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 751873,
+      "upscale": 2.188
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0037.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 475682,
+      "upscale": 2.753
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0038.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 551127,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0039.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1091604,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0040.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 755097,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0041.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 668994,
+      "upscale": 2.798
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0042.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 832249,
+      "upscale": 2.107
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0043.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 901013,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0044.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 686791,
+      "upscale": 2.338
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0045.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 360875,
+      "upscale": 2.753
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0046.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 645677,
+      "upscale": 2.586
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0047.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 677528,
+      "upscale": 2.107
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0048.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 493248,
+      "upscale": 2.216
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0049.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 822328,
+      "upscale": 2.16
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0050.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 795716,
+      "upscale": 1.875
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0051.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 257545,
+      "upscale": 2.16
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0052.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 891497,
+      "upscale": 2.709
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0053.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 908593,
+      "upscale": 2.216
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0054.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 699234,
+      "upscale": 2.547
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0055.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 650480,
+      "upscale": 2.081
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0056.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 538714,
+      "upscale": 2.547
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0057.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 458657,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0058.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 408421,
+      "upscale": 2.276
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0059.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 985363,
+      "upscale": 1.484
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0060.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1073925,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0061.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 661770,
+      "upscale": 2.107
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0062.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 858990,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0063.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 695509,
+      "upscale": 2.107
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0064.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 836264,
+      "upscale": 2.438
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0065.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 788152,
+      "upscale": 3.103
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0066.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 555356,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0067.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 705219,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0068.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 603074,
+      "upscale": 2.753
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0069.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 596555,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0070.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1201153,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0071.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 615571,
+      "upscale": 2.133
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0072.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 656902,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0073.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 812178,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0074.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 697316,
+      "upscale": 2.16
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0075.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 717713,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0076.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1104322,
+      "upscale": 2.276
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0077.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 834752,
+      "upscale": 2.246
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0078.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 727037,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0079.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 810016,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0080.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 447934,
+      "upscale": 2.216
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0081.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 585050,
+      "upscale": 2.547
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0082.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 499819,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0083.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 774301,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0084.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 901279,
+      "upscale": 2.37
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0085.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 655936,
+      "upscale": 2.306
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0086.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 795504,
+      "upscale": 2.16
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0087.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 839462,
+      "upscale": 1.918
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0088.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1005564,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0089.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 583467,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0090.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 464122,
+      "upscale": 2.753
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0091.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 674629,
+      "upscale": 2.473
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0092.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1084871,
+      "upscale": 2.51
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0093.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 790785,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0094.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 1049800,
+      "upscale": 2.056
+    },
+    {
+      "path": "/vllm-workspace/bench/wl/pool/2048x2048_0095.jpg",
+      "w": 2048,
+      "h": 2048,
+      "embeds": 5329,
+      "region_bytes": 38198272,
+      "jpeg_bytes": 654650,
+      "upscale": 2.626
+    }
+  ],
+  "sequence": {
+    "images_per_request": 2,
+    "image_count_histogram": {
+      "1": 262,
+      "0": 84,
+      "2": 54
+    },
+    "requests": 400,
+    "mm_requests": 316,
+    "text_only_requests": 84,
+    "image_references": 370,
+    "distinct_images_used": 79,
+    "reference_histogram": {
+      "19": 1,
+      "70": 1,
+      "35": 1,
+      "13": 1,
+      "2": 12,
+      "1": 27,
+      "14": 1,
+      "5": 5,
+      "7": 1,
+      "3": 14,
+      "16": 1,
+      "4": 9,
+      "6": 2,
+      "11": 1,
+      "9": 1,
+      "10": 1
+    }
+  },
+  "expected": {
+    "first_encodes": 79,
+    "reuses": 291,
+    "max_hit_rate": 0.7865,
+    "working_set_bytes": 3017663488,
+    "max_embeds_per_request": 10658,
+    "suggested_ec_cpu_bytes": 3772079360,
+    "fragmentation_arm_ec_cpu_bytes": 1508831744
+  }
+}
