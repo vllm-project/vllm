@@ -24,6 +24,7 @@ from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.reader import Metric
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -215,7 +216,8 @@ def run_tests(
     # per-stream request mean <0.073, max greedy gap 0.125, and request sum 0.25.
     # Per-request budgets also reject systematic errors below the scalar bounds.
     tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
-    with hf_runner(model) as hf:
+    # These short CPU reductions cost more to distribute across a thread pool.
+    with set_default_torch_num_threads(1), hf_runner(model) as hf:
         hf.model.eval()
         for config, batches, _ in outputs:
             assert len(batches) == len(test_sampling_params)
