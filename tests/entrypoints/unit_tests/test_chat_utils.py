@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
+    validate_chat_template,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -3138,3 +3139,12 @@ def test_tool_call_arguments_multiple_independent(caplog):
 
     assert len(caplog.records) == 1
     assert "bad" in caplog.records[0].message
+
+
+def test_validate_chat_template_rejects_invalid_type():
+    """A non-str/Path chat_template is invalid user input."""
+    with pytest.raises(
+        VLLMValidationError, match="not a valid chat template type"
+    ) as exc_info:
+        validate_chat_template(123)  # type: ignore[arg-type]
+    assert exc_info.value.parameter == "chat_template"
