@@ -153,10 +153,12 @@ def get_supported_mm_limits(self) -> Mapping[str, int | None]:
 
 ## 3. Specify dummy inputs
 
-Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct dummy inputs for
-HF processing. The processed outputs are also used for memory profiling.
+Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct the dummy inputs
+that are used for memory profiling.
 
 Override the abstract methods [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
+
+Besides profiling, the dummy text is passed to the HF processor by models whose HF processor requires text corresponding to the multi-modal items (see [Multi-modal fields](#multi-modal-fields)). If the HF processor can process multi-modal data without any text, the dummy text is not used during HF processing.
 
 Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
 
@@ -446,36 +448,63 @@ return a schema of the tensors outputted by the HF processor that are related to
     like in LLaVA, each image's features must be independent of the others (which
     is also required for prefix caching to work correctly). So, we un-pad each image
     back to its own size by overriding
-    [BaseMultiModalProcessor._call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor]:
+    [BaseMultiModalProcessor._postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data]
+    to post-process the outputs of the HF processor:
 
     ??? code
 
         ```python
-        def _call_hf_processor(
-            self,
-            prompt: str,
-            mm_data: Mapping[str, object],
-            mm_kwargs: Mapping[str, object],
-        ) -> BatchFeature:
-            processed_outputs = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-            )
+        def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+            # Mistral3Processor requires text corresponding to the images
+            return self.dummy_inputs.get_dummy_text(mm_counts)
 
-            pixel_values = processed_outputs.get("pixel_values")
+        def _postprocess_hf_mm_data(
+            self,
+            mm_data: Mapping[str, object],
+            hf_processor_mm_kwargs: Mapping[str, object],
+            processed_data: BatchFeature,
+        ) -> BatchFeature:
+            if not mm_data:
+                return processed_data
+
+            pixel_values = processed_data.get("pixel_values")
             if pixel_values is not None:
                 # Avoid padding since we need the output for each image to be
                 # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
+                image_sizes = processed_data["image_sizes"]
                 assert len(pixel_values) == len(image_sizes)
 
-                processed_outputs["pixel_values"] = [
+                processed_data["pixel_values"] = [
                     p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
                 ]
 
-            return processed_outputs
+            return processed_data
         ```
+
+    The default implementation of
+    [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
+    calls the HF processor on the multi-modal data without passing any text.
+    If the HF processor instead requires text corresponding to the multi-modal items,
+    you should override
+    [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text]
+    to return the dummy text from
+    [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]
+    like in the example above. If the HF processor expects the multi-modal data
+    under different keys than those provided by the multi-modal items
+    (e.g. `audio` instead of `audios`), or requires additional keyword arguments
+    (e.g. `sampling_rate`), you should override
+    [_preprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._preprocess_hf_mm_data].
+    If you need to modify the output of the HF processor,
+    you should override
+    [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].
+    If the HF processor applies additional transformations to the prompt tokens
+    that are not reflected in its multi-modal outputs (e.g. prepending a BOS token),
+    you should override
+    [_postprocess_prompt][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_prompt]
+    to replicate them.
+    For even more control over how the HF processor is called, you can override
+    [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
+    directly.
 
     Since `pixel_values` is now a list with one tensor per image, we can override
     [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
@@ -502,6 +531,12 @@ return a list of [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instanc
 
 Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies an update operation
 (e.g.: insertion, replacement) performed by the HF processor.
+
+!!! note
+    The target and content of each update are token sequences. When converting
+    text to token sequences, remember to encode it with
+    `cached_encode(..., add_special_tokens=False)`. Otherwise, the updated prompt
+    may contain duplicated special tokens or fail to match the target.
 
 === "Basic example: LLaVA"
 
@@ -680,17 +715,16 @@ Examples:
 
 ### Handling prompt updates unrelated to multi-modal data
 
-[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override [_apply_hf_processor_tokens_only][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only] so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
+[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing on the prompt regardless of how many multi-modal items there are, you should override [_postprocess_prompt][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_prompt] so that the prompt token IDs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
 
 Examples:
 
-- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
 - Molmo2 (prepends `bos_token`): [vllm/model_executor/models/molmo2.py](../../../vllm/model_executor/models/molmo2.py)
 - Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 
-Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and return it from [BaseProcessingInfo.get_hf_processor][vllm.multimodal.processing.BaseProcessingInfo.get_hf_processor]. It is then applied to the multi-modal data via [InputProcessingContext.call_hf_processor][vllm.multimodal.processing.InputProcessingContext.call_hf_processor] inside [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main].
 
 Examples:
 

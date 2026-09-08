@@ -154,16 +154,25 @@ class ColModernVBertDummyInputsBuilder(
 class ColModernVBertMultiModalProcessor(
     BaseMultiModalProcessor[ColModernVBertProcessingInfo],
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
         assert isinstance(tokenizer, HfTokenizer)
         text_encoding = tokenizer(
-            prompt,
+            prompt_text,
             return_tensors="pt",
         )
         result = BatchFeature(data=dict(text_encoding))
@@ -183,7 +192,9 @@ class ColModernVBertMultiModalProcessor(
             )
             result.update(image_outputs)
 
-        return result
+        processed_data = result
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,

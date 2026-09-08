@@ -3,7 +3,6 @@
 
 import importlib
 import json
-import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
 from typing import Any
@@ -15,13 +14,13 @@ from openai.types.responses import (
 from openai.types.responses.function_tool import FunctionTool
 
 import vllm.envs as envs
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    ExtractedToolCallInformation,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    ExtractedToolCallInformation,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
@@ -33,7 +32,7 @@ from vllm.sampling_params import (
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import import_from_path
+from vllm.utils.import_utils import import_plugin
 
 __all__ = ["Tool"]
 
@@ -367,12 +366,5 @@ class ToolParserManager:
 
     @classmethod
     def import_tool_parser(cls, plugin_path: str) -> None:
-        """Import a user-defined parser file from arbitrary path."""
-
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-        try:
-            import_from_path(module_name, plugin_path)
-        except Exception:
-            logger.exception(
-                "Failed to load module '%s' from %s.", module_name, plugin_path
-            )
+        """Import a user-defined tool parser."""
+        import_plugin(plugin_path)

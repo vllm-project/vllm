@@ -12,7 +12,7 @@ Supports:
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import torch
 import torch.nn as nn
@@ -120,6 +120,11 @@ class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
 
 
 HCXVisionV2VideoInputs = HCXVisionV2VideoPixelInputs | HCXVisionV2VideoEmbeddingInputs
+
+
+class HCXVisionV2MultiModalInputs(TypedDict, total=False):
+    image: HCXVisionV2ImageInputs | None
+    video: HCXVisionV2VideoInputs | None
 
 
 class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
@@ -261,34 +266,44 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         images = mm_data.get("images")
         videos = mm_data.get("videos")
 
         # Get the HF processor
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         # Build data dict for HF processor (images/videos only)
         # NOTE: We pass the prompt as-is without token normalization.
         # Token expansion is handled by vLLM via _get_prompt_updates.
         data: dict[str, object] = dict(
-            text=prompt,
+            text=prompt_text,
             images=images,
             videos=videos,
         )
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
-            kwargs=mm_kwargs,
+            kwargs=hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
 
-        return processed_outputs
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -319,6 +334,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     # Qwen2.5-VL style calculation
                     h, w = grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (h * w) // (merge_size**2)
@@ -330,6 +346,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (t * h * w) // (merge_size**2)
                 else:
@@ -596,8 +613,10 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> HCXVisionV2MultiModalInputs:
+        modalities: HCXVisionV2MultiModalInputs = {}
 
         for input_key in kwargs:
             if (

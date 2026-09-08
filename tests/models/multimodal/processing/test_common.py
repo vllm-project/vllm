@@ -385,17 +385,11 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "google/gemma-3n-E2B-it":
-        pytest.skip("Fix later")
-    if model_id == "OpenGVLab/InternVL2-2B":
-        pytest.skip("Fix later")
     if model_id == "openvla/openvla-7b":
         pytest.skip(
             "OpenVLA uses a custom vLLM processor because its HF remote "
             "processor is incompatible with current Transformers."
         )
-    if model_id == "jinaai/jina-reranker-m0":
-        pytest.skip("Fix later")
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "
@@ -403,21 +397,11 @@ def test_processing_correctness(
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
         )
-    if model_id == "CohereLabs/cohere-transcribe-03-2026":
-        pytest.skip("Fix later")
     if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
         pytest.skip(
             "MOSS-Audio uses a custom processor that dynamically expands "
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
-        )
-    # TODO: Remove when transformers 5.15.0 is released, which contains
-    # https://github.com/huggingface/transformers/pull/47483.
-    if model_id == "microsoft/VibeVoice-ASR-HF":
-        pytest.skip(
-            "VibeVoice ASR requires audio as a positional argument and hence "
-            "cannot pass the processing correctness test as is. Its generation "
-            "is covered by test_transformers_audio.py."
         )
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(

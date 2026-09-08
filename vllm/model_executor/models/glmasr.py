@@ -11,7 +11,7 @@ from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
@@ -710,6 +710,7 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         sampling_rate = feature_extractor.sampling_rate
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -750,46 +751,40 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-    ) -> BatchFeature:
-        # Normalize input: handle deprecated key and list conversion.
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
 
-        audio = mm_data.get("audio", [])
-        audio_list = [audio] if audio and not isinstance(audio, list) else audio
-
-        # Early return for text-only.
-        if not audio_list:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        # Handle sampling_rate
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        # Call parent method
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
-        # Postprocess: rename mask and add chunk counts
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         # Handle different key names from different transformers versions
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-        elif "input_features_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
+        elif "input_features" in processed_data:
             # If no mask is provided, create one from input_features
-            input_features = outputs["input_features"]
+            input_features = processed_data["input_features"]
             if isinstance(input_features, torch.Tensor):
                 # Create a mask of all ones matching the sequence length
                 mask = torch.ones(
@@ -797,18 +792,27 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                     input_features.shape[-1],
                     dtype=torch.long,
                 )
-                outputs["feature_attention_mask"] = mask
+                processed_data["feature_attention_mask"] = mask
 
-        # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        audio = mm_data.get("audio")
+        if audio is None:
+            audio_list: list[Any] = []
+        elif isinstance(audio, list):
+            audio_list = audio
+        else:
+            audio_list = [audio]
+        if audio_list:
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        # Override chunk counts calculation with GLM-ASR specific logic
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, processor.feature_extractor, processor
-        )
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+            # Override chunk counts calculation with GLM-ASR specific logic
+            chunk_counts = self._calculate_chunk_counts(
+                audio_list, processor.feature_extractor, processor
+            )
+            processed_data["chunk_counts"] = torch.tensor(
+                chunk_counts, dtype=torch.long
+            )
 
-        return outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -880,6 +884,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 audio_embeds = out_mm_data.get("audio_embeds")
                 if audio_embeds is not None:
                     embed = audio_embeds[item_idx]
+                    assert isinstance(embed, torch.Tensor)
                     num_features = embed.shape[0]
                 else:
                     raise ValueError(
@@ -898,7 +903,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_glmasr,
             )
         ]
@@ -1120,7 +1125,11 @@ class GlmAsrForConditionalGeneration(
         audio_token = cls._get_audio_token(model_config)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_content = f"{audio_token}translate the speech to {full_lang_name_to}"
         elif task_type == "transcribe":
             user_content = (

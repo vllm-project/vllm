@@ -37,10 +37,14 @@ def _make_fake_speculator(
     fake_input_buffers = SimpleNamespace(
         query_start_loc=torch.zeros(max_num_reqs + 1, dtype=torch.int32),
         seq_lens=torch.zeros(max_num_reqs, dtype=torch.int32),
+        dcp_local_seq_lens=torch.zeros(max_num_reqs, dtype=torch.int32),
     )
     fake_block_tables = SimpleNamespace(
         input_block_tables=[torch.zeros(max_num_reqs, 4, dtype=torch.int32)],
         slot_mappings=torch.zeros(1, max_num_tokens, dtype=torch.int64),
+        cp_size=1,
+        cp_rank=0,
+        cp_interleave=1,
     )
     return SimpleNamespace(
         arange=torch.arange(max_num_reqs + 1, dtype=torch.int32, device="cpu"),
@@ -126,3 +130,32 @@ def test_build_draft_attn_metadata_clamps_to_max_model_len():
     bound = captured["seq_lens_cpu_upper_bound"]
     # 1023 + 3 = 1026 -> clamped to 1024; 500 + 3 = 503 unaffected.
     assert torch.equal(bound, torch.tensor([1024, 503], dtype=torch.int32))
+
+
+def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens():
+    fake = _make_fake_speculator()
+    fake.block_tables.cp_size = 2
+    fake.block_tables.cp_rank = 1
+    fake.block_tables.cp_interleave = 4
+    fake.input_buffers.seq_lens[:3] = torch.tensor([5, 9, 16])
+
+    def fake_prepare(out, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave):
+        assert seq_lens is fake.input_buffers.seq_lens
+        assert (num_reqs, dcp_size, dcp_rank, cp_interleave) == (3, 2, 1, 4)
+        out[:num_reqs].copy_(torch.tensor([1, 4, 8], dtype=torch.int32))
+        out[num_reqs:].zero_()
+
+    with patch.object(base_speculator, "prepare_dcp_local_seq_lens", fake_prepare):
+        captured = _run_build(
+            fake,
+            num_reqs=3,
+            num_reqs_padded=4,
+            num_tokens_padded=4,
+            base=torch.tensor([5, 9, 16]),
+            step=0,
+        )
+
+    local = captured["dcp_local_seq_lens"]
+    assert isinstance(local, torch.Tensor)
+    assert local.data_ptr() == fake.input_buffers.dcp_local_seq_lens.data_ptr()
+    assert local.tolist() == [1, 4, 8, 0]
