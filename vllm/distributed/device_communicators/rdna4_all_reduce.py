@@ -35,8 +35,6 @@ P2P_GRAPH_MIN_SIZE = {
     8: 384 * 1024 + 16,
 }
 TP2_P2P_GRAPH_MAX_SIZE = 128 * 1024 * 1024
-TP2_P2P_SMALL_MAX_SIZE = 1024 * 1024
-TP2_P2P_EAGER_MIN_SIZE = 1024 * 1024
 TP4_EAGER_PYNCCL_SIZES = frozenset({32 * 1024})
 TP4_P2P_PULL_GRAPH_RANGE = (1024 * 1024, 128 * 1024 * 1024)
 TP4_P2P_TWO_SHOT_MIN_SIZE = 1024 * 1024
@@ -742,10 +740,11 @@ class RDNA4AllReduce:
         if graph:
             return True
         if self.world_size == 2:
-            return (
-                inp.nbytes >= TP2_P2P_EAGER_MIN_SIZE
-                and inp.nbytes <= TP2_P2P_SMALL_MAX_SIZE
-            ) or inp.nbytes >= 2 * 1024 * 1024
+            # The direct-input transport wins isolated benchmarks, but long
+            # multi-process model forwards can leave one HIP stream spinning
+            # on peer progress.  Keep TP2 eager execution on PyNCCL until the
+            # cross-process progress protocol is safe under sustained load.
+            return False
         return self.world_size == 4 and inp.nbytes >= TP4_P2P_FOUR_BLOCK_MIN_SIZE
 
     def _p2p_tensor_supported(self, inp: torch.Tensor) -> bool:

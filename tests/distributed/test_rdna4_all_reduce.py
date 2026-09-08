@@ -15,7 +15,6 @@ from vllm.distributed.device_communicators.rdna4_all_reduce import (
     MAPPED_ALL_REDUCE_MAX_SIZE,
     P2P_GRAPH_MIN_SIZE,
     TP2_MAPPED_BF16_MAX_SIZE,
-    TP2_P2P_EAGER_MIN_SIZE,
     TP4_EAGER_PYNCCL_SIZES,
     TP8_PYNCCL_GRAPH_RANGE,
     RDNA4AllReduce,
@@ -142,9 +141,9 @@ def test_measured_pynccl_routing_exclusions():
     graph_only_tp2 = _bf16_tensor(P2P_GRAPH_MIN_SIZE[2])
     assert not tp2.should_use(graph_only_tp2)
     assert tp2.should_use_graph(graph_only_tp2)
-    eager_tp2 = _bf16_tensor(TP2_P2P_EAGER_MIN_SIZE)
-    assert tp2.should_use(eager_tp2)
-    assert tp2.should_use_graph(eager_tp2)
+    large_tp2 = _bf16_tensor(DEFAULT_MAX_SIZE)
+    assert not tp2.should_use(large_tp2)
+    assert tp2.should_use_graph(large_tp2)
 
     tp4 = _bare_communicator(4, max_size=DEFAULT_MAX_SIZE)
     tp4._mapped = _Delegate(True, "mapped")
