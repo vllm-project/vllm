@@ -8,7 +8,7 @@ from collections.abc import Iterable
 import pytest
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager, LookupPhase
 
 
 def _key(i: int) -> OffloadKey:
@@ -46,10 +46,13 @@ class TestAsyncLookupManager:
     def test_found_key_returns_true(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         assert mgr.lookup(_key(1), _ctx()) is None
+        assert mgr._lookup_state[_key(1)].phase is LookupPhase.PENDING
         mgr.flush()
+        assert mgr._lookup_state[_key(1)].phase is LookupPhase.IN_FLIGHT
         mgr._results_ready.wait()
         mgr._results_ready.clear()
         assert mgr.lookup(_key(1), _ctx()) is True
+        assert mgr._lookup_state[_key(1)].phase is LookupPhase.RESOLVED
         mgr.shutdown()
 
     def test_not_found_key_returns_false(self):
@@ -106,8 +109,8 @@ class TestAsyncLookupManager:
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
-    def test_cleanup_reuses_submitted_probe(self, monkeypatch: pytest.MonkeyPatch):
-        """A replacement request shares the submitted probe and its verdict."""
+    def test_cleanup_reuses_in_flight_probe(self, monkeypatch: pytest.MonkeyPatch):
+        """A replacement request shares the in-flight probe and its verdict."""
         key = _key(1)
         mgr = InMemoryLookupManager(existing_keys={key})
         ctx_b = _ctx("req_b")
@@ -126,8 +129,10 @@ class TestAsyncLookupManager:
             assert mgr.lookup(key, _ctx("req_a")) is None
             mgr.flush()
             assert probe_started.wait(timeout=5)
+            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
             mgr.cleanup("req_a")
             assert mgr.lookup(key, ctx_b) is None
+            assert mgr._lookup_state[key].phase is LookupPhase.IN_FLIGHT
             mgr.flush()
 
             release_probe.set()

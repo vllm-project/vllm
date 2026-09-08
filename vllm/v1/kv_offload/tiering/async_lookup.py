@@ -28,7 +28,7 @@ flush() is called once per step from the tier's on_schedule_end(), posting
 the entire batch as a single queue item so the background thread sees one
 batch per step.
 Results are drained on the first lookup after each flush, at flush(), and
-after worker shutdown. Submitted lookups with no remaining request references
+after worker shutdown. In-flight lookups with no remaining request references
 are retained until their results are drained, allowing new requests to share
 the same probe.
 """
@@ -38,6 +38,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -45,11 +46,19 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 logger = init_logger(__name__)
 
 
+class LookupPhase(Enum):
+    """Lifecycle phase of a lookup probe."""
+
+    PENDING = auto()  # Accumulated in _lookup_batch, but not yet submitted.
+    IN_FLIGHT = auto()  # Submitted to the worker, but not yet resolved.
+    RESOLVED = auto()  # The worker result has been applied to the state.
+
+
 @dataclass(slots=True)
 class LookupState:
     generation: int
-    submitted: bool = False
-    result: bool | None = None  # True (found), False (not found), None
+    phase: LookupPhase = LookupPhase.PENDING
+    result: bool | None = None  # Populated when phase is RESOLVED.
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
@@ -165,15 +174,16 @@ class AsyncLookupManager(ABC):
         self._need_to_drain = True
         batch = self._lookup_batch
         self._lookup_batch = []
-        submitted_batch = []
+        in_flight_batch = []
         for key, req_context, generation in batch:
             state = self._lookup_state.get(key)
             if state is None or state.generation != generation:
                 continue
-            state.submitted = True
-            submitted_batch.append((key, req_context, generation))
-        if submitted_batch:
-            self._lookup_queue.put(submitted_batch)
+            assert state.phase is LookupPhase.PENDING
+            state.phase = LookupPhase.IN_FLIGHT
+            in_flight_batch.append((key, req_context, generation))
+        if in_flight_batch:
+            self._lookup_queue.put(in_flight_batch)
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
@@ -192,6 +202,7 @@ class AsyncLookupManager(ABC):
                 if not state.request_ids:
                     del self._lookup_state[key]
                     continue
+                assert state.phase is LookupPhase.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
                 # generations were discarded above.
@@ -201,6 +212,7 @@ class AsyncLookupManager(ABC):
                     "failed-load livelock"
                 )
                 state.result = result
+                state.phase = LookupPhase.RESOLVED
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
@@ -210,9 +222,10 @@ class AsyncLookupManager(ABC):
             state = self._lookup_state.get(key)
             if state is not None:
                 state.result = False
+                state.phase = LookupPhase.RESOLVED
 
     def cleanup(self, req_id: str) -> None:
-        """Release request references, retaining submitted unresolved lookups.
+        """Release request references, retaining in-flight lookups.
 
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
@@ -220,9 +233,7 @@ class AsyncLookupManager(ABC):
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
-            if not state.request_ids and (
-                not state.submitted or state.result is not None
-            ):
+            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:
