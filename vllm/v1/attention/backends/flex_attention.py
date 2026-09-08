@@ -160,6 +160,7 @@ def physical_to_logical_mapping(
     seq_lens: torch.Tensor,
     block_size: int,
     total_blocks: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Creates an inverse mapping from physical block locations to logical indices.
@@ -230,6 +231,8 @@ def physical_to_logical_mapping(
         block_size: Size of each block in tokens. Used with seq_lens to
             compute the number of valid blocks per sequence.
         total_blocks: Total number of physical blocks available
+        out: Optional preallocated [>= max_reqs, total_blocks] int32 buffer to
+            write into.
 
     Returns:
         A tensor of shape [max_reqs, total_blocks] where each entry
@@ -239,21 +242,22 @@ def physical_to_logical_mapping(
     max_reqs, max_num_blocks = block_table.shape
     device = block_table.device
 
-    physical_to_logical = torch.full(
-        (max_reqs, total_blocks), -1, dtype=torch.long, device=device
-    )
+    if out is None:
+        physical_to_logical = torch.full(
+            (max_reqs, total_blocks), -1, dtype=torch.int32, device=device
+        )
+    else:
+        physical_to_logical = out[:max_reqs, :total_blocks].fill_(-1)
 
     # Only process valid blocks to avoid garbage values
     num_blocks_per_seq: torch.Tensor = cdiv(seq_lens, block_size)
-    mask = (
-        torch.arange(max_num_blocks, device=device)[None, :]
-        < num_blocks_per_seq[:, None]
-    )
+    logical_indices = torch.arange(
+        max_num_blocks, device=device, dtype=physical_to_logical.dtype
+    )[None, :]
+    mask = logical_indices < num_blocks_per_seq[:, None]
 
     valid_block_table = torch.where(mask, block_table, 0)
-    valid_logical_indices = torch.where(
-        mask, torch.arange(max_num_blocks, device=device)[None, :], 0
-    )
+    valid_logical_indices = torch.where(mask, logical_indices, 0)
 
     physical_to_logical.scatter_reduce_(
         -1, valid_block_table.to(torch.int64), valid_logical_indices, reduce="amax"
@@ -274,11 +278,11 @@ def unique_static_unsorted(
     """
     - Keeps the first occurrence of each non-zero value while preserving order,
       then left-packs those uniques and fills the rest with `pad_val`.
-    - Returns (packed, keep_mask) with the *same shape* as `x`.
+    - Returns `packed` with the *same shape* as `x`.
     - Requires that all values be in the range [0, M]
     - Skips ignored_val
 
-    Works on CPU or GPU, no Python loops, O(B·N) time / O(B·M) memory.
+    Works on CPU or GPU, no Python loops, O(B·N log N) time / O(B·N) memory.
 
     Example:
     x =[3, 1, 0, 1, 2], M=3, ignored_val=0 => [3, 1, 2, -1, -1]
@@ -293,15 +297,15 @@ def unique_static_unsorted(
     x_flat = x_perm.reshape(B, N)  # [B, N]
 
     device = x.device
-    idx = torch.arange(N, device=device).expand(B, N)  # per-row indices
 
-    # ── build first-occurrence table for every v ∈ [0, M] ───────────────
-    first_idx = torch.full((B, M + 1), N, device=device)  # “∞”
-    # scatter_reduce_: first_idx[b, v] = min(first_idx[b, v], i) for each i
-    first_idx.scatter_reduce_(1, x_flat, idx, reduce="amin")
-
-    # ── keep mask: first occurrence *and* value ≠ 0 ─────────────────────
-    keep = (x_flat != ignored_val) & (idx == first_idx.gather(1, x_flat))  # [B, N]
+    # ── keep mask: first occurrence *and* value ≠ ignored_val ───────────
+    # A stable sort groups equal values and orders each group by original
+    # position, so the first element of every group is the first occurrence.
+    sorted_vals, order = torch.sort(x_flat, dim=1, stable=True)
+    is_first_sorted = torch.ones_like(sorted_vals, dtype=torch.bool)
+    is_first_sorted[:, 1:] = sorted_vals[:, 1:] != sorted_vals[:, :-1]
+    keep = torch.zeros_like(is_first_sorted).scatter_(1, order, is_first_sorted)
+    keep &= x_flat != ignored_val  # [B, N]
 
     # ── left-pack uniques into a fresh tensor ───────────────────────────
     # Route non-kept entries to a garbage slot at column N so we can do a
@@ -789,9 +793,7 @@ class FlexAttentionMetadata:
             used_pages_padded.shape[0] // self.q_block_size, -1
         )
         used_pages_padded = used_pages_padded // page_to_block_ratio
-        kv_indices = unique_static_unsorted(
-            (used_pages_padded.long()), M=self.num_blocks
-        ).to(torch.int32)
+        kv_indices = unique_static_unsorted(used_pages_padded, M=self.num_blocks)
         kv_indices = copy_to_persistent(self.persistent_kv_indices, kv_indices)
 
         kv_num_blocks = (kv_indices >= 0).sum(dim=-1).to(torch.int32)
@@ -1045,17 +1047,21 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         )
         total_cache_tokens = num_gpu_blocks * block_size
 
-        inverse_block_table = physical_to_logical_mapping(
-            block_table_tensor, seq_lens, block_size, num_gpu_blocks
-        )
         if self.persistent_physical_to_logical is None:
             max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
             self.persistent_physical_to_logical = torch.empty(
                 max_num_seqs,
                 num_gpu_blocks,
-                dtype=torch.long,
+                dtype=torch.int32,
                 device=self.device,
             )
+        physical_to_logical_mapping(
+            block_table_tensor,
+            seq_lens,
+            block_size,
+            num_gpu_blocks,
+            out=self.persistent_physical_to_logical,
+        )
 
         if self.persistent_kv_indices is None:
             self.persistent_kv_indices = torch.empty(
@@ -1084,8 +1090,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             if use_rswa
             else self.persistent_kv_num_blocks
         )
-
-        copy_to_persistent(self.persistent_physical_to_logical, inverse_block_table)
 
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
         copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
