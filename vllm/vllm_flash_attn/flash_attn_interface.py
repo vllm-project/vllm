@@ -464,6 +464,8 @@ def compile_flash_attn_varlen_func_from_specs(
     k_descale: bool = False,
     v_descale: bool = False,
     softcap: float | None = None,
+    mask_mod=None,
+    aux_tensor_shapes: list[tuple[int, ...]] | None = None,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -491,6 +493,8 @@ def compile_flash_attn_varlen_func_from_specs(
     q = _make_compile_only_tensor_spec(q_shape, q_dtype)
     k = _make_compile_only_tensor_spec(k_shape, q_dtype, stride=k_stride)
     v = _make_compile_only_tensor_spec(v_shape, q_dtype, stride=v_stride)
+    cu_seqlens_q = _make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4)
+    aux_tensors = None
     out = _make_compile_only_tensor_spec(
         (*q_shape[:-1], v_shape[-1]),
         q_dtype,
@@ -511,11 +515,20 @@ def compile_flash_attn_varlen_func_from_specs(
             stride=lse_stride,
         )
 
+    if aux_tensor_shapes is not None:
+        # Aux tensor metadata is part of FA4's native cache key. Runtime
+        # mm_prefix buffers carry no explicit alignment annotation, unlike the
+        # regular cu_seqlens argument, so compile them without an alignment hint.
+        aux_tensors = [
+            _make_compile_only_tensor_spec(shape, torch.int32)
+            for shape in aux_tensor_shapes
+        ]
+
     return _flash_attn_fwd(
         q=q,
         k=k,
         v=v,
-        cu_seqlens_q=_make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4),
+        cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=_make_compile_only_tensor_spec(cu_seqlens_k_shape, torch.int32, 4),
         seqused_k=_make_compile_only_tensor_spec(seqused_k_shape, torch.int32, 4),
         page_table=_make_compile_only_tensor_spec(page_table_shape, torch.int32, 4),
@@ -545,6 +558,8 @@ def compile_flash_attn_varlen_func_from_specs(
             if v_descale
             else None
         ),
+        mask_mod=mask_mod,
+        aux_tensors=aux_tensors,
         compile_only=True,
     )
 

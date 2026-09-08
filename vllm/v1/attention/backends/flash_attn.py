@@ -4,7 +4,6 @@
 
 import copy
 import functools
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -61,7 +60,6 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
-from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
@@ -95,27 +93,21 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         q_stage: int
         is_split_kv: bool
         dtype: torch.dtype
-        num_qo_heads: int
-        num_kv_heads: int
+        qhead_per_kvhead: int
         head_dim: int
         page_size: int
-        max_blocks_per_seq: int
-        scale: float
-        window_size: tuple[int, int]
+        has_window_left: bool
+        has_window_right: bool
         softcap: float
-        fa_version: int
+        causal: bool
+        uses_mm_prefix_mask: bool
+        mm_prefix_sliding_window: int
+        mm_prefix_sliding_window_left: int | None
 
     @staticmethod
-    def kernel(
-        *args: Any,
-        runtime_kernel: Callable[..., Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        selected_kernel = (
-            flash_attn_varlen_func if runtime_kernel is None else runtime_kernel
-        )
-        assert selected_kernel is not None
-        return selected_kernel(*args, **kwargs)
+    def kernel(*args: Any, **kwargs: Any) -> Any:
+        assert flash_attn_varlen_func is not None
+        return flash_attn_varlen_func(*args, **kwargs)
 
     def dispatch(
         self,
@@ -127,25 +119,27 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         num_kv_heads: int,
         head_dim: int,
         page_size: int,
-        max_blocks_per_seq: int,
-        scale: float,
         window_size: tuple[int, int],
         softcap: float,
-        fa_version: int,
+        causal: bool,
+        uses_mm_prefix_mask: bool,
+        mm_prefix_sliding_window: int,
+        mm_prefix_sliding_window_left: int | None,
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
             is_split_kv=is_split_kv,
             dtype=dtype,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
+            qhead_per_kvhead=num_qo_heads // num_kv_heads,
             head_dim=head_dim,
             page_size=page_size,
-            max_blocks_per_seq=max_blocks_per_seq,
-            scale=scale,
-            window_size=window_size,
+            has_window_left=window_size[0] >= 0,
+            has_window_right=window_size[1] >= 0,
             softcap=softcap,
-            fa_version=fa_version,
+            causal=causal,
+            uses_mm_prefix_mask=uses_mm_prefix_mask,
+            mm_prefix_sliding_window=mm_prefix_sliding_window,
+            mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
         )
 
     def get_warmup_keys(
@@ -156,10 +150,12 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         num_kv_heads: int,
         head_dim: int,
         page_size: int,
-        max_blocks_per_seq: int,
-        scale: float,
         window_size: tuple[int, int],
         softcap: float,
+        causal: bool,
+        uses_mm_prefix_mask: bool,
+        mm_prefix_sliding_window: int,
+        mm_prefix_sliding_window_left: int | None,
         fa_version: int,
     ) -> list[CompileKey]:
         capability = current_platform.get_device_capability()
@@ -167,17 +163,26 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         if (
             fa_version != 4
             or dtype not in FA4_DENSE_STANDARD_DTYPES
-            or major not in (9, 10, 11, 12)
+            or major not in (9, 10, 11)
         ):
             return []
 
         q_stages = (1, 2) if major in (10, 11) else (1,)
-        split_states = (False,) if major == 12 else (False, True)
+        split_states = (False, True)
         if uses_fa4_hd256_kernel(head_dim):
+            if page_size != FA4_HD256_PAGE_SIZE:
+                return []
             split_states = (False,)
 
+        runtime_variant = dict(
+            window_size=window_size,
+            causal=causal,
+            uses_mm_prefix_mask=uses_mm_prefix_mask,
+            mm_prefix_sliding_window=mm_prefix_sliding_window,
+            mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
+        )
         return self._trace_dispatch(self.dispatch)(
-            zip_inputs(dict(window_size=window_size)),
+            zip_inputs(runtime_variant),
             q_stage=q_stages,
             is_split_kv=split_states,
             dtype=dtype,
@@ -185,10 +190,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             page_size=page_size,
-            max_blocks_per_seq=max_blocks_per_seq,
-            scale=scale,
             softcap=softcap,
-            fa_version=fa_version,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -198,17 +200,29 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
             compile_key.page_size,
-            compile_key.num_kv_heads,
+            1,
             compile_key.head_dim,
         )
         kv_stride = (
-            2 * compile_key.page_size * compile_key.num_kv_heads * compile_key.head_dim,
-            2 * compile_key.num_kv_heads * compile_key.head_dim,
+            2 * compile_key.page_size * compile_key.head_dim,
+            2 * compile_key.head_dim,
             2 * compile_key.head_dim,
             1,
         )
+        mask_mod = None
+        aux_tensor_shapes = None
+        if compile_key.uses_mm_prefix_mask:
+            mask_mod = _make_mm_prefix_mask_mod(
+                sliding_window=compile_key.mm_prefix_sliding_window,
+                sliding_window_left=compile_key.mm_prefix_sliding_window_left,
+            )
+            aux_tensor_shapes = [(max_seqlen_q, 2), (2,)]
         compile_flash_attn_varlen_func_from_specs(
-            q_shape=(max_seqlen_q, compile_key.num_qo_heads, compile_key.head_dim),
+            q_shape=(
+                max_seqlen_q,
+                compile_key.qhead_per_kvhead,
+                compile_key.head_dim,
+            ),
             k_shape=kv_shape,
             v_shape=kv_shape,
             k_stride=kv_stride,
@@ -216,16 +230,23 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_dtype=compile_key.dtype,
             cu_seqlens_q_shape=(2,),
             seqused_k_shape=(1,),
-            page_table_shape=(1, compile_key.max_blocks_per_seq),
+            page_table_shape=(
+                1,
+                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+            ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
-            softmax_scale=compile_key.scale,
-            causal=True,
-            window_size=list(compile_key.window_size),
+            causal=compile_key.causal,
+            window_size=[
+                1 if compile_key.has_window_left else -1,
+                1 if compile_key.has_window_right else -1,
+            ],
             softcap=compile_key.softcap,
             num_splits=num_splits,
-            fa_version=compile_key.fa_version,
+            fa_version=4,
             return_softmax_lse=False,
+            mask_mod=mask_mod,
+            aux_tensor_shapes=aux_tensor_shapes,
         )
 
     def __call__(
@@ -234,16 +255,9 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        runtime_kernel: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        return self.kernel(
-            q=q,
-            k=k,
-            v=v,
-            runtime_kernel=runtime_kernel,
-            **kwargs,
-        )
+        return self.kernel(q=q, k=k, v=v, **kwargs)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -626,37 +640,70 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
         )
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and fa_version == 4
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-        ):
+        if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
             dtype = self.model_config.dtype
             attn_layers = get_layers_from_vllm_config(
                 vllm_config, Attention, layer_names
             )
-            runtime_variants = {
-                (
-                    layer.impl.scale,
-                    layer.impl.sliding_window,
-                    float(layer.impl.logits_soft_cap),
+            runtime_variants = set()
+            for layer in attn_layers.values():
+                if not isinstance(layer.impl, FlashAttentionImpl):
+                    continue
+                runtime_variants.add(
+                    (
+                        layer.impl.sliding_window,
+                        float(layer.impl.logits_soft_cap),
+                        True,
+                        False,
+                        0,
+                        None,
+                    )
                 )
-                for layer in attn_layers.values()
-                if isinstance(layer.impl, FlashAttentionImpl)
-            }
-            for scale, window_size, softcap in runtime_variants:
+                if not self.model_config.is_mm_prefix_lm:
+                    continue
+                sw_val = (
+                    1 + layer.impl.sliding_window[0]
+                    if layer.impl.sliding_window is not None
+                    and layer.impl.sliding_window[0] >= 0
+                    else None
+                )
+                mm_clamp_sw = (
+                    sw_val
+                    if getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                    and sw_val is not None
+                    else 0
+                )
+                runtime_variants.add(
+                    (
+                        (-1, -1),
+                        float(layer.impl.logits_soft_cap),
+                        False,
+                        True,
+                        mm_clamp_sw,
+                        sw_val,
+                    )
+                )
+
+            for (
+                window_size,
+                softcap,
+                causal,
+                uses_mm_prefix_mask,
+                mm_prefix_sliding_window,
+                mm_prefix_sliding_window_left,
+            ) in runtime_variants:
                 _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
                     dtype=dtype,
                     num_qo_heads=self.num_heads_q,
                     num_kv_heads=self.num_heads_kv,
                     head_dim=self.headdim,
                     page_size=self.block_size,
-                    max_blocks_per_seq=cdiv(
-                        self.model_config.max_model_len, self.block_size
-                    ),
-                    scale=scale,
                     window_size=window_size,
                     softcap=softcap,
+                    causal=causal,
+                    uses_mm_prefix_mask=uses_mm_prefix_mask,
+                    mm_prefix_sliding_window=mm_prefix_sliding_window,
+                    mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
                     fa_version=fa_version,
                 )
 

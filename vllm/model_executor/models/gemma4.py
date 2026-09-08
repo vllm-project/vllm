@@ -179,7 +179,7 @@ class Gemma4RoutingKernel(VllmTritonJitKernel["Gemma4RoutingKernel.CompileKey"])
         num_warps: int
         scale_dtype: torch.dtype
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_experts: int,
