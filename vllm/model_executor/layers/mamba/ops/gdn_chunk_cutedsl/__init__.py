@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
+from dataclasses import dataclass
+from typing import Any
 
 import cutlass
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import Int32, cute
 from quack.compile_utils import make_fake_tensor
-
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+)
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    cutedsl_kernel_launcher as kernel_launcher,
+)
 from vllm.triton_utils import triton
 
 from .kernel_h import h_cutedsl
@@ -16,7 +23,7 @@ from .kernel_kkt_inv_uw import kkt_inv_uw_cutedsl
 from .kernel_o import o_cutedsl
 
 
-class PrepMetaKernel:
+class _PrepMetaKernel:
     def __init__(self, BT: int) -> None:
         self.BT = BT
         self.num_warps = 8
@@ -102,25 +109,49 @@ class PrepMetaKernel:
 
             chunk_start = chunk_end
 
-    @cache
+
+class GdnPrepMetaKernel(VllmCuTeDSLJitKernel["GdnPrepMetaKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        chunk_size: int
+
     @staticmethod
-    def compile(BT: int):
+    def kernel(compile_key: CompileKey) -> Any:
+        return _PrepMetaKernel(compile_key.chunk_size)
+
+    def dispatch(self, *, chunk_size: int) -> CompileKey:
+        return self.CompileKey(chunk_size=chunk_size)
+
+    def get_warmup_keys(self, *, chunk_size: int) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(chunk_size=chunk_size)
+
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         cu_entries = cute.sym_int()
         upper_bound_chunks = cute.sym_int()
 
         cu_seqlens = make_fake_tensor(Int32, (cu_entries,), divisibility=1)
         chunk_indices = make_fake_tensor(Int32, (upper_bound_chunks, 2), divisibility=2)
         chunk_offsets = make_fake_tensor(Int32, (cu_entries,), divisibility=1)
+        return cu_seqlens, chunk_indices, chunk_offsets
 
-        kernel = PrepMetaKernel(BT)
-        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        return cute.compile(
-            kernel,
-            cu_seqlens,
-            chunk_indices,
-            chunk_offsets,
-            stream,
-            options="--enable-tvm-ffi",
+    @kernel_launcher
+    def __call__(
+        self,
+        cu_seqlens: torch.Tensor,
+        chunk_indices: torch.Tensor,
+        chunk_offsets: torch.Tensor,
+        chunk_size: int,
+    ) -> CuTeDSLLaunchSpec[CompileKey]:
+        compile_key = self.dispatch(chunk_size=chunk_size)
+        return (
+            compile_key,
+            (cu_seqlens, chunk_indices, chunk_offsets),
+            {
+                "cu_seqlens_shape": tuple(cu_seqlens.shape),
+                "chunk_indices_shape": tuple(chunk_indices.shape),
+                "chunk_offsets_shape": tuple(chunk_offsets.shape),
+                "chunk_size": chunk_size,
+            },
         )
 
 
@@ -138,7 +169,12 @@ def prepare_metadata_cutedsl(
     chunk_offsets = cu_seqlens.new_empty(num_seqs + 1, dtype=torch.int32)
     chunk_indices = cu_seqlens.new_empty((upper_bound_chunks, 2), dtype=torch.int32)
 
-    PrepMetaKernel.compile(chunk_size)(cu_seqlens, chunk_indices, chunk_offsets)
+    _GDN_PREP_META_KERNEL(
+        cu_seqlens,
+        chunk_indices,
+        chunk_offsets,
+        chunk_size,
+    )
     return chunk_indices, chunk_offsets
 
 
@@ -240,7 +276,11 @@ def chunk_gated_delta_rule_cutedsl(
     return output.unsqueeze(0), final_state
 
 
+_GDN_PREP_META_KERNEL = GdnPrepMetaKernel()
+
+
 __all__ = [
+    "_GDN_PREP_META_KERNEL",
     "chunk_gated_delta_rule_cutedsl",
     "prepare_metadata_cutedsl",
 ]

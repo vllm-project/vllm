@@ -312,6 +312,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+                _resolve_gdn_prefill_backend,
+            )
+
+            _, gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+            if gdn_prefill_backend == "cutedsl":
+                from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                    _GDN_PREP_META_KERNEL,
+                )
+
+                _GDN_PREP_META_KERNEL.register_warmup(chunk_size=64)
             GATHER_INITIAL_STATES_KERNEL.register_warmup(
                 row_size=self.local_num_heads * self.head_dim * self.head_dim,
                 state_dtype=self.get_state_dtype()[1],
