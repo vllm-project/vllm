@@ -472,7 +472,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
                 if name.startswith("backbone."):
                     name = name.replace("backbone.", "model.")
 
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
