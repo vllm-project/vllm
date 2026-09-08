@@ -22,8 +22,9 @@ _TOPK = 16
 # fixed planner allocation used by the MSA decode kernel.
 _MAX_QUERY_HEAD_ROWS = 65536
 _MAX_DECODE_QUERY_LEN = 32
-# Kernel benchmarks put the CUTLASS crossover at 16 requests for TP1 and TP4.
-_MIN_CUTLASS_BATCH_SIZE = 16
+# Kernel benchmarks originally put the CUTLASS crossover at 16 requests for
+# TP1 and TP4. This is a performance heuristic rather than a kernel constraint.
+_DEFAULT_MIN_CUTLASS_BATCH_SIZE = 4
 
 
 @dataclass
@@ -235,8 +236,13 @@ def should_prepare_decode_metadata(
     kv_cache_dtype: str,
     page_size: int,
     topk_blocks: int,
+    min_batch_size: int = _DEFAULT_MIN_CUTLASS_BATCH_SIZE,
 ) -> bool:
-    """Return whether a graph shape can use the CUTLASS decode path."""
+    """Return whether a graph shape can use the CUTLASS decode path.
+
+    ``min_batch_size`` is a tunable performance gate; the remaining checks are
+    kernel constraints.
+    """
     total_q = batch_size * decode_query_len
     return (
         supports_cutlass_sparse_decode(
@@ -248,7 +254,7 @@ def should_prepare_decode_metadata(
             topk_blocks=topk_blocks,
         )
         and 1 <= decode_query_len <= _MAX_DECODE_QUERY_LEN
-        and batch_size >= _MIN_CUTLASS_BATCH_SIZE
+        and batch_size >= min_batch_size
         and total_q * num_q_heads <= _MAX_QUERY_HEAD_ROWS
     )
 
