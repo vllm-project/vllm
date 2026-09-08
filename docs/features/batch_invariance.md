@@ -118,6 +118,44 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+## Mamba2 Models
+
+Mamba2 layers normally run two different kernels: a chunked scan for prefill
+and a recurrent single-token update for decode. The two are not bit-identical,
+so a request's logits would depend on how it was scheduled (prefill versus
+decode, chunked-prefill split points, recompute after preemption).
+
+Under `VLLM_BATCH_INVARIANT=1` the Mamba2 backend therefore changes how the
+layers run. The SSM state is kept in fp32, and every scan call for a sequence
+(prefill, chunked-prefill continuation and each decode step) starts from the
+fp32 state at the sequence's last chunk boundary and re-feeds the inputs of the
+current partial chunk from a per-sequence buffer that is part of the layer's
+state. The kernels always see the chunk grid of a single-shot prefill, decode
+runs through the same chunked-scan kernels as prefill, and the SSM computation
+produces identical bits on every path. Nothing is configured per model: every
+model built on `MambaMixer2` behaves this way, and in a hybrid model the
+attention layers keep using their own batch-invariant kernels.
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve <mamba2-model> --no-enable-prefix-caching
+```
+
+Current limitations (the engine fails at startup otherwise): prefix caching
+must be off for the Mamba2 layers, pipeline-parallel size 1, no
+speculative decoding, no micro-batching (`--enable-dbo` or `--ubatch-size > 1`), no
+KV connectors, the Triton mamba backend, and not together with
+`--use-replayssm`. The Mamba2 layers run outside CUDA graphs in this mode.
+
+Costs: each decode step runs the chunked-scan kernels over the current partial
+chunk instead of the single-token update, and the per-layer Mamba state grows
+from two tensors (conv state, SSM state) to five. The three partial-chunk
+buffers `x`, raw `dt` and `B` hold `chunk_size` tokens of scan inputs per
+sequence (`C` is not buffered: it only enters a token's own output row, and the
+re-fed rows are discarded); for a layer with `nheads` heads of size `head_dim`
+and `ngroups` groups of size `dstate` in bf16 that is
+`chunk_size * (nheads * head_dim + ngroups * dstate + nheads) * 2` bytes per
+sequence, in addition to the fp32 SSM state.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
@@ -132,6 +170,7 @@ Batch invariance has been tested and verified on the following models:
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`
 - **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
+- **Mamba2**: `AntonV/mamba2-130m-hf`; **Mamba2 + attention hybrid**: `ibm-granite/granite-4.0-h-350m` (including scheduler preemption)
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 
