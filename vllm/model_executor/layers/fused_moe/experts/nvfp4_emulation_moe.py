@@ -494,7 +494,7 @@ class FusedMoeNvfp4EmulationKernel(
             stride_be=compile_key.n * k_packed,
             stride_bk=1,
             stride_bn=k_packed,
-            stride_cm=compile_key.top_k * compile_key.n,
+            stride_cm=compile_key.n,
             stride_cn=1,
             stride_bse=compile_key.n * k_scale,
             stride_bsk=1,

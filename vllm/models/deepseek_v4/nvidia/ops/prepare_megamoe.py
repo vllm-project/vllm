@@ -39,6 +39,7 @@ class PrepareMegaMoeInputsKernel(
         has_padding: bool
         has_shared_x_sf: bool
         shared_block_m: int
+        shared_x_sf_stride_k: int
 
     @staticmethod
     @triton.jit
@@ -182,6 +183,7 @@ class PrepareMegaMoeInputsKernel(
         has_padding: bool,
         has_shared_x_sf: bool,
         shared_block_m: int,
+        shared_x_sf_stride_k: int,
     ) -> CompileKey:
         block_topk = next_power_of_2(top_k)
         return self.CompileKey(
@@ -191,6 +193,7 @@ class PrepareMegaMoeInputsKernel(
             has_padding=has_padding,
             has_shared_x_sf=has_shared_x_sf,
             shared_block_m=shared_block_m if has_shared_x_sf else 1,
+            shared_x_sf_stride_k=shared_x_sf_stride_k if has_shared_x_sf else 0,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -200,11 +203,15 @@ class PrepareMegaMoeInputsKernel(
 
         hidden_size = vllm_config.model_config.hf_config.hidden_size
         top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # DeepGEMM aligns its input buffer to 384 tokens, then reserves 128
+        # scale rows per eight-token block for the shared-expert MN layout.
+        shared_x_sf_stride_k = triton.cdiv(max_tokens, 384) * 384 * 16
         has_shared_experts = (
             getattr(vllm_config.model_config.hf_config, "n_shared_experts", None)
             is not None
         )
-        if hidden_size <= 0 or top_k <= 0:
+        if hidden_size <= 0 or top_k <= 0 or max_tokens <= 0:
             return []
 
         # DeepGEMM's MegaMoE scheduler selects from these BLOCK_M candidates.
@@ -223,6 +230,7 @@ class PrepareMegaMoeInputsKernel(
             hidden_size=hidden_size,
             top_k=top_k,
             has_padding=(False, True),
+            shared_x_sf_stride_k=shared_x_sf_stride_k,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -245,6 +253,7 @@ class PrepareMegaMoeInputsKernel(
                 TritonWarmupTensor(
                     torch.int32,
                     shape=(shared_rows, x_scale_width),
+                    strides=(1, compile_key.shared_x_sf_stride_k),
                 )
                 if compile_key.has_shared_x_sf
                 else None
@@ -290,7 +299,7 @@ class PrepareMegaMoeInputsKernel(
             if shared_block_m <= 0:
                 raise ValueError("MegaMoE shared_block_m must be positive.")
             expected_sf_k = hidden_size // self.BLOCK_K
-            if shared_x_sf.ndim != 2 or shared_x_sf.shape[1] != expected_sf_k:
+            if len(shared_x_sf.shape) != 2 or shared_x_sf.shape[1] != expected_sf_k:
                 raise ValueError(
                     "MegaMoE shared_x_sf must have shape "
                     f"(*, {expected_sf_k}), got {tuple(shared_x_sf.shape)}."
