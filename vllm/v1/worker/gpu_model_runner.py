@@ -211,6 +211,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 )
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
+from vllm.v1.spec_decode.uno import UnoProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -641,6 +642,7 @@ class GPUModelRunner(
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
+                | UnoProposer
                 | Step3p5MTPProposer
             )
             if self.speculative_config.method == "custom_class":
@@ -651,6 +653,8 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.use_uno():
+                self.drafter = UnoProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -1211,6 +1215,12 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        if (
+            self.speculative_config
+            and self.speculative_config.use_uno()
+            and any(req.lora_request for req in scheduler_output.scheduled_new_reqs)
+        ):
+            raise ValueError("Uno does not support request-specific LoRA adapters")
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             req_state = self.requests.pop(req_id, None)
@@ -4735,6 +4745,7 @@ class GPUModelRunner(
             # TP/EP/DP collectives), independent of padded-batch timing.
             drafter_runs_model_forward = (
                 spec_config.use_eagle()
+                or spec_config.use_uno()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
             )
@@ -4751,7 +4762,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | UnoProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4847,7 +4859,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | UnoProposer,
                 )
                 self.drafter.dummy_run(num_tokens=1)
 
@@ -5248,12 +5261,17 @@ class GPUModelRunner(
 
         elif (
             spec_config.use_eagle()
+            or spec_config.use_uno()
             or spec_config.use_dflash()
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | UnoProposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5382,6 +5400,30 @@ class GPUModelRunner(
 
         return draft_token_ids
 
+    def _install_uno_lora(self, drafter: UnoProposer) -> None:
+        """Keep the draft adapter registered and restore base mappings afterward."""
+        self._ensure_lora_enabled()
+        active_mapping: tuple[int, ...] = ()
+
+        def ensure_adapter() -> None:
+            # Profiling evicts adapters while exercising the available slots.
+            if drafter.uno_lora_id not in self.lora_manager.list_adapters():
+                self.lora_manager.add_adapter(drafter.lora_request)
+
+        def set_draft_mapping(mapping: tuple[int, ...] | None) -> None:
+            nonlocal active_mapping
+            if mapping is None:
+                base_mapping = (0,) * len(active_mapping)
+                self._set_active_loras(base_mapping, base_mapping, set())
+                active_mapping = ()
+                return
+            active_mapping = mapping
+            ensure_adapter()
+            self._set_active_loras(mapping, mapping, {drafter.lora_request})
+
+        ensure_adapter()
+        drafter.set_lora_hook(set_draft_mapping)
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
@@ -5430,6 +5472,8 @@ class GPUModelRunner(
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
+                    if isinstance(self.drafter, UnoProposer):
+                        self._install_uno_lora(self.drafter)
                     if (
                         self.parallel_config.enable_eplb
                         and hasattr(self.drafter, "model")
@@ -6261,6 +6305,7 @@ class GPUModelRunner(
 
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
+                or self.speculative_config.use_uno()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
             ):
@@ -6270,7 +6315,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | UnoProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -7241,11 +7287,16 @@ class GPUModelRunner(
         # Initialize drafter attention backend
         if self.speculative_config and (
             self.speculative_config.use_eagle()
+            or self.speculative_config.use_uno()
             or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | UnoProposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 

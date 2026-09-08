@@ -43,6 +43,49 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Uno
+
+[Uno](https://github.com/ifm-ai/uno) uses a trained LoRA adapter to draft with the
+same model that verifies the candidates. Each draft processes `K` query rows:
+one base-weight seed followed by `K-1` noisy rows with the adapter active. It
+proposes `K = num_speculative_tokens` candidates, and the target verifies them
+with vLLM's standard rejection sampler using the full draft probabilities.
+`K=1` is supported and uses only the base-weight seed, with no noisy rows.
+
+The initial implementation supports single-GPU NVIDIA text generation with
+causal full attention and the `FLASH_ATTN` backend, Model Runner V1, synchronous
+scheduling, and eager draft execution. Prefill and verification use the base
+model. Request-level LoRA adapters, hybrid or sliding-window attention, dynamic
+speculation lengths, and KV cache transfer are not supported.
+
+For the original [Qwen3-8B Uno adapter](https://huggingface.co/s-sahoo/uno-qwen3-8B),
+download its `adapter/` directory, then enable LoRA with rank capacity 128:
+
+```bash
+hf download s-sahoo/uno-qwen3-8B --include 'adapter/*' --local-dir uno-qwen3-8b
+
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve Qwen/Qwen3-8B \
+  --dtype bfloat16 --attention-backend FLASH_ATTN \
+  --attention-config '{"flash_attn_version":2}' \
+  --enable-lora --max-lora-rank 128 --max-loras 2 \
+  --no-async-scheduling --max-model-len 4096 \
+  --max-num-seqs 32 --max-num-batched-tokens 8192 \
+  --speculative-config '{
+    "method": "uno",
+    "uno_lora_path": "./uno-qwen3-8b/adapter",
+    "num_speculative_tokens": 8,
+    "uno_mask_token_id": 151669
+  }'
+```
+
+`uno_lora_path` identifies a PEFT adapter directory or Hugging Face repository.
+If the adapter is stored in a subdirectory, pass that local subdirectory as in
+the example. `uno_mask_token_id` is the exclusive upper bound of the uniform
+noise range `[1, uno_mask_token_id)`; it defaults to the target vocabulary size
+and must match the adapter's training range. `uno_noise_seed` defaults to `0`.
+The draft token budget must satisfy
+`max_num_batched_tokens >= max_num_seqs * num_speculative_tokens`.
+
 ## Custom Proposer Backend (Experimental)
 
 You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
@@ -81,7 +124,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 
 | Key | Type | Default | Allowed values / meaning |
 | --- | --- | --- | --- |
-| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
+| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, `dflash`, and `uno`. If omitted, vLLM infers the method from the provided configuration when possible. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |

@@ -1406,6 +1406,114 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
 
 
+@pytest.fixture
+def uno_scheduler_factory(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+
+    def create(**kwargs):
+        return create_scheduler(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            use_v2_model_runner=False,
+            num_speculative_tokens=4,
+            speculative_method="uno",
+            device="cpu",
+            block_size=4,
+            max_num_seqs=1,
+            max_num_batched_tokens=32,
+            **kwargs,
+        )
+
+    return create
+
+
+@pytest.mark.parametrize("num_available_blocks", [1, 2])
+def test_uno_reserves_suffix_before_first_draft(
+    uno_scheduler_factory, num_available_blocks
+):
+    """Admission must fit the seed/noise suffix even before drafts exist."""
+    scheduler = uno_scheduler_factory(num_blocks=num_available_blocks + 1)
+    (request,) = create_requests(num_requests=1, num_tokens=1, block_size=4)
+    scheduler.add_request(request)
+    manager = scheduler.kv_cache_manager
+
+    output = scheduler.schedule()
+    if num_available_blocks == 1:
+        assert not output.num_scheduled_tokens
+        assert request.status == RequestStatus.WAITING
+        assert not manager.get_blocks(request.request_id).blocks[0]
+        assert manager.block_pool.get_num_free_blocks() == num_available_blocks
+    else:
+        assert output.num_scheduled_tokens == {request.request_id: 1}
+        assert not output.scheduled_spec_decode_tokens
+        assert len(manager.get_block_ids(request.request_id)[0]) == 2
+        assert manager.block_pool.get_num_free_blocks() == 0
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.block_pool.get_num_free_blocks() == num_available_blocks
+
+
+@pytest.mark.parametrize("num_accepted", [0, 3, 4])
+@pytest.mark.parametrize("preempt", [False, True])
+def test_uno_verification_rolls_back_and_releases_suffix(
+    uno_scheduler_factory, num_accepted, preempt
+):
+    """K+1 verification commits accepted tokens and frees temporary KV on exit."""
+    scheduler = uno_scheduler_factory(num_blocks=9)
+    (request,) = create_requests(num_requests=1, num_tokens=3, block_size=4)
+    scheduler.add_request(request)
+    rid = request.request_id
+    manager = scheduler.kv_cache_manager
+    initial_free_blocks = manager.block_pool.get_num_free_blocks()
+
+    def update(output, token_ids):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[rid],
+                req_id_to_index={rid: 0},
+                sampled_token_ids=[token_ids],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    update(scheduler.schedule(), [10])
+    draft_ids = [11, 12, 13, 14]
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [draft_ids]))
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {rid: 5}
+    assert output.scheduled_spec_decode_tokens == {rid: draft_ids}
+    assert len(manager.get_block_ids(rid)[0]) == 3
+
+    accepted_ids = draft_ids[:num_accepted] + [20]
+    update(output, accepted_ids)
+    assert list(request.output_token_ids) == [10] + accepted_ids
+    assert request.num_computed_tokens == 4 + num_accepted
+    assert request.num_tokens == request.num_computed_tokens + 1
+
+    if preempt:
+        scheduler.update_draft_token_ids(DraftTokenIds([rid], [[21, 22, 23, 24]]))
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+        assert request.status == RequestStatus.PREEMPTED
+        assert request.num_computed_tokens == 0
+        assert not request.spec_token_ids
+        assert not manager.get_blocks(rid).blocks[0]
+        assert manager.block_pool.get_num_free_blocks() == initial_free_blocks
+        resumed = scheduler.schedule()
+        assert resumed.num_scheduled_tokens == {rid: request.num_tokens}
+        assert not resumed.scheduled_spec_decode_tokens
+
+    scheduler.finish_requests(rid, RequestStatus.FINISHED_ABORTED)
+    assert not manager.get_blocks(rid).blocks[0]
+    assert manager.block_pool.get_num_free_blocks() == initial_free_blocks
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected,expected_per_req",

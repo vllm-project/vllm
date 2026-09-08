@@ -7,8 +7,10 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -74,6 +76,7 @@ def create_scheduler(
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
+    device: str = "auto",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -159,8 +162,19 @@ def create_scheduler(
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
+        if speculative_method == "uno":
+            spec_kwargs.update(
+                model=None,
+                uno_lora_path="test-adapter",
+                target_model_config=model_config,
+                target_parallel_config=ParallelConfig(
+                    pipeline_parallel_size=pipeline_parallel_size,
+                    data_parallel_size=data_parallel_size,
+                ),
+            )
         speculative_config = SpeculativeConfig(**spec_kwargs)
-        speculative_config.parallel_drafting = parallel_drafting
+        if speculative_method != "uno":
+            speculative_config.parallel_drafting = parallel_drafting
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -175,6 +189,7 @@ def create_scheduler(
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
+        device_config=DeviceConfig(device=device),
         cache_config=cache_config,
         parallel_config=ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
@@ -182,6 +197,11 @@ def create_scheduler(
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        lora_config=(
+            LoRAConfig(max_lora_rank=128, max_loras=2)
+            if speculative_method == "uno"
+            else None
+        ),
         ec_transfer_config=ec_transfer_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,

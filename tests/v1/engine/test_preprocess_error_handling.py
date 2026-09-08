@@ -1,15 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch.cuda
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
+from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.input_processor import InputProcessor
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+@pytest.mark.parametrize("use_uno", [False, True])
+@pytest.mark.parametrize("with_adapter", [False, True])
+def test_uno_adapter_validation_precedes_engine_submission(use_uno, with_adapter):
+    processor = object.__new__(InputProcessor)
+    processor.speculative_config = SimpleNamespace(use_uno=lambda: use_uno)
+    processor.lora_config = object()
+    processor.renderer = SimpleNamespace(tokenizer=None)
+    request = LoRARequest("user", 1, "test-adapter") if with_adapter else None
+    if use_uno and with_adapter:
+        with pytest.raises(VLLMValidationError, match="request-specific LoRA"):
+            processor._validate_lora(request)
+    else:
+        processor._validate_lora(request)
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
