@@ -6515,6 +6515,8 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
 # ==============================================================================
 # Regression tests for #53130: requests parked in skipped_waiting must be
 # promotable (and failed grammar compiles detectable) even on steps where the
@@ -6551,10 +6553,15 @@ def _parked_grammar_request(scheduler, req_id: str, grammar) -> Request:
     return req
 
 
-def test_parked_grammar_promotion_when_token_budget_saturated():
+@pytest.mark.parametrize(
+    "make_scheduler",
+    [create_scheduler, create_scheduler_with_priority],
+    ids=["fcfs", "priority"],
+)
+def test_parked_grammar_promotion_when_token_budget_saturated(make_scheduler):
     """A grammar-ready parked request must be promoted even on steps where
     running prefills consume the entire token budget (#53130)."""
-    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=1024)
+    scheduler = make_scheduler(max_num_batched_tokens=64, max_model_len=1024)
     hog = _add_budget_saturating_hog(scheduler)
     req = _parked_grammar_request(scheduler, "grammar", grammar=object())
 

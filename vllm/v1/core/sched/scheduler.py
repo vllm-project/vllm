@@ -849,14 +849,6 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            # Promote blocked requests before the budget/capacity checks in
-            # the loop below can stop the traversal; otherwise a saturated
-            # batch prevents both promotion and failed-grammar detection,
-            # parking the requests until saturation ends (#53130).
-            for request in self.skipped_waiting:
-                if self._is_blocked_waiting_status(request.status):
-                    self._try_promote_blocked_waiting_request(request)
-
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
                     break
@@ -1288,6 +1280,14 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
+
+            # When the loop above stops on the budget/capacity checks (or never
+            # runs), the rest of skipped_waiting is left unvisited. Promote it
+            # here so saturation cannot starve promotion or failed-grammar
+            # detection (#53130).
+            for request in self.skipped_waiting.iter_unordered():
+                if self._is_blocked_waiting_status(request.status):
+                    self._try_promote_blocked_waiting_request(request)
 
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
