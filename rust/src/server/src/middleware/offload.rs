@@ -26,6 +26,8 @@ const OFFLOADED_PATHS: &[&str] = &[
     // HTTP routes:
     "/v1/chat/completions",
     "/v1/completions",
+    "/pooling",
+    "/classify",
     "/tokenize",
     "/detokenize",
     "/inference/v1/generate",

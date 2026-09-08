@@ -14,6 +14,7 @@ pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
 };
 pub use embedding::{EmbeddingError, EmbeddingOutput, EmbeddingParams, EmbeddingRequest};
+pub use encode::TextEncodeRequest;
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
@@ -33,6 +34,7 @@ use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
 mod embedding;
+mod encode;
 mod error;
 mod lower;
 pub mod output;

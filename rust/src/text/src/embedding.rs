@@ -2,14 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
-use std::mem::take;
 
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_llm::{EncodeOutput, EncodeRequest, PoolingParams as LlmPoolingParams, PoolingTask};
 
 use crate::error::{Error, Result};
-use crate::{Prompt, PromptTruncation, TextLlm, TextRequestProcessor};
+use crate::{Prompt, PromptTruncation, TextEncodeRequest, TextLlm, TextRequestProcessor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -156,17 +155,11 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation,
-            None,
-        )?;
-        self.validate_prompt_tokens(&request.request_id, &prompt_token_ids)?;
-
-        Ok(EncodeRequest {
+        self.prepare_encode(TextEncodeRequest {
             request_id: request.request_id,
-            prompt_token_ids,
+            prompt: request.prompt,
+            add_special_tokens: request.add_special_tokens,
+            prompt_truncation: request.prompt_truncation,
             task: PoolingTask::Embed,
             pooling_params: LlmPoolingParams {
                 use_activation: request.params.use_activation,
