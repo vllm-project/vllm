@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 import torch
 
+from vllm import SamplingParams
+
 from ...utils import check_logprobs_close
 
 MODEL = os.environ.get("NCP_OLMO_TEST_MODEL", "")
@@ -17,8 +19,12 @@ PROMPTS = [
 ]
 MAX_NUM_SEQS = 2
 PRESSURE_PROMPTS = [
-    f"Request {index} checks chunked prefill, preemption, and refill. " * 12
-    for index in range(5)
+    "The following numbers of the sequence "
+    + ", ".join(str(i) for i in range(10))
+    + " are:",
+    "In one word, the capital of France is ",
+] + [
+    f"Tell me about the number {index}: " for index in range(32)
 ]
 
 pytestmark = pytest.mark.skipif(
@@ -159,7 +165,7 @@ def test_batched_matches_sequential(
     )
 
 
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("max_tokens", [40])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_chunked_prefill_preemption_and_refill_match_sequential(
     vllm_runner,
@@ -168,31 +174,38 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
 ) -> None:
     """Preserve request-local HLM state across scheduler pressure."""
 
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=max_tokens,
+        min_tokens=20,
+        logprobs=num_logprobs,
+    )
+
     with vllm_runner(
         MODEL,
         dtype="bfloat16",
         max_model_len=512,
-        max_num_seqs=MAX_NUM_SEQS,
-        max_num_batched_tokens=64,
-        num_gpu_blocks_override=17,
+        max_num_batched_tokens=48,
+        # NCP uses four KV-cache groups. Scale the upstream preemption fixture's
+        # 33-block cache by that factor: one 512-token request remains legal,
+        # while 34 concurrent requests force scheduler recompute/preemption.
+        num_gpu_blocks_override=132,
         disable_log_stats=False,
         enforce_eager=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
     ) as vllm_model:
         sequential_outputs = [
-            vllm_model.generate_greedy_logprobs(
+            vllm_model.generate_w_logprobs(
                 [prompt],
-                max_tokens,
-                num_logprobs,
+                sampling_params=sampling_params,
             )[0]
             for prompt in PRESSURE_PROMPTS
         ]
         metrics_before = vllm_model.llm.get_metrics()
-        pressured_outputs = vllm_model.generate_greedy_logprobs(
+        pressured_outputs = vllm_model.generate_w_logprobs(
             PRESSURE_PROMPTS,
-            max_tokens,
-            num_logprobs,
+            sampling_params=sampling_params,
         )
         metrics_after = vllm_model.llm.get_metrics()
 
