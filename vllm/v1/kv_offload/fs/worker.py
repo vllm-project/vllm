@@ -116,13 +116,18 @@ class FSOffloadingWorker(OffloadingWorker):
         finished_ids: list[int] = []
         for job_id, t in self._transfers.items():
             if all(f.done() for f in t.futures):
+                success = True
                 for f in t.futures:
-                    f.result()
+                    try:
+                        f.result()
+                    except Exception:
+                        logger.exception("I/O failed for job %d", job_id)
+                        success = False
                 elapsed = time.perf_counter() - t.start_time
                 results.append(
                     TransferResult(
                         job_id=t.job_id,
-                        success=True,
+                        success=success,
                         transfer_size=t.num_bytes,
                         transfer_time=elapsed,
                     )
