@@ -890,6 +890,8 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundary: int,
     ) -> None:
         return None
 

@@ -462,6 +462,7 @@ class KVCacheCoordinator(ABC):
             request,
             num_tokens_to_cache,
             self.retention_interval,
+            replay_boundary=replay_boundary,
         )
 
     def free(self, request_id: str) -> None:
@@ -942,6 +943,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             request,
             cached_num_computed_tokens,
             self.retention_interval,
+            replay_boundary=replay_boundary,
         )
 
     def find_longest_cache_hit(

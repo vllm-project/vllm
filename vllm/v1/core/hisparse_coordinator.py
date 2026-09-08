@@ -33,6 +33,7 @@ class _PendingPublication:
     num_computed_tokens: int
     num_pages: int
     retention_interval: int | None
+    replay_boundary: int
 
 
 @dataclass
@@ -512,6 +513,8 @@ class HiSparseCoordinator:
         request: Request,
         num_computed_tokens: int,
         retention_interval: int | None,
+        *,
+        replay_boundary: int,
     ) -> None:
         """Publish host-source hashes only after their pages are durable."""
         manager = self.host_manager
@@ -525,6 +528,7 @@ class HiSparseCoordinator:
                 request,
                 num_computed_tokens,
                 retention_interval=retention_interval,
+                replay_boundary=replay_boundary,
             )
             self._record_shadow_pages(request_id, num_computed_tokens)
             state.publication = None
@@ -534,6 +538,7 @@ class HiSparseCoordinator:
             num_computed_tokens=num_computed_tokens,
             num_pages=num_pages,
             retention_interval=retention_interval,
+            replay_boundary=replay_boundary,
         )
 
     def _publish_host_blocks_if_ready(self, request_id: str) -> None:
@@ -548,6 +553,7 @@ class HiSparseCoordinator:
             publication.request,
             publication.num_computed_tokens,
             retention_interval=publication.retention_interval,
+            replay_boundary=publication.replay_boundary,
         )
         self._record_shadow_pages(request_id, publication.num_computed_tokens)
         state.publication = None
