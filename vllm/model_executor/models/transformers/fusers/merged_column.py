@@ -69,10 +69,13 @@ class MergedColumnParallelFuser(StackedFuser):
                 and node.args[0].op == "placeholder"
             ):
                 by_input.setdefault(node.args[0], []).append(node)
-        groups = [nodes for nodes in by_input.values() if len(nodes) >= 2]
         # A group whose members are not distinct direct children is dropped:
         # the source rewrite addresses each projection as `self.<name>` once.
-        groups = [group for group in groups if cls._names(group) is not None]
+        groups = [
+            (group, names)
+            for group in by_input.values()
+            if len(group) >= 2 and (names := cls._names(group)) is not None
+        ]
         if len(groups) > 1:
             logger.debug(
                 "%s has %d fusable sibling-linear groups; skipping fusion "
@@ -82,8 +85,7 @@ class MergedColumnParallelFuser(StackedFuser):
             )
         if len(groups) != 1:
             return None
-        if (names := cls._names(groups[0])) is None:
-            return None
+        _, names = groups[0]
         fuser = cls(source_cls=type(module).__name__, linear_names=names)
         return None if hasattr(module, fuser.merged_name) else fuser
 
