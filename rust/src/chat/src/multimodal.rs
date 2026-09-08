@@ -39,8 +39,8 @@ use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 mod audio;
 mod expand;
 mod image;
-mod image_metadata;
 mod item;
+mod metadata;
 mod tensor;
 mod video;
 
@@ -752,7 +752,11 @@ impl MultimodalModelInfo {
             }) {
                 bail_multimodal!("mixing image and image_embeds is not supported");
             }
-            prepared.push(self.prepare_image_metadata(image_metadata)?);
+            let support = self
+                .image
+                .as_ref()
+                .ok_or_else(|| multimodal!("image_embeds requires a supported image model"))?;
+            prepared.push(self.prepare_metadata_only(support, image_metadata, model_dtype)?);
         }
         let fetched = self.fetch_media(raw_media).await?;
         if !fetched.images.is_empty() {
@@ -942,7 +946,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
@@ -950,7 +954,7 @@ mod tests {
         test_info_with_limits(model_type, config, tokenizer, HashMap::new())
     }
 
-    fn llama4_info() -> MultimodalModelInfo {
+    pub(super) fn llama4_info() -> MultimodalModelInfo {
         let config = serde_json::json!({
             "model_type": "llama4",
             "image_token_index": LLAMA4_PATCH_ID,

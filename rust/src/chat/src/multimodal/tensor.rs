@@ -78,12 +78,20 @@ pub(super) fn collect_tensors(
 
     let primary_value = KwargValue::from_f32_array(encoder_input, float_dtype)?;
 
-    let mut tensors = HashMap::new();
-    tensors.insert(primary_key.to_string(), primary_value);
-    for (key, value) in model_specific {
-        tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
-    }
+    let mut tensors = collect_metadata_tensors(model_specific, float_dtype)?;
+    tensors.entry(primary_key.to_string()).or_insert(primary_value);
     Ok(tensors)
+}
+
+/// Lower auxiliary fields without creating a primary encoder input.
+pub(super) fn collect_metadata_tensors(
+    fields: HashMap<String, ModelSpecificValue>,
+    float_dtype: ModelDtype,
+) -> Result<HashMap<String, KwargValue>> {
+    fields
+        .into_iter()
+        .map(|(key, value)| Ok((key, KwargValue::from_model_specific(value, float_dtype)?)))
+        .collect()
 }
 
 impl KwargValue {
