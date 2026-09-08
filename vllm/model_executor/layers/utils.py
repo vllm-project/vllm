@@ -395,12 +395,18 @@ direct_register_custom_op(
 
 @functools.cache
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
-    """Eagerly allocate wvSplitKrc's process-lifetime static workspaces.
+    """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    They are otherwise created lazily on the first qualifying GEMM
+    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    (csrc/rocm/skinny_gemms.cu) and hands each stream one on first use, so that
+    two streams never share the split-K partials and counters.
+
+    The pool is otherwise created lazily on the first qualifying GEMM
     (csrc/rocm/skinny_gemms.cu), which can be the first real request — after
-    the KV cache backing buffer exists. If one landed in that segment's
-    rounding tail, it would pin the entire segment at engine shutdown.
+    the KV cache backing buffer exists. If it landed in that segment's rounding
+    tail, it would pin the entire segment at engine shutdown; it could also land
+    inside a cudagraph capture, where it would be taken from the graph's private
+    pool and its zero-fill would become a replayed graph node.
     """
     from vllm.platforms.rocm import on_gfx950
 

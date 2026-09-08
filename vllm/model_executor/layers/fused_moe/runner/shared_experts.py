@@ -43,7 +43,6 @@ class SharedExperts(torch.nn.Module):
         moe_config: FusedMoEConfig,
         enable_dbo: bool,
         mk_can_overlap_shared_experts: Callable[[], bool],
-        is_multistream_safe: Callable[[], bool],
     ):
         super().__init__()
 
@@ -57,10 +56,6 @@ class SharedExperts(torch.nn.Module):
         self._moe_config = moe_config
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
-
-        # Might not be safe to run multi-stream mode if routed and shared experts
-        # alias the same inputs
-        self._is_multistream_safe = is_multistream_safe
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -124,7 +119,6 @@ class SharedExperts(torch.nn.Module):
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
             and overlap_is_beneficial
-            and self._is_multistream_safe()
         )
 
         if should_run_shared_in_aux_stream:
