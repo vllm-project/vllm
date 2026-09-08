@@ -158,10 +158,14 @@ class FusedEmbedNormKernel(VllmTritonJitKernel["FusedEmbedNormKernel.CompileKey"
             compile_key.table_dtype,
             shape=(1, compile_key.hidden_size),
         )
+        chain_weight = TritonWarmupTensor(
+            compile_key.table_dtype,
+            shape=(compile_key.hidden_size,),
+        )
         return dict(
             input_ids=TritonWarmupTensor(compile_key.ids_dtype),
             embed_table=table,
-            chain_weight=(table if compile_key.has_norm else None),
+            chain_weight=(chain_weight if compile_key.has_norm else None),
             eps=0.0,
             _outputs=(
                 table,

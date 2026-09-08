@@ -190,7 +190,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         if vllm_config.kernel_config.enable_jit_warmup:
             if self.replicated_embed:
                 _FUSED_EMBED_EH_NORM_KERNEL.register_warmup(
-                    ids_dtype=torch.int64,
+                    ids_dtype=torch.int32,
                     table_dtype=self.embed_tokens.weight.dtype,
                     hidden_dtype=vllm_config.model_config.dtype,
                     hidden_size=config.hidden_size,

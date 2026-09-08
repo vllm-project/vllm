@@ -218,7 +218,7 @@ class DeepseekV32Model(torch.nn.Module):
             and self.start_layer < self.end_layer
         ):
             _FUSED_EMBED_NORM_KERNEL.register_warmup(
-                ids_dtype=torch.int64,
+                ids_dtype=torch.int32,
                 table_dtype=self.embed_tokens.weight.dtype,
                 table_stride=self.embed_tokens.weight.stride(0),
                 hidden_size=config.hidden_size,
