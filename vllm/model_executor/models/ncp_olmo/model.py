@@ -13,6 +13,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState
@@ -227,7 +228,7 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
         self,
         advances: Sequence[_HLMAdvance],
     ) -> None:
-        """Batch one-chunk HLM updates at the same concept position."""
+        """Advance one-chunk HLM updates, batching only when permitted."""
 
         batches: dict[int, list[_HLMAdvance]] = {}
         for advance in advances:
@@ -235,13 +236,17 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             batches.setdefault(concept_position, []).append(advance)
 
         for batch in batches.values():
-            if len(batch) == 1:
-                state, encoder_chunk, layer_chunks = batch[0]
-                self.highlevel.advance(
-                    state,
-                    encoder_chunk,
-                    layer_chunks,
-                )
+            if len(batch) == 1 or envs.VLLM_BATCH_INVARIANT:
+                # The HLM is request-local. In deterministic mode, preserve the
+                # exact single-request numerical path across admission,
+                # preemption, and refill instead of changing GEMM/attention
+                # geometry when equal-position requests happen to co-schedule.
+                for state, encoder_chunk, layer_chunks in batch:
+                    self.highlevel.advance(
+                        state,
+                        encoder_chunk,
+                        layer_chunks,
+                    )
                 continue
             self.highlevel.advance_batch(
                 [advance[0] for advance in batch],

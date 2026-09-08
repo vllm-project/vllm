@@ -9,7 +9,7 @@ import torch
 
 from vllm import SamplingParams
 
-from ...utils import check_logprobs_close
+from ...utils import check_logprobs_close, check_outputs_equal
 
 MODEL = os.environ.get("NCP_OLMO_TEST_MODEL", "")
 PROMPTS = [
@@ -23,14 +23,36 @@ PRESSURE_PROMPTS = [
     + ", ".join(str(i) for i in range(10))
     + " are:",
     "In one word, the capital of France is ",
-] + [
-    f"Tell me about the number {index}: " for index in range(32)
-]
+] + [f"Tell me about the number {index}: " for index in range(32)]
 
 pytestmark = pytest.mark.skipif(
     not MODEL,
     reason="NCP_OLMO_TEST_MODEL must point to a pure-HF NCP-OLMo checkpoint",
 )
+
+
+def _check_exact_vllm_outputs(
+    reference: list[tuple[list[int], str, Any]],
+    candidate: list[tuple[list[int], str, Any]],
+    *,
+    reference_name: str,
+    candidate_name: str,
+) -> None:
+    """Require exact tokens/text and matching top-k choices."""
+
+    check_outputs_equal(
+        outputs_0_lst=[(output[0], output[1]) for output in reference],
+        outputs_1_lst=[(output[0], output[1]) for output in candidate],
+        name_0=reference_name,
+        name_1=candidate_name,
+    )
+    check_logprobs_close(
+        outputs_0_lst=reference,
+        outputs_1_lst=candidate,
+        name_0=reference_name,
+        name_1=candidate_name,
+        always_check_logprobs=True,
+    )
 
 
 def _generate_hf_greedy_logprobs(
@@ -157,11 +179,11 @@ def test_batched_matches_sequential(
             num_logprobs,
         )
 
-    check_logprobs_close(
-        outputs_0_lst=sequential_outputs,
-        outputs_1_lst=batched_outputs,
-        name_0="sequential_vllm",
-        name_1="batched_vllm",
+    _check_exact_vllm_outputs(
+        sequential_outputs,
+        batched_outputs,
+        reference_name="sequential_vllm",
+        candidate_name="batched_vllm",
     )
 
 
@@ -209,11 +231,11 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
         )
         metrics_after = vllm_model.llm.get_metrics()
 
-    check_logprobs_close(
-        outputs_0_lst=sequential_outputs,
-        outputs_1_lst=pressured_outputs,
-        name_0="sequential_vllm",
-        name_1="pressured_vllm",
+    _check_exact_vllm_outputs(
+        sequential_outputs,
+        pressured_outputs,
+        reference_name="sequential_vllm",
+        candidate_name="pressured_vllm",
     )
     preemptions_before = next(
         (

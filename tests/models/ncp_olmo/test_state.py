@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
+import vllm.envs as envs
+from vllm.model_executor.models.ncp_olmo.model import NCPOlmo3ForCausalLM
 from vllm.model_executor.models.ncp_olmo.model_state import NCPOlmoModelState
 from vllm.model_executor.models.ncp_olmo.state import (
     ConceptRequestStateStore,
@@ -85,6 +88,71 @@ def test_finished_slot_is_refilled_and_reordered_without_state_leakage() -> None
         (0, 2),
         (2, 3),
     ]
+
+
+def test_batch_invariant_hlm_advances_requests_individually(monkeypatch) -> None:
+    """Keep HLM arithmetic independent of incidental scheduler batching."""
+
+    calls = []
+
+    class RecordingHighLevel:
+        def advance(self, state, encoder_chunk, layer_chunks) -> None:
+            calls.append((state.req_id, encoder_chunk.item(), layer_chunks[0].item()))
+
+        def advance_batch(self, *args, **kwargs) -> None:
+            raise AssertionError("batch-invariant HLM must not use advance_batch")
+
+    states = [
+        SimpleNamespace(req_id="first", predicted_concepts=SimpleNamespace(length=0)),
+        SimpleNamespace(req_id="second", predicted_concepts=SimpleNamespace(length=0)),
+    ]
+    advances = [
+        (states[0], torch.tensor(1.0), (torch.tensor(2.0),)),
+        (states[1], torch.tensor(3.0), (torch.tensor(4.0),)),
+    ]
+    model = SimpleNamespace(highlevel=RecordingHighLevel())
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    NCPOlmo3ForCausalLM._advance_hlm_batches(model, advances)
+
+    assert calls == [("first", 1.0, 2.0), ("second", 3.0, 4.0)]
+
+
+def test_normal_hlm_path_batches_equal_position_requests(monkeypatch) -> None:
+    """Retain the throughput path when exact batch invariance is disabled."""
+
+    calls = []
+
+    class RecordingHighLevel:
+        def advance(self, *args, **kwargs) -> None:
+            raise AssertionError("normal HLM path should batch equal-position requests")
+
+        def advance_batch(self, states, encoder_chunks, layer_chunks) -> None:
+            calls.append(
+                (
+                    [state.req_id for state in states],
+                    encoder_chunks.tolist(),
+                    layer_chunks[0].tolist(),
+                )
+            )
+
+    states = [
+        SimpleNamespace(req_id="first", predicted_concepts=SimpleNamespace(length=0)),
+        SimpleNamespace(req_id="second", predicted_concepts=SimpleNamespace(length=0)),
+    ]
+    advances = [
+        (states[0], torch.tensor(1.0), (torch.tensor(2.0),)),
+        (states[1], torch.tensor(3.0), (torch.tensor(4.0),)),
+    ]
+    model = SimpleNamespace(
+        highlevel=RecordingHighLevel(),
+        backend_config=SimpleNamespace(encoder_layers=1),
+    )
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
+    NCPOlmo3ForCausalLM._advance_hlm_batches(model, advances)
+
+    assert calls == [(["first", "second"], [1.0, 3.0], [2.0, 4.0])]
 
 
 def test_remove_request_releases_state_and_requires_readmission() -> None:
