@@ -93,6 +93,7 @@ def assert_request_is_queued(url, future):
 @pytest.mark.parametrize("level", [0, 1])
 def test_sleep_flags_metrics_and_idempotency(server_url, level):
     """Repeated commands preserve state; level zero only pauses scheduling."""
+    # Metric tuple: (awake, weights_offloaded, discard_all).
     assert sleep_metrics(server_url) == (1, 0, 0)
     for _ in range(2):
         assert sleep(server_url, level=level) == 200
