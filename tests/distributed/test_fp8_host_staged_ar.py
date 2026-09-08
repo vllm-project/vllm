@@ -11,6 +11,7 @@ import torch.distributed as dist
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
     QUANT_BLOCK,
+    KERNEL_BLOCK,
     Fp8HostStagedAllReduce,
     _quant_fp8_kernel,
 )
@@ -118,8 +119,8 @@ def test_dequant_add_bitexact(dev):
     for row, x in enumerate((x0, x1)):
         p = payload_buf[row, :n].view(torch.float8_e4m3fn)
         s = scale_buf[row, : n // QUANT_BLOCK]
-        _quant_fp8_kernel[(n // QUANT_BLOCK,)](
-            x, p, s, BLOCK=QUANT_BLOCK, num_warps=4
+        _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
+            x, p, s, BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
     out = torch.empty_like(x0)
     comm = _uninitialized_comm(dev)
@@ -147,11 +148,11 @@ def test_dequant_add_bitexact(dev):
 @pytest.mark.parametrize(
     ("dtype", "numel", "contiguous", "expect"),
     [
-        (torch.bfloat16, 1_000_064, True, True),  # >= MIN and %128 == 0
-        (torch.float16, 1_000_064, True, False),  # dtype gate
+        (torch.bfloat16, 1_024_000, True, True),  # >= MIN and %KERNEL_BLOCK == 0
+        (torch.float16, 1_024_000, True, False),  # dtype gate
         (torch.bfloat16, 999_936, True, False),  # < MIN_ELEMS
-        (torch.bfloat16, 1_000_114, True, False),  # %128 != 0
-        (torch.bfloat16, 1_000_064, False, False),  # non-contiguous
+        (torch.bfloat16, 1_000_064, True, False),  # %128 == 0 but %KERNEL_BLOCK != 0
+        (torch.bfloat16, 1_024_000, False, False),  # non-contiguous
     ],
 )
 def test_should_use_gates(dev, dtype, numel, contiguous, expect):
@@ -167,7 +168,7 @@ def test_should_use_rejects_graph_capture(dev, monkeypatch):
         torch.cuda, "is_current_stream_capturing", lambda: True
     )
     comm = _uninitialized_comm(dev)
-    x = torch.randn(1_000_064, dtype=torch.bfloat16, device=dev)
+    x = torch.randn(1_024_000, dtype=torch.bfloat16, device=dev)
     assert comm.should_use(x) is False
 
 

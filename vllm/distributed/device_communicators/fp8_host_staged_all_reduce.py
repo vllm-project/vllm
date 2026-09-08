@@ -22,48 +22,60 @@ import triton.language as tl
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 FP8_MAX = tl.constexpr(448.0)
+# Scale granularity (codec): one FP32 scale per QUANT_BLOCK elements, per the
+# measured b12x e4m3/128 codec. This defines the wire format and admission.
 QUANT_BLOCK = 128
+# Elements processed per program (a multiple of QUANT_BLOCK). Batching several
+# scale groups per program cuts the program count (and its launch overhead) by
+# that factor; the codec (per-QUANT_BLOCK scale) is untouched, so outputs stay
+# bit-identical. 1024 is the measured sweet spot and divides the model hidden
+# size (5120), so every AR size (tokens x 5120) is a whole number of programs.
+KERNEL_BLOCK = 1024
 MIN_ELEMS = 1_000_000
 
 
 @triton.jit
 def _quant_fp8_kernel(
     x_ptr, payload_ptr, scale_ptr,
-    BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr, GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(x_ptr + offs).to(tl.float32)
-    amax = tl.max(tl.abs(x), axis=0)
+    xg = tl.reshape(x, (BLOCK // GROUP, GROUP))
+    amax = tl.max(tl.abs(xg), axis=1)
     # The codec specifies IEEE RN divisions (b12x uses div_rn_f32 twice);
     # Triton's default `/` lowers to div.full.f32, which is not
     # correctly rounded, so use div_rn explicitly.
     scale = tl.where(amax > 0.0, tl.math.div_rn(amax, FP8_MAX), 1.0)
     inv = tl.math.div_rn(1.0, scale)
-    y = tl.clamp(x * inv, -FP8_MAX, FP8_MAX)
-    tl.store(payload_ptr + offs, y.to(tl.float8e4nv))
-    tl.store(scale_ptr + pid, scale)
+    y = tl.clamp(xg * tl.reshape(inv, (BLOCK // GROUP, 1)), -FP8_MAX, FP8_MAX)
+    tl.store(payload_ptr + offs, tl.reshape(y, (BLOCK,)).to(tl.float8e4nv))
+    tl.store(
+        scale_ptr + pid * (BLOCK // GROUP) + tl.arange(0, BLOCK // GROUP),
+        scale,
+    )
 
 
 @triton.jit
 def _dequant_add_kernel(
     p0_ptr, s0_ptr, p1_ptr, s1_ptr, out_ptr,
-    BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr, GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
-    q0 = tl.load(p0_ptr + offs).to(tl.float32)
-    q1 = tl.load(p1_ptr + offs).to(tl.float32)
-    s0 = tl.load(s0_ptr + pid)
-    s1 = tl.load(s1_ptr + pid)
+    q0 = tl.reshape(tl.load(p0_ptr + offs).to(tl.float32), (BLOCK // GROUP, GROUP))
+    q1 = tl.reshape(tl.load(p1_ptr + offs).to(tl.float32), (BLOCK // GROUP, GROUP))
+    s0 = tl.load(s0_ptr + pid * (BLOCK // GROUP) + tl.arange(0, BLOCK // GROUP))
+    s1 = tl.load(s1_ptr + pid * (BLOCK // GROUP) + tl.arange(0, BLOCK // GROUP))
     # Round each dequantized side to BF16 before the add. The cvt breaks
     # the compiler's fma contraction of q0*s0 + q1*s1 (fma(q0, s0, q1*s1)
     # is not bitwise commutative: the ranks swap the operand roles and
     # would differ by 1 FP32 ulp). Cost: one extra rounding per side.
-    v0 = (q0 * s0).to(tl.bfloat16).to(tl.float32)
-    v1 = (q1 * s1).to(tl.bfloat16).to(tl.float32)
-    out = (v0 + v1).to(tl.bfloat16)
-    tl.store(out_ptr + offs, out)
+    v0 = (q0 * tl.reshape(s0, (BLOCK // GROUP, 1))).to(tl.bfloat16).to(tl.float32)
+    v1 = (q1 * tl.reshape(s1, (BLOCK // GROUP, 1))).to(tl.bfloat16).to(tl.float32)
+    out = tl.reshape(v0 + v1, (BLOCK,))
+    tl.store(out_ptr + offs, out.to(tl.bfloat16))
 
 
 class Fp8HostStagedAllReduce:
@@ -106,7 +118,7 @@ class Fp8HostStagedAllReduce:
             input_.dtype == torch.bfloat16
             and input_.is_contiguous()
             and input_.numel() >= MIN_ELEMS
-            and input_.numel() % QUANT_BLOCK == 0
+            and input_.numel() % KERNEL_BLOCK == 0
             and not torch.cuda.is_current_stream_capturing()
         )
 
@@ -116,8 +128,9 @@ class Fp8HostStagedAllReduce:
         self._ensure_capacity(n)
         payload = self._payload[0, :n].view(torch.float8_e4m3fn)
         scale = self._scale[0, : n // QUANT_BLOCK]
-        _quant_fp8_kernel[(n // QUANT_BLOCK,)](
-            input_, payload, scale, BLOCK=QUANT_BLOCK, num_warps=4
+        _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
+            input_, payload, scale,
+            BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         return payload, scale
 
@@ -131,8 +144,9 @@ class Fp8HostStagedAllReduce:
     ) -> torch.Tensor:
         """out = dequant(p0, s0) + dequant(p1, s1), FP32 add, BF16 out."""
         n = p0.numel()
-        _dequant_add_kernel[(n // QUANT_BLOCK,)](
-            p0, s0, p1, s1, out, BLOCK=QUANT_BLOCK, num_warps=4
+        _dequant_add_kernel[(n // KERNEL_BLOCK,)](
+            p0, s0, p1, s1, out,
+            BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         return out
 
@@ -153,8 +167,9 @@ class Fp8HostStagedAllReduce:
         peer = self._payload[1, :n].view(torch.float8_e4m3fn)
         s_own = self._scale[0, : n // QUANT_BLOCK]
         s_peer = self._scale[1, : n // QUANT_BLOCK]
-        _quant_fp8_kernel[(n // QUANT_BLOCK,)](
-            input_, own, s_own, BLOCK=QUANT_BLOCK, num_warps=4
+        _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
+            input_, own, s_own,
+            BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         # Two one-way phases: rank 0 -> rank 1, CPU barrier, rank 1 -> rank
         # 0. Each op is stream-ordered, so a phase's data is fully received
@@ -171,7 +186,8 @@ class Fp8HostStagedAllReduce:
             dist.barrier(group=self._cpu_group)
             self._comm.send(own, 0)
             self._comm.send(s_own, 0)
-        _dequant_add_kernel[(n // QUANT_BLOCK,)](
-            own, s_own, peer, s_peer, out, BLOCK=QUANT_BLOCK, num_warps=4
+        _dequant_add_kernel[(n // KERNEL_BLOCK,)](
+            own, s_own, peer, s_peer, out,
+            BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         return out
