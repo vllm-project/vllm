@@ -2014,6 +2014,9 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
+    if args.max_concurrency is not None and args.max_concurrency <= 0:
+        raise ValueError("--max-concurrency must be greater than 0")
+
     random.seed(args.seed)
     np.random.seed(args.seed)
 
