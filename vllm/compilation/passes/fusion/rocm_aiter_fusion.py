@@ -1097,11 +1097,7 @@ class MLADualRMSGroupQuantPattern(
 
     GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
     FUSED_OP = rocm_aiter_ops.get_fused_mla_dual_rms_norm_group_quant_op()
-    # The AITER kernel can write the q scales column-major, and the fused op
-    # this pattern inserts always exposes that as the `transpose_scale`
-    # argument. But the unfused op rocm_aiter_rmsnorm_fp8_group_quant does not
-    # have a transpose_scale argument currently. Probe the installed op's
-    # schema so the pass is correct in case it does get the argument
+    # Check if we are using transposed scales (unfused kernel might not)
     GROUP_QUANT_HAS_TRANSPOSE = any(
         a.name == "transpose_scale" for a in GROUP_QUANT_OP._schema.arguments
     )
@@ -1220,18 +1216,10 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     ``fused_qk_rmsnorm`` HIP kernel.
 
     The FP8 attention path is also handled via
-    :class:`MLADualRMSPerTokenQuantPattern`, which fuses the q-latent RMSNorm +
-    FP8 per-token quant together with the kv-latent RMSNorm into
-    ``fused_mla_dual_rms_norm_per_token_quant`` backed by aiter's
-    ``fused_qk_rmsnorm_per_token_quant`` HIP kernel.
-
-    The FP8 *block-scale* path (e.g. DeepSeek) is handled via
-    :class:`MLADualRMSGroupQuantPattern`, which fuses the q-latent RMSNorm +
-    FP8 group quant together with the kv-latent RMSNorm into
-    ``fused_mla_dual_rms_norm_group_quant`` backed by aiter's
-    ``fused_qk_rmsnorm_group_quant`` HIP kernel. It is registered for both
-    scale layouts when the unfused group-quant op exposes ``transpose_scale``,
-    standard layout only otherwise.
+    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`, 
+    which fuse the q-latent RMSNorm + FP8 per-token/group quant together with 
+    the kv-latent RMSNorm into ``fused_mla_dual_rms_norm_<per_token|group>_quant``
+    backed by aiter's ``fused_qk_rmsnorm_<per_token|group>_quant`` HIP kernel.
     """
 
     def __init__(self, config: VllmConfig) -> None:
