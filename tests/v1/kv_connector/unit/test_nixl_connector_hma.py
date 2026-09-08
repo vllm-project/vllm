@@ -914,6 +914,7 @@ def test_shared_nixl_region_broadcasts_every_group_block_table():
         block_len_per_layer=[100] * 3,
     )
     worker.region_group_ids = [0, bw._SHARED_REGION_GROUP_ID, 2]
+    worker._uses_region_group_mapping = True
 
     result = worker._compute_desc_ids(
         block_ids=([1], [2], [3]),
