@@ -60,15 +60,6 @@ VISION_PROMPT = {
 }
 
 
-@pytest.mark.parametrize("errored", [False, True])
-def test_engine_health_after_client_failure(errored):
-    client = MagicMock()
-    client.errored = errored
-    client.engine_core.get_engine_health.return_value = {0: True, 1: False}
-
-    assert AsyncLLM.get_engine_health(client) == {0: not errored, 1: False}
-
-
 def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
     vllm_config = MagicMock()
     vllm_config.observability_config.otlp_traces_endpoint = None

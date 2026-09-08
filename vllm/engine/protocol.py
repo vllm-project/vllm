@@ -263,10 +263,6 @@ class EngineClient(ABC):
         """Get fault tolerance status of all engines."""
         raise NotImplementedError
 
-    def get_engine_health(self) -> dict[int, bool]:
-        """Return cached FT health for engines managed by this client."""
-        raise NotImplementedError
-
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError

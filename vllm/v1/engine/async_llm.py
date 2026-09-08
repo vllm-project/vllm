@@ -1190,12 +1190,6 @@ class AsyncLLM(EngineClient):
     async def get_status(self):
         return await self.engine_core.get_status()
 
-    def get_engine_health(self) -> dict[int, bool]:
-        return {
-            rank: healthy and not self.errored
-            for rank, healthy in self.engine_core.get_engine_health().items()
-        }
-
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.

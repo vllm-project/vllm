@@ -5,15 +5,14 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-import prometheus_client
 import regex as re
-from fastapi import FastAPI, Response
-from prometheus_client import make_asgi_app
+from fastapi import FastAPI
+from prometheus_client import CollectorRegistry, make_asgi_app
 from prometheus_client.core import GaugeMetricFamily
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
 from starlette.routing import Match, Mount
-from starlette.types import Scope
+from starlette.types import Receive, Scope, Send
 
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
@@ -56,29 +55,20 @@ def _patch_instrumentator_route_walk() -> None:
 _patch_instrumentator_route_walk()
 
 
-class PrometheusResponse(Response):
-    media_type = prometheus_client.CONTENT_TYPE_LATEST
-
-
 class _EngineHealthCollector:
-    def __init__(self, app: FastAPI):
-        self.app = app
+    def __init__(self, engines: list[dict], errored: bool):
+        self.engines = engines
+        self.errored = errored
 
     def collect(self) -> Iterable[GaugeMetricFamily]:
-        client: EngineClient | None = getattr(self.app.state, "engine_client", None)
-        if (
-            client is None
-            or not client.vllm_config.parallel_config.enable_fault_tolerance
-        ):
-            return
-
         metric = GaugeMetricFamily(
             "vllm:engine_healthy",
             "Whether the engine reports healthy under fault tolerance.",
             labels=["engine"],
         )
-        for rank, healthy in client.get_engine_health().items():
-            metric.add_metric([str(rank)], int(healthy))
+        for engine in self.engines:
+            healthy = engine["status"] == "healthy" and not self.errored
+            metric.add_metric([str(engine["id"])], int(healthy))
         yield metric
 
 
@@ -86,14 +76,7 @@ def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
 
     registry = get_prometheus_registry()
-    # Collect from this API's live cache, not shared multiprocess gauge files:
-    # another rank's metrics must not keep a dead endpoint looking healthy.
-    registry.register(_EngineHealthCollector(app))
 
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
         excluded_handlers=[
             "/metrics",
@@ -106,14 +89,21 @@ def attach_router(app: FastAPI):
         registry=registry,
     ).add().instrument(app)
 
-    # Instrumentator.expose() replaces the registry in multiprocess mode,
-    # which would discard this API's engine-health collector.
-    @app.get("/metrics", response_class=PrometheusResponse)
-    def metrics() -> PrometheusResponse:
-        return PrometheusResponse(content=prometheus_client.generate_latest(registry))
+    async def metrics(scope: Scope, receive: Receive, send: Send):
+        scrape_registry = registry
+        client: EngineClient | None = getattr(app.state, "engine_client", None)
+        if client and client.vllm_config.parallel_config.enable_fault_tolerance:
+            status = await client.get_status()
+            # Keep rank health local to this scrape, outside shared metric files.
+            scrape_registry = CollectorRegistry(auto_describe=True)
+            scrape_registry.register(registry)
+            scrape_registry.register(
+                _EngineHealthCollector(status["engines"], client.errored)
+            )
+        await make_asgi_app(registry=scrape_registry)(scope, receive, send)
 
     # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    metrics_route = Mount("/metrics", metrics)
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
