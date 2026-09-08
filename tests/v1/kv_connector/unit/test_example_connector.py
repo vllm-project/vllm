@@ -8,6 +8,7 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
@@ -93,13 +94,11 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    outputs = llm.generate(
-        {
-            "prompt": prompt,
-            **({"multi_modal_data": {"image": [*image_urls]}} if image_urls else {}),
-        },
-        sampling_params=SAMPLING_PARAMS,
-    )
+    prompt_input: TextPrompt = {"prompt": prompt}
+    if image_urls:
+        prompt_input["multi_modal_data"] = {"image": image_urls}
+
+    outputs = llm.generate(prompt_input, sampling_params=SAMPLING_PARAMS)
 
     print("-" * 50)
     print("Output:")
