@@ -106,6 +106,66 @@ class TestAsyncLookupManager:
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
+    def test_cleanup_reuses_submitted_probe(self, monkeypatch: pytest.MonkeyPatch):
+        """A replacement request shares the submitted probe and its verdict."""
+        key = _key(1)
+        mgr = InMemoryLookupManager(existing_keys={key})
+        ctx_b = _ctx("req_b")
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+
+        def blocking_lookup(keys, req_context):
+            probe_started.set()
+            if not release_probe.wait(timeout=5):
+                raise TimeoutError("Test did not release the backend probe")
+            return batch_lookup(keys, req_context)
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key, _ctx("req_a")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+            mgr.cleanup("req_a")
+            assert mgr.lookup(key, ctx_b) is None
+            mgr.flush()
+
+            release_probe.set()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            replacement_result = mgr.lookup(key, ctx_b)
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        assert mgr.batch_lookup_calls == 1
+        assert replacement_result is True
+
+    @pytest.mark.parametrize(
+        "reclaim_at_shutdown", [False, True], ids=["flush", "shutdown"]
+    )
+    def test_unclaimed_probe_reclaimed_without_lookup(self, reclaim_at_shutdown: bool):
+        """A completed orphan is released by flush or shutdown without a lookup."""
+        key = _key(1)
+        mgr = InMemoryLookupManager(existing_keys={key})
+        try:
+            mgr.lookup(key, _ctx("req_a"))
+            mgr.flush()
+            mgr.cleanup("req_a")
+            assert key in mgr._lookup_state
+            assert not mgr._req_keys
+
+            if not reclaim_at_shutdown:
+                batch = mgr._pending_results.get(timeout=5)
+                mgr._pending_results.put(batch)
+                mgr.flush()
+                assert key not in mgr._lookup_state
+        finally:
+            mgr.shutdown()
+
+        assert not mgr._lookup_state
+        assert mgr._pending_results.empty()
+
     def test_stale_result_ignored_after_cleanup_and_key_reuse(self):
         key = _key(1)
         mgr = InMemoryLookupManager()

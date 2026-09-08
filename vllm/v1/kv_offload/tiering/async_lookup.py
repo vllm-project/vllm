@@ -27,8 +27,10 @@ lookup() accumulates new keys in _lookup_batch without touching the queue.
 flush() is called once per step from the tier's on_schedule_end(), posting
 the entire batch as a single queue item so the background thread sees one
 batch per step.
-drain_results() is called before any lookup() calls in the same step, so
-lookup() is a pure OrderedDict operation.
+Results are drained on the first lookup after each flush, at flush(), and
+after worker shutdown. Submitted lookups with no remaining request references
+are retained until their results are drained, allowing new requests to share
+the same probe.
 """
 
 import queue
@@ -46,6 +48,7 @@ logger = init_logger(__name__)
 @dataclass(slots=True)
 class LookupState:
     generation: int
+    submitted: bool = False
     result: bool | None = None  # True (found), False (not found), None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
@@ -155,24 +158,27 @@ class AsyncLookupManager(ABC):
         Called once per step from on_schedule_end() after all lookup() calls
         are done. The worker receives the full batch and processes it during
         the model-execution window, maximising time available before the next
-        step's drain_results().  Safe to call with an empty batch (no-op).
+        step's drain_results(). Also drains completed lookups when there
+        are no new keys to submit.
         """
+        self.drain_results()
         self._need_to_drain = True
         batch = self._lookup_batch
         self._lookup_batch = []
-        batch = [
-            (key, req_context, generation)
-            for key, req_context, generation in batch
-            if (state := self._lookup_state.get(key)) is not None
-            and state.generation == generation
-        ]
-        if batch:
-            self._lookup_queue.put(batch)
+        submitted_batch = []
+        for key, req_context, generation in batch:
+            state = self._lookup_state.get(key)
+            if state is None or state.generation != generation:
+                continue
+            state.submitted = True
+            submitted_batch.append((key, req_context, generation))
+        if submitted_batch:
+            self._lookup_queue.put(submitted_batch)
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
 
-        Called from lookup() before checking state.
+        Called from lookup(), flush(), and shutdown() on the scheduler thread.
         """
         while True:
             try:
@@ -182,6 +188,9 @@ class AsyncLookupManager(ABC):
             for key, generation, result in batch:
                 state = self._lookup_state.get(key)
                 if state is None or state.generation != generation:
+                    continue
+                if not state.request_ids:
+                    del self._lookup_state[key]
                     continue
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
@@ -203,7 +212,7 @@ class AsyncLookupManager(ABC):
                 state.result = False
 
     def cleanup(self, req_id: str) -> None:
-        """Remove entries no longer needed by any active request.
+        """Release request references, retaining submitted unresolved lookups.
 
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
@@ -211,13 +220,16 @@ class AsyncLookupManager(ABC):
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
-            if not state.request_ids:
+            if not state.request_ids and (
+                not state.submitted or state.result is not None
+            ):
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:
-        """Stop the worker thread."""
+        """Stop the worker thread and drain completed lookups."""
         self._lookup_queue.put(None)  # unblock _worker from _lookup_queue.get()
         self._thread.join()
+        self.drain_results()
 
     # ------------------------------------------------------------------
     # Internal helpers
