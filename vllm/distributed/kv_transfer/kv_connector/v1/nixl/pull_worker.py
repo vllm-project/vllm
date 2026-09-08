@@ -254,6 +254,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
+                load_start_token=meta.load_start_token,
+                load_end_token=meta.load_end_token,
             )
 
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
@@ -276,6 +278,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
         expected_consumers: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -347,6 +351,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 prefill_physical_per_logical=(
                     remote_info.remote_physical_blocks_per_logical
                 ),
+                load_start_token=load_start_token,
+                load_end_token=load_end_token,
+                block_size_ratio=block_size_ratio,
             )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from

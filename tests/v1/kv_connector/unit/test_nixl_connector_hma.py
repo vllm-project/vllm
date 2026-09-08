@@ -11,6 +11,7 @@ import torch
 from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -93,7 +94,16 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 
 @pytest.mark.cpu_test
-def test_update_state_after_alloc_tracks_cached_blocks_per_group():
+@pytest.mark.parametrize(
+    "transfer_group_ids,expected_num_computed_blocks",
+    [
+        pytest.param((0, 1), (2, 1), id="all_groups"),
+        pytest.param((1,), (1,), id="nonzero_transfer_group"),
+    ],
+)
+def test_update_state_after_alloc_tracks_cached_blocks_per_group(
+    transfer_group_ids, expected_num_computed_blocks
+):
     """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
     KV cache group. Each group's count must be tracked independently rather
     than collapsed to a single scalar, or DCP read-phase alignment
@@ -112,7 +122,10 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False
     scheduler.kv_cache_config = MagicMock(
-        select_transfer_block_ids=lambda block_ids: block_ids
+        transfer_group_ids=transfer_group_ids,
+        select_transfer_block_ids=lambda block_ids: tuple(
+            block_ids[group_id] for group_id in transfer_group_ids
+        ),
     )
 
     def cached(block_id):
@@ -134,8 +147,102 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
 
-    _, _, local_num_computed_blocks = scheduler._reqs_need_recv[request.request_id]
-    assert local_num_computed_blocks == (2, 1)
+    _, local_block_ids, local_num_computed_blocks, load_start, load_end = (
+        scheduler._reqs_need_recv[request.request_id]
+    )
+    assert len(local_block_ids) == len(local_num_computed_blocks)
+    assert local_num_computed_blocks == expected_num_computed_blocks
+    assert (load_start, load_end) == (
+        request.num_computed_tokens,
+        request.num_computed_tokens + 2,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("wrapped_mamba", [False, True])
+def test_range_load_selects_attention_suffix_and_terminal_mamba_state(
+    wrapped_mamba: bool,
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        MambaSpec,
+        UniformTypeKVCacheSpecs,
+    )
+
+    full = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((16,), (16,)),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="align",
+    )
+    mamba_group_spec = (
+        UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={"mamba": mamba},
+        )
+        if wrapped_mamba
+        else mamba
+    )
+    scheduler = object.__new__(NixlPullConnectorScheduler)
+    scheduler._scheduler_block_size = 64
+    scheduler._range_group_block_sizes = (16, 16)
+    scheduler._range_transfer_group_block_sizes = (16, 16)
+    scheduler._is_hma_required = True
+    scheduler.blocks_per_sw = [0, 0]
+    scheduler._ssm_spec_blocks = [None, 0]
+    scheduler._ssm_state_slots_are_positional = False
+    scheduler.kv_cache_config = MagicMock()
+    scheduler.kv_cache_config.kv_cache_groups = (
+        MagicMock(kv_cache_spec=full),
+        MagicMock(kv_cache_spec=mamba_group_spec),
+    )
+    scheduler.kv_cache_config.transfer_groups = (
+        scheduler.kv_cache_config.kv_cache_groups
+    )
+    scheduler.kv_cache_config.select_transfer_block_ids.side_effect = lambda ids: ids
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = (
+        [10, 11, 12, 13, 14, 15, 16, 17],
+        [20, 21, 22],
+    )
+
+    terminal = scheduler.get_range_block_ids(blocks, KVLoadRange(64, 96))
+    nonterminal = scheduler.get_range_block_ids(
+        blocks, KVLoadRange(64, 96, is_terminal=False)
+    )
+
+    assert terminal == ([14, 15], [22])
+    assert nonterminal == ([14, 15], [])
+    assert scheduler.get_range_start_blocks(KVLoadRange(64, 96)) == (4, 4)
+    scheduler._reqs_in_batch = set()
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_recv = {}
+    scheduler.use_host_buffer = False
+    scheduler.is_bidirectional_kv_xfer_enabled = False
+    request = create_request(do_remote_prefill=True)
+
+    scheduler.update_state_after_alloc_for_range(
+        request,
+        blocks,
+        KVLoadRange(64, 96),
+    )
+
+    assert scheduler._reqs_need_recv[request.request_id] == (
+        request,
+        ([14, 15], [22]),
+        (4, 4),
+        64,
+        96,
+    )
 
 
 @pytest.mark.cpu_test
@@ -514,6 +621,15 @@ def test_apply_prefix_caching_mamba_hybrid(
     "local_block_ids,remote_block_ids,"
     "expected_local,expected_remote",
     [
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), []],
+            [list(range(10)), [42]],
+            [list(range(10)), []],
+            [list(range(10)), []],
+            id="nonterminal_range_skips_ssm_state",
+        ),
         # SSM prefix caching: remote has 3 placeholder + 1 real block,
         # local has only the 1 real block. FA blocks are equal (no trim).
         pytest.param(
@@ -635,6 +751,7 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
+    "load_start_token,load_end_token,"
     "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
     "correct_remote_fa,correct_local_fa",
     [
@@ -644,16 +761,17 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
         # 1st local logical block cached → suffix [6..11]
         # Correct: transfer only uncached suffix tokens (384-639)
         #   = remote [6,7,8,9] → local [6,7,8,9].
-        # Actual (front-trim): remote[:6]=[0..5] → local [6..11]. Wrong.
         pytest.param(
             6,
             10,
+            384,
+            640,
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             [6, 7, 8, 9, 10, 11],
             [42],
             [6, 7, 8, 9],
             [6, 7, 8, 9],
-            id="local6_remote10_fail",
+            id="local6_remote10",
         ),
         # 15 kernel blocks of data (960 tokens).
         # remote physical_per_logical=6  → 3 logical → 18 kernel [0..17]
@@ -661,36 +779,35 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
         # 1st local logical block cached → suffix [10..19]
         # Correct: transfer only uncached suffix tokens (640-959)
         #   = remote [10,11,12,13,14] → local [10,11,12,13,14].
-        # Actual (front-trim): remote[:10]=[0..9] → local [10..19]. Wrong.
         pytest.param(
             10,
             6,
+            640,
+            960,
             list(range(18)),
             list(range(10, 20)),
             [42],
             [10, 11, 12, 13, 14],
             [10, 11, 12, 13, 14],
-            id="local10_remote6_fail",
+            id="local10_remote6",
         ),
     ],
 )
-def test_mismatched_physical_per_logical_fails_with_prefix_caching(
+def test_mismatched_physical_per_logical_uses_token_window(
     local_physical_per_logical,
     remote_physical_per_logical,
+    load_start_token,
+    load_end_token,
     remote_fa_blocks,
     local_fa_blocks,
     ssm_blocks,
     correct_remote_fa,
     correct_local_fa,
 ):
-    """Demonstrate that _apply_prefix_caching front-trims ([:N])
-    in the Mamba hybrid path, which fails when prefix caching produces
-    suffix-only local blocks.
+    """Token-offset pairing avoids prefix/suffix misalignment.
 
-    Prefix caching operates at logical block granularity. When a logical
-    block is cached locally, the decode side only allocates kernel blocks
-    for the uncached suffix. The front-trim pairs remote prefix blocks
-    with local suffix slots — a silent data corruption.
+    Prefix caching can allocate different numbers of padded kernel blocks on
+    P and D. The explicit token window selects the same semantic suffix.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -703,6 +820,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         mamba_enabled=True,
     )
     worker._has_mamba = True
+    worker.block_size = 64
     worker._group_spec_types = tuple(
         type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
     )
@@ -715,16 +833,84 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         remote_block_ids,
         local_physical_per_logical,
         remote_physical_per_logical,
+        load_start_token=load_start_token,
+        load_end_token=load_end_token,
     )
 
-    assert (
-        aligned_remote[0] != correct_remote_fa or aligned_local[0] != correct_local_fa
-    ), (
-        f"Prefix caching with mismatched physical_per_logical should not "
-        f"produce correct transfer ids: "
-        f"remote={aligned_remote[0]}, local={aligned_local[0]}, "
-        f"correct_remote={correct_remote_fa}, correct_local={correct_local_fa}"
+    assert aligned_remote[0] == correct_remote_fa
+    assert aligned_local[0] == correct_local_fa
+
+
+@pytest.mark.cpu_test
+def test_full_attention_range_uses_token_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker.block_size = 16
+    worker._group_spec_types = (FullAttentionSpec,)
+
+    local, remote = worker._apply_prefix_caching(
+        ([100, 101],),
+        ([0, 1, 2, 3, 4, 5],),
+        1,
+        1,
+        load_start_token=64,
+        load_end_token=96,
+    )
+
+    assert local == [[100, 101]]
+    assert remote == [[4, 5]]
+
+
+@pytest.mark.cpu_test
+def test_full_attention_range_uses_remote_block_size_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker.block_size = 16
+    worker._group_spec_types = (FullAttentionSpec,)
+
+    local, remote = worker._apply_prefix_caching(
+        ([100, 101],),
+        ([0, 1, 2, 3, 4, 5, 6, 7],),
+        1,
+        1,
+        load_start_token=32,
+        load_end_token=48,
+        block_size_ratio=2,
+    )
+
+    assert local == [[100, 101]]
+    assert remote == [[4, 5]]
+
+
+@pytest.mark.cpu_test
+def test_heterogeneous_hybrid_prefix_cache_rejects_missing_wire_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._prefix_caching_enabled = True
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+
+    with pytest.raises(RuntimeError, match="explicit token load range"):
+        worker._apply_prefix_caching(
+            ([10, 11], [20]),
+            ([0, 1, 2], [30]),
+            decode_physical_per_logical=2,
+            prefill_physical_per_logical=3,
+        )
 
 
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])

@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVLoadRange,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -181,6 +182,29 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens
+        )
+
+    @property
+    def supports_load_range(self) -> bool:
+        return bool(
+            self.connector_scheduler and self.connector_scheduler.supports_load_range
+        )
+
+    @property
+    def load_range_alignment(self) -> int | None:
+        if self.connector_scheduler is None:
+            return None
+        return self.connector_scheduler.load_range_alignment
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_alloc_for_range(
+            request, blocks, load_range
         )
 
     def build_connector_meta(
