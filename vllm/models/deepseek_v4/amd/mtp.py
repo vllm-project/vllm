@@ -142,10 +142,9 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
-        # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
+        # Fused enorm and hnorm.
         inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
             inputs_embeds,
-            positions,
             previous_hidden_states,
             self.enorm.weight.data,
             self.hnorm.weight.data,
