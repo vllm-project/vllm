@@ -1786,6 +1786,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm5NextMTPModel": _HfExamplesInfo(
         "zai-org/GLM-5.3-Flash",
         speculative_model="zai-org/GLM-5.3-Flash",
+        speculative_method="mtp",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",
@@ -1796,6 +1797,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV4MTPModel": _HfExamplesInfo(
         "tencent/Hy4-preview",
         speculative_model="tencent/Hy4-preview",
+        speculative_method="mtp",
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",

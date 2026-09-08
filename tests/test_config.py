@@ -2658,6 +2658,9 @@ def test_spec_model_declaration_fills_missing_settings(
         ("EagleDeepSeekMTPModel", "eagle"),
         ("PEagleDraftModel", "eagle3"),
         ("DeepSeekMTPModel", "mtp"),
+        ("Glm5NextMTPModel", "mtp"),
+        ("HYV4MTPModel", "mtp"),
+        ("Qwen4ExpMTP", "mtp"),
         ("MedusaModel", "medusa"),
     ],
 )
