@@ -772,7 +772,10 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda", "fused"] | None = None
+    kda_prefill_backend: Literal[
+        "auto", "triton", "flashkda", "flashinfer", "fused"
+    ] | None = None
+    kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1747,10 +1750,17 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda", "fused"],
+            choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
             help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
             "'fused' is ROCm-only; 'auto' picks a supported backend.",
+        )
+        parser.add_argument(
+            "--kda-decode-backend",
+            dest="kda_decode_backend",
+            choices=["auto", "native", "flashinfer", "triton"],
+            default=None,
+            help="Select KDA decode backend.",
         )
         return parser
 
@@ -2579,6 +2589,8 @@ class EngineArgs:
                     "--kda-prefill-backend=fused is only available on ROCm."
                 )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
+        if self.kda_decode_backend is not None:
+            self.additional_config["kda_decode_backend"] = self.kda_decode_backend
 
         config = VllmConfig(
             model_config=model_config,
