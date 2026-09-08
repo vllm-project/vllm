@@ -16,14 +16,13 @@ from vllm.model_executor.layers.mamba.exact_replay import (
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -154,9 +153,12 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
-    # Exact-replay mode (None when disabled or when there are no such rows)
+    # Exact-replay mode (None when disabled or when there are no such rows).
+    # Decode rows only need the position of their token inside the partial
+    # chunk; the tensor covers every row the decode kernels run over, padded
+    # rows included, and lives in a persistent buffer for CUDA graphs.
     exact_replay_p: ExactReplayMetadata | None = None
-    exact_replay_d: ExactReplayMetadata | None = None
+    exact_replay_pos_d: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -178,18 +180,52 @@ class Mamba2AttentionMetadataBuilder(
         )
         self.chunk_size: int = chunk_size
         self.exact_replay: bool = envs.VLLM_BATCH_INVARIANT
+        if self.exact_replay:
+            # Decode rows run fixed-shape kernels, so decode-only full CUDA
+            # graphs work as usual; this buffer feeds them each row's position.
+            self.exact_replay_pos_d: torch.Tensor = torch.zeros(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
 
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> AttentionCGSupport:
-        if envs.VLLM_BATCH_INVARIANT:
-            # The replayed SSD step re-feeds each row's buffered partial chunk,
-            # so its shapes are data dependent and cannot be captured.
-            return AttentionCGSupport.NEVER
-        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+    def _exact_replay_decode_positions(
+        self,
+        common: Mamba2AttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> torch.Tensor:
+        """Positions for the rows that ``state_indices_tensor_d`` covers.
+
+        For full CUDA graphs the runner pads the batch and the base builder
+        pads the state indices; padded rows have sequence length 0 and point
+        at the null block, so they get position 0 and never fold.
+        """
+        num_decodes = common.num_decodes
+        assert common.state_indices_tensor_d is not None
+        num_rows = common.state_indices_tensor_d.shape[0]
+        seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+        if num_rows > self.decode_cudagraph_max_bs:
+            return exact_replay_decode_positions(seq_lens, self.chunk_size)
+        pos = self.exact_replay_pos_d[:num_rows]
+        exact_replay_decode_positions(seq_lens, self.chunk_size, out=pos[:num_decodes])
+        pos[num_decodes:].zero_()
+        return pos
+
+    def update_block_table(
+        self,
+        metadata: Mamba2AttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> Mamba2AttentionMetadata:
+        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        pos = metadata.exact_replay_pos_d
+        if pos is None or pos.shape[0] > self.decode_cudagraph_max_bs:
+            return new_metadata
+        # Full CUDA graphs of this group's layers read this builder's own
+        # persistent buffer, so refresh it from the metadata built by the
+        # first Mamba2 group's builder.
+        own = self.exact_replay_pos_d[: pos.shape[0]]
+        if own.data_ptr() != pos.data_ptr():
+            own.copy_(pos)
+        return replace(new_metadata, exact_replay_pos_d=own)
 
     def build(
         self,
@@ -231,40 +267,35 @@ class Mamba2AttentionMetadataBuilder(
             )
 
         exact_replay_p = None
-        exact_replay_d = None
+        exact_replay_pos_d = None
         if self.exact_replay:
-            device = common_attn_metadata.query_start_loc.device
-            # Derive per-row computed-token counts from CPU metadata only:
-            # `seq_lens_cpu_upper_bound` is exact for every row without
-            # speculative decoding, which this mode rejects, and it avoids the
-            # D2H sync of the deprecated `num_computed_tokens_cpu` property.
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-            if seq_lens_cpu is None:
-                raise ValueError(
-                    "VLLM_BATCH_INVARIANT=1 needs CPU sequence lengths in the "
-                    "attention metadata for Mamba2 layers"
-                )
-            query_lens = torch.diff(common_attn_metadata.query_start_loc_cpu)
-            num_computed_cpu = (seq_lens_cpu - query_lens).tolist()
-            query_lens_cpu = query_lens.tolist()
-            num_reqs = common.num_reqs
-            # The metadata carries batch rows, not state slots, so the copy
-            # that `update_block_table` hands to the other KV cache groups of a
-            # hybrid model stays valid: each layer resolves its own slots from
-            # its state indices when it runs the SSD step.
             if common.num_decodes > 0:
-                exact_replay_d = build_exact_replay_metadata(
-                    num_computed_cpu[: common.num_decodes],
-                    query_lens_cpu[: common.num_decodes],
-                    self.chunk_size,
-                    device,
+                exact_replay_pos_d = self._exact_replay_decode_positions(
+                    common, common_attn_metadata
                 )
             if common.num_prefills > 0:
+                # Derive per-row computed-token counts from CPU metadata only:
+                # `seq_lens_cpu_upper_bound` is exact for every row without
+                # speculative decoding, which this mode rejects, and it avoids
+                # the D2H sync of the deprecated `num_computed_tokens_cpu`.
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+                if seq_lens_cpu is None:
+                    raise ValueError(
+                        "VLLM_BATCH_INVARIANT=1 needs CPU sequence lengths in "
+                        "the attention metadata for Mamba2 layers"
+                    )
+                num_reqs = common.num_reqs
+                rows = slice(num_reqs - common.num_prefills, num_reqs)
+                query_lens = torch.diff(common_attn_metadata.query_start_loc_cpu)
+                # The metadata carries batch rows, not state slots, so the
+                # copy that `update_block_table` hands to the other KV cache
+                # groups of a hybrid model stays valid: each layer resolves its
+                # own slots from its state indices when it runs the SSD step.
                 exact_replay_p = build_exact_replay_metadata(
-                    num_computed_cpu[num_reqs - common.num_prefills : num_reqs],
-                    query_lens_cpu[num_reqs - common.num_prefills : num_reqs],
+                    (seq_lens_cpu[rows] - query_lens[rows]).tolist(),
+                    query_lens[rows].tolist(),
                     self.chunk_size,
-                    device,
+                    common_attn_metadata.query_start_loc.device,
                 )
 
         return replace(
@@ -275,5 +306,5 @@ class Mamba2AttentionMetadataBuilder(
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
             exact_replay_p=exact_replay_p,
-            exact_replay_d=exact_replay_d,
+            exact_replay_pos_d=exact_replay_pos_d,
         )
