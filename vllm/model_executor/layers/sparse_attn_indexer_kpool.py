@@ -436,7 +436,6 @@ def sparse_attn_indexer_kpool(
             tp_rank = get_tensor_model_parallel_rank()
             shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
             shard_stop = shard_start + shard_sizes[tp_rank]
-        num_prefill_tokens = attn_metadata_narrowed.num_prefill_tokens
 
         # Short sequences select every pool, so skip sparse scoring and fill
         # the top-k buffer with all causal token indices. The index-K cache was
@@ -612,7 +611,8 @@ def sparse_attn_indexer_kpool(
                 topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
 
         if shard_sizes is not None:
-            prefill_end = num_decode_tokens + num_prefill_tokens
+            # Metadata token counts can include graph padding, unlike the shard.
+            prefill_end = num_decode_tokens + sum(shard_sizes)
             # K-pool expansion appends the request's incomplete tail after the
             # logical top-k history.  Those ``index_kpool - 1`` entries are
             # part of the attention index and must be exchanged as well.

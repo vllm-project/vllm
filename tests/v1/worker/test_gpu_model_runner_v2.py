@@ -11,6 +11,7 @@ import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
@@ -20,7 +21,12 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
-def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("kind,width", [("circular", 1), ("mamba", 1), ("kpool", 16)])
+def test_custom_state_groups_skip_linear_slot_mapping(
+    monkeypatch, kind, width, wrapped
+):
+    """One-block states must not index their tables with long token positions."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144
     runner.is_encoder_decoder = False
@@ -55,6 +61,21 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         head_size=128,
         dtype=torch.bfloat16,
     )
+    if kind == "mamba":
+        raw_spec = MambaSpec(block_size=8, shapes=((1,),), dtypes=(torch.float32,))
+    elif kind == "kpool":
+        raw_spec = KpoolTailSpec(
+            block_size=8,
+            num_kv_heads=2,
+            head_size=128,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            sliding_window=8,
+        )
+    if wrapped:
+        raw_spec = UniformTypeKVCacheSpecs(
+            block_size=8, kv_cache_specs={"raw": raw_spec}
+        )
     compressed_spec = FullAttentionSpec(
         block_size=262144,
         num_kv_heads=1,
@@ -67,10 +88,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=["raw"],
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=8,
-                    kv_cache_specs={"raw": raw_spec},
-                ),
+                kv_cache_spec=raw_spec,
             ),
             KVCacheGroupSpec(layer_names=["compressed"], kv_cache_spec=compressed_spec),
         ],
@@ -106,7 +124,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     with pytest.raises(BlockTablesCaptured):
         runner.initialize_kv_cache(kv_cache_config)
 
-    assert captured["max_num_blocks_per_group"] == [1, 1]
+    assert captured["max_num_blocks_per_group"] == [width, 1]
     assert captured["slot_mapping_enabled"] == [False, True]
 
 
