@@ -20,6 +20,7 @@ from vllm.model_executor.models.transformers.fusers import (
     AttentionFuser,
     BaseFuser,
     GLUFuser,
+    MergedColumnParallelFuser,
     MLAFuser,
     PackedQKVFuser,
     QKVFuser,
@@ -46,6 +47,7 @@ FUSERS: tuple[type[BaseFuser], ...] = (
     GLUFuser,
     QKVFuser,
     PackedQKVFuser,
+    MergedColumnParallelFuser,
     RMSNormFuser,
     AttentionFuser,
 )
