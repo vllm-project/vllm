@@ -355,6 +355,7 @@ class TestSiluMulFp8Integration:
         registered_kernels = get_registered_kernels()
         kernel_wrapper = registered_kernels["silu_mul_fp8"]
         fake_impl = kernel_wrapper._fake_impl
+        assert fake_impl is not None
 
         fake_output = fake_impl(input_tensor, scale)
 
