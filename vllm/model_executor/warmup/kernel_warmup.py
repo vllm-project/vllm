@@ -274,26 +274,57 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 
+def _flashinfer_deferred_moe_token_counts(
+    runner: "GPUModelRunner",
+) -> tuple[int, ...]:
+    """Return bounded token counts that exercise deferred MoE finalization."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
+
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    token_counts: list[int] = []
+    for module in runner.get_model().modules():
+        if not isinstance(module, MoERunner):
+            continue
+
+        moe_config = module.moe_config
+        max_deferred_tokens = moe_config.defer_moe_finalize_max_num_tokens
+        if moe_config.use_deferred_moe_finalize and max_deferred_tokens > 0:
+            token_counts.append(min(max_tokens, max_deferred_tokens))
+
+    return tuple(dict.fromkeys(token_counts))
+
+
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
+    # Tune the widest bucket set first so bounded passes reuse its configs.
+    token_counts = [max_tokens]
     linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
         linear_backend == "flashinfer_cutedsl"
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
-        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    return (max_tokens,)
+        token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
+    token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
+    return tuple(dict.fromkeys(token_counts))
 
 
 def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+    import vllm.utils.flashinfer as fi_utils
+
     for num_tokens in _flashinfer_autotune_token_counts(runner):
-        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            randomize_inputs=True,
+        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+        logger.info(
+            "Running FlashInfer autotune with %d tokens and token buckets %s.",
+            num_tokens,
+            tuning_buckets,
         )
+        with fi_utils.autotune(tuning_buckets=tuning_buckets):
+            runner._dummy_run(
+                num_tokens=num_tokens,
+                skip_eplb=True,
+                is_profile=True,
+                randomize_inputs=True,
+            )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
