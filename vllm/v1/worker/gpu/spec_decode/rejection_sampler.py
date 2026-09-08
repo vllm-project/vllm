@@ -86,16 +86,16 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
-class FlattenSampledKernel(
-    VllmTritonJitKernel["FlattenSampledKernel.CompileKey"]
-):
+class FlattenSampledKernel(VllmTritonJitKernel["FlattenSampledKernel.CompileKey"]):
     kernel = staticmethod(_flatten_sampled_kernel)
 
     @dataclass(frozen=True)
     class CompileKey:
         sampled_stride: int
 
-    def dispatch(self, *, sampled_stride: int) -> CompileKey:
+    def dispatch(  # type: ignore[override]
+        self, *, sampled_stride: int
+    ) -> CompileKey:
         return self.CompileKey(sampled_stride=sampled_stride)
 
     def get_warmup_keys(self, *, num_speculative_steps: int) -> list[CompileKey]:
@@ -131,6 +131,7 @@ class RejectionSampler:
         spec_config: SpeculativeConfig,
         device: torch.device,
         model_dtype: torch.dtype | None = None,
+        draft_dtype: torch.dtype | None = None,
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
@@ -154,8 +155,10 @@ class RejectionSampler:
             self.use_block_verification = True
 
         if model_dtype is not None:
+            draft_dtype = draft_dtype or model_dtype
             warmup_kwargs = dict(
                 model_dtype=model_dtype,
+                draft_dtype=draft_dtype,
                 vocab_size=self.sampler.sampling_states.vocab_size,
                 num_speculative_steps=self.num_speculative_steps,
             )
@@ -196,7 +199,8 @@ class RejectionSampler:
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
         )
-        _FLATTEN_SAMPLED_KERNEL((num_reqs,),
+        _FLATTEN_SAMPLED_KERNEL(
+            (num_reqs,),
             flat_sampled,
             sampled,
             sampled.stride(0),

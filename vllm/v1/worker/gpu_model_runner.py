@@ -680,7 +680,8 @@ class GPUModelRunner(
             elif self.speculative_config.use_step3p5_mtp():
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
-                self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                with self.jit_warmup_registry.activate():
+                    self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
@@ -704,9 +705,10 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(
-                self.sampler, self.speculative_config, self.device
-            )
+            with self.jit_warmup_registry.activate():
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler, self.speculative_config, self.device
+                )
 
         self.num_spec_tokens = 0
         self.prev_num_spec_tokens = 0

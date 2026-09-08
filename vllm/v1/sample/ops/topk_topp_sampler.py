@@ -24,6 +24,16 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def register_top_k_top_p_warmups() -> None:
+    """Register every native accelerator sampling kernel used at runtime."""
+    if HAS_TRITON and not current_platform.is_cpu():
+        _TOPK_TOPP_KERNEL.register_warmup()
+        if current_platform.is_cuda():
+            _TOPP_SPLIT_STATS_KERNEL.register_warmup()
+            _TOPP_SPLIT_STEP_KERNEL.register_warmup()
+            _TOPP_SPLIT_MASK_KERNEL.register_warmup()
+
+
 def _skip_aiter_sampler_on_gfx1250() -> bool:
     # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
     from vllm.platforms.rocm import on_gfx1250
@@ -135,12 +145,7 @@ class TopKTopPSampler(nn.Module):
             self.forward = self.forward_native
 
         # Every accelerator backend can fall back to native sampling at runtime.
-        if HAS_TRITON and not current_platform.is_cpu():
-            _TOPK_TOPP_KERNEL.register_warmup()
-            if current_platform.is_cuda():
-                _TOPP_SPLIT_STATS_KERNEL.register_warmup()
-                _TOPP_SPLIT_STEP_KERNEL.register_warmup()
-                _TOPP_SPLIT_MASK_KERNEL.register_warmup()
+        register_top_k_top_p_warmups()
 
     def forward_native(
         self,

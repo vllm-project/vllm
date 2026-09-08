@@ -587,7 +587,7 @@ class CopyAndExpandDflashInputsKernel(
         triton_block_size: int
         has_num_rejected: bool
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         block_table_stride: int,
@@ -647,7 +647,7 @@ class CopyAndExpandDflashInputsKernel(
             out_token_indices_ptr=int32_ptr,
             block_table_ptr=int32_ptr,
             query_start_loc_ptr=int32_ptr,
-            num_rejected_tokens_ptr=int32_ptr,
+            num_rejected_tokens_ptr=(int32_ptr if compile_key.has_num_rejected else 0),
             max_tokens_per_req=compile_key.triton_block_size,
             **vars(compile_key),
         )

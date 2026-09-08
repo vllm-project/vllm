@@ -949,7 +949,7 @@ class ComputeLocalLogitsStatsKernel(
         block_size: int
         has_draft_logits: bool
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         target_dtype: torch.dtype,
@@ -965,9 +965,7 @@ class ComputeLocalLogitsStatsKernel(
         return self.CompileKey(
             target_dtype=target_dtype,
             draft_dtype=draft_dtype,
-            target_logits_stride=triton_scalar_specialization_rep(
-                target_logits_stride
-            ),
+            target_logits_stride=triton_scalar_specialization_rep(target_logits_stride),
             draft_logits_stride_0=triton_scalar_specialization_rep(
                 draft_logits_stride_0
             ),
@@ -983,7 +981,12 @@ class ComputeLocalLogitsStatsKernel(
         )
 
     def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
+        self,
+        *,
+        model_dtype: torch.dtype,
+        draft_dtype: torch.dtype,
+        vocab_size: int,
+        num_speculative_steps: int,
     ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
@@ -1003,14 +1006,14 @@ class ComputeLocalLogitsStatsKernel(
                 ),
                 dict(
                     target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
                 ),
                 dict(
                     target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
@@ -1086,7 +1089,12 @@ class ComputeCumulativeLogPKernel(
         return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
+        self,
+        *,
+        model_dtype: torch.dtype,
+        draft_dtype: torch.dtype,
+        vocab_size: int,
+        num_speculative_steps: int,
     ) -> list[CompileKey]:
         vocab_num_blocks = triton.cdiv(vocab_size, 8192)
         return self._trace_dispatch(self.dispatch)(
@@ -1107,14 +1115,14 @@ class ComputeCumulativeLogPKernel(
                 ),
                 dict(
                     target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
                 ),
                 dict(
                     target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
@@ -1190,13 +1198,18 @@ class ComputeLocalResidualMassKernel(
         return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
+        self,
+        *,
+        model_dtype: torch.dtype,
+        draft_dtype: torch.dtype,
+        vocab_size: int,
+        num_speculative_steps: int,
     ) -> list[CompileKey]:
         vocab_num_blocks = triton.cdiv(vocab_size, 8192)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
-                dict(target_dtype=model_dtype, draft_dtype=model_dtype),
-                dict(target_dtype=torch.float32, draft_dtype=model_dtype),
+                dict(target_dtype=model_dtype, draft_dtype=draft_dtype),
+                dict(target_dtype=torch.float32, draft_dtype=draft_dtype),
             ),
             target_logits_stride=vocab_size,
             draft_logits_stride_0=num_speculative_steps * vocab_size,
@@ -1272,6 +1285,7 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
         self,
         *,
         model_dtype: torch.dtype,
+        draft_dtype: torch.dtype,
         vocab_size: int,
         num_speculative_steps: int,
         synthetic_mode: bool,
@@ -1296,14 +1310,14 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
                 ),
                 dict(
                     target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
                 ),
                 dict(
                     target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
@@ -1357,8 +1371,7 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
             float32_ptr if compile_key.use_block_verification else None,
             (
                 float32_ptr
-                if compile_key.use_block_verification
-                and compile_key.has_draft_logits
+                if compile_key.use_block_verification and compile_key.has_draft_logits
                 else None
             ),
             1 if compile_key.has_draft_logits else 0,
@@ -1402,6 +1415,7 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
         self,
         *,
         model_dtype: torch.dtype,
+        draft_dtype: torch.dtype,
         vocab_size: int,
         num_speculative_steps: int,
         use_fp64: bool,
@@ -1425,14 +1439,14 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
                 ),
                 dict(
                     target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
                 ),
                 dict(
                     target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
+                    draft_dtype=draft_dtype,
                     draft_logits_stride_0=num_speculative_steps * vocab_size,
                     draft_logits_stride_1=vocab_size,
                     has_draft_logits=True,
@@ -1491,9 +1505,7 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-class InsertResampledKernel(
-    VllmTritonJitKernel["InsertResampledKernel.CompileKey"]
-):
+class InsertResampledKernel(VllmTritonJitKernel["InsertResampledKernel.CompileKey"]):
     kernel = staticmethod(_insert_resampled_kernel)
 
     @dataclass(frozen=True)
@@ -1522,9 +1534,7 @@ class InsertResampledKernel(
             resampled_local_argmax_stride=resample_num_blocks,
             resampled_local_max_stride=resample_num_blocks,
             resample_num_blocks=resample_num_blocks,
-            padded_resample_num_blocks=triton.next_power_of_2(
-                resample_num_blocks
-            ),
+            padded_resample_num_blocks=triton.next_power_of_2(resample_num_blocks),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -1617,7 +1627,8 @@ def rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL((num_logits, vocab_num_blocks),
+    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL(
+        (num_logits, vocab_num_blocks),
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -1653,7 +1664,8 @@ def rejection_sample(
         # cumulative_log_p[start + i] = log(p_{i+1}), the cumulative ratio after
         # the (i+1)-th draft token.
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        _COMPUTE_CUMULATIVE_LOG_P_KERNEL((num_reqs,),
+        _COMPUTE_CUMULATIVE_LOG_P_KERNEL(
+            (num_reqs,),
             cumulative_log_p,
             target_logits,
             target_logits.stride(0),
@@ -1686,7 +1698,8 @@ def rejection_sample(
             local_residual_mass = target_logits.new_empty(
                 num_logits, vocab_num_blocks, dtype=torch.float32
             )
-            _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL((num_logits, vocab_num_blocks),
+            _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL(
+                (num_logits, vocab_num_blocks),
                 local_residual_mass,
                 local_residual_mass.stride(0),
                 cumulative_log_p,
@@ -1727,7 +1740,8 @@ def rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    _REJECTION_KERNEL((num_reqs,),
+    _REJECTION_KERNEL(
+        (num_reqs,),
         sampled,
         sampled.stride(0),
         num_sampled,
@@ -1778,7 +1792,8 @@ def rejection_sample(
         resample_num_blocks,
         dtype=torch.float64 if use_fp64 else torch.float32,
     )
-    _RESAMPLE_KERNEL((num_reqs, resample_num_blocks),
+    _RESAMPLE_KERNEL(
+        (num_reqs, resample_num_blocks),
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
@@ -1806,7 +1821,8 @@ def rejection_sample(
     )
 
     # Insert the resampled tokens into the output sampled.
-    _INSERT_RESAMPLED_KERNEL((num_reqs,),
+    _INSERT_RESAMPLED_KERNEL(
+        (num_reqs,),
         sampled,
         sampled.stride(0),
         num_sampled,

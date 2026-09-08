@@ -690,7 +690,7 @@ class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
         )
         return config
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         num_tokens: int,

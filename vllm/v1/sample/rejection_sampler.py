@@ -480,6 +480,7 @@ def rejection_sample(
             uniform_probs,
             synthetic_conditional_rates,
             synthetic_mode=synthetic_mode,
+            all_greedy=sampling_metadata.all_greedy,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
@@ -978,12 +979,21 @@ class RejectionGreedySampleKernel(
     @dataclass(frozen=True)
     class CompileKey:
         synthetic_mode: bool
+        all_greedy: bool
 
-    def dispatch(self, *, synthetic_mode: bool) -> CompileKey:
-        return self.CompileKey(synthetic_mode=synthetic_mode)
+    def dispatch(  # type: ignore[override]
+        self, *, synthetic_mode: bool, all_greedy: bool
+    ) -> CompileKey:
+        return self.CompileKey(
+            synthetic_mode=synthetic_mode,
+            all_greedy=all_greedy,
+        )
 
     def get_warmup_keys(self, *, synthetic_mode: bool) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(synthetic_mode=synthetic_mode)
+        return self._trace_dispatch(self.dispatch)(
+            synthetic_mode=synthetic_mode,
+            all_greedy=(False, True),
+        )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
         int32_ptr = TritonWarmupTensor(torch.int32)
@@ -993,11 +1003,22 @@ class RejectionGreedySampleKernel(
             draft_token_ids=int32_ptr,
             target_argmax=TritonWarmupTensor(torch.int64),
             bonus_token_ids=TritonWarmupTensor(torch.int64),
-            is_greedy=TritonWarmupTensor(torch.bool),
+            is_greedy=None
+            if compile_key.all_greedy
+            else TritonWarmupTensor(torch.bool),
             max_spec_len=5,
-            uniform_probs=TritonWarmupTensor(torch.float64),
-            synthetic_conditional_rates=TritonWarmupTensor(torch.float32),
+            uniform_probs=(
+                None
+                if compile_key.all_greedy and not compile_key.synthetic_mode
+                else TritonWarmupTensor(torch.float64)
+            ),
+            synthetic_conditional_rates=(
+                TritonWarmupTensor(torch.float32)
+                if compile_key.synthetic_mode
+                else None
+            ),
             synthetic_mode=compile_key.synthetic_mode,
+            all_greedy=compile_key.all_greedy,
         )
 
     @kernel_launcher
@@ -1014,6 +1035,7 @@ class RejectionGreedySampleKernel(
         synthetic_conditional_rates: torch.Tensor | None,
         *,
         synthetic_mode: bool,
+        all_greedy: bool,
     ) -> tuple[tuple[int, ...], dict[str, object]]:
         return (output_token_ids.shape[0],), dict(
             SYNTHETIC_MODE=synthetic_mode,
@@ -1031,7 +1053,7 @@ class RejectionRandomSampleKernel(
         no_draft_probs: bool
         synthetic_mode: bool
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self, *, vocab_size: int, no_draft_probs: bool, synthetic_mode: bool
     ) -> CompileKey:
         return self.CompileKey(
@@ -1062,7 +1084,9 @@ class RejectionRandomSampleKernel(
             is_greedy=TritonWarmupTensor(torch.bool),
             max_spec_len=5,
             vocab_size=compile_key.vocab_size,
-            synthetic_conditional_rates=float32_ptr,
+            synthetic_conditional_rates=(
+                float32_ptr if compile_key.synthetic_mode else None
+            ),
             no_draft_probs=compile_key.no_draft_probs,
             synthetic_mode=compile_key.synthetic_mode,
         )
@@ -1100,12 +1124,15 @@ class ExpandKernel(VllmTritonJitKernel["ExpandKernel.CompileKey"]):
         dtype: torch.dtype
         max_num_tokens: int
 
-    def dispatch(self, *, dtype: torch.dtype, max_num_tokens: int) -> CompileKey:
+    def dispatch(  # type: ignore[override]
+        self, *, dtype: torch.dtype, max_num_tokens: int
+    ) -> CompileKey:
         return self.CompileKey(dtype=dtype, max_num_tokens=max_num_tokens)
 
     def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
-            dtype=(torch.float32, torch.int64), max_num_tokens=MAX_SPEC_LEN
+            dtype=(torch.float32, torch.int32, torch.int64),
+            max_num_tokens=MAX_SPEC_LEN,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
@@ -1145,7 +1172,7 @@ class SampleRecoveredTokensKernel(
         no_draft_probs: bool
         use_fp64_gumbel: bool
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         vocab_size: int,
