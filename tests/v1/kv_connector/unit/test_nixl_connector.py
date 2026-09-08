@@ -1965,7 +1965,7 @@ def test_mixed_host_staging_waits_for_both_receive_parts(staging_finishes_first)
 
 
 @pytest.mark.cpu_test
-def test_mixed_host_staging_reports_failure_after_aborted_sibling_drains():
+def test_mixed_host_staging_does_not_report_failure_twice_after_drain():
     worker = object.__new__(NixlConnectorWorker)
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = {}
@@ -1980,7 +1980,7 @@ def test_mixed_host_staging_reports_failure_after_aborted_sibling_drains():
 
     assert worker._get_finished_host_staging() == set()
     assert worker._failed_recv_pending == set()
-    worker._report_failed_recv.assert_called_once_with("request")
+    worker._report_failed_recv.assert_not_called()
 
 
 def _run_abort_timeout_test(llm: LLM, timeout: int):
