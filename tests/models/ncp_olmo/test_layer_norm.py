@@ -45,10 +45,7 @@ def test_batch_invariant_layer_norm_is_independent_of_row_batching(
 
     batched = apply_ncp_layer_norm(layer_norm, hidden_states)
     rowwise = torch.cat(
-        [
-            apply_ncp_layer_norm(layer_norm, row.unsqueeze(0))
-            for row in hidden_states
-        ],
+        [apply_ncp_layer_norm(layer_norm, row.unsqueeze(0)) for row in hidden_states],
         dim=0,
     )
 
