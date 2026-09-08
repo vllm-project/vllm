@@ -95,6 +95,12 @@ def test_resolve_shorthand_only_populates_both_slots():
     assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
 
 
+@pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
+def test_resolve_colliding_shorthand_is_deferred(quantization: str):
+    """Checkpoint metadata determines whether an MXFP shorthand is online."""
+    assert resolve_quantization_config(quantization, None) is None
+
+
 def test_resolve_int8_shorthand_leaves_linear_unset():
     # int8_per_channel_weight_only is MoE-only; linear stays None so that
     # OnlineQuantizationConfig leaves Linear layers in full precision.
@@ -122,12 +128,9 @@ def test_resolve_merges_explicit_over_shorthand():
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
 
 
-def test_resolve_rejects_quantization_config_with_non_shorthand_quant():
-    # If --quantization names something other than an online shorthand,
-    # quantization_config is not allowed via this path (checkpoint quant
-    # paths read it directly off ModelConfig instead).
-    with pytest.raises(ValueError, match="quantization_config is only supported"):
-        resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+def test_resolve_quantization_config_with_checkpoint_quantization():
+    args = resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+    assert args == QuantizationConfigArgs(linear="fp8_per_block")
 
 
 # ---- QUANT_KEY_NAMES coverage --------------------------------------------
@@ -206,6 +209,6 @@ def test_targets_reject_moe_only_shorthand_for_linear_layer():
     )
 
     with pytest.raises(ValueError, match="does not define a QuantSpec"):
-        config._dispatch_target(
-            "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
+        config.resolve_quant_method_cls(
+            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
         )
