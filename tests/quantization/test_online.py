@@ -35,6 +35,7 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.mla_bmm import Mxfp4MLABmm
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -100,6 +101,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
 )
@@ -228,6 +230,162 @@ def _write_minimal_llama_config(
     if quantization_config is not None:
         config["quantization_config"] = quantization_config
     (model_path / "config.json").write_text(json.dumps(config))
+
+
+def _write_minimal_mla_config(model_path: Path, architecture: str) -> None:
+    """Write a compact DeepSeek-style config usable by generic MLA models."""
+    config = {
+        "architectures": [architecture],
+        "model_type": "deepseek_v2",
+        "hidden_size": 256,
+        "intermediate_size": 512,
+        "moe_intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_hidden_layers": 1,
+        "mhc": False,
+        "vocab_size": 256,
+        "max_position_embeddings": 64,
+        "q_lora_rank": 64,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "n_routed_experts": 4,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "n_group": 1,
+        "topk_group": 1,
+        "n_shared_experts": 1,
+        "first_k_dense_replace": 1,
+        "moe_layer_freq": 1,
+        "layer_group_size": 1,
+        "layer_types": ["full_attention"],
+        "rms_norm_eps": 1e-6,
+        "use_bias": False,
+        "rope_theta": 10000,
+        "tie_word_embeddings": False,
+    }
+    if architecture in {
+        "DeepseekV32ForCausalLM",
+        "Dots3NoteForCausalLM",
+        "GlmMoeDsaForCausalLM",
+        "Glm5NextForCausalLM",
+    }:
+        config.update(
+            index_topk=1,
+            index_kpool=1,
+            index_n_heads=1,
+            index_head_dim=32,
+            index_kv_lora_rank=32,
+        )
+    if architecture in {
+        "Glm4MoeLiteForCausalLM",
+        "PanguProMoEV2ForCausalLM",
+        "PanguUltraMoEForCausalLM",
+        "SarvamMLAForCausalLM",
+    }:
+        config["first_k_dense_replace"] = 0
+    if architecture == "Glm5NextForCausalLM":
+        config.update(model_type="glm5_next", index_kpool=2, index_topk=2)
+    if architecture == "LongcatFlashForCausalLM":
+        config.update(zero_expert_num=1, zero_expert_type="identity")
+    (model_path / "config.json").write_text(json.dumps(config))
+
+
+@pytest.mark.skipif(
+    not on_gfx950(),
+    reason="kv_b_proj mxfp4 quantization tested only on gfx950",
+)
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "AXK1ForCausalLM",
+        "BailingMoeV2_5ForCausalLM",
+        "BailingMoeV3ForCausalLM",
+        "DeepseekForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
+        pytest.param(
+            "Dots3NoteForCausalLM",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Dots3 NOTE requires the CUDA FlashAttention extension.",
+            ),
+        ),
+        "Glm4MoeLiteForCausalLM",
+        "GlmMoeDsaForCausalLM",
+        # Glm5NextDecoderLayer passes quant_config=None to its MLA layer; see
+        # vllm/models/glm5next/nvidia/model.py.
+        pytest.param(
+            "Glm5NextForCausalLM",
+            marks=pytest.mark.skip(
+                reason="GLM5 Next does not pass quant_config to MLAAttention."
+            ),
+        ),
+        pytest.param(
+            "HYV4ForCausalLM",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="HY-V4 does not support ROCm.",
+            ),
+        ),
+        "LongcatFlashForCausalLM",
+        "PanguEmbeddedForCausalLM",
+        "PanguProMoEV2ForCausalLM",
+        "PanguUltraMoEForCausalLM",
+        "SarvamMLAForCausalLM",
+    ],
+)
+def test_online_mla_kv_b_proj_quantization(
+    architecture: str,
+    tmp_path: Path,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+) -> None:
+    """Online MXFP4 installs the MLA BMM captured from ``kv_b_proj``."""
+
+    _write_minimal_mla_config(tmp_path, architecture)
+    logged_messages: list[str] = []
+
+    def record_info(message: str, *args: object) -> None:
+        logged_messages.append(message % args)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.logger.info", record_info
+    )
+    model, vllm_config = load_model_without_vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        quantization="online",
+        model_config_kwargs={
+            "quantization_config": resolve_quantization_config(
+                "online", {"targets": {"*kv_b_proj*": "mxfp4"}}
+            )
+        },
+        model_loader_cls=DummyModelLoader,
+    )
+    expected_model_cls, resolved_architecture = get_model_architecture(
+        vllm_config.model_config
+    )
+    assert resolved_architecture == architecture
+    assert isinstance(model, expected_model_cls)
+
+    kv_b_projs = [
+        module for name, module in model.named_modules() if name.endswith("kv_b_proj")
+    ]
+    assert kv_b_projs, f"{architecture} did not create an MLA kv_b_proj"
+    for kv_b_proj in kv_b_projs:
+        assert isinstance(kv_b_proj.quant_method, Mxfp4OnlineLinearMethod)
+        assert isinstance(kv_b_proj.mla_bmm, Mxfp4MLABmm)
+    expected_count = len(kv_b_projs)
+    assert any(
+        f"Quantized {expected_count} layers of types:" in message
+        and "kv_b_proj" in message
+        for message in logged_messages
+    )
 
 
 @pytest.mark.parametrize(

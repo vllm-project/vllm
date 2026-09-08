@@ -9,12 +9,6 @@ from tqdm import tqdm
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    Fp8PerTensorOnlineLinearMethod,
-)
-from vllm.model_executor.layers.quantization.online.mxfp4 import (
-    Mxfp4OnlineLinearMethod,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     quantize_fp8_per_tensor,
 )
@@ -229,6 +223,13 @@ def create_online_mla_bmm(
     v_head_dim: int,
 ) -> MLABmm | None:
     """Quantize MLA BMM weights while kv_b_proj is still in high precision."""
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerTensorOnlineLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+    )
+
     if not is_aiter_found_and_supported():
         return None
 

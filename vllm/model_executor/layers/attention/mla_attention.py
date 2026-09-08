@@ -255,13 +255,6 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    Fp8PerTensorOnlineLinearMethod,
-    OnlineLinearBase,
-)
-from vllm.model_executor.layers.quantization.online.mxfp4 import (
-    Mxfp4OnlineLinearMethod,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -448,6 +441,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         **extra_impl_args,
     ):
         super().__init__()
+        from vllm.model_executor.layers.quantization.online.fp8 import (
+            Fp8PerTensorOnlineLinearMethod,
+            OnlineLinearBase,
+        )
+        from vllm.model_executor.layers.quantization.online.mxfp4 import (
+            Mxfp4OnlineLinearMethod,
+        )
+
         self.num_heads = num_heads
         self.scale = scale
         self.qk_nope_head_dim = qk_nope_head_dim
