@@ -18,7 +18,11 @@ from compressed_tensors.transform import deterministic_hadamard_matrix
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
@@ -636,6 +640,29 @@ def test_inc_config_accepts_mxfp4_hadamard_rotation() -> None:
     }
 
 
+@pytest.mark.parametrize("backend", [None, "auto"])
+def test_inc_config_accepts_auto_rotation_backend(backend) -> None:
+    rotation_config = {
+        "block_size": 32,
+        "hadamard_type": "hadamard",
+    }
+    if backend is not None:
+        rotation_config["backend"] = backend
+
+    config = INCConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "rotation_config": rotation_config,
+        }
+    )
+
+    assert config.rotation_config == rotation_config
+
+
 def test_inc_config_accepts_maximum_rotation_block_size() -> None:
     config = INCConfig.from_config(
         {
@@ -661,7 +688,7 @@ def test_inc_config_accepts_maximum_rotation_block_size() -> None:
     [
         (
             {"backend": "inplace", "hadamard_type": "hadamard"},
-            "backend='transform'",
+            "backends 'auto' and 'transform'",
         ),
         (
             {"backend": "transform", "hadamard_type": "random_hadamard"},
@@ -987,9 +1014,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     assert captured["processed_layer"] is layer
 
 
-def test_inc_mxfp4_linear_rotation_rejects_tp_shard_crossing_block(
-    monkeypatch,
-) -> None:
+def test_inc_mxfp4_linear_rotation_rejects_tp_shard_crossing_block() -> None:
     """A rotation block spanning multiple TP shards is not supported.
 
     E.g. a checkpoint-wide block_size=64 on a 64-wide layer is valid without
@@ -999,23 +1024,18 @@ def test_inc_mxfp4_linear_rotation_rejects_tp_shard_crossing_block(
     a generic "not divisible" error.
     """
 
-    class DummyKernel:
-        pass
+    class FailingQuantMethod(LinearMethodBase):
+        def create_weights(self, *args, **kwargs) -> None:
+            pytest.fail("quant_method.create_weights should not be reached")
 
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
-        lambda **kwargs: DummyKernel(),
+        def apply(self, layer, x, bias=None):
+            raise NotImplementedError
+
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
     )
 
-    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
-        INCMxfp4LinearMethod,
-    )
-
-    method = INCMxfp4LinearMethod(
-        make_layer_config(group_size=32, data_type="mx_fp"),
-        rotation_block_size=64,
-    )
+    method = INCLinearTransformMethod(FailingQuantMethod(), block_size=64)
 
     with pytest.raises(ValueError, match="tensor-parallel shard"):
         method.create_weights(
@@ -1054,13 +1074,18 @@ def test_inc_mxfp4_linear_rotation_validates_shard_alignment(monkeypatch) -> Non
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
         INCMxfp4LinearMethod,
     )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    def make_quant_method() -> INCLinearMethod:
+        return INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        )
 
     # No TP sharding (input_size_per_partition == input_size): a block_size
     # that just does not fit the layer's width is a plain, generic error.
-    misaligned_method = INCMxfp4LinearMethod(
-        make_layer_config(group_size=32, data_type="mx_fp"),
-        rotation_block_size=48,
-    )
+    misaligned_method = INCLinearTransformMethod(make_quant_method(), block_size=48)
     with pytest.raises(ValueError, match="not divisible by"):
         misaligned_method.create_weights(
             torch.nn.Module(),
@@ -1073,10 +1098,7 @@ def test_inc_mxfp4_linear_rotation_validates_shard_alignment(monkeypatch) -> Non
 
     # TP shards the input, but the block_size still evenly divides the
     # per-shard width, so this must be accepted.
-    aligned_method = INCMxfp4LinearMethod(
-        make_layer_config(group_size=32, data_type="mx_fp"),
-        rotation_block_size=32,
-    )
+    aligned_method = INCLinearTransformMethod(make_quant_method(), block_size=32)
     layer = torch.nn.Module()
     aligned_method.create_weights(
         layer,
@@ -1108,21 +1130,31 @@ def test_inc_mxfp4_linear_applies_rotation_before_kernel(monkeypatch) -> None:
         return x + 1
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_mxfp4_linear.ops.hadacore_transform",
+        "vllm.model_executor.layers.quantization.inc.transform.hadamard.ops."
+        "hadacore_transform",
         fake_hadamard,
     )
 
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
         INCMxfp4LinearMethod,
     )
+    from vllm.model_executor.layers.quantization.inc.transform.hadamard import (
+        HadamardTransform,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
 
-    method = INCMxfp4LinearMethod(
-        make_layer_config(group_size=32, data_type="mx_fp"),
-        rotation_block_size=32,
+    block_size = 32
+    method = INCLinearTransformMethod(
+        INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        ),
+        block_size=block_size,
+        rotation=HadamardTransform(block_size),
     )
     value = torch.zeros(2, 64)
-    result = method.apply_weights(torch.nn.Module(), value)
+    result = method.apply(torch.nn.Module(), value)
 
     assert captured["hadamard_shape"] == (2, 2, 32)
     assert torch.equal(captured["kernel_input"], torch.ones_like(value))
@@ -1145,13 +1177,13 @@ def test_inc_mxfp4_rotation_requires_cuda_or_xpu(monkeypatch) -> None:
         }
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_mxfp4_scheme.current_platform.is_cuda",
+        "vllm.model_executor.layers.quantization.inc.transform."
+        "linear.current_platform.is_cuda",
         lambda: False,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes."
-        "inc_mxfp4_scheme.current_platform.is_xpu",
+        "vllm.model_executor.layers.quantization.inc.transform."
+        "linear.current_platform.is_xpu",
         lambda: False,
     )
 
@@ -1179,11 +1211,20 @@ def test_inc_mxfp4_linear_rotation_matches_hadamard(monkeypatch) -> None:
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
         INCMxfp4LinearMethod,
     )
+    from vllm.model_executor.layers.quantization.inc.transform.hadamard import (
+        HadamardTransform,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
 
     block_size = 32
-    method = INCMxfp4LinearMethod(
-        make_layer_config(group_size=32, data_type="mx_fp"),
-        rotation_block_size=block_size,
+    method = INCLinearTransformMethod(
+        INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        ),
+        block_size=block_size,
+        rotation=HadamardTransform(block_size),
     )
     identity = torch.eye(block_size, dtype=torch.bfloat16, device="cuda")
     value = torch.cat((identity, identity), dim=-1)
@@ -1195,7 +1236,7 @@ def test_inc_mxfp4_linear_rotation_matches_hadamard(monkeypatch) -> None:
         value.unflatten(-1, (-1, block_size)).to(hadamard.dtype) @ hadamard.T
     ).to(value.dtype)
 
-    result = method.apply_weights(torch.nn.Module(), value)
+    result = method.apply(torch.nn.Module(), value)
 
     torch.testing.assert_close(result.unflatten(-1, (-1, block_size)), expected)
     torch.testing.assert_close(value, original)

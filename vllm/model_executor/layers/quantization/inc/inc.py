@@ -168,9 +168,11 @@ class INCConfig(QuantizationConfig):
                 raise ValueError(
                     "AutoRound Hadamard rotation is only supported with INC MXFP4"
                 )
-            if self.rotation_config.get("backend") != "transform":
+            rotation_backend = self.rotation_config.get("backend", "auto")
+            if rotation_backend not in {"auto", "transform"}:
                 raise ValueError(
-                    "INC only supports AutoRound rotation backend='transform'"
+                    "INC only supports AutoRound rotation backends "
+                    f"'auto' and 'transform', but found {rotation_backend!r}"
                 )
             if self.rotation_config.get("hadamard_type") != "hadamard":
                 raise ValueError(

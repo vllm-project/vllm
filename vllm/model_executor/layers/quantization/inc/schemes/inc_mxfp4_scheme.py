@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme
@@ -23,7 +22,11 @@ class INCMxfp4Scheme(INCScheme):
 
     Dispatches to :class:`INCMxfp4LinearMethod` for linear layers and
     :class:`INCMxfp4MoEMethod` for fused MoE layers; see those classes for the
-    per-module weight layout and kernel-selection details.
+    per-module weight layout and kernel-selection details. When the
+    checkpoint requests an AutoRound Hadamard rotation
+    (``config.rotation_config``), the linear method is additionally wrapped
+    with an HMT transform method from ``..transform.linear``, keeping the
+    rotation decoupled from the quantization scheme itself.
     """
 
     @staticmethod
@@ -40,20 +43,23 @@ class INCMxfp4Scheme(INCScheme):
         del layer, prefix
         from .inc_mxfp4_linear import INCMxfp4LinearMethod
 
-        if (
-            config.rotation_config is not None
-            and not current_platform.is_cuda()
-            and not current_platform.is_xpu()
-        ):
-            raise NotImplementedError(
-                "AutoRound Hadamard rotation requires CUDA Hadacore or XPU ARK"
+        if config.rotation_config is not None:
+            from ..transform.linear import require_supported_platform
+
+            # Fail fast, before constructing a platform-specific MXFP4
+            # kernel, if this platform cannot run the rotation at all.
+            require_supported_platform()
+
+        linear_method = INCLinearMethod(INCMxfp4LinearMethod(layer_config))
+
+        if config.rotation_config is not None:
+            from ..transform.linear import build_linear_transform_method
+
+            return build_linear_transform_method(
+                linear_method, config.rotation_config["block_size"]
             )
-        rotation_block_size = (
-            config.rotation_config["block_size"]
-            if config.rotation_config is not None
-            else None
-        )
-        return INCLinearMethod(INCMxfp4LinearMethod(layer_config, rotation_block_size))
+
+        return linear_method
 
     def get_moe_method(
         self,
