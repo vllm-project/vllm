@@ -865,6 +865,10 @@ def _make_mock_worker_for_desc_ids(
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
     worker._conv_decomp = None
+    worker._is_csa_linear = False
+    worker._ssm_region_indices = [0] if has_mamba else []
+    worker._ple_group_index = None
+    worker._ple_region_index = None
     if has_mamba:
         from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
             MambaConvSplitInfo,
@@ -1823,6 +1827,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker.shutdown = lambda: None  # skeleton worker: silence __del__
     worker.use_mla = True
     worker._has_mamba = True
+    worker._is_csa_linear = False
     worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.tp_ratio.return_value = -2

@@ -11,7 +11,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.tasks import check_removed_pooling_task
@@ -95,6 +96,15 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     # --8<-- [end:pooling-common-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
     def _build_pooling_tok_params(
         self,
         model_config: ModelConfig,
@@ -169,7 +179,7 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
         pooler_config = model_config.pooler_config
         if pooler_config is not None:
             if pooler_config.enable_chunked_processing:
-                max_total_tokens = None
+                max_total_tokens = pooler_config.max_embed_len
             else:
                 max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
                 max_output_tokens = default_max_total_tokens - max_embed_len

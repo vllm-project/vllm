@@ -160,7 +160,11 @@ def _backend_incompatibility_reason(
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
         if isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs)):
-            group_size = quant_config.group_size
+            # QuantizationArgs leaves group_size unset for per-channel
+            # strategies; -1 is the in-tree encoding for that.
+            group_size = (
+                -1 if quant_config.group_size is None else quant_config.group_size
+            )
         else:
             return "Marlin not supported for this layer"
 
@@ -1509,7 +1513,9 @@ def convert_to_wna16_moe_kernel_format(
         elif isinstance(quant_config, QuantizationArgs):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
-            group_size = quant_config.group_size
+            group_size = (
+                -1 if quant_config.group_size is None else quant_config.group_size
+            )
             actorder = quant_config.actorder
         else:
             raise TypeError(

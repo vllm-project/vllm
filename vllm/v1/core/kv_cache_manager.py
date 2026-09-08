@@ -779,6 +779,14 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                # Scratch groups (e.g. the CSA compressor ring) hold a fixed
+                # block covering no token range, so a lookup result never
+                # carries computed blocks for them and their block size does
+                # not divide the endpoint.
+                assert not group_blocks
+                truncated.append([])
+                continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
             if isinstance(group.kv_cache_spec, MambaSpec):
@@ -864,6 +872,29 @@ class KVCacheManager:
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
+        return offloads
+
+    def finalize_partial_tail_offloads(
+        self, request: Request
+    ) -> list[tuple[int, int, int]]:
+        """Consume safe producer partial tails when a request finishes.
+
+        A mamba align table block is a valid boundary source only if no later
+        token was forwarded. The connector pins and queues the exact table
+        block before request cleanup, then releases the pin when every worker
+        reports the store job complete.
+        """
+        offloads: list[tuple[int, int, int]] = []
+        for mgr in self.coordinator.single_type_managers:
+            finalized = mgr.finalize_partial_tail_offload(
+                request.request_id,
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+            )
+            if finalized is None:
+                continue
+            group_id, block, boundary_tokens = finalized
+            offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
     def new_step_starts(self) -> None:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for SpeculativeConfig.compose_draft_hf_overrides.
+"""Tests for draft config overrides used by SpeculativeConfig.
 
 Callable ``hf_overrides`` on the target model config (e.g. the
 ``dummy_hf_overrides`` shrink used by ``tests/models/test_initialization.py``)
@@ -12,10 +12,12 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+from unittest.mock import MagicMock, patch
 
 import pytest
 from transformers import PretrainedConfig
 
+from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 
@@ -134,3 +136,52 @@ def test_composed_override_is_picklable():
 
     out = composed(_make_hf_config())
     assert out.num_hidden_layers == 1
+
+
+def _make_mtp_speculative_config(
+    override: bool | None,
+    checkpoint_value: bool,
+) -> SpeculativeConfig:
+    draft_hf_config = _make_hf_config(
+        architectures=["Qwen4ExpMTP"],
+        model_type="qwen4_exp_mtp",
+        n_predict=1,
+        index_share_for_mtp_iteration=checkpoint_value,
+    )
+    draft_model_config = MagicMock(
+        model="draft",
+        hf_config=draft_hf_config,
+        architectures=draft_hf_config.architectures,
+        max_model_len=128,
+    )
+    target_model_config = MagicMock(
+        model="target",
+        max_model_len=128,
+        quantization=None,
+        hf_overrides={},
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        return SpeculativeConfig(
+            model="draft",
+            method="mtp",
+            num_speculative_tokens=1,
+            index_share_for_mtp_iteration=override,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("override", "checkpoint_value", "expected"),
+    [(None, True, True), (False, True, False), (True, False, True)],
+)
+def test_mtp_index_share_override(
+    override: bool | None, checkpoint_value: bool, expected: bool
+):
+    speculative_config = _make_mtp_speculative_config(override, checkpoint_value)
+    assert (
+        speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        is expected
+    )
