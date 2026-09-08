@@ -2422,13 +2422,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         format_scheme=None,
     ) -> None:
         self.spec = spec
-        # Only NVFP4 weights are verified to round-trip via weight cache IPC:
-        # their post-load swizzle/pad is reproduced from the exported tensors.
-        # fp8/mxfp8 ModelOpt kernels transpose/repack and are unverified.
-        w = spec.weight
-        self.supports_pre_processed_weights = (
-            isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
-        )
         self.ctx = ctx
         self.fmt = format_scheme or FormatScheme()
         self.wkey = SCHEME_FOR[spec.weight]
@@ -2449,6 +2442,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         # so the front-end marlin poke stays dormant here — same as the old
         # NVFP4 methods.
         self.kernel: Any = None
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
+        w = self.spec.weight
+        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
 
     def create_weights(
         self,

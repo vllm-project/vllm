@@ -116,7 +116,7 @@ from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.utils.torch_utils import aux_stream, is_meta_module
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
@@ -1822,8 +1822,7 @@ class KimiK3ForConditionalGeneration(
             # Under meta-device init (the weight cache IPC loader) the tower
             # tensors are mapped/materialized by the loader afterwards, so
             # moving them to a real device here would fail on meta storage.
-            tower_on_meta = any(p.is_meta for p in self.vision_tower.parameters())
-            if tower_on_meta:
+            if is_meta_module(self.vision_tower):
                 pass
             elif self._maybe_ignore_quant_config(quant_config) is not None:
                 self.vision_tower = self.vision_tower.to(device=self.device)
@@ -1867,7 +1866,7 @@ class KimiK3ForConditionalGeneration(
             )
             # Skip the device move under meta-device init (weight cache IPC
             # loader); the loader maps/materializes these tensors afterwards.
-            if not any(p.is_meta for p in self.mm_projector.parameters()):
+            if not is_meta_module(self.mm_projector):
                 self.mm_projector = self.mm_projector.to(
                     device=self.device, dtype=model_config.dtype
                 )
