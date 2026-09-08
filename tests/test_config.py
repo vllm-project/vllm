@@ -2378,16 +2378,32 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def _watermarked_vllm_config() -> VllmConfig:
+    config = object.__new__(VllmConfig)
+    config.watermark_config = WatermarkConfig(key=42)
+    config.speculative_config = None
+    return config
+
+
 def test_gumbel_watermark_rejects_speculative_decoding():
-    speculative_config = SpeculativeConfig(
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
     )
+
     with pytest.raises(ValueError, match="does not support speculative decoding"):
-        VllmConfig(
-            watermark_config=WatermarkConfig(key=42),
-            speculative_config=speculative_config,
-        )
+        config._check_watermarking_unsupported()
+
+
+def test_gumbel_watermark_rejects_beam_search():
+    with pytest.raises(ValueError, match="Beam search is not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+
+
+def test_gumbel_watermark_rejects_custom_sampler():
+    with pytest.raises(ValueError, match="custom samplers are not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
 
 
 def test_watermark_key_must_fit_in_64_bits():
@@ -2412,10 +2428,9 @@ def test_watermark_key_is_excluded_from_serialization():
 
 def test_watermarking_forces_model_runner_v2(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    config = SimpleNamespace(watermark_config=WatermarkConfig(key=42))
 
     with patch("vllm.config.vllm.logger.info_once") as info_once:
-        assert VllmConfig.use_v2_model_runner.fget(config)
+        assert _watermarked_vllm_config().use_v2_model_runner
 
     info_once.assert_called_once_with(
         "Watermarking requires Model Runner V2 and overrides "

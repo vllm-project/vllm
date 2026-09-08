@@ -1094,6 +1094,30 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _check_watermarking_unsupported(
+        self,
+        *,
+        beam_search: bool = False,
+        custom_sampler: bool = False,
+    ) -> None:
+        watermark_config = getattr(self, "watermark_config", None)
+        if watermark_config is None:
+            return
+        if (
+            self.speculative_config is not None
+            and not watermark_config.supports_speculative_decoding
+        ):
+            raise ValueError(
+                f"The {watermark_config.algorithm} watermarking algorithm "
+                "does not support speculative decoding."
+            )
+        if beam_search:
+            raise ValueError("Beam search is not supported with watermarking.")
+        if custom_sampler:
+            raise ValueError(
+                "Model-specific custom samplers are not supported with watermarking."
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1107,15 +1131,7 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
-        if (
-            self.watermark_config is not None
-            and self.speculative_config is not None
-            and not self.watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {self.watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
+        self._check_watermarking_unsupported()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()

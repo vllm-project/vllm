@@ -474,12 +474,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
-                if self.vllm_config.watermark_config is not None:
-                    logger.warning_once(
-                        "A model-specific custom sampler replaced "
-                        "GPUWatermarkSampler; configured watermarking may not be "
-                        "applied."
-                    )
+                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
