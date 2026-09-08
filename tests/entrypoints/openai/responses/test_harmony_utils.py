@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
@@ -126,6 +127,16 @@ class TestResponsePreviousInputToHarmony:
         assert len(messages[0].content) == 2
         assert messages[0].content[0].text == "Sorry, "
         assert messages[0].content[1].text == "I can't help with that"
+
+    def test_chat_message_without_role_raises_validation_error(self):
+        """A chat-format message missing the 'role' key is invalid input."""
+        chat_msg = {"content": "hello, no role here"}
+
+        with pytest.raises(
+            VLLMValidationError, match="Message has no 'role' key"
+        ) as exc_info:
+            response_previous_input_to_harmony(chat_msg)
+        assert exc_info.value.parameter == "input"
 
 
 class TestHarmonyToResponseOutput:
