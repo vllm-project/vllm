@@ -36,15 +36,17 @@ def key(module: nn.Module) -> tuple:
 
 
 FUSERS: tuple[type[BaseFuser], ...] = (
+    # Order these by priority, e.g. QKV would be preferred over MergedColumnParallel
     MLAFuser,
     GLUFuser,
     QKVFuser,
     PackedQKVFuser,
     MergedColumnParallelFuser,
     RMSNormFuser,
+    # Put fusers that don't redefine forward after this comment
     AttentionFuser,
 )
-"""Every fuser, in match order: those that redefine the forward first, then those
+"""Every fuser, in priority order: those that redefine the forward first, then those
 that leave it alone. A new fuser is added here."""
 
 
