@@ -851,6 +851,24 @@ async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
     (app, engine_task)
 }
 
+async fn test_app_with_force_include_usage() -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-force-usage",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_force_include_usage: true,
+                ..Default::default()
+            },
+        ),
+    ));
+    (app, engine_task)
+}
+
 async fn test_app_with_api_keys(api_keys: Vec<String>) -> (axum::Router, MockEngineTask) {
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai-api-key",
@@ -3394,6 +3412,56 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn force_include_usage_adds_usage_to_all_chat_chunks() {
+    let (app, engine_task) = test_app_with_force_include_usage().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_json_payloads(&text);
+
+    assert!(
+        payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_without_include_usage_keeps_existing_shape() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
@@ -4766,6 +4834,55 @@ async fn completions_stream_continuous_usage_stats_adds_usage_to_chunks() {
                             "include_usage": true,
                             "continuous_usage_stats": true
                         }
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_json_payloads(&text);
+
+    assert!(
+        payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn force_include_usage_adds_usage_to_all_completion_chunks() {
+    let (app, engine_task) = test_app_with_force_include_usage().await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true
                     })
                     .to_string(),
                 ))
