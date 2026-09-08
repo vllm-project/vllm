@@ -654,7 +654,7 @@ class Base(
                 if layer_types and layer_types[i] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
                 # Handle attention sinks
-                if (sinks := attn_fuser.sinks(attn_module)) is not None:
+                if (sinks := attn_fuser.sinks_param) is not None:
                     kwargs["sinks"] = sinks
 
             attn_instance = attn_cls(**kwargs)

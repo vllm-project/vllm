@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,27 +41,19 @@ def get_model(arch: str) -> str:
     return model_info.default
 
 
+def count_modules(model, cls: type) -> int:
+    return sum(isinstance(m, cls) for m in model.modules())
+
+
 def get_num_fused(model) -> tuple[int, int]:
     from vllm.model_executor.layers.linear import (
         MergedColumnParallelLinear,
         QKVParallelLinear,
     )
 
-    glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
-    qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
+    glu = count_modules(model, MergedColumnParallelLinear)
+    qkv = count_modules(model, QKVParallelLinear)
     return glu, qkv
-
-
-def count_mla_layers(model) -> int:
-    from vllm.model_executor.layers.attention import MLAAttention
-
-    return sum(isinstance(m, MLAAttention) for m in model.modules())
-
-
-def count_attention_layers(model) -> int:
-    from vllm.model_executor.layers.attention import Attention
-
-    return sum(isinstance(m, Attention) for m in model.modules())
 
 
 def check_implementation(
@@ -94,7 +87,10 @@ def check_implementation(
             assert num_qkv == expected_qkv * num_layers
 
         tp_size = kwargs_test.get("tensor_parallel_size", 1)
-        assert model_test.apply_model(count_attention_layers) == [num_layers] * tp_size
+        from vllm.model_executor.layers.attention import Attention
+
+        counts = model_test.apply_model(partial(count_modules, cls=Attention))
+        assert counts == [num_layers] * tp_size
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -154,10 +150,11 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
-    return {
-        i: fuser.sinks(model.get_submodule(prefix)).float().cpu()
-        for i, (prefix, fuser) in model.attention_fusers.items()
-    }
+    sinks = {}
+    for i, (prefix, fuser) in model.attention_fusers.items():
+        if (sink := fuser.sinks(model.get_submodule(prefix))) is not None:
+            sinks[i] = sink.float().cpu()
+    return sinks
 
 
 def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None:
@@ -209,7 +206,10 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
-        assert model_test.apply_model(count_mla_layers) == [num_layers]
+        from vllm.model_executor.layers.attention import MLAAttention
+
+        counts = model_test.apply_model(partial(count_modules, cls=MLAAttention))
+        assert counts == [num_layers]
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
     with vllm_runner(model, model_impl="auto") as model_ref:
