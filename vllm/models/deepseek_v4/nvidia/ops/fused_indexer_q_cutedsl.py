@@ -340,7 +340,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
             head_dim=head_dim,
             rope_dim=rope_dim,
             num_heads=num_heads,
-            cos_sin_dtype=(Float32, BFloat16),
+            cos_sin_dtype=torch_to_cute_dtype(vllm_config.model_config.dtype),
             coarsen=(1, 4),
         )
 
@@ -615,7 +615,7 @@ class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
             head_dim=head_dim,
             rope_dim=rope_dim,
             num_heads=num_heads,
-            cos_sin_dtype=(Float32, BFloat16),
+            cos_sin_dtype=torch_to_cute_dtype(vllm_config.model_config.dtype),
             coarsen=(1, 4),
         )
 
