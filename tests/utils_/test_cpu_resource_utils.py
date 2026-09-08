@@ -28,6 +28,8 @@ def test_get_cpu_list_falls_back_when_lscpu_fails(
     synthesized_cpu_list: list[LogicalCPUInfo],
     error: Exception,
 ) -> None:
+    monkeypatch.setattr(cpu_resource_utils.sys, "platform", "linux")
+
     def raise_error(*args, **kwargs):
         raise error
 
@@ -42,6 +44,7 @@ def test_get_cpu_list_falls_back_when_lscpu_output_is_unparsable(
     synthesized_cpu_list: list[LogicalCPUInfo],
     lscpu_output: str,
 ) -> None:
+    monkeypatch.setattr(cpu_resource_utils.sys, "platform", "linux")
     monkeypatch.setattr(
         subprocess, "check_output", lambda *args, **kwargs: lscpu_output
     )
