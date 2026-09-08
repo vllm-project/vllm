@@ -719,6 +719,7 @@ class PrepareDflashInputsKernel(
     """
 
     _BLOCK_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+    kernel = staticmethod(_prepare_dflash_inputs_kernel)
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -736,8 +737,6 @@ class PrepareDflashInputsKernel(
         cp_rank: int
         cp_size: int
         cp_interleave: int
-
-    kernel = staticmethod(_prepare_dflash_inputs_kernel)
 
     def dispatch(  # type: ignore[override]
         self,

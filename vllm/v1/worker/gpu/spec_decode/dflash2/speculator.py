@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -129,6 +136,9 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
+        _SELECTOR_WALK_KERNEL.register_warmup(speculator=self)
+        if self.draft_logits is not None:
+            _CACHE_DRAFT_LOGITS_KERNEL.register_warmup(speculator=self)
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -143,7 +153,7 @@ class DFlash2Speculator(DFlashSpeculator):
         num_reqs: int,
     ) -> None:
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _selector_walk_kernel[(num_reqs,)](
+        _SELECTOR_WALK_KERNEL(
             scores.contiguous(),
             candidate_ids.contiguous(),
             self.sample_pos,
@@ -153,6 +163,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self._selector_scores,
             num_steps=self.num_speculative_steps,
+            num_reqs=num_reqs,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=self.draft_logits is not None,
@@ -164,7 +175,7 @@ class DFlash2Speculator(DFlashSpeculator):
         draft_logits = self.draft_logits
         assert draft_logits is not None
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _cache_draft_logits_kernel[(num_sample,)](
+        _CACHE_DRAFT_LOGITS_KERNEL(
             draft_logits,
             self._cached_candidate_ids,
             candidate_ids,
@@ -172,6 +183,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.sample_idx_mapping,
             draft_logits.stride(0),
             draft_logits.stride(1),
+            num_sample=num_sample,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
@@ -215,3 +227,178 @@ class DFlash2Speculator(DFlashSpeculator):
         self._sample_path(candidate_ids, scores, num_reqs)
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)
+
+
+class SelectorWalkKernel(VllmTritonJitKernel["SelectorWalkKernel.CompileKey"]):
+    kernel = staticmethod(_selector_walk_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_steps: int
+        top_k: int
+        block_k: int
+        sample_probabilistic: bool
+        use_fp64: bool
+
+    def dispatch(
+        self,
+        *,
+        num_steps: int,
+        top_k: int,
+        sample_probabilistic: bool,
+        use_fp64: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            num_steps=num_steps,
+            top_k=top_k,
+            block_k=triton.next_power_of_2(top_k),
+            sample_probabilistic=sample_probabilistic,
+            use_fp64=use_fp64,
+        )
+
+    def get_warmup_keys(self, *, speculator: DFlash2Speculator) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            num_steps=speculator.num_speculative_steps,
+            top_k=speculator.selector_top_k,
+            sample_probabilistic=speculator.draft_logits is not None,
+            use_fp64=speculator.use_fp64_gumbel,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            scores=TritonWarmupTensor(torch.float32),
+            candidate=TritonWarmupTensor(torch.int64),
+            sample_pos=TritonWarmupTensor(torch.int64),
+            req_state=TritonWarmupTensor(torch.int32),
+            temperature=TritonWarmupTensor(torch.float32),
+            seeds=TritonWarmupTensor(torch.int64),
+            tokens=TritonWarmupTensor(torch.int64),
+            realized_scores=TritonWarmupTensor(torch.float32),
+            num_steps=compile_key.num_steps,
+            num_reqs=1,
+            top_k=compile_key.top_k,
+            BLOCK_K=compile_key.block_k,
+            SAMPLE_PROBABILISTIC=compile_key.sample_probabilistic,
+            USE_FP64=compile_key.use_fp64,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        scores: torch.Tensor,
+        candidate: torch.Tensor,
+        sample_pos: torch.Tensor,
+        req_state: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        tokens: torch.Tensor,
+        realized_scores: torch.Tensor,
+        *,
+        num_steps: int,
+        num_reqs: int,
+        top_k: int,
+        BLOCK_K: int,
+        SAMPLE_PROBABILISTIC: bool,
+        USE_FP64: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_reqs,), dict(
+            num_steps=num_steps,
+            top_k=top_k,
+            BLOCK_K=BLOCK_K,
+            SAMPLE_PROBABILISTIC=SAMPLE_PROBABILISTIC,
+            USE_FP64=USE_FP64,
+            num_warps=1,
+        )
+
+
+class CacheDraftLogitsKernel(VllmTritonJitKernel["CacheDraftLogitsKernel.CompileKey"]):
+    kernel = staticmethod(_cache_draft_logits_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        draft_logits_stride_0: int
+        draft_logits_stride_1: int
+        num_steps: int
+        top_k: int
+        block_k: int
+
+    def dispatch(
+        self,
+        *,
+        draft_logits_stride_0: int,
+        draft_logits_stride_1: int,
+        num_steps: int,
+        top_k: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            draft_logits_stride_0=triton_scalar_specialization_rep(
+                draft_logits_stride_0
+            ),
+            draft_logits_stride_1=triton_scalar_specialization_rep(
+                draft_logits_stride_1
+            ),
+            num_steps=num_steps,
+            top_k=top_k,
+            block_k=triton.next_power_of_2(top_k),
+        )
+
+    def get_warmup_keys(self, *, speculator: DFlash2Speculator) -> list[CompileKey]:
+        draft_logits = speculator.draft_logits
+        assert draft_logits is not None
+        return self._trace_dispatch(self.dispatch)(
+            draft_logits_stride_0=draft_logits.stride(0),
+            draft_logits_stride_1=draft_logits.stride(1),
+            num_steps=speculator.num_speculative_steps,
+            top_k=speculator.selector_top_k,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        draft_logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, 1, 1),
+            strides=(
+                compile_key.draft_logits_stride_0,
+                compile_key.draft_logits_stride_1,
+                1,
+            ),
+        )
+        return dict(
+            draft_logits=draft_logits,
+            cached_candidate=TritonWarmupTensor(torch.int64),
+            candidate=TritonWarmupTensor(torch.int64),
+            scores=TritonWarmupTensor(torch.float32),
+            req_state=TritonWarmupTensor(torch.int32),
+            draft_logits_stride_0=compile_key.draft_logits_stride_0,
+            draft_logits_stride_1=compile_key.draft_logits_stride_1,
+            num_sample=1,
+            num_steps=compile_key.num_steps,
+            top_k=compile_key.top_k,
+            BLOCK_K=compile_key.block_k,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        draft_logits: torch.Tensor,
+        cached_candidate: torch.Tensor,
+        candidate: torch.Tensor,
+        scores: torch.Tensor,
+        req_state: torch.Tensor,
+        draft_logits_stride_0: int,
+        draft_logits_stride_1: int,
+        *,
+        num_sample: int,
+        num_steps: int,
+        top_k: int,
+        BLOCK_K: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_sample,), dict(
+            num_steps=num_steps,
+            top_k=top_k,
+            BLOCK_K=BLOCK_K,
+            num_warps=1,
+        )
+
+
+_SELECTOR_WALK_KERNEL = SelectorWalkKernel()
+_CACHE_DRAFT_LOGITS_KERNEL = CacheDraftLogitsKernel()
