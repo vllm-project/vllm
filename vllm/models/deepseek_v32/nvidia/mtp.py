@@ -5,15 +5,9 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.fused_embed_norm import (
-    fused_embed_eh_norm,
-    has_full_vocab_on_rank,
-    make_input_embedding,
-)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -43,12 +37,19 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+
+from vllm.model_executor.layers.fused_embed_norm import (
+    _FUSED_EMBED_EH_NORM_KERNEL,
+    fused_embed_eh_norm,
+    has_full_vocab_on_rank,
+    make_input_embedding,
+)
 from vllm.models.deepseek_v32.common.kernels import (
     _FUSED_EH_NORM_KERNEL,
     fused_eh_norm,
 )
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import (
     build_glm52_plan,
@@ -90,15 +91,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             config=config,
             topk_indices_buffer=topk_indices_buffer,
         )
-
-        # Self-register the MTP embed/hidden RMSNorm-fusion Triton owner with the
-        # model-load warmup registry (no-op unless a registry is active). The
-        # owner derives its single compile key (draft hidden size) from
-        # vllm_config, so register with no kwargs to use the registry's
-        # auto-inject. fused_embed_eh_norm (replicated-table path) is a shared
-        # vllm layer kernel with its own warmup ownership, out of scope here.
-        if vllm_config.kernel_config.enable_jit_warmup:
-            _FUSED_EH_NORM_KERNEL.register_warmup()
 
     def forward(
         self,
@@ -195,6 +187,16 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         )
         # A full on-rank table lets the eh_norm fusion fold in the embedding gather.
         self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
+        if vllm_config.kernel_config.enable_jit_warmup:
+            if self.replicated_embed:
+                _FUSED_EMBED_EH_NORM_KERNEL.register_warmup(
+                    ids_dtype=torch.int64,
+                    table_dtype=self.embed_tokens.weight.dtype,
+                    hidden_dtype=vllm_config.model_config.dtype,
+                    hidden_size=config.hidden_size,
+                )
+            else:
+                _FUSED_EH_NORM_KERNEL.register_warmup()
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):

@@ -8,10 +8,12 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float8E4M3FN, Float32, Int64, Uint8, Uint16, Uint32
-
 from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+)
 from vllm.platforms import current_platform
 
 
@@ -438,19 +440,13 @@ class FusedQKernel:
             idx_weights_out[token_id, head_id] = w * scale * weight_scale
 
 
-class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
+class FusedQCuteDSLKernel(
+    VllmCuTeDSLJitKernel["FusedQCuteDSLKernel.CompileKey"]
+):
     """JIT-warmup owner for the fused MQA-query + indexer-query CuTeDSL kernel.
 
-    Extends :class:`VllmJitKernel` directly (like the DSv4 CuTeDSL owners
-    ``IndexerQMxFp4Kernel`` / ``DequantGatherKCacheKernel``) rather than the
-    ``VllmCuTeDSLJitKernel`` helper base: the compile-key is built from a small,
-    fixed set of runtime axes so ``dispatch``/``get_warmup_keys`` stay AST
-    traceable. The compiled executor is cached in ``_compiled_cache`` and shared
-    by warmup and runtime, so a first request never triggers a JIT compile.
-
-    The device kernel itself is the unchanged :class:`FusedQKernel`; this owner
-    only wraps compilation and dispatch, mirroring the Triton
-    ``FusedQTritonKernel`` in ``common/kernels.py``.
+    The compiled executor is cached by the shared CuTeDSL helper and reused by
+    runtime. The device kernel itself remains :class:`FusedQKernel`.
     """
 
     @dataclass(frozen=True)
@@ -481,35 +477,6 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
     def dispatch(  # type: ignore[override]
         self,
         *,
-        rope_dim: int,
-        nope_dim: int,
-        num_heads: int,
-        rope_type: type[cutlass.Numeric],
-        idx_dim: int,
-        num_idx_heads: int,
-        idx_rope_type: type[cutlass.Numeric] | None,
-        idx_weights_type: type[cutlass.Numeric] | None,
-        index_rope_interleave: bool,
-    ) -> "FusedQCuteDSLKernel.CompileKey":
-        # Pure forwarding: the torch->cute dtype conversion and the no-indexer
-        # collapse happen in ``_key_args`` (real Python), so this stays trivially
-        # AST-traceable for get_warmup_keys -- mirrors the DSv4 CuTeDSL owners,
-        # which also pass already-cute dtypes into dispatch.
-        return self.CompileKey(
-            rope_dim=rope_dim,
-            nope_dim=nope_dim,
-            num_heads=num_heads,
-            rope_type=rope_type,
-            idx_dim=idx_dim,
-            num_idx_heads=num_idx_heads,
-            idx_rope_type=idx_rope_type,
-            idx_weights_type=idx_weights_type,
-            index_rope_interleave=index_rope_interleave,
-        )
-
-    def _key_args(
-        self,
-        *,
         num_q_heads: int,
         qk_rope_head_dim: int,
         kv_lora_rank: int,
@@ -520,39 +487,31 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
         rope_cache_dtype: torch.dtype,
         idx_rope_cache_dtype: torch.dtype | None,
         idx_weights_dtype: torch.dtype | None,
-    ) -> dict[str, Any]:
-        """Runtime-values -> dispatch kwargs (dtype conversion + indexer collapse).
-
-        Shared verbatim by ``__call__`` (runtime) and ``get_warmup_keys``
-        (registration) so the warmup key can never drift from the runtime key.
-        """
-        if has_indexer:
-            idx_dim = index_head_dim
-            num_idx_heads = index_n_head
-            idx_rope_type = _TORCH_TO_CUTE_DTYPE[idx_rope_cache_dtype]
-            idx_weights_type = _TORCH_TO_CUTE_DTYPE[idx_weights_dtype]
-        else:
-            idx_dim = num_idx_heads = 0
-            idx_rope_type = idx_weights_type = None
-        return dict(
+    ) -> "FusedQCuteDSLKernel.CompileKey":
+        return self.CompileKey(
             rope_dim=qk_rope_head_dim,
             nope_dim=kv_lora_rank,
             num_heads=num_q_heads,
             rope_type=_TORCH_TO_CUTE_DTYPE[rope_cache_dtype],
-            idx_dim=idx_dim,
-            num_idx_heads=num_idx_heads,
-            idx_rope_type=idx_rope_type,
-            idx_weights_type=idx_weights_type,
+            idx_dim=index_head_dim if has_indexer else 0,
+            num_idx_heads=index_n_head if has_indexer else 0,
+            idx_rope_type=(
+                _TORCH_TO_CUTE_DTYPE[idx_rope_cache_dtype]
+                if has_indexer
+                else None
+            ),
+            idx_weights_type=(
+                _TORCH_TO_CUTE_DTYPE[idx_weights_dtype] if has_indexer else None
+            ),
             index_rope_interleave=index_rope_interleave,
         )
 
     def get_warmup_keys(self, **kwargs: Any) -> list["FusedQCuteDSLKernel.CompileKey"]:
-        return self._trace_dispatch(self.dispatch)(**self._key_args(**kwargs))
+        return self._trace_dispatch(self.dispatch)(**kwargs)
 
-    def compile(self, compile_key: "FusedQCuteDSLKernel.CompileKey") -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(
+        self, compile_key: "FusedQCuteDSLKernel.CompileKey"
+    ) -> tuple[Any, ...]:
         num_tokens = cute.sym_int()
         max_pos = cute.sym_int()
         rope_dim = compile_key.rope_dim
@@ -600,8 +559,7 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
             index_q = index_rope_cache = index_q_fp8 = None
             index_weights = index_weights_out = None
 
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
+        return (
             positions,
             q_pe,
             rope_cache,
@@ -616,6 +574,7 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
             Float32(0.0),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         positions: torch.Tensor,
@@ -634,12 +593,12 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
         *,
         has_indexer: bool = True,
         index_rope_interleave: bool = True,
-    ) -> None:
+    ) -> CuTeDSLLaunchSpec["FusedQCuteDSLKernel.CompileKey"]:
         _, num_heads, rope_dim = q_pe.shape
         _, _, nope_dim = ql_nope.shape
         _, num_idx_heads, idx_dim = idx_q.shape
 
-        key_args = self._key_args(
+        compile_key = self.dispatch(
             num_q_heads=num_heads,
             qk_rope_head_dim=rope_dim,
             kv_lora_rank=nope_dim,
@@ -657,12 +616,7 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
             idx_q = idx_rope_cache = idx_q_fp8 = None
             idx_weights = idx_weights_out = None
 
-        compile_key = self.dispatch(**key_args)
-        executor = self._get_or_compile(
-            compile_key,
-            runtime_context={**key_args, "has_indexer": has_indexer},
-        )
-        executor(
+        launch_args = (
             positions,
             q_pe,
             rope_cache,
@@ -676,6 +630,7 @@ class FusedQCuteDSLKernel(VllmJitKernel["FusedQCuteDSLKernel.CompileKey"]):
             idx_weights_out,
             float(idx_weights_softmax_scale * idx_weights_head_scale),
         )
+        return compile_key, launch_args
 
 
 _FUSED_Q_CUTEDSL_KERNEL = FusedQCuteDSLKernel()
