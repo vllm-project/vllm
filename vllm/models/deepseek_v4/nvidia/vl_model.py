@@ -25,18 +25,19 @@ from torch import nn
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    SupportsLoRA,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from ..common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
@@ -98,6 +99,7 @@ class DeepseekV4ForConditionalGeneration(
     # The MoE router needs raw token ids to detect image sentinel tokens
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -345,10 +347,19 @@ class DeepseekV4ForConditionalGeneration(
         )
 
     def get_mm_lora_token_counts(
-            self,
-            *,
-            modality: str,
-            mm_kwargs: MultiModalKwargsItem | None,
-            num_mm_embeds: int,
-        ) -> tuple[int, int | None]:
-            # TODO
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        if modality != "image":
+            raise ValueError(f"Unsupported modality: {modality!r}")
+
+        patches = mm_kwargs.get("patches") if mm_kwargs else None
+        if patches is not None and isinstance(patches.data, torch.Tensor):
+            tower_tokens = patches.data.shape[0]
+        else:
+            tower_tokens = num_mm_embeds * self.config.vision_downsample_ratio**2
+
+        return tower_tokens, num_mm_embeds
