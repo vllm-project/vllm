@@ -27,6 +27,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -34,6 +35,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..common.mm_preprocess import (
@@ -85,7 +87,7 @@ def _make_deepseek_v4_vl_weights_mapper(
     dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
 class DeepseekV4ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3, SupportsLoRA
 ):
     """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower.
 
@@ -331,3 +333,22 @@ class DeepseekV4ForConditionalGeneration(
         if getattr(self, "_weights_finalized", False):
             return
         self.language_model.process_weights_after_loading()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )
+
+    def get_mm_lora_token_counts(
+            self,
+            *,
+            modality: str,
+            mm_kwargs: MultiModalKwargsItem | None,
+            num_mm_embeds: int,
+        ) -> tuple[int, int | None]:
+            # TODO
