@@ -5,7 +5,12 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.watermarking import GumbelWatermarkDetector, GumbelWatermarker
+from vllm.v1.watermarking import (
+    DualKeyGumbelWatermarkDetector,
+    GumbelWatermarkDetector,
+    GumbelWatermarker,
+    derive_watermark_key,
+)
 from vllm.v1.watermarking.gumbel import _gamma_survival_integer_shape
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
@@ -34,6 +39,34 @@ def test_detector_deduplicates_context_even_when_target_differs():
     detection = GumbelWatermarkDetector(key=42, context_width=1).detect([1, 2, 1, 3])
 
     assert detection.num_scored_tokens == 3
+
+
+def test_dual_key_detector_scores_each_token_against_both_keys():
+    token_ids = [1, 2, 3, 4, 5]
+    draft_detector = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"draft"),
+        context_width=1,
+        deduplicate_contexts=False,
+    )
+    target_detector = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"target"),
+        context_width=1,
+        deduplicate_contexts=False,
+    )
+    detector = DualKeyGumbelWatermarkDetector(
+        key=42,
+        context_width=1,
+        deduplicate_contexts=False,
+    )
+
+    draft = draft_detector.detect(token_ids)
+    target = target_detector.detect(token_ids)
+    dual = detector.detect(token_ids)
+
+    assert dual.score == pytest.approx((draft.score + target.score) / 2)
+    assert dual.p_value == pytest.approx(
+        _gamma_survival_integer_shape(dual.score * 2, dual.num_scored_tokens * 2)
+    )
 
 
 @pytest.mark.skipif(

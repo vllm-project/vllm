@@ -2754,12 +2754,93 @@ def _watermarked_vllm_config() -> VllmConfig:
 
 def test_gumbel_watermark_rejects_speculative_decoding():
     config = _watermarked_vllm_config()
-    config.speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
     )
 
     with pytest.raises(ValueError, match="does not support speculative decoding"):
+        config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_requires_probabilistic_drafting():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="greedy",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
+        config._check_watermarking_unsupported()
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method=method,
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_supports_dspark():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="dspark",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=True,
+    )
+
+    config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="ngram",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="autoregressive model-based"):
+        config._check_watermarking_unsupported()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"rejection_sample_method": "synthetic"}, "rejection_sample_method"),
+        ({"rejection_sample_method": "block"}, "rejection_sample_method"),
+        ({"parallel_drafting": True}, "Parallel speculative drafting"),
+    ],
+)
+def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    values = {
+        "method": "mtp",
+        "draft_sample_method": "probabilistic",
+        "rejection_sample_method": "standard",
+        "parallel_drafting": False,
+        **overrides,
+    }
+    config.speculative_config = SimpleNamespace(**values)
+
+    with pytest.raises(ValueError, match=match):
         config._check_watermarking_unsupported()
 
 

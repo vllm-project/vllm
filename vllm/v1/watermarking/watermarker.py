@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -37,6 +38,8 @@ class RandomSampler:
 
 
 class Watermarker(ABC):
+    supports_speculative_decoding: ClassVar[bool] = False
+
     @property
     @abstractmethod
     def context_width(self) -> int:

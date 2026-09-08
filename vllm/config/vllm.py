@@ -1142,6 +1142,30 @@ class VllmConfig:
                 f"The {watermark_config.algorithm} watermarking algorithm "
                 "does not support speculative decoding."
             )
+        if self.speculative_config is not None:
+            speculative_config = self.speculative_config
+            if speculative_config.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "draft_sample_method='probabilistic'."
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "rejection_sample_method='standard'."
+                )
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dspark"
+            ):
+                raise ValueError(
+                    "Parallel speculative drafting is not supported with watermarking."
+                )
+            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+                raise ValueError(
+                    "Watermarking supports only autoregressive model-based "
+                    "speculative decoding."
+                )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:

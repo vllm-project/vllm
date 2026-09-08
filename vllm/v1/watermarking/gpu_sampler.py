@@ -134,22 +134,74 @@ class GPUWatermarkSampler(Sampler):
             skip_partial_context=self.deduplicate_contexts == "all",
         )
 
-    def _get_contexts(self, expanded_idx_mapping: torch.Tensor) -> torch.Tensor:
+    def _get_contexts(
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor | None = None,
+        draft_sampled: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build one watermark context for each flattened verification row.
+
+        For each verification row:
+
+        1. Add its request-local speculative position to ``total_len`` to get
+           the absolute position being sampled.
+        2. Read context positions below ``total_len`` from committed output.
+        3. Read later context positions from preceding draft rows.
+
+        For example, with committed output ``[10, 11]``, proposals ``[20, 21]``,
+        and context width 2, local positions ``[0, 1, 2]`` sample after prefixes
+        ``[10, 11]``, ``[10, 11, 20]``, and ``[10, 11, 20, 21]``. Their contexts
+        are therefore ``[10, 11]``, ``[11, 20]``, and ``[20, 21]``.
+
+        ``draft_sampled`` has the same flattened, request-chunked layout as the
+        verification logits. Its first row per request precedes the first draft
+        token, so the draft index includes a one-row offset.
+        """
         context_width = self.watermarker.context_width
         req_indices = expanded_idx_mapping.to(torch.int64)
         valid_reqs = req_indices >= 0
         safe_req_indices = req_indices.clamp_min(0)
         total_lens = self.req_states.total_len.gpu[safe_req_indices].to(torch.int64)
         prompt_lens = self.req_states.prompt_len.gpu[safe_req_indices].to(torch.int64)
+        if expanded_local_pos is None:
+            expanded_local_pos = torch.zeros_like(req_indices)
+        else:
+            expanded_local_pos = expanded_local_pos.to(torch.int64)
         offsets = torch.arange(
             -context_width, 0, dtype=torch.int64, device=req_indices.device
         )
-        positions = total_lens.unsqueeze(-1) + offsets
-        valid_positions = valid_reqs.unsqueeze(-1) & (
-            positions >= prompt_lens.unsqueeze(-1)
+        positions = (
+            total_lens.unsqueeze(-1) + expanded_local_pos.unsqueeze(-1) + offsets
         )
-        positions = positions.clamp_min(0)
-        contexts = self.req_states.all_token_ids.gpu[
-            safe_req_indices.unsqueeze(-1), positions
+        committed = positions < total_lens.unsqueeze(-1)
+        valid_committed = (
+            valid_reqs.unsqueeze(-1)
+            & committed
+            & (positions >= prompt_lens.unsqueeze(-1))
+        )
+        committed_contexts = self.req_states.all_token_ids.gpu[
+            safe_req_indices.unsqueeze(-1),
+            positions.clamp(0, self.req_states.all_token_ids.gpu.shape[1] - 1),
         ]
-        return torch.where(valid_positions, contexts, -1)
+        contexts = torch.where(valid_committed, committed_contexts, -1)
+        if draft_sampled is None:
+            return contexts
+
+        row_indices = torch.arange(
+            len(req_indices), dtype=torch.int64, device=req_indices.device
+        )
+        draft_offsets = positions - total_lens.unsqueeze(-1)
+        draft_indices = (
+            row_indices.unsqueeze(-1)
+            - expanded_local_pos.unsqueeze(-1)
+            + draft_offsets
+            + 1
+        )
+        valid_drafts = (
+            valid_reqs.unsqueeze(-1)
+            & ~committed
+            & (draft_offsets < expanded_local_pos.unsqueeze(-1))
+        )
+        draft_contexts = draft_sampled[draft_indices.clamp(0, len(draft_sampled) - 1)]
+        return torch.where(valid_drafts, draft_contexts, contexts)

@@ -111,6 +111,27 @@ vllm serve MODEL \
   '{"algorithm":"gumbel","key":42,"deduplicate_contexts":"all"}'
 ```
 
+### Dual-key Gumbel-max
+
+Dual-key Gumbel-max is a speculative-decoding variant of Gumbel-max. It derives
+independent draft and target keys from one configured master key using SHA-256
+domain separation. Draft tokens use the draft key; rejection recovery and
+bonus tokens use the target key. The ordinary target-to-draft probability-ratio
+test remains unchanged, preserving the expected acceptance rate of
+unwatermarked speculative decoding.
+
+Select `dual_key_gumbel` together with probabilistic drafting:
+
+```bash
+vllm serve MODEL \
+  --speculative-config \
+  '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
+  --watermark-config '{"algorithm":"dual_key_gumbel","key":42}'
+```
+
+This implements the construction from [SynthID-Text Supplementary Algorithm
+6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
+
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
@@ -183,7 +204,9 @@ watermarked output or to modify watermarked text so it is no longer detected.
 ## Limitations
 
 - Watermarking is currently available only with Model Runner V2.
-- Gumbel-max cannot be configured with speculative decoding.
+- Speculative-decoding support depends on the configured watermark algorithm;
+  check the watermarker's `supports_speculative_decoding` capability before
+  combining them.
 - Beam search expands candidates from model log probabilities and does not apply
   Gumbel-max watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use

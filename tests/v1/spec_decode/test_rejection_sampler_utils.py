@@ -6,6 +6,8 @@ import math
 import pytest
 import torch
 
+from vllm.v1.watermarking import GumbelWatermarker
+from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -137,6 +139,93 @@ def _assert_distribution_match(
         f"df={df}, threshold={threshold:.1f}. "
         f"Output distribution does not match target distribution."
     )
+
+
+def test_watermarked_bonus_uses_target_key():
+    target_logits = torch.randn(16, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    draft_token = inputs["draft_sampled"][1]
+    contexts = torch.tensor(
+        [[10, 11], [11, draft_token.item()]], dtype=torch.int64, device="cuda"
+    )
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=contexts,
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+    expected = GumbelWatermarker(key=42, context_width=2).sample(
+        target_logits.unsqueeze(0), contexts[1:], lambda _: None
+    )
+
+    assert num_sampled.item() == 2
+    assert sampled[0, 1] == expected.token_ids[0]
+
+
+def test_watermarked_recovery_uses_target_key():
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    inputs["draft_sampled"][1] = 0
+    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device="cuda")
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=contexts,
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+    expected = GumbelWatermarker(key=42, context_width=2).sample(
+        target_logits.unsqueeze(0), contexts[:1], lambda _: None
+    )
+
+    assert num_sampled.item() == 1
+    assert sampled[0, 0] == expected.token_ids[0]
+
+
+def test_watermarked_recovery_supports_smaller_draft_vocabulary():
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device="cuda")
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits[:4],
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    inputs["target_logits"] = target_logits.unsqueeze(0).expand(2, -1).contiguous()
+    inputs["draft_sampled"][1] = 0
+    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device="cuda")
+    watermarker = GumbelWatermarker(key=42, context_width=2)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=contexts,
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarker=watermarker,
+    )
+    expected = watermarker.sample(
+        target_logits[:4].unsqueeze(0), contexts[:1], lambda _: None
+    )
+
+    assert num_sampled.item() == 1
+    assert sampled[0, 0] == expected.token_ids[0]
 
 
 @pytest.mark.parametrize(
