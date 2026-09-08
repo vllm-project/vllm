@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -26,9 +29,10 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.uniproc_executor import UniProcExecutor
+from vllm.v1.executor.multiproc_executor import FutureWrapper
+from vllm.v1.executor.uniproc_executor import AsyncOutputFuture, UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -61,6 +65,81 @@ def make_request() -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+@pytest.mark.parametrize("batch_queue", [False, True])
+@pytest.mark.parametrize("multiproc", [False, True])
+def test_model_wait_services_connector(batch_queue, multiproc):
+    core = EngineCore.__new__(EngineCore)
+    core.scheduler = MagicMock()
+    core.scheduler.schedule.return_value.total_num_scheduled_tokens = 1
+    core.model_executor = MagicMock()
+    core.capture_iteration_details = lambda _: nullcontext(None)
+    core.log_error_detail = lambda _: nullcontext()
+    core._process_aborts_queue = MagicMock()
+    core.batch_queue = deque(maxlen=1)
+    core.batch_queue_size = 1
+    core.is_ec_consumer = False
+    core.is_pooling_model = True
+    ready = threading.Event()
+    scheduler_thread = threading.get_ident()
+    result = MagicMock(spec=ModelRunnerOutput)
+
+    def get_output():
+        assert ready.wait(2), "Connector was not serviced while awaiting output"
+        return result
+
+    def progress():
+        assert threading.get_ident() == scheduler_thread
+        ready.set()
+
+    if multiproc:
+        future = FutureWrapper(deque(), get_output)
+    else:
+        async_output = MagicMock(spec=AsyncModelRunnerOutput)
+        async_output.get_output.side_effect = get_output
+        future = AsyncOutputFuture(async_output, single_value=True)
+    core.model_executor.execute_model.return_value = future
+    core._model_wait_callback = progress
+    with ThreadPoolExecutor(max_workers=1) as core._model_output_pool:
+        (core.step_with_batch_queue if batch_queue else core.step)()
+    core.scheduler.update_from_output.assert_called_once_with(
+        core.scheduler.schedule.return_value, result
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_model_wait_propagates_worker_timeout(enabled):
+    core = EngineCore.__new__(EngineCore)
+    core._model_wait_callback = MagicMock()
+    future = FutureWrapper(deque(), MagicMock(side_effect=TimeoutError("worker")))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        core._model_output_pool = pool if enabled else None
+        with pytest.raises(TimeoutError, match="worker"):
+            core._wait_for_model_output(future)
+
+
+def test_model_wait_finishes_output_before_propagating_progress_error():
+    core = EngineCore.__new__(EngineCore)
+    ready = threading.Event()
+    finished = threading.Event()
+
+    def get_output():
+        assert ready.wait(2)
+        finished.set()
+
+    def progress():
+        ready.set()
+        raise RuntimeError("progress")
+
+    future = FutureWrapper(deque(), get_output)
+    core._model_wait_callback = progress
+    with (
+        ThreadPoolExecutor(max_workers=1) as core._model_output_pool,
+        pytest.raises(RuntimeError, match="progress"),
+    ):
+        core._wait_for_model_output(future)
+    assert finished.is_set()
 
 
 @create_new_process_for_each_test()

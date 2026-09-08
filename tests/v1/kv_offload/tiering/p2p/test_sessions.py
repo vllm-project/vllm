@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -25,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.p2p.data.base import DataTransport
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -67,6 +69,8 @@ _DEFAULT_HASH_SEED = "0"
 
 class FakeDataTransport:
     """Minimal fake DataTransport for testing sessions."""
+
+    add_remote_peer_async = DataTransport.add_remote_peer_async
 
     def __init__(
         self,
@@ -389,6 +393,64 @@ class TestConnectHandshake:
         assert "peer:8000" in transport._remote_peers
         ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
         assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_registration_delays_ack(self, monkeypatch):
+        session, conn, transport = _make_session()
+        registration: Future[None] = Future()
+        monkeypatch.setattr(
+            transport, "add_remote_peer_async", lambda *a, **k: registration
+        )
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+        assert session.has_pending_work
+
+        registration.set_result(None)
+        assert session.has_pending_work
+        session.poll()
+        session.poll()
+        assert sum(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent) == 1
+        assert not session.has_pending_work
+
+    @pytest.mark.parametrize("disconnect", [False, True])
+    def test_registration_failure_or_disconnect_never_acks(
+        self, monkeypatch, disconnect
+    ):
+        session, conn, transport = _make_session()
+        registration: Future[None] = Future()
+        monkeypatch.setattr(
+            transport, "add_remote_peer_async", lambda *a, **k: registration
+        )
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        if disconnect:
+            conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+            registration.set_result(None)
+        else:
+            registration.set_exception(RuntimeError("registration failed"))
+        session.poll()
+        assert not session.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    @pytest.mark.parametrize("complete", [False, True])
+    def test_duplicate_connect_before_peer_ack_is_rejected(self, monkeypatch, complete):
+        session, conn, transport = _make_session()
+        registration: Future[None] = Future()
+        calls = []
+
+        def register(*args, **kwargs):
+            calls.append(args)
+            return registration
+
+        monkeypatch.setattr(transport, "add_remote_peer_async", register)
+        if complete:
+            registration.set_result(None)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert not session.alive
+        assert len(calls) == 1
 
     def test_connect_ack_makes_session_ready(self):
         """Session.ready becomes True after ConnectAckMsg."""

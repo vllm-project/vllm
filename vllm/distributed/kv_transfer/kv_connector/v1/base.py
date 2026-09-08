@@ -595,6 +595,10 @@ class KVConnectorBase_V1(ABC):
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
 
+    def get_model_wait_callback(self) -> Callable[[], None] | None:
+        """Return nonblocking scheduler-thread work to run while awaiting output."""
+        return None
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """

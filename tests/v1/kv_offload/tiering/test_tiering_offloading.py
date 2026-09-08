@@ -441,7 +441,10 @@ class TestTieringOffloadingManager:
             self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in blocks
         )
 
-    def test_ref_cnt_protection_during_cascade(self, manager_setup):
+    @pytest.mark.parametrize("during_model_execution", [False, True])
+    def test_ref_cnt_protection_during_cascade(
+        self, manager_setup, during_model_execution
+    ):
         """Test that ref_cnt protects blocks during cascade."""
         blocks = to_keys(range(3))
 
@@ -476,7 +479,12 @@ class TestTieringOffloadingManager:
 
         # End of step 2: flag was reset, so _maybe_process_finished_jobs()
         # runs and processes the cascade completions (complete_read → ref_cnt--)
-        self._simulate_on_schedule_end()
+        if during_model_execution:
+            callback = self.manager.get_model_wait_callback()
+            assert callback is not None
+            callback()
+        else:
+            self._simulate_on_schedule_end()
 
         # After cascade completes, ref_cnt should be 0
         for block_hash in blocks:

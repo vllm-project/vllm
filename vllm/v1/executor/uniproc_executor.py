@@ -149,6 +149,10 @@ class UniProcExecutor(Executor):
         # it's running.
         return
 
+    def init_output_thread(self) -> None:
+        if hasattr(self.driver_worker.worker, "device"):
+            current_platform.set_device(self.driver_worker.worker.device)
+
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()

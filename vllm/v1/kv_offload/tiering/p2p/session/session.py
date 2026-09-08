@@ -12,8 +12,8 @@ dispatch — each parsed message is forwarded to the corresponding role.
 
 Wire protocol is unchanged. Both sides advertise their NIXL metadata
 via ConnectMsg when their session is connected; the peer's ConnectMsg
-triggers transport.add_remote_peer; ConnectAckMsg confirms the peer
-received our ConnectMsg, after which queued outgoing messages are flushed.
+starts remote registration; ConnectAckMsg confirms registration completed,
+after which queued outgoing messages are flushed.
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from vllm.v1.kv_offload.base import ReqContext
     from vllm.v1.kv_offload.tiering.base import JobId, ParentManager
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
@@ -99,9 +101,9 @@ class P2PSession:
         the decoder connects).
       - Constructor with conn != None ⇒ connected. Sends our own ConnectMsg
         immediately; the peer's ConnectMsg arrives in poll() and is
-        dispatched to _on_connect (which calls transport.add_remote_peer
-        and replies with ConnectAckMsg). Outgoing sends are queued until
-        ConnectAckMsg confirms our metadata reached the peer.
+        dispatched to _on_connect (which starts peer registration and
+        replies with ConnectAckMsg when it completes). Outgoing sends wait
+        until ConnectAckMsg confirms the peer registered our metadata.
       - attach_connection(conn) on a pending session ⇒ same as above,
         starting from pending.
     """
@@ -123,6 +125,8 @@ class P2PSession:
         self._conn: ControlConnection | None = None
 
         self._send_ready = False  # True after the peer acked our ConnectMsg
+        self._peer_registration: Future[None] | None = None
+        self._peer_registered = False
         # Msgs waiting to be sent on connection establishment
         self._queued: list[dict] = []
 
@@ -166,8 +170,12 @@ class P2PSession:
 
     @property
     def has_pending_work(self) -> bool:
-        """True while inbound loads or outbound transfers are outstanding."""
-        return self._client.has_active_loads or self._server.has_inflight_transfers
+        """True while registration, loads, or transfers are outstanding."""
+        return (
+            self._peer_registration is not None
+            or self._client.has_active_loads
+            or self._server.has_inflight_transfers
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -260,6 +268,7 @@ class P2PSession:
 
         for msg in self._conn.recv():
             self._on_message(msg)
+        self._poll_registration()
 
         loads = self._client.collect_results()
         stores = self._server.collect_results()
@@ -287,6 +296,9 @@ class P2PSession:
         """
         client_result = self._client.close()
         failed_stores, failed_serves = self._server.close()
+        if self._peer_registration is not None:
+            self._peer_registration.cancel()
+            self._peer_registration = None
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -435,11 +447,12 @@ class P2PSession:
         # Validation failures here mean an incompatible or malicious peer.
         # Mark the connection dead so the manager reaps the session;
         # don't call add_remote_peer or send connect_ack.
-        if self._send_ready:
-            # We've already received connect_ack, so the handshake is
-            # complete. A second connect from the peer is a protocol
-            # violation — re-registering would corrupt transport state.
-            self._protocol_error("duplicate connect after handshake")
+        if (
+            self._send_ready
+            or self._peer_registration is not None
+            or self._peer_registered
+        ):
+            self._protocol_error("duplicate connect")
             return
         try:
             ConnectMsg.validate(msg)
@@ -463,26 +476,38 @@ class P2PSession:
                     f"local={self._local_hash_seed!r}. Ensure PYTHONHASHSEED "
                     "(if set) matches on all P2P peers."
                 )
-            self._transport.add_remote_peer(
+            self._peer_registration = self._transport.add_remote_peer_async(
                 self.peer_id,
                 agent_metadata=msg[ConnectMsg.AGENT_METADATA],
                 base_addr=msg[ConnectMsg.BASE_ADDR],
                 num_blocks=msg[ConnectMsg.NUM_BLOCKS],
                 block_len=msg[ConnectMsg.BLOCK_LEN],
             )
-        except ValueError as exc:
+        except Exception as exc:
             logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
             if self._conn is not None:
                 self._conn.mark_dead()
             return
 
-        if self._conn is not None:
-            self._conn.send(
-                {
-                    TYPE_KEY: ConnectAckMsg.TYPE,
-                    ConnectAckMsg.PEER_ID: self._local_id,
-                }
-            )
+    def _poll_registration(self) -> None:
+        future = self._peer_registration
+        if future is None or not future.done() or not self.alive:
+            return
+        self._peer_registration = None
+        try:
+            future.result()
+        except Exception:
+            logger.exception("P2PSession %s: peer registration failed", self.peer_id)
+            assert self._conn is not None
+            self._conn.mark_dead()
+            return
+        self._peer_registered = True
+        self._do_send(
+            {
+                TYPE_KEY: ConnectAckMsg.TYPE,
+                ConnectAckMsg.PEER_ID: self._local_id,
+            }
+        )
 
     def _on_connect_ack(self) -> None:
         if self._queued:

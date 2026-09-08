@@ -66,7 +66,7 @@ Implementor contracts
 - close() releases all resources (memory registrations, handles).
   After close(), no other methods may be called.
 
-Threading model: no background threads. All I/O driven by poll().
+Methods are called on the session thread. Peer registration may run in a worker.
 """
 
 from __future__ import annotations
@@ -76,6 +76,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
+from concurrent.futures import Future
 from typing import Literal, NamedTuple
 
 CancelMode = Literal["immediate", "wait"]
@@ -176,6 +177,26 @@ class DataTransport(ABC):
             block_len: Size of each block (must match local block_len).
         """
         ...
+
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        """Register a peer, completing inline unless overridden by the transport."""
+        future: Future[None] = Future()
+        try:
+            self.add_remote_peer(
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
+            )
+        except Exception as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(None)
+        return future
 
     @abstractmethod
     def remove_remote_peer(self, peer_id: str) -> None:

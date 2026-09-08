@@ -21,8 +21,9 @@ Key Design Principles:
 """
 
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import NamedTuple
 
 import numpy as np
@@ -810,6 +811,21 @@ class TieringOffloadingManager(OffloadingManager):
         Called once per scheduler step from
         OffloadingConnectorScheduler.build_connector_meta().
         """
+        self._poll(context)
+
+        for req_id in context.new_req_ids:
+            state = self._req_state.get(req_id)
+            if state is None:
+                continue
+            self._metrics.on_request_allocated(state.req_context)
+
+    @override
+    def get_model_wait_callback(self) -> Callable[[], None] | None:
+        if not self.secondary_tiers:
+            return None
+        return partial(self._poll, ScheduleEndContext((), ()))
+
+    def _poll(self, context: ScheduleEndContext) -> None:
         # Catch-all poll: guarantees jobs are processed even on steps where
         # lookup()/prepare_store() were never called (e.g. no requests
         # scheduled but a tier still has_pending_work()).
@@ -826,12 +842,6 @@ class TieringOffloadingManager(OffloadingManager):
         self._flush_pending_cascades()
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
-
-        for req_id in context.new_req_ids:
-            state = self._req_state.get(req_id)
-            if state is None:
-                continue
-            self._metrics.on_request_allocated(state.req_context)
 
     @override
     def has_pending_work(self) -> bool:
