@@ -106,7 +106,7 @@ def test_qwen2_vl_encoder_cudagraph_normalizes_pixels() -> None:
             return {}
 
         def __call__(
-            self, pixel_values: torch.Tensor, grid_thw: list[list[int]]
+            self, pixel_values: torch.Tensor, grid_thw: list[list[int]], **_kwargs
         ) -> torch.Tensor:
             self.pixel_values = pixel_values
             self.grid_thw = grid_thw
@@ -131,7 +131,12 @@ def test_qwen2_vl_encoder_cudagraph_normalizes_pixels() -> None:
         adapter, mm_kwargs, max_batch_size=1, max_frames_per_batch=1
     )
     expected = torch.ones_like(pixel_values, dtype=visual.dtype)
-    torch.testing.assert_close(replay.values["pixel_values"], expected)
+    torch.testing.assert_close(replay.values["pixel_values"], pixel_values)
+    cudagraph_output = Qwen2VLForConditionalGeneration.encoder_cudagraph_forward(
+        adapter, {"pixel_values": pixel_values}
+    )
+    torch.testing.assert_close(cudagraph_output, expected)
+    assert visual.grid_thw is None
 
     output = Qwen2VLForConditionalGeneration.encoder_eager_forward(adapter, mm_kwargs)
     torch.testing.assert_close(output, expected)
