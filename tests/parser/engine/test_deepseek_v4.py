@@ -379,7 +379,9 @@ class TestMissingToolCallsWrapper:
         assert "DSML" not in content
 
     def test_parallel_orphan_invokes(self, mock_tokenizer, mock_request):
-        parser = DeepSeekV4Parser(mock_tokenizer)
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
         result = parser.extract_tool_calls(self._ORPHAN + self._ORPHAN, mock_request)
 
         assert [tc.function.name for tc in result.tool_calls] == [
@@ -388,7 +390,7 @@ class TestMissingToolCallsWrapper:
         ]
         assert result.content is None
 
-    def test_reasoning_missing_think_end_and_wrapper(
+    def test_orphan_invoke_inside_reasoning_is_not_a_tool_call(
         self, mock_tokenizer, mock_request
     ):
         parser = DeepSeekV4Parser(
@@ -397,23 +399,40 @@ class TestMissingToolCallsWrapper:
         text = "Let me run it.\n\n" + self._ORPHAN + DSML_TOOL_END
         reasoning, content, tool_calls = parser.parse(text, mock_request)
 
-        assert reasoning == "Let me run it."
+        assert not tool_calls
         assert content is None
-        assert tool_calls is not None
-        assert len(tool_calls) == 1
-        assert tool_calls[0].name == "terminal"
-        assert json.loads(tool_calls[0].arguments) == {"command": "echo hi"}
+        assert reasoning is not None and reasoning.startswith("Let me run it.")
 
-    def test_streaming_reasoning_missing_think_end_and_wrapper(self, mock_tokenizer):
+    def test_drafted_invoke_in_reasoning_does_not_hijack_real_call(
+        self, mock_tokenizer, mock_request
+    ):
+        """A drafted invoke in ``<think>`` must not steal the real call."""
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        text = (
+            f"Maybe {DSML_INVOKE_PREFIX}search{DSML_INVOKE_NAME_END} is wrong; "
+            f"use terminal.{DSML_THINK_END}\n"
+            f"{DSML_TOOL_START}\n{self._ORPHAN}{DSML_TOOL_END}"
+        )
+        reasoning, content, tool_calls = parser.parse(text, mock_request)
+
+        assert tool_calls is not None
+        assert [tc.name for tc in tool_calls] == ["terminal"]
+        assert json.loads(tool_calls[0].arguments) == {"command": "echo hi"}
+        assert reasoning is not None and "use terminal." in reasoning
+
+    def test_streaming_orphan_invoke_inside_reasoning_is_not_a_tool_call(
+        self, mock_tokenizer
+    ):
         parser = DeepSeekV4Parser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
         )
         chunks = ["Let me run it.\n\n", *list(self._ORPHAN), DSML_TOOL_END]
         reasoning, content = simulate_reasoning_streaming(parser, chunks)
 
-        assert reasoning == "Let me run it."
-        assert DSML_INVOKE_PREFIX not in reasoning
-        assert "DSML" not in content
+        assert reasoning.startswith("Let me run it.")
+        assert content == ""
 
     def test_wrapper_present_is_unchanged(self, mock_tokenizer, mock_request):
         parser = DeepSeekV4Parser(mock_tokenizer)
