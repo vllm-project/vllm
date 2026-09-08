@@ -986,6 +986,9 @@ class CompilationConfig:
             and "benchmark_combo_kernel" not in self.inductor_compile_config
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
+            # Timed combo-kernel selection depends on batch shape and is not
+            # batch-invariant (finetunej / vllm#49827).
+            and not envs.VLLM_BATCH_INVARIANT
         ):
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.

@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -339,6 +340,56 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        needs_mamba_cache_alignment = self.need_mamba_block_aligned_split
+        self.needs_mamba_cache_alignment = needs_mamba_cache_alignment
+        batch_invariant_prefill_chunk_sizes: set[int] = set()
+        if envs.VLLM_BATCH_INVARIANT:
+            for group in kv_cache_config.kv_cache_groups:
+                spec = group.kv_cache_spec
+                if not isinstance(spec, MambaSpec):
+                    continue
+                chunk_size = (
+                    spec.mamba_type.get_class().get_batch_invariant_prefill_chunk_size()
+                )
+                if chunk_size is not None:
+                    batch_invariant_prefill_chunk_sizes.add(chunk_size)
+            if len(batch_invariant_prefill_chunk_sizes) > 1:
+                raise ValueError(
+                    "All recurrent backends must use the same batch-invariant "
+                    "prefill chunk size."
+                )
+            batch_invariant_prefill_chunk_size = next(
+                iter(batch_invariant_prefill_chunk_sizes), None
+            )
+            if batch_invariant_prefill_chunk_size is not None:
+                if needs_mamba_cache_alignment:
+                    raise NotImplementedError(
+                        "Batch-invariant recurrent prefill does not yet "
+                        "support Mamba cache alignment."
+                    )
+                if self.max_num_scheduled_tokens < batch_invariant_prefill_chunk_size:
+                    raise ValueError(
+                        "The effective scheduler token budget must be at least the "
+                        "batch-invariant prefill chunk size "
+                        f"({batch_invariant_prefill_chunk_size})."
+                    )
+                long_prefill_threshold = (
+                    self.scheduler_config.long_prefill_token_threshold
+                )
+                if 0 < long_prefill_threshold < batch_invariant_prefill_chunk_size:
+                    raise ValueError(
+                        "long_prefill_token_threshold must be zero or at least the "
+                        "batch-invariant prefill chunk size "
+                        f"({batch_invariant_prefill_chunk_size})."
+                    )
+        else:
+            batch_invariant_prefill_chunk_size = None
+
+        self.mamba_prefill_alignment = batch_invariant_prefill_chunk_size or (
+            self.cache_config.block_size if needs_mamba_cache_alignment else 1
+        )
+        if self.mamba_prefill_alignment > 1:
+            self.need_mamba_block_aligned_split = True
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -427,7 +478,11 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
+        block_size = (
+            self.mamba_prefill_alignment
+            if envs.VLLM_BATCH_INVARIANT and self.mamba_prefill_alignment > 1
+            else self.cache_config.block_size
+        )
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.

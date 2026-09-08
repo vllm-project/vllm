@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -36,6 +37,20 @@ class GDNAttentionBackend(AttentionBackend):
     @classmethod
     def is_ssm(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Validated for NVIDIA CUDA (SM80+ Triton, SM90+ FlashInfer).
+        # ROCm AITER and XPU paths still use batch-shaped projections
+        # and the fused norm kernel, which are not batch-invariant.
+        # Inline import: vllm.platforms imports attention backends.
+        from vllm.platforms import current_platform
+
+        return current_platform.is_cuda() and current_platform.has_device_capability(80)
+
+    @classmethod
+    def get_batch_invariant_prefill_chunk_size(cls) -> int:
+        return FLA_CHUNK_SIZE
 
 
 @dataclass
