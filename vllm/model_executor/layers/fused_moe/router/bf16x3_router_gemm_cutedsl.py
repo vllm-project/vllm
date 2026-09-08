@@ -7,9 +7,9 @@ weights ``W`` with shape ``[M, K]`` by decomposing each FP32 weight value into
 three BF16 residual terms inside the kernel, then accumulating the three BF16
 MMA results into FP32 TMEM output.
 
-The TMEM accumulation chain is bounded to eight K-tiles. At chunk boundaries,
-the epilogue warps drain the main-term accumulator into registers and the MMA
-warp resets it.
+The TMEM accumulation chain is bounded to ``num_tmem_acc`` K-tiles: at chunk
+boundaries the epilogue warps drain the main-term accumulator into a register
+master accumulator and the MMA warp resets it.
 """
 
 from collections.abc import Iterable
@@ -39,7 +39,7 @@ def _decompose_fp32x2_to_3xbf16x2(
     loc=None,
     ip=None,
 ) -> tuple[Uint32, Uint32, Uint32]:
-    # This PTX snippet does the following:
+    # this PTX snippets does the following
     #   out0 = BF16(in);   res =  in - FP32(out0)
     #   out1 = BF16(res);  res = res - FP32(out1)
     #   out2 = BF16(res)
@@ -87,7 +87,7 @@ class Sm100BF16x3RouterGemm:
         self.cta_tile = (BN, 128, 64)
         self.num_stages = 2
         self.num_warps = 10
-        self.tiles_per_tmem_accumulator = 8
+        self.num_tmem_acc = 8
 
     @cute.jit
     def _make_tma(self, tensor: cute.Tensor, BM: int, BK: int):
@@ -135,7 +135,7 @@ class Sm100BF16x3RouterGemm:
 
         BN, BM, BK = self.cta_tile
         num_stages = self.num_stages
-        tiles_per_tmem_accumulator = self.tiles_per_tmem_accumulator
+        num_tmem_acc = self.num_tmem_acc
 
         N, K = X_tma.tma_tensor.shape
         M, _ = W_tma.tma_tensor.shape
@@ -261,7 +261,7 @@ class Sm100BF16x3RouterGemm:
                 if tma_stage_id == 0:
                     tma_parity ^= 1
 
-                tmem_acc_count = (tmem_acc_count + 1) % tiles_per_tmem_accumulator
+                tmem_acc_count = (tmem_acc_count + 1) % num_tmem_acc
                 if tmem_acc_count == 0:
                     _tcgen05.commit(acc_full_mbar)
                     tmem_parity ^= 1
@@ -325,14 +325,14 @@ class Sm100BF16x3RouterGemm:
             cute.arch.barrier(barrier_id=BAR_TMEM_ALLOC, number_of_threads=128)
 
             tiles_local = cute.ceil_div(k_tiles - bid_k, split_k)
-            num_chunks = cute.ceil_div(tiles_local, tiles_per_tmem_accumulator)
+            num_chunks = cute.ceil_div(tiles_local, num_tmem_acc)
 
             WIDTH = 8
             main_regs = cute.make_rmem_tensor(WIDTH, Float32)
             res_regs = cute.make_rmem_tensor(WIDTH, Float32)
 
             if num_chunks == 1:
-                # Single accumulation chunk.
+                # single chunk
                 cute.arch.mbarrier_wait(acc_full_mbar, 0)
                 _tcgen05.fence_after_thread_sync()
                 w_row_idx = bid_m * BM + tid
@@ -354,10 +354,10 @@ class Sm100BF16x3RouterGemm:
                             out[bid_k, x_row_idx, w_row_idx] = main_regs[j]
 
             else:
-                # Multiple accumulation chunks.
+                # multiple chunks
                 master_acc = cute.make_rmem_tensor(BN, Float32)
 
-                # Seed the register accumulator from the first chunk.
+                # chunk 0: pure TMEM load, no accumulation.
                 cute.arch.mbarrier_wait(acc_full_mbar, 0)
                 _tcgen05.fence_after_thread_sync()
                 master_acc.store(_tcgen05.ld(warp_id * 32, 0, "32x32b", BN))
@@ -365,7 +365,7 @@ class Sm100BF16x3RouterGemm:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(acc_empty_mbar)
 
-                # Accumulate subsequent main-term chunks.
+                # accumulate main tmem acc
                 for chunk in cutlass.range(1, num_chunks, unroll=1):
                     cute.arch.mbarrier_wait(acc_full_mbar, chunk & 1)
                     _tcgen05.fence_after_thread_sync()
@@ -376,8 +376,9 @@ class Sm100BF16x3RouterGemm:
                             _tcgen05.ld(warp_id * 32, tcol, "32x32b", WIDTH)
                         )
                         _tcgen05.wait_ld()
-                        # CuTeDSL cannot vectorize the dynamically indexed
-                        # master_acc expression without a tiled view.
+                        # CuteDSL refuses to compile
+                        # master_acc[i * WIDTH + j] += main_regs[j]
+                        # when vectorize=True
                         master_view = cute.local_tile(master_acc, (WIDTH,), (i,))
                         for j in cutlass.range(WIDTH, vectorize=True):
                             master_view[j] += main_regs[j]
@@ -385,7 +386,7 @@ class Sm100BF16x3RouterGemm:
                     _tcgen05.fence_before_thread_sync()
                     cute.arch.mbarrier_arrive(acc_empty_mbar)
 
-                # Fold in the residual accumulator.
+                # fold in the residual accumulator
                 for i in cutlass.range_constexpr(BN // WIDTH):
                     tcol = i * WIDTH
                     res_regs.store(

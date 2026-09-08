@@ -24,9 +24,9 @@ def _requires_sm100_cutedsl():
         (48, 6144, 128),
         (96, 3072, 256),
         (129, 3072, 17),
-        # Long-K cases exercise the multi-accumulation path: the split-K
-        # heuristic leaves chains of 15 and 32 K-tiles, above the eight-tile
-        # accumulation bound.
+        # long-K cases exercise the multi-accumulation path (the split-K
+        # heuristic leaves chains of 15 and 32 K-tiles here, above the
+        # kernel's num_tmem_acc bound)
         (1024, 8192, 256),
         (2048, 8192, 256),
     ],
