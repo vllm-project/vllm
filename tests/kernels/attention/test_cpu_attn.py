@@ -15,7 +15,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
     should_use_zentorch_sdpa,
-    zentorch_encoder_sdpa,
+    zentorch_sdpa_attn,
 )
 
 if not current_platform.is_cpu():
@@ -830,7 +830,7 @@ def varlen_encoder_zentorch_sdpa(
     alibi_slopes = _get_alibi_slopes(num_query_heads) if use_alibi else None
     output = torch.empty_like(query)
 
-    zentorch_encoder_sdpa(
+    zentorch_sdpa_attn(
         query,
         key,
         value,
@@ -865,7 +865,7 @@ _ZENTORCH_SDPA_DTYPES = [
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
 @pytest.mark.parametrize("use_alibi", [False, True])
-def test_zentorch_encoder_sdpa(
+def test_zentorch_sdpa_attn(
     seq_lens: list[int],
     num_heads: tuple[int, int],
     head_size: int,
