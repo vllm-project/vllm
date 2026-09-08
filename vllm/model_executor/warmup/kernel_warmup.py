@@ -28,6 +28,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.hy_v4_ihc_warmup import hy_v4_ihc_warmup
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
@@ -162,6 +163,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes,
     )
+    hy_v4_ihc_warmup(worker.get_model(), dtype=worker.model_config.dtype)
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:

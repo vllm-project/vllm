@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the HY V4 Triton iHC pre/post kernels against eager PyTorch."""
+"""Benchmark the HY V4 Triton iHC pre/post/head kernels against eager PyTorch
+and torch.compile of the eager code."""
 
 import os
 import subprocess
@@ -13,6 +14,7 @@ import torch.nn.functional as F
 
 import vllm
 from vllm.models.hy_v4.nvidia.triton_ihc import (
+    triton_ihc_head,
     triton_ihc_post,
     triton_ihc_pre,
 )
@@ -39,6 +41,23 @@ def eager_pre(
     post = magnitude * post + hc_eps
     output = torch.sum(pre.unsqueeze(-1) * x.float(), dim=1)
     return output.to(x.dtype).reshape(num_tokens, hidden_size), post
+
+
+def eager_head(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    hc_eps: float,
+    norm_eps: float,
+) -> torch.Tensor:
+    num_tokens, hc_mult, hidden_size = x.shape
+    x_flat = x.flatten(1).float()
+    reciprocal_rms = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x_flat, weight) * reciprocal_rms
+    pre = torch.sigmoid(mixes * scale + base) + hc_eps
+    output = torch.sum(pre.unsqueeze(-1) * x.float(), dim=1)
+    return output.to(x.dtype).reshape(num_tokens, hidden_size)
 
 
 def eager_post(
@@ -85,7 +104,12 @@ def run_benchmark(
     )
     scale = torch.randn(2, device=device, dtype=torch.float32) * 0.01
     base = torch.randn(2 * hc_mult, device=device, dtype=torch.float32)
+    head_weight = weight[:hc_mult].contiguous()
+    head_scale, head_base = scale[:1].contiguous(), base[:hc_mult].contiguous()
     timer = _timer(method)
+    compiled_pre = torch.compile(eager_pre)
+    compiled_post = torch.compile(eager_post)
+    compiled_head = torch.compile(eager_head)
 
     properties = torch.cuda.get_device_properties(device)
     git_branch = subprocess.run(
@@ -118,9 +142,9 @@ def run_benchmark(
     )
     print(f"hidden_size: {hidden_size}; hc_mult: {hc_mult}")
     print(
-        f"{'tokens':>8} {'op':>6} {'eager (us)':>12} "
-        f"{'triton (us)':>12} {'speedup':>9} {'GiB':>8} "
-        f"{'eager GB/s':>12} {'triton GB/s':>13}"
+        f"{'tokens':>8} {'op':>6} {'eager (us)':>12} {'compile (us)':>13} "
+        f"{'triton (us)':>12} {'x eager':>9} {'x compile':>10} {'GiB':>8} "
+        f"{'triton GB/s':>13}"
     )
 
     for num_tokens in token_counts:
@@ -145,11 +169,19 @@ def run_benchmark(
             atol=0,
             rtol=0,
         )
+        head_args = (x, head_weight, head_scale, head_base, 1e-6, 1e-5)
+        torch.testing.assert_close(
+            triton_ihc_head(*head_args),
+            eager_head(*head_args),
+            atol=2e-2,
+            rtol=1e-2,
+        )
 
         benchmarks = (
             (
                 "pre",
                 partial(eager_pre, x, weight, scale, base, 2.0, 1e-6, 1e-5),
+                partial(compiled_pre, x, weight, scale, base, 2.0, 1e-6, 1e-5),
                 partial(triton_ihc_pre, x, weight, scale, base, 2.0, 1e-6, 1e-5),
                 x.nbytes
                 + weight.nbytes
@@ -161,21 +193,33 @@ def run_benchmark(
             (
                 "post",
                 partial(eager_post, block_output, residual, post),
+                partial(compiled_post, block_output, residual, post),
                 partial(triton_ihc_post, block_output, residual, post),
                 block_output.nbytes + residual.nbytes + post.nbytes + residual.nbytes,
             ),
+            (
+                "head",
+                partial(eager_head, *head_args),
+                partial(compiled_head, *head_args),
+                partial(triton_ihc_head, *head_args),
+                x.nbytes
+                + head_weight.nbytes
+                + head_scale.nbytes
+                + head_base.nbytes
+                + eager_output.nbytes,
+            ),
         )
-        for op_name, eager_fn, triton_fn, logical_bytes in benchmarks:
+        for op_name, eager_fn, compiled_fn, triton_fn, logical_bytes in benchmarks:
             eager_us = median(timer(eager_fn)) * 1e3
+            compile_us = median(timer(compiled_fn)) * 1e3
             triton_us = median(timer(triton_fn)) * 1e3
-            speedup = eager_us / triton_us
             logical_gib = logical_bytes / 2**30
-            eager_gbps = logical_bytes / eager_us / 1e3
             triton_gbps = logical_bytes / triton_us / 1e3
             print(
-                f"{num_tokens:>8} {op_name:>6} {eager_us:>12.1f} "
-                f"{triton_us:>12.1f} {speedup:>8.2f}x {logical_gib:>8.3f} "
-                f"{eager_gbps:>12.1f} {triton_gbps:>13.1f}"
+                f"{num_tokens:>8} {op_name:>6} {eager_us:>12.1f} {compile_us:>13.1f} "
+                f"{triton_us:>12.1f} {eager_us / triton_us:>8.2f}x "
+                f"{compile_us / triton_us:>9.2f}x {logical_gib:>8.3f} "
+                f"{triton_gbps:>13.1f}"
             )
 
 
