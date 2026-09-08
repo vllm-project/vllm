@@ -428,14 +428,14 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        attention_block_sizes = [
+        transfer_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
             if not isinstance(group.kv_cache_spec, MambaSpec)
         ]
         self.block_size = (
-            math.lcm(*attention_block_sizes)
-            if attention_block_sizes
+            math.lcm(*transfer_block_sizes)
+            if transfer_block_sizes
             else cast(int, vllm_config.cache_config.block_size)
         )
         # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
@@ -1573,7 +1573,7 @@ class NixlBaseConnectorWorker:
                 "models without Mamba layers."
             )
         for mem_type in sorted(set(region_mem_types)):
-            typed = [
+            ranges_for_mem_type = [
                 (start, end - start, device_id, "")
                 for (_, cache_mem_type), (
                     start,
@@ -1582,7 +1582,7 @@ class NixlBaseConnectorWorker:
                 ) in registration_ranges.items()
                 if cache_mem_type == mem_type
             ]
-            descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
+            descs = self.nixl_wrapper.get_reg_descs(ranges_for_mem_type, mem_type)
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
 
@@ -2630,18 +2630,13 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
-        for req_id in tuple(done_recving):
+        for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
-            if meta is None:
-                logger.debug(
-                    "Skipping late duplicate completion for request %s", req_id
-                )
-                done_recving.discard(req_id)
-                continue
+            assert meta is not None, f"{req_id} not found in recving_metadata list"
 
             # Skip KV sync and post-processing for failed requests
-            if req_id in failed_recv_reqs or req_id in invalidated_recv_reqs:
+            if req_id in failed_recv_reqs:
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
                     req_id,

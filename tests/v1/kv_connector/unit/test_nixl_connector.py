@@ -3089,10 +3089,8 @@ def test_failed_request_skips_kv_postprocessing(
     ):
         results = connector.get_transfer_results(finished_req_ids=set())
 
-    # Globally unique non-HMA block IDs preserve the successfully loaded
-    # prefix. They complete normally and report only the invalid suffix.
     assert request_id in results.finished_recving
-    assert results.failed_recving == set()
+    assert results.failed_recving == {request_id}
 
     # Critical: KV sync and post-processing must NOT have been called
     # since no valid KV data was received for the failed request.
