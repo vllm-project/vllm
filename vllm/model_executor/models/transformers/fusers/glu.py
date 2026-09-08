@@ -162,18 +162,15 @@ class GLUFuser(MergedColumnParallelFuser):
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         if not super().validate(module, vllm_config):
             return False
+        # An AndMul kernel splits its input in half, so gate and up must match.
         gate = module.get_submodule(self.gate_name)
         up = module.get_submodule(self.up_name)
         if gate.out_features != up.out_features:
-            logger.debug(
-                "%s and %s have different output sizes; skipping fusion",
-                self.gate_name,
-                self.up_name,
-            )
+            logger.debug("%s and %s differ in size; skipping fusion", gate, up)
             return False
         act = module.get_submodule(self.act_name)
         if self._get_act_and_mul_name(act) is None:
-            logger.debug("No AndMul equivalent for %s; skipping fusion", type(act))
+            logger.debug("%s has no AndMul equivalent; skipping fusion", act)
             return False
         return True
 
