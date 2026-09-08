@@ -76,10 +76,7 @@ class MergedColumnParallelFuser(StackedFuser):
             return None
         if (names := cls._names(groups[0])) is None:
             return None
-        # Semantic subclasses add their own fields after reusing this match.
-        return MergedColumnParallelFuser(
-            source_cls=type(module).__name__, linear_names=names
-        )
+        return cls(source_cls=type(module).__name__, linear_names=names)
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace the parallel calls with one merged call and split."""
