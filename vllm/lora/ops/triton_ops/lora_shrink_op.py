@@ -7,6 +7,9 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 from vllm import envs
@@ -15,6 +18,14 @@ from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
     supports_pdl,
+)
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -127,6 +138,176 @@ def _lora_shrink_kernel(
         USE_GDC,
     )
 
+class LoRAShrinkKernel(VllmTritonJitKernel["LoRAShrinkKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        input_dtype: torch.dtype
+        weight_dtype: torch.dtype
+        m: int
+        n: int
+        k: int
+        lora_d0_stride: int
+        lora_d1_stride: int
+        lora_d2_stride: int
+        output_d0_stride: int
+        output_d1_stride: int
+        output_d2_stride: int
+        block_m: int
+        block_n: int
+        block_k: int
+        even_k: bool
+        split_k: int
+        group_size_m: int
+        slice_num: int
+        lora_pointer_table: bool
+        use_gdc: bool
+        num_warps: int
+        num_ctas: int
+        num_stages: int
+
+    kernel = staticmethod(_lora_shrink_kernel)
+
+
+    def dispatch(
+        self,
+        *,
+        m: int,
+        n: int,
+        k: int,
+        max_loras: int,
+        input_dtype: torch.dtype,
+        weight_dtype: torch.dtype,
+        lora_d0_stride: int,
+        lora_d1_stride: int,
+        lora_d2_stride: int,
+        slice_num: int,
+        lora_pointer_table: bool,
+        use_gdc: bool,
+    ) -> "LoRAShrinkKernel.CompileKey":
+        config = get_lora_op_configs(
+            "shrink",
+            max_loras=max_loras,
+            batch=m,
+            hidden_size=k,
+            rank=n,
+            num_slices=slice_num,
+        )
+        split_k = config["split_k"]
+        block_k = config["block_k"]
+        return self.CompileKey(
+            input_dtype=input_dtype,
+            weight_dtype=weight_dtype,
+            m=triton_scalar_specialization_rep(m),
+            n=triton_scalar_specialization_rep(n),
+            k=triton_scalar_specialization_rep(k),
+            lora_d0_stride=triton_scalar_specialization_rep(lora_d0_stride),
+            lora_d1_stride=triton_scalar_specialization_rep(lora_d1_stride),
+            lora_d2_stride=triton_scalar_specialization_rep(lora_d2_stride),
+            output_d0_stride=triton_scalar_specialization_rep(m * n),
+            output_d1_stride=triton_scalar_specialization_rep(n),
+            output_d2_stride=1,
+            block_m=config["block_m"],
+            block_n=config["block_n"],
+            block_k=block_k,
+            even_k=k % (block_k * split_k) == 0,
+            split_k=split_k,
+            group_size_m=config.get("group_size_m", 8),
+            slice_num=slice_num,
+            lora_pointer_table=lora_pointer_table,
+            use_gdc=use_gdc,
+            num_warps=config["num_warps"],
+            num_ctas=config["num_ctas"],
+            num_stages=config["num_stages"],
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        max_tokens: int,
+        max_loras: int,
+        **compile_key_fields: Any,
+    ) -> list["LoRAShrinkKernel.CompileKey"]:
+        return self._trace_dispatch(self.dispatch)(
+            m=WarmupIntRange(1, max_tokens + 1, advance=lambda value: value * 2),
+            max_loras=max_loras,
+            use_gdc=(False, True),
+            **compile_key_fields,
+        )
+
+    def warmup_inputs(
+        self, compile_key: "LoRAShrinkKernel.CompileKey"
+    ) -> dict[str, Any]:
+        metadata = TritonWarmupTensor(torch.int32)
+        return dict(
+            input_ptr=TritonWarmupTensor(
+                compile_key.input_dtype,
+                shape=(1, 1),
+                strides=(compile_key.k, 1),
+            ),
+            lora_ptr=TritonWarmupTensor(
+                torch.uint64
+                if compile_key.lora_pointer_table
+                else compile_key.weight_dtype
+            ),
+            out_ptr=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1, 1),
+                strides=(
+                    compile_key.output_d0_stride,
+                    compile_key.output_d1_stride,
+                    compile_key.output_d2_stride,
+                ),
+            ),
+            M=compile_key.m,
+            N=compile_key.n,
+            K=compile_key.k,
+            token_indices_sorted_by_lora_ids=metadata,
+            num_tokens_per_lora=metadata,
+            lora_token_start_loc=metadata,
+            lora_ids=metadata,
+            scaling=1.0,
+            input_d0_stride=compile_key.k,
+            input_d1_stride=1,
+            lora_d0_stride=compile_key.lora_d0_stride,
+            lora_d1_stride=compile_key.lora_d1_stride,
+            lora_d2_stride=compile_key.lora_d2_stride,
+            output_d0_stride=compile_key.output_d0_stride,
+            output_d1_stride=compile_key.output_d1_stride,
+            output_d2_stride=compile_key.output_d2_stride,
+            BLOCK_M=compile_key.block_m,
+            BLOCK_N=compile_key.block_n,
+            BLOCK_K=compile_key.block_k,
+            EVEN_K=compile_key.even_k,
+            SPLIT_K=compile_key.split_k,
+            GROUP_SIZE_M=compile_key.group_size_m,
+            SLICE_NUM=compile_key.slice_num,
+            USE_GDC=compile_key.use_gdc,
+            launch_pdl=compile_key.use_gdc,
+            grid=(1, 1, 1),
+            num_warps=compile_key.num_warps,
+            num_ctas=compile_key.num_ctas,
+            num_stages=compile_key.num_stages,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        *args: Any,
+        grid: tuple[int, ...],
+        num_warps: int,
+        num_ctas: int,
+        num_stages: int,
+        **kwargs: Any,
+    ) -> LaunchSpec:
+        return grid, dict(
+            num_warps=num_warps,
+            num_ctas=num_ctas,
+            num_stages=num_stages,
+        )
+
+
+_LORA_SHRINK_KERNEL = LoRAShrinkKernel()
+
 
 @torch.inference_mode()
 def _lora_shrink(
@@ -228,7 +409,7 @@ def _lora_shrink(
 
     # PDL only works when dual-stream is being used.
     use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
-    _lora_shrink_kernel[grid](
+    _LORA_SHRINK_KERNEL(
         inputs,
         lora_ptr_tensor,
         output_tensor,
@@ -256,6 +437,7 @@ def _lora_shrink(
         GROUP_SIZE_M,
         NUM_SLICES,
         use_gdc,
+        grid=grid,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,

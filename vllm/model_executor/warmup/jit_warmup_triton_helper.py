@@ -158,9 +158,17 @@ def kernel_launcher(
         grid, launch_kwargs = call_fn(self, *args, **kwargs)
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
-        inputs = {
-            name: value for name, value in bound.arguments.items() if name != "self"
-        }
+        inputs: dict[str, Any] = {}
+        for name, value in bound.arguments.items():
+            if name == "self":
+                continue
+            kind = signature.parameters[name].kind
+            if kind is inspect.Parameter.VAR_POSITIONAL:
+                inputs.update(zip(self._kernel_arg_names, value))
+            elif kind is inspect.Parameter.VAR_KEYWORD:
+                inputs.update(value)
+            else:
+                inputs[name] = value
         self.launch(grid, inputs, **launch_kwargs)
 
     return wrapper
