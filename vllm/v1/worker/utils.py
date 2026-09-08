@@ -562,17 +562,21 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
-    requested_memory = math.ceil(
-        init_snapshot.total_memory * cache_config.gpu_memory_utilization
-    )
+    gpu_memory_utilization = cache_config.resolved_gpu_memory_utilization
+    requested_memory = math.ceil(init_snapshot.total_memory * gpu_memory_utilization)
 
-    if init_snapshot.free_memory < requested_memory:
+    if (
+        init_snapshot.free_memory < requested_memory
+        and not cache_config.enable_extensible_kv_cache
+    ):
+        # With the extensible KV cache the budget is only a cap; exceeding free
+        # memory over-reserves address space rather than pages.
         raise ValueError(
             f"Free memory on device {init_snapshot.device_} "
             f"({format_gib(init_snapshot.free_memory)}/"
             f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
             f"is less than desired GPU memory utilization "
-            f"({cache_config.gpu_memory_utilization}, "
+            f"({gpu_memory_utilization}, "
             f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
             f"utilization or reduce GPU memory used by other processes."
         )

@@ -20,10 +20,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Headroom kept free after sizing the cache from measured memory, covering
-# allocations that only happen after warmup (allocator fragmentation, shapes
-# warmup did not exercise, workspaces that grow at runtime).
-EXTENSIBLE_KV_CACHE_MARGIN_BYTES = 150 * (1 << 20)
+# Headroom left after sizing from measured memory, for allocations that only
+# happen after warmup, taken off the free device memory.
+KV_CACHE_MARGIN_FLOOR_BYTES = 256 * (1 << 20)
+KV_CACHE_MARGIN_FRACTION = 0.02
 
 
 class ExtensibleKVCache:
@@ -58,6 +58,9 @@ class ExtensibleKVCache:
             )
         self.bytes_per_block = self.size // self.capacity_blocks
         self.num_committed_blocks = 0
+        # Memory to keep free while committing before the final sizing, e.g.
+        # the profiled activation peak the warmup steps are about to hit.
+        self.reserved_headroom_bytes = 0
         self.buffer = ExtensibleTensor(
             self.size, device=device, num_segments=self.size // segment_bytes
         )
@@ -131,6 +134,23 @@ class ExtensibleKVCache:
                 kv_caches[layer_name] = view
         return kv_caches
 
+    def committable_blocks(self) -> int:
+        """Blocks that can be committed now without eating into the headroom.
+
+        Bounds what warmup may commit: free memory plus the committed prefix,
+        less ``reserved_headroom_bytes`` and the sizing margin, never below
+        what is already committed nor above the capacity.
+        """
+        free_memory, _ = torch.accelerator.get_memory_info(self.buffer.device)
+        headroom = free_memory + self.physical_bytes
+        margin = max(
+            KV_CACHE_MARGIN_FLOOR_BYTES, int(headroom * KV_CACHE_MARGIN_FRACTION)
+        )
+        budget = headroom - margin - self.reserved_headroom_bytes
+        budget -= self.commit_rounding_overhead
+        blocks = max(budget // self.bytes_per_block, self.num_committed_blocks)
+        return min(blocks, self.capacity_blocks)
+
     @property
     def physical_bytes(self) -> int:
         """Physically mapped bytes, including granule rounding."""
@@ -154,6 +174,14 @@ class ExtensibleKVCache:
     def free(self) -> None:
         self.buffer.free()
         self.num_committed_blocks = 0
+
+
+def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
+    """Blocks warmup may address: all of them, or, for an extensible cache,
+    those whose commit still leaves the reserved headroom free."""
+    if runner.extensible_kv_cache is not None:
+        return runner.extensible_kv_cache.committable_blocks()
+    return runner.kv_cache_config.num_blocks
 
 
 def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
@@ -209,14 +237,21 @@ def measure_kv_cache_blocks(
     committed_bytes: int,
     requested_memory: int,
     bytes_per_block: int,
-    margin_bytes: int,
+    extra_margin_bytes: int = 0,
+    margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
+    margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
     """Blocks that fit in the memory measured after warmup.
 
     Everything resident except the committed KV prefix is needed by the engine;
-    the cache gets the rest of the budget, capped by free memory, less
-    ``margin_bytes``.
+    the cache gets the rest of the budget, capped by the device headroom (free
+    memory plus the committed prefix) less a margin of
+    ``max(margin_floor_bytes, margin_fraction * headroom) + extra_margin_bytes``.
+    The margin guards physical memory, so it never reduces an explicit budget
+    that already leaves that much free.
     """
     non_kv_used = init_free_memory - free_memory - committed_bytes
-    available = min(requested_memory - non_kv_used, free_memory + committed_bytes)
-    return max((available - margin_bytes) // bytes_per_block, 0)
+    headroom = free_memory + committed_bytes
+    margin = max(margin_floor_bytes, int(headroom * margin_fraction))
+    available = min(requested_memory - non_kv_used, headroom - margin)
+    return max((available - extra_margin_bytes) // bytes_per_block, 0)
