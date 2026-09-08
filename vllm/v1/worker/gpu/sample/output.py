@@ -11,6 +11,13 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
+# Debug-only escape hatch: set VLLM_FORCE_TORCH_SAMPLING_MASK=1 to bypass the
+# Triton kernel below and use a pure-PyTorch reimplementation instead, to help
+# isolate whether a failure is caused by Triton kernel launch/JIT behavior
+# rather than the underlying algorithm/data-layout logic.
+# _FORCE_TORCH_SAMPLING_MASK = os.environ.get("VLLM_FORCE_TORCH_SAMPLING_MASK") == "1"
+_FORCE_TORCH_SAMPLING_MASK = True
+
 
 @dataclass
 class SamplerOutput:
@@ -70,6 +77,41 @@ def _compact_sampling_mask_kernel(
     tl.store(counts_ptr + req_idx, count)
 
 
+def _compact_sampling_mask_torch(
+    logits: torch.Tensor,
+    num_sampled_tokens: torch.Tensor,
+    token_ids: torch.Tensor,
+    packed_mask: torch.Tensor,
+    counts: torch.Tensor,
+    max_num_kept: int,
+) -> None:
+    """Pure-PyTorch reimplementation of ``_compact_sampling_mask_kernel``.
+
+    Same semantics, in-place fills ``token_ids``/``packed_mask``/``counts``.
+    Only intended for debugging (see VLLM_FORCE_TORCH_SAMPLING_MASK); not
+    written for performance.
+    """
+    num_reqs, vocab_size = logits.shape
+    is_active = num_sampled_tokens > 0
+    finite = torch.isfinite(logits) & is_active.unsqueeze(1)
+
+    row_counts = finite.sum(dim=1).to(torch.int32)
+    counts.copy_(row_counts)
+
+    token_ids.zero_()
+    for row in range(num_reqs):
+        idx = finite[row].nonzero(as_tuple=True)[0]
+        n = min(idx.numel(), max_num_kept)
+        if n:
+            token_ids[row, :n] = idx[:n].to(torch.int32)
+
+    finite_np = finite.to("cpu", dtype=torch.uint8).numpy()
+    packed_np = np.packbits(finite_np, axis=1, bitorder="little")
+    packed_mask.copy_(
+        torch.from_numpy(packed_np).to(device=packed_mask.device, dtype=torch.uint8)
+    )
+
+
 # Bounds the [num_reqs, width] int32 buffer; wider rows use the bitmask instead.
 MAX_COMPACT_SUPPORT = 2048
 
@@ -105,20 +147,30 @@ class SamplingMaskTensors(NamedTuple):
             (num_reqs, (vocab_size + 7) // 8), dtype=torch.uint8, device=device
         )
         counts = torch.empty(num_reqs, dtype=torch.int32, device=device)
-        _compact_sampling_mask_kernel[(num_reqs,)](
-            logits,
-            logits.stride(0),
-            logits.stride(1),
-            num_sampled_tokens,
-            token_ids,
-            token_ids.stride(0),
-            packed_mask,
-            packed_mask.stride(0),
-            counts,
-            vocab_size,
-            max_num_kept,
-            BLOCK_SIZE=8192,
-        )
+        if _FORCE_TORCH_SAMPLING_MASK:
+            _compact_sampling_mask_torch(
+                logits,
+                num_sampled_tokens,
+                token_ids,
+                packed_mask,
+                counts,
+                max_num_kept,
+            )
+        else:
+            _compact_sampling_mask_kernel[(num_reqs,)](
+                logits,
+                logits.stride(0),
+                logits.stride(1),
+                num_sampled_tokens,
+                token_ids,
+                token_ids.stride(0),
+                packed_mask,
+                packed_mask.stride(0),
+                counts,
+                vocab_size,
+                max_num_kept,
+                BLOCK_SIZE=8192,
+            )
         return cls(token_ids, packed_mask, counts, vocab_size)
 
     def to_cpu_nonblocking(self) -> SamplingMaskTensors:
