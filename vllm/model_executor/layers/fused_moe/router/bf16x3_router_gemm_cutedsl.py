@@ -7,11 +7,12 @@ weights ``W`` with shape ``[M, K]`` by decomposing each FP32 weight value into
 three BF16 residual terms inside the kernel, then accumulating the three BF16
 MMA results into FP32 TMEM output.
 
-The TMEM accumulation chain is bounded to ``num_tmem_acc`` K-tiles: at chunk
-boundaries the epilogue warps drain the main-term accumulator into a register
-master accumulator and the MMA warp resets it.
+The TMEM accumulation chain is bounded to eight K-tiles. At chunk boundaries,
+the epilogue warps drain the main-term accumulator into registers and the MMA
+warp resets it.
 """
 
+from collections.abc import Iterable
 from functools import cache
 
 import cutlass
@@ -38,7 +39,7 @@ def _decompose_fp32x2_to_3xbf16x2(
     loc=None,
     ip=None,
 ) -> tuple[Uint32, Uint32, Uint32]:
-    # this PTX snippets does the following
+    # This PTX snippet does the following:
     #   out0 = BF16(in);   res =  in - FP32(out0)
     #   out1 = BF16(res);  res = res - FP32(out1)
     #   out2 = BF16(res)
@@ -86,7 +87,7 @@ class Sm100BF16x3RouterGemm:
         self.cta_tile = (BN, 128, 64)
         self.num_stages = 2
         self.num_warps = 10
-        self.num_tmem_acc = 8
+        self.tiles_per_tmem_accumulator = 8
 
     @cute.jit
     def _make_tma(self, tensor: cute.Tensor, BM: int, BK: int):
@@ -134,7 +135,7 @@ class Sm100BF16x3RouterGemm:
 
         BN, BM, BK = self.cta_tile
         num_stages = self.num_stages
-        num_tmem_acc = self.num_tmem_acc
+        tiles_per_tmem_accumulator = self.tiles_per_tmem_accumulator
 
         N, K = X_tma.tma_tensor.shape
         M, _ = W_tma.tma_tensor.shape
@@ -260,7 +261,7 @@ class Sm100BF16x3RouterGemm:
                 if tma_stage_id == 0:
                     tma_parity ^= 1
 
-                tmem_acc_count = (tmem_acc_count + 1) % num_tmem_acc
+                tmem_acc_count = (tmem_acc_count + 1) % tiles_per_tmem_accumulator
                 if tmem_acc_count == 0:
                     _tcgen05.commit(acc_full_mbar)
                     tmem_parity ^= 1
@@ -324,14 +325,14 @@ class Sm100BF16x3RouterGemm:
             cute.arch.barrier(barrier_id=BAR_TMEM_ALLOC, number_of_threads=128)
 
             tiles_local = cute.ceil_div(k_tiles - bid_k, split_k)
-            num_chunks = cute.ceil_div(tiles_local, num_tmem_acc)
+            num_chunks = cute.ceil_div(tiles_local, tiles_per_tmem_accumulator)
 
             WIDTH = 8
             main_regs = cute.make_rmem_tensor(WIDTH, Float32)
             res_regs = cute.make_rmem_tensor(WIDTH, Float32)
 
             if num_chunks == 1:
-                # single chunk
+                # Single accumulation chunk.
                 cute.arch.mbarrier_wait(acc_full_mbar, 0)
                 _tcgen05.fence_after_thread_sync()
                 w_row_idx = bid_m * BM + tid
@@ -353,10 +354,10 @@ class Sm100BF16x3RouterGemm:
                             out[bid_k, x_row_idx, w_row_idx] = main_regs[j]
 
             else:
-                # multiple chunks
+                # Multiple accumulation chunks.
                 master_acc = cute.make_rmem_tensor(BN, Float32)
 
-                # chunk 0: pure TMEM load, no accumulation.
+                # Seed the register accumulator from the first chunk.
                 cute.arch.mbarrier_wait(acc_full_mbar, 0)
                 _tcgen05.fence_after_thread_sync()
                 master_acc.store(_tcgen05.ld(warp_id * 32, 0, "32x32b", BN))
@@ -364,7 +365,7 @@ class Sm100BF16x3RouterGemm:
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(acc_empty_mbar)
 
-                # accumulate main tmem acc
+                # Accumulate subsequent main-term chunks.
                 for chunk in cutlass.range(1, num_chunks, unroll=1):
                     cute.arch.mbarrier_wait(acc_full_mbar, chunk & 1)
                     _tcgen05.fence_after_thread_sync()
@@ -375,9 +376,8 @@ class Sm100BF16x3RouterGemm:
                             _tcgen05.ld(warp_id * 32, tcol, "32x32b", WIDTH)
                         )
                         _tcgen05.wait_ld()
-                        # CuteDSL refuses to compile
-                        # master_acc[i * WIDTH + j] += main_regs[j]
-                        # when vectorize=True
+                        # CuTeDSL cannot vectorize the dynamically indexed
+                        # master_acc expression without a tiled view.
                         master_view = cute.local_tile(master_acc, (WIDTH,), (i,))
                         for j in cutlass.range(WIDTH, vectorize=True):
                             master_view[j] += main_regs[j]
@@ -385,7 +385,7 @@ class Sm100BF16x3RouterGemm:
                     _tcgen05.fence_before_thread_sync()
                     cute.arch.mbarrier_arrive(acc_empty_mbar)
 
-                # fold in the residual accumulator
+                # Fold in the residual accumulator.
                 for i in cutlass.range_constexpr(BN // WIDTH):
                     tcol = i * WIDTH
                     res_regs.store(
@@ -466,16 +466,19 @@ def _splitk_reduce_kernel(
     )
 
 
+def _splitk_reduce_config(split_k: int) -> tuple[int, int, int]:
+    block_s = 1 << (split_k - 1).bit_length()
+    if block_s >= 64:
+        return 1, 32, block_s
+    if block_s >= 8:
+        return 1, 256, block_s
+    return min(16, 32 // block_s), 32, block_s
+
+
 def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
     split_k, N, M = partials.shape
-    block_s = 1 << (split_k - 1).bit_length()
     split_stride = partials.stride(0)
-    if block_s >= 64:
-        BN, BM = 1, 32
-    elif block_s >= 8:
-        BN, BM = 1, 256
-    else:
-        BN, BM = min(16, 32 // block_s), 32
+    BN, BM, block_s = _splitk_reduce_config(split_k)
     grid = (triton.cdiv(N, BN), triton.cdiv(M, BM))
     _splitk_reduce_kernel[grid](
         partials,
@@ -502,10 +505,9 @@ def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
 # generic rule is within ~2%, so no rows are needed there.
 #
 # Rows are keyed by (K, M) = (hidden_size, num_experts) and cover the N
-# buckets (64, 128, 256, 512); N rounds up to the next bucket. Shapes without
-# an entry use _MID_RANGE_DEFAULT, which the K<=3072 M=256 shapes (2816/256,
-# 3072/256) share. (128, 19) entries at N=512 reproduce the generic rule:
-# no faster config meets the accuracy bar there.
+# buckets (64, 128, 256, 512); N rounds up to the next bucket. Untabled shapes
+# use the shared default row. (128, 19) entries at N=512 reproduce the generic
+# rule because no faster config meets the accuracy bar there.
 _MID_RANGE_BUCKETS = (64, 128, 256, 512)
 _MID_RANGE_DEFAULT = ((16, 16), (32, 16), (64, 16), (128, 16))
 _MID_RANGE_TUNED = {
@@ -535,6 +537,103 @@ def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     base_ctas = grid_m * grid_n
     split_k = min(k_tiles, max(1, num_sms // base_ctas))
     return BN, split_k
+
+
+def _bf16x3_warmup_configs(
+    router_specs: Iterable[tuple[int, int, int]],
+    max_num_tokens: int,
+    num_sms: int,
+) -> tuple[tuple[int, int], ...]:
+    """Return the reachable ``(K, BN)`` compile configurations."""
+    configs: set[tuple[int, int]] = set()
+    for K, M, min_num_tokens in router_specs:
+        if min_num_tokens > max_num_tokens:
+            continue
+
+        table_limit = min(max_num_tokens, _MID_RANGE_BUCKETS[-1])
+        for N in range(min_num_tokens, table_limit + 1):
+            BN, _ = _pick_tile_config(N, K, M, num_sms)
+            configs.add((K, BN))
+
+        if max_num_tokens > table_limit:
+            BN, _ = _pick_tile_config(max_num_tokens, K, M, num_sms)
+            configs.add((K, BN))
+
+    return tuple(sorted(configs))
+
+
+def _bf16x3_reduce_warmup_configs(
+    router_specs: Iterable[tuple[int, int, int]],
+    max_num_tokens: int,
+    num_sms: int,
+) -> tuple[tuple[int, int, int, int, int, int, int], ...]:
+    """Return the reachable Triton split-K reduction specializations."""
+    from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+        triton_scalar_specialization_rep,
+    )
+
+    configs: set[tuple[int, int, int, int, int, int, int]] = set()
+    for K, M, min_num_tokens in router_specs:
+        for N in range(min_num_tokens, max_num_tokens + 1):
+            _, split_k = _pick_tile_config(N, K, M, num_sms)
+            if split_k == 1:
+                continue
+            BN, BM, block_s = _splitk_reduce_config(split_k)
+            configs.add(
+                (
+                    triton_scalar_specialization_rep(N),
+                    M,
+                    triton_scalar_specialization_rep(N * M),
+                    triton_scalar_specialization_rep(split_k),
+                    BN,
+                    BM,
+                    block_s,
+                )
+            )
+    return tuple(sorted(configs))
+
+
+def _warmup_splitk_reduce(
+    config: tuple[int, int, int, int, int, int, int],
+) -> None:
+    from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+        TritonWarmupTensor,
+    )
+
+    N, M, split_stride, split_k, BN, BM, block_s = config
+    partials = TritonWarmupTensor(torch.float32, shape=(split_k, N, M))
+    out = TritonWarmupTensor(torch.float32, shape=(N, M))
+    _splitk_reduce_kernel.warmup(
+        partials,
+        out,
+        N,
+        M,
+        split_stride,
+        split_k,
+        BN=BN,
+        BM=BM,
+        BS=block_s,
+        USE_PDL=True,
+        num_warps=4,
+        launch_pdl=True,
+        grid=(1, 1),
+    )
+
+
+def warmup_bf16x3_router_gemm(
+    router_specs: Iterable[tuple[int, int, int]],
+    max_num_tokens: int,
+) -> tuple[tuple[int, int], ...]:
+    """Compile every BF16x3 router GEMM configuration reachable at runtime."""
+    router_specs = tuple(router_specs)
+    device = torch.accelerator.current_device_index()
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    configs = _bf16x3_warmup_configs(router_specs, max_num_tokens, num_sms)
+    for K, BN in configs:
+        Sm100BF16x3RouterGemm.compile(K, BN)
+    for config in _bf16x3_reduce_warmup_configs(router_specs, max_num_tokens, num_sms):
+        _warmup_splitk_reduce(config)
+    return configs
 
 
 def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:

@@ -101,6 +101,43 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _bf16x3_router_specs_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return ``(K, M, min_num_tokens)`` for eligible router layers."""
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    specs: set[tuple[int, int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear) or not module.allow_bf16x3_router_gemm:
+            continue
+        min_num_tokens = module.FP32_MAX_TOKENS + 1
+        if not module.allow_fp32_router_gemm:
+            min_num_tokens = 1
+        specs.add((module.input_size, module.output_size, min_num_tokens))
+    return tuple(sorted(specs))
+
+
+def _warmup_bf16x3_router_gemm(
+    model: torch.nn.Module,
+    max_num_tokens: int,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+        warmup_bf16x3_router_gemm,
+    )
+
+    specs = _bf16x3_router_specs_from_model(model)
+    if not specs:
+        logger.debug_once(
+            "Skipping BF16x3 router GEMM warmup: no eligible GateLinear shapes found."
+        )
+        return
+
+    logger.info_once("Warming up BF16x3 router GEMM specs: %s.", specs)
+    configs = warmup_bf16x3_router_gemm(specs, max_num_tokens)
+    logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
+
+
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
     # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
     # enabled and initializes its singleton before kernel_warmup runs. Avoid
@@ -131,7 +168,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
+    enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
+    if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
@@ -164,10 +202,16 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
+    if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+
+    if enable_jit_warmup and current_platform.is_device_capability_family(100):
+        _warmup_bf16x3_router_gemm(
+            worker.get_model(),
+            worker.scheduler_config.max_num_batched_tokens,
+        )
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())

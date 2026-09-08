@@ -24,9 +24,9 @@ def _requires_sm100_cutedsl():
         (48, 6144, 128),
         (96, 3072, 256),
         (129, 3072, 17),
-        # long-K cases exercise the multi-accumulation path (the split-K
-        # heuristic leaves chains of 15 and 32 K-tiles here, above the
-        # kernel's num_tmem_acc bound)
+        # Long-K cases exercise the multi-accumulation path: the split-K
+        # heuristic leaves chains of 15 and 32 K-tiles, above the eight-tile
+        # accumulation bound.
         (1024, 8192, 256),
         (2048, 8192, 256),
     ],
@@ -51,3 +51,30 @@ def test_bf16x3_router_gemm_matches_reference(
     assert out.shape == (num_tokens, num_experts)
     assert out.dtype == torch.float32
     assert torch.mean(torch.abs(out.double() - ref)).item() < 5e-6
+
+
+def test_bf16x3_warmup_configs_cover_reachable_tiles():
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+        _bf16x3_warmup_configs,
+    )
+
+    configs = _bf16x3_warmup_configs(
+        [
+            (3072, 256, 33),
+            (6144, 128, 33),
+            (3072, 17, 1),
+        ],
+        max_num_tokens=512,
+        num_sms=152,
+    )
+
+    assert configs == (
+        (3072, 8),
+        (3072, 16),
+        (3072, 32),
+        (3072, 64),
+        (3072, 128),
+        (6144, 32),
+        (6144, 64),
+        (6144, 128),
+    )
