@@ -172,6 +172,8 @@ def _create_decode_vllm_config(
     capture_sizes: list[int],
     num_speculative_tokens: int = 0,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
+    max_num_seqs: int = 8,
+    use_kda_recoverssm: bool = False,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
         cudagraph_mode="FULL_AND_PIECEWISE",
@@ -182,8 +184,11 @@ def _create_decode_vllm_config(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
-    vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=8)
+    vllm_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs
+    )
     vllm_config.parallel_config = ParallelConfig()
+    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
     vllm_config.num_speculative_tokens = num_speculative_tokens
     if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
@@ -201,6 +206,8 @@ def _make_spec_decode_manager(
     capture_sizes: list[int] | None = None,
     num_speculative_tokens: int = 0,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
+    max_num_seqs: int = 8,
+    use_kda_recoverssm: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -217,6 +224,8 @@ def _make_spec_decode_manager(
             capture_sizes or [1, 2, 4, 8, 16, 24],
             num_speculative_tokens=num_speculative_tokens,
             dynamic_spec_schedule=dynamic_spec_schedule,
+            max_num_seqs=max_num_seqs,
+            use_kda_recoverssm=use_kda_recoverssm,
         ),
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
