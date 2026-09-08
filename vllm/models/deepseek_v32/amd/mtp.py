@@ -38,10 +38,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
-from vllm.models.deepseek_v32.common.kernels import (
-    _FUSED_EH_NORM_KERNEL,
-    fused_eh_norm,
-)
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -75,9 +72,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             config=config,
             topk_indices_buffer=topk_indices_buffer,
         )
-
-        if vllm_config.kernel_config.enable_jit_warmup:
-            _FUSED_EH_NORM_KERNEL.register_warmup()
 
     def forward(
         self,

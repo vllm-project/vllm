@@ -32,12 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.models.deepseek_v32.common.kernels import (
-    _FUSED_NORM_ROPE_KERNEL,
-    fused_norm_rope,
-    fused_q,
-    register_fused_q_warmup,
-)
+from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
@@ -283,61 +278,6 @@ class DeepseekV32Attention(MLAAttention):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
-        )
-
-        self._register_jit_warmup(vllm_config, config, cache_config)
-
-    def _register_jit_warmup(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config,
-        cache_config: CacheConfig,
-    ) -> None:
-        """Register the fused kernels selected by this attention layer."""
-        if not vllm_config.kernel_config.enable_jit_warmup:
-            return
-        # A layer whose forward runs always has a topk_indices_buffer (the
-        # kernel dereferences it unconditionally); skip layers that cannot run.
-        if self.topk_indices_buffer is None:
-            return
-
-        has_indexer = self.indexer is not None
-        index_head_dim = self.indexer.head_dim if has_indexer else 1
-        index_n_head = self.indexer.n_head if has_indexer else 1
-        act_dtype = self.q_a_layernorm.weight.dtype
-        cos_sin_dtype = self.rotary_emb.cos_sin_cache.dtype
-        _FUSED_NORM_ROPE_KERNEL.register_warmup(
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            index_head_dim=index_head_dim,
-            topk=self.topk_indices_buffer.shape[-1],
-            use_pcp=self.use_pcp,
-            has_indexer=has_indexer,
-            index_rope_interleave=self._index_rope_interleave,
-            use_pdl=current_platform.is_arch_support_pdl(),
-            mla_kv_cache_dtype=self.kv_cache_dtype,
-            block_size=cache_config.block_size,
-            act_dtype=act_dtype,
-            cos_sin_dtype=cos_sin_dtype,
-            topk_dtype=self.topk_indices_buffer.dtype,
-        )
-        register_fused_q_warmup(
-            num_q_heads=self.num_local_heads,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            index_n_head=index_n_head,
-            index_head_dim=index_head_dim,
-            has_indexer=has_indexer,
-            index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_query,
-            act_dtype=act_dtype,
-            rope_cache_dtype=cos_sin_dtype,
-            idx_rope_cache_dtype=(
-                self.indexer_rope_emb.cos_sin_cache.dtype
-                if has_indexer
-                else cos_sin_dtype
-            ),
         )
 
     def forward(  # type: ignore[override]

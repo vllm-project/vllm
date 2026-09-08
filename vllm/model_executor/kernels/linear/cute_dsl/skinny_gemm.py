@@ -6,16 +6,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
-
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
-    CuTeDSLLaunchSpec,
-    VllmCuTeDSLJitKernel,
-    compile_cutedsl,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -32,17 +26,11 @@ class SkinnyGemmConfig:
     static_k: int | None = None
 
 
-class ShapeDynamicSkinnyGemm(
-    VllmCuTeDSLJitKernel["ShapeDynamicSkinnyGemm.CompileKey"]
-):
-    compile_options = "--enable-tvm-ffi --ptxas-options -maxrregcount=64"
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        dtype: torch.dtype
-        config: SkinnyGemmConfig
-        has_residual: bool
-        use_pdl: bool
+class ShapeDynamicSkinnyGemm:
+    def __init__(self) -> None:
+        self._compiled: dict[tuple[torch.dtype, SkinnyGemmConfig, bool], Any] = {}
+        self._warmup_configs: set[tuple[torch.dtype, SkinnyGemmConfig, bool]] = set()
+        self._warmup_registered = False
 
     @staticmethod
     def is_available() -> bool:
@@ -93,13 +81,13 @@ class ShapeDynamicSkinnyGemm(
         )
 
     @staticmethod
-    def _cutlass_dtype(dtype: torch.dtype) -> Any:
+    def _cutlass_dtype(dtype: torch.dtype):
         from cutlass import BFloat16, Float16
 
         return BFloat16 if dtype == torch.bfloat16 else Float16
 
     @staticmethod
-    def _stream() -> Any:
+    def _stream():
         from cuda.bindings.driver import CUstream
 
         from vllm.utils.torch_utils import current_stream
@@ -112,72 +100,18 @@ class ShapeDynamicSkinnyGemm(
 
         return current_platform.is_arch_support_pdl()
 
-    @staticmethod
-    def kernel(compile_key: CompileKey) -> Any:
-        from ._skinny_gemm import CuteSkinnyGemm
-
-        config = compile_key.config
-        return CuteSkinnyGemm(
-            element_type=ShapeDynamicSkinnyGemm._cutlass_dtype(compile_key.dtype),
-            num_rows=config.num_rows,
-            block_size=config.block_size,
-            outputs_per_block=config.outputs_per_block,
-            vector_width=config.vector_width,
-            k_unroll=config.k_unroll,
-            has_residual=compile_key.has_residual,
-            use_pdl=compile_key.use_pdl,
-            static_k=config.static_k,
-        )
-
-    def dispatch(
+    def _compile(
         self,
-        *,
         dtype: torch.dtype,
         config: SkinnyGemmConfig,
         has_residual: bool,
-        use_pdl: bool,
-    ) -> CompileKey:
-        return self.CompileKey(
-            dtype=dtype,
-            config=config,
-            has_residual=has_residual,
-            use_pdl=use_pdl,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        dtype: torch.dtype,
-        configs: tuple[SkinnyGemmConfig, ...],
-        has_residual: bool = False,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            dtype=dtype,
-            config=configs,
-            has_residual=has_residual,
-            use_pdl=self._use_pdl(),
-        )
-
-    def request_warmup_configs(
-        self,
-        dtype: torch.dtype,
-        configs: Iterable[SkinnyGemmConfig],
-        *,
-        has_residual: bool = False,
     ) -> None:
-        """Compatibility entry point for existing skinny-GEMM selectors."""
-        self.register_warmup(
-            dtype=dtype,
-            configs=tuple(configs),
-            has_residual=has_residual,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         import cutlass.cute as cute
         from quack.compile_utils import make_fake_tensor
 
-        config = compile_key.config
-        element_type = self._cutlass_dtype(compile_key.dtype)
+        from ._skinny_gemm import CuteSkinnyGemm
+
+        element_type = self._cutlass_dtype(dtype)
         n = cute.sym_int(divisibility=config.outputs_per_block)
         k = (
             config.static_k
@@ -196,25 +130,79 @@ class ShapeDynamicSkinnyGemm(
         )
         c = make_fake_tensor(element_type, (config.num_rows, n), divisibility=1)
         residual = make_fake_tensor(element_type, (config.num_rows, n), divisibility=1)
-        return a, b, residual, c
-
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
-            *self.warmup_inputs(compile_key),
-            options=self.compile_options,
+        kernel = CuteSkinnyGemm(
+            element_type=element_type,
+            num_rows=config.num_rows,
+            block_size=config.block_size,
+            outputs_per_block=config.outputs_per_block,
+            vector_width=config.vector_width,
+            k_unroll=config.k_unroll,
+            has_residual=has_residual,
+            use_pdl=self._use_pdl(),
+            static_k=config.static_k,
+        )
+        self._compiled[(dtype, config, has_residual)] = cute.compile(
+            kernel,
+            a,
+            b,
+            residual,
+            c,
+            self._stream(),
+            options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
 
-    @kernel_launcher
+    def request_warmup_configs(
+        self,
+        dtype: torch.dtype,
+        configs: Iterable[SkinnyGemmConfig],
+        *,
+        has_residual: bool = False,
+    ) -> None:
+        """Request compilation of explicit measured configs before capture."""
+        self._warmup_configs.update((dtype, config, has_residual) for config in configs)
+        if self._warmup_registered:
+            return
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            register_cutedsl_warmup_provider,
+        )
+
+        register_cutedsl_warmup_provider(self)
+        self._warmup_registered = True
+
+    def get_cutedsl_warmup_compile_units(self):
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLCompileUnit
+
+        return tuple(
+            CuTeDSLCompileUnit(
+                name=(
+                    "shape-dynamic skinny GEMM with residual"
+                    if has_residual
+                    else "shape-dynamic skinny GEMM"
+                ),
+                key=("shape-dynamic-skinny-gemm", dtype, config, has_residual),
+                compile=partial(self._compile, dtype, config, has_residual),
+            )
+            for dtype, config, has_residual in sorted(
+                self._warmup_configs,
+                key=lambda item: (
+                    str(item[0]),
+                    item[1].num_rows,
+                    item[1].block_size,
+                    item[1].outputs_per_block,
+                    item[1].k_unroll,
+                    item[1].vector_width,
+                    item[2],
+                ),
+            )
+        )
+
     def __call__(
         self,
         a: torch.Tensor,
         b: torch.Tensor,
         config: SkinnyGemmConfig | None = None,
         residual: torch.Tensor | None = None,
-    ) -> CuTeDSLLaunchSpec[CompileKey]:
+    ) -> torch.Tensor:
         if a.dim() != 2 or b.dim() != 2:
             raise ValueError("a and b must be 2D tensors")
         if a.dtype not in (torch.bfloat16, torch.float16) or b.dtype != a.dtype:
@@ -248,20 +236,14 @@ class ShapeDynamicSkinnyGemm(
             )
         if config.static_k is not None and a.shape[1] != config.static_k:
             raise ValueError("input K must match config static_k")
+        has_residual = residual is not None
+        cache_key = (a.dtype, config, has_residual)
+        if cache_key not in self._compiled:
+            self._compile(a.dtype, config, has_residual)
         output = torch.empty((a.shape[0], b.shape[0]), dtype=a.dtype, device=a.device)
-        compile_key = self.dispatch(
-            dtype=a.dtype,
-            config=config,
-            has_residual=residual is not None,
-            use_pdl=self._use_pdl(),
-        )
-        return compile_key, (
-            a,
-            b,
-            output if residual is None else residual,
-            output,
-            self._stream(),
-        ), output
+        residual_arg = output if residual is None else residual
+        self._compiled[cache_key](a, b, residual_arg, output, self._stream())
+        return output
 
 
 shape_dynamic_skinny_gemm = ShapeDynamicSkinnyGemm()
