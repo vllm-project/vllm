@@ -76,6 +76,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from ..config import Qwen4ExpConfig
+from .fp8_moe import Qwen4ExpRoutedExperts
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
@@ -167,7 +168,11 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
             raise NotImplementedError(
                 "Qwen4Exp HC does not support sequence-parallel MoE"
             )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            routed_experts_cls=Qwen4ExpRoutedExperts,
+        )
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 

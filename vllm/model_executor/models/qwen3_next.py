@@ -19,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
@@ -126,7 +127,13 @@ def _should_replicate_misaligned_shared_expert(
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        *,
+        routed_experts_cls: type[RoutedExperts] | None = None,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -213,6 +220,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
 
         self.experts = FusedMoEFactory(
+            routed_experts_cls=routed_experts_cls,
             shared_experts=(
                 None if self.replicate_shared_expert else self.shared_expert
             ),
