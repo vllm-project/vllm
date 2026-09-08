@@ -42,7 +42,10 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.cache import LRUCache
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
@@ -146,6 +149,7 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
+        self._register_jit_warmups(vllm_config)
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
@@ -547,6 +551,208 @@ class LoRAModelManager:
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)
+
+    def _register_jit_warmups(self, vllm_config: VllmConfig) -> None:
+        if not HAS_TRITON:
+            return
+
+        from vllm.lora.ops.triton_ops.fused_moe_lora_op import (
+            _FUSED_MOE_LORA_ONE_SHOT_KERNEL,
+            _FUSED_MOE_LORA_SMALL_BATCH_KERNEL,
+            _FUSED_MOE_LORA_TWO_STAGE_KERNEL,
+        )
+        from vllm.lora.ops.triton_ops.lora_expand_op import _LORA_EXPAND_KERNEL
+        from vllm.lora.ops.triton_ops.lora_shrink_op import _LORA_SHRINK_KERNEL
+
+        for module in self.modules.values():
+            if isinstance(module, FusedMoEWithLoRA | FusedMoE3DWithLoRA):
+                max_loras = module.w13_lora_a_stacked[0].shape[0]
+                max_tokens = self.max_num_batched_tokens
+                top_k_num = module.moe_config.experts_per_token
+                sm_count = current_platform.num_compute_units(module.device.index)
+                output_dtype = vllm_config.model_config.dtype
+                weight_pairs = (
+                    (
+                        module.w13_lora_a_stacked,
+                        module.w13_lora_b_stacked,
+                        "fused_moe_lora_w13_shrink",
+                        "fused_moe_lora_w13_expand",
+                        module.hidden_size,
+                    ),
+                    (
+                        module.w2_lora_a_stacked,
+                        module.w2_lora_b_stacked,
+                        "fused_moe_lora_w2_shrink",
+                        "fused_moe_lora_w2_expand",
+                        module.hidden_size,
+                    ),
+                )
+                for lora_a, lora_b, shrink_op, expand_op, output_size in weight_pairs:
+                    a0 = lora_a[0]
+                    b0 = lora_b[0]
+                    common = dict(
+                        max_tokens=max_tokens,
+                        top_k_num=top_k_num,
+                        max_loras=max_loras,
+                        num_experts=a0.shape[1],
+                        num_slices=len(lora_a),
+                        n=b0.shape[2],
+                        k=a0.shape[3],
+                        rank=a0.shape[2],
+                        input_dtype=output_dtype,
+                        output_dtype=output_dtype,
+                        stride_a_lora=a0.stride(0),
+                        stride_a_expert=a0.stride(1),
+                        stride_a_r=a0.stride(2),
+                        stride_a_k=a0.stride(3),
+                        stride_b_lora=b0.stride(0),
+                        stride_b_expert=b0.stride(1),
+                        stride_b_n=b0.stride(2),
+                        stride_b_r=b0.stride(3),
+                        num_slices_output=len(lora_b),
+                    )
+                    if not module.fully_sharded:
+                        max_npid_factor = min(
+                            16,
+                            max(1, b0.shape[2] // 128),
+                            max(
+                                1,
+                                int(
+                                    1.5
+                                    / max(
+                                        a0.shape[3]
+                                        / max(a0.shape[3] + b0.shape[2], 1),
+                                        1e-3,
+                                    )
+                                )
+                                + 1,
+                            ),
+                        )
+                        _FUSED_MOE_LORA_ONE_SHOT_KERNEL.register_warmup(
+                            max_npid_factor=max_npid_factor,
+                            config_op_type=shrink_op,
+                            config_hidden_size=module.hidden_size,
+                            moe_intermediate_size=module.intermediate_size_per_partition,
+                            max_shared_memory=get_max_shared_memory_bytes(
+                                module.device.index
+                            ),
+                            **common,
+                        )
+                        _FUSED_MOE_LORA_SMALL_BATCH_KERNEL.register_warmup(
+                            sm_count=sm_count,
+                            **common,
+                        )
+                        continue
+
+                    rank = b0.shape[3]
+                    _FUSED_MOE_LORA_TWO_STAGE_KERNEL.register_warmup(
+                        max_tokens=max_tokens,
+                        top_k_num=top_k_num,
+                        max_loras=max_loras,
+                        num_experts=a0.shape[1],
+                        n=a0.shape[2],
+                        k=a0.shape[3],
+                        a_dtype=output_dtype,
+                        c_dtype=output_dtype,
+                        stride_am=a0.shape[3],
+                        stride_ak=1,
+                        stride_bl=a0.stride(0),
+                        stride_be=a0.stride(1),
+                        stride_bk=a0.stride(3),
+                        stride_bn=a0.stride(2),
+                        stride_cm=a0.shape[2],
+                        stride_cn=1,
+                        num_slice_a=1,
+                        num_slice_c=len(lora_a),
+                        config_op_type=shrink_op,
+                        config_hidden_size=module.hidden_size,
+                        moe_intermediate_size=module.intermediate_size_per_partition,
+                        is_primary=True,
+                    )
+                    _FUSED_MOE_LORA_TWO_STAGE_KERNEL.register_warmup(
+                        max_tokens=max_tokens,
+                        top_k_num=top_k_num,
+                        max_loras=max_loras,
+                        num_experts=b0.shape[1],
+                        n=b0.shape[2],
+                        k=rank,
+                        a_dtype=output_dtype,
+                        c_dtype=output_dtype,
+                        stride_am=rank,
+                        stride_ak=1,
+                        stride_bl=b0.stride(0),
+                        stride_be=b0.stride(1),
+                        stride_bk=b0.stride(3),
+                        stride_bn=b0.stride(2),
+                        stride_cm=len(lora_b) * output_size,
+                        stride_cn=1,
+                        num_slice_a=len(lora_b),
+                        num_slice_c=len(lora_b),
+                        config_op_type=expand_op,
+                        config_hidden_size=module.hidden_size,
+                        moe_intermediate_size=module.intermediate_size_per_partition,
+                        is_primary=False,
+                    )
+                continue
+
+            lora_a_weights = getattr(module, "lora_a_stacked", ())
+            lora_b_weights = getattr(module, "lora_b_stacked", ())
+            if not lora_a_weights or not lora_b_weights:
+                continue
+
+            lora_b_weights_3d = tuple(weight.squeeze(1) for weight in lora_b_weights)
+            same_stride = (
+                len(
+                    {
+                        (
+                            weight.shape[1],
+                            weight.stride(0),
+                            weight.stride(1),
+                            weight.stride(2),
+                        )
+                        for weight in lora_b_weights_3d
+                    }
+                )
+                == 1
+            )
+            lora_a_weights_3d = tuple(weight.squeeze(1) for weight in lora_a_weights)
+            _LORA_SHRINK_KERNEL.register_warmup(
+                max_tokens=self.max_num_batched_tokens,
+                max_loras=self.lora_slots + 1,
+                input_dtype=lora_a_weights_3d[0].dtype,
+                weight_dtype=lora_a_weights_3d[0].dtype,
+                n=lora_a_weights_3d[0].shape[1],
+                k=lora_a_weights_3d[0].shape[2],
+                lora_d0_stride=lora_a_weights_3d[0].stride(0),
+                lora_d1_stride=lora_a_weights_3d[0].stride(1),
+                lora_d2_stride=lora_a_weights_3d[0].stride(2),
+                slice_num=len(lora_a_weights_3d),
+                lora_pointer_table=len(lora_a_weights_3d) > 1,
+            )
+
+            for add_inputs in (False, True):
+                _LORA_EXPAND_KERNEL.register_warmup(
+                    max_tokens=self.max_num_batched_tokens,
+                    max_loras=self.lora_slots + 1,
+                    input_dtype=torch.float32,
+                    weight_dtype=lora_b_weights_3d[0].dtype,
+                    output_dtype=vllm_config.model_config.dtype,
+                    n=max(weight.shape[1] for weight in lora_b_weights_3d),
+                    k=lora_b_weights_3d[0].shape[2],
+                    lora_d0_stride=lora_b_weights_3d[0].stride(0),
+                    lora_d1_stride=lora_b_weights_3d[0].stride(1),
+                    lora_d2_stride=lora_b_weights_3d[0].stride(2),
+                    output_d0_stride=sum(
+                        weight.shape[1] for weight in lora_b_weights_3d
+                    ),
+                    output_d1_stride=1,
+                    add_inputs=add_inputs,
+                    cast_type=True,
+                    slice_num=len(lora_b_weights_3d),
+                    same_stride=same_stride,
+                    lora_pointer_table=len(lora_b_weights_3d) > 1,
+                    metadata_table=not same_stride,
+                )
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (

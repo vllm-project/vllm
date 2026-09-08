@@ -5,7 +5,7 @@ import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, wraps
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -188,6 +188,31 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         else:
             kernel[grid](**kwargs)
         return outputs
+
+
+def kernel_launcher(call_fn: Callable[..., LaunchSpec]) -> Callable[..., Any]:
+    """Launch a Triton kernel from a declarative __call__ specification."""
+    signature = inspect.signature(call_fn)
+
+    @wraps(call_fn)
+    def wrapper(self: VllmTritonJitKernel[Any], *args: Any, **kwargs: Any) -> Any:
+        spec = call_fn(self, *args, **kwargs)
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        inputs: dict[str, Any] = {}
+        for name, value in bound.arguments.items():
+            if name == "self":
+                continue
+            kind = signature.parameters[name].kind
+            if kind is inspect.Parameter.VAR_POSITIONAL:
+                inputs.update(zip(self._kernel_arg_names, value))
+            elif kind is inspect.Parameter.VAR_KEYWORD:
+                inputs.update(value)
+            else:
+                inputs[name] = value
+        return self.launch(spec, inputs)
+
+    return wrapper
 
 
 @dataclass(frozen=True)
