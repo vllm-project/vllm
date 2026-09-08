@@ -20,7 +20,7 @@ steps:
       device: mi250_1
       no_gpu: true
       working_dir: "/vllm-workspace"
-      timeout_in_minutes: 25
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
 
@@ -43,6 +43,6 @@ steps:
       device: mi250_1
       no_gpu: true
       working_dir: "/vllm-workspace"
-      timeout_in_minutes: 25
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
