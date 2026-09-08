@@ -128,9 +128,9 @@ class GLUFuser(MergedColumnParallelFuser):
         down_node = find_node(graph, predicate)
         return cls(
             source_cls=type(module).__name__,
-            linear_names=(str(gate_node.target), str(up_node.target)),
-            act_name=str(act_node.target),
-            down_name=None if down_node is None else str(down_node.target),
+            act_name=act_node.target,
+            linear_names=(gate_node.target, up_node.target),
+            down_name=down_node.target if down_node is not None else None,
         )
 
     def update_forward(self, module: nn.Module) -> None:
@@ -162,10 +162,6 @@ class GLUFuser(MergedColumnParallelFuser):
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         if not super().validate(module, vllm_config):
             return False
-        gate = module.get_submodule(self.gate_name)
-        up = module.get_submodule(self.up_name)
-        if gate.out_features != up.out_features:
-            return False
         act = module.get_submodule(self.act_name)
         if self._get_act_and_mul_name(act) is None:
             logger.debug("No AndMul equivalent for %s; skipping fusion", type(act))
@@ -175,16 +171,15 @@ class GLUFuser(MergedColumnParallelFuser):
     def update_attrs(
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
-        quant_config = vllm_config.quant_config
-        act_fn = self._get_act_and_mul(module.get_submodule(self.act_name))
         super().update_attrs(module, prefix, vllm_config)
+        act_fn = self._get_act_and_mul(module.get_submodule(self.act_name))
         setattr(module, self.act_name, act_fn)
         # If there is a down projection, we know it must be rowwise.
         if self.down_name is not None:
             down_prefix = maybe_prefix(prefix, self.down_name)
             down = module.get_submodule(self.down_name)
             new_down = replace_linear_class(
-                down, "rowwise", quant_config, prefix=down_prefix
+                down, "rowwise", vllm_config.quant_config, prefix=down_prefix
             )
             setattr(module, self.down_name, new_down)
             log_replacement(down_prefix, down, new_down)
