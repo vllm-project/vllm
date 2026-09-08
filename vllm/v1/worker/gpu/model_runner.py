@@ -277,13 +277,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
 
-        # FT flag: set to True once this worker raises an exception. While it
-        # is True, execute_model routes to the no-forward KV-only path and
-        # WorkerProc skips other methods (the worker state is considered
-        # contaminated). Restored to False by WorkerSentinel.retry() after
-        # recovery completes.
-        self.fault_occur = False
-
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
 
@@ -1221,20 +1214,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        # FT: if this worker previously failed, its state is considered
-        # contaminated and forward must not run. However, the scheduler_output
-        # may carry KV transfer tasks (preemption handling, metadata binding,
-        # async loads/saves) which must still be processed, otherwise the
-        # transfers are silently dropped. Route to the no-forward path which
-        # processes the KV tasks only (its pre_forward calls
-        # handle_preemptions before binding metadata and starting loads).
-        if (
-            not dummy_run
-            and self.parallel_config.enable_fault_tolerance
-            and getattr(self, "fault_occur", False)
-        ):
-            return self.kv_connector.no_forward(scheduler_output)
-
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()

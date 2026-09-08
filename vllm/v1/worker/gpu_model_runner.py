@@ -952,12 +952,6 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
-        # FT flag: set to True once this worker raises an exception. While it
-        # is True, execute_model routes to the no-forward KV-only path and
-        # WorkerProc skips other methods (the worker state is considered
-        # contaminated). Restored to False by WorkerSentinel.retry() after
-        # recovery completes.
-        self.fault_occur = False
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
@@ -4185,30 +4179,6 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
-        # FT: if this worker previously failed, its state is considered
-        # contaminated and forward must not run. However, the scheduler_output
-        # may carry KV transfer tasks (preemption handling, metadata binding,
-        # async loads/saves) which must still be processed, otherwise the
-        # transfers are silently dropped. Route to the no-forward path which
-        # processes the KV tasks only.
-        if (
-            self.parallel_config.enable_fault_tolerance
-            and getattr(self, "fault_occur", False)
-        ):
-            if has_kv_transfer_group():
-                # KV transfer tasks (preemption handling, metadata binding,
-                # async loads/saves) must still be processed, otherwise the
-                # transfers are silently dropped.
-                assert scheduler_output.kv_connector_metadata is not None
-                get_kv_transfer_group().handle_preemptions(
-                    scheduler_output.kv_connector_metadata
-                )
-                return self.kv_connector_no_forward(
-                    scheduler_output, self.vllm_config
-                )
-            # No KV connector configured: nothing to preserve, just skip.
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "

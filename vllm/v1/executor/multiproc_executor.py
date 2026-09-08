@@ -1018,12 +1018,10 @@ class WorkerProc:
                 output = output.get_output()
             except Exception as e:
                 logger.exception("Error getting async model runner output")
+                self.worker.fault_occur = True
                 # Check if fault tolerance is enabled
                 ft_enabled = self.worker.vllm_config.parallel_config.enable_fault_tolerance
                 if ft_enabled:
-                    # Mark the worker as faulted so that subsequent RPCs
-                    # are skipped until retry() completes recovery.
-                    self.worker.model_runner.fault_occur = True
                     # In FT scenario, even if the forward pass throws an exception,
                     # we need to extract the kv_connector_output and pass it to the
                     # executor so that KV transfer progress is not lost.
@@ -1100,6 +1098,7 @@ class WorkerProc:
                     self.handle_output(output)
             except Exception as e:
                 # Notes have been introduced in python 3.11
+                self.worker.fault_occur = True
                 if hasattr(e, "add_note"):
                     e.add_note(traceback.format_exc())
                 logger.exception("WorkerProc hit an exception.")
@@ -1109,9 +1108,6 @@ class WorkerProc:
                     # Check if fault tolerance is enabled
                     ft_enabled = self.worker.vllm_config.parallel_config.enable_fault_tolerance
                     if ft_enabled:
-                        # Mark the worker as faulted so that subsequent RPCs
-                        # are skipped until retry() completes recovery.
-                        self.worker.model_runner.fault_occur = True
                         # In FT scenario, even if the forward pass throws an exception,
                         # we need to extract the kv_connector_output and pass it to the
                         # executor so that KV transfer progress is not lost.

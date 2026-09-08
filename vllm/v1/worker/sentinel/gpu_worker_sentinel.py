@@ -67,7 +67,7 @@ class WorkerSentinel:
                 backend="gloo",
             )
         # Recovery completed; allow the worker to execute methods again.
-        self.worker.model_runner.fault_occur = False
+        self.worker.fault_occur = False
 
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner

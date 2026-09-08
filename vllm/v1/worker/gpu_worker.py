@@ -150,6 +150,10 @@ class Worker(WorkerBase):
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
         self.worker_sentinel: WorkerSentinel | None = None
+        # FT: set to True once this worker raises an exception. While True,
+        # execute_model skips forward and only processes KV transfers.
+        # Reset by WorkerSentinel.retry() after recovery.
+        self.fault_occur = False
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
@@ -1019,6 +1023,24 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # FT: after a fault the worker state is contaminated; skip forward
+        # and only process KV transfer tasks (preemptions, loads/saves),
+        # otherwise in-flight transfers would be silently dropped.
+        # Returns None: no model output for this step.
+        if self.parallel_config.enable_fault_tolerance and self.fault_occur:
+            logger.info("WorkerProc is in fault tolerance mode, skip forward pass.")
+            if self.use_v2_model_runner:
+                self.model_runner.kv_connector.no_forward(scheduler_output)
+            elif has_kv_transfer_group():
+                assert scheduler_output.kv_connector_metadata is not None
+                get_kv_transfer_group().handle_preemptions(
+                    scheduler_output.kv_connector_metadata
+                )
+                self.model_runner.kv_connector_no_forward(
+                    scheduler_output, self.vllm_config
+                )
+            return None
+
         # ensure any previous non-blocking PP sends are complete
         if self._pp_send_work:
             for handle in self._pp_send_work:
