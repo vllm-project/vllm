@@ -11,6 +11,7 @@ from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
+    PREFIX_CACHE_RETENTION_INTERVAL_UNSET,
     EngineArgs,
     _expand_json_human_readable_numbers,
     contains_type,
@@ -471,7 +472,12 @@ def test_prefix_cache_default():
     # should be None by default (depends on model).
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_prefix_caching is None
-    assert engine_args.prefix_cache_retention_interval == 0
+    # Left as an unresolved sentinel; create_engine_config resolves it against
+    # the model and speculative-decoding configuration.
+    assert (
+        engine_args.prefix_cache_retention_interval
+        is PREFIX_CACHE_RETENTION_INTERVAL_UNSET
+    )
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
