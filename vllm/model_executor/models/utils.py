@@ -55,6 +55,7 @@ class WeightsMapper:
     orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_duplicate: Mapping[str, str] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -71,6 +72,10 @@ class WeightsMapper:
             },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+            orig_to_new_duplicate={
+                **self.orig_to_new_duplicate,
+                **other.orig_to_new_duplicate,
+            },
         )
 
     def _map_name(self, key: str) -> str | None:
@@ -134,17 +139,28 @@ class WeightsMapper:
 
         return key, shard_id
 
+    def _apply_one(
+        self, name: str, data: torch.Tensor
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        result = self._map_name_with_shard(name)
+        if result is None:
+            return
+        out_name, shard_id = result
+        if shard_id is not None:
+            data.shard_id = shard_id
+        yield out_name, data
+
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, data in weights:
-            result = self._map_name_with_shard(name)
-            if result is None:
-                continue
-            out_name, shard_id = result
-            if shard_id is not None:
-                data.shard_id = shard_id
-            yield out_name, data
+            yield from self._apply_one(name, data)
+            for substr, new_substr in self.orig_to_new_duplicate.items():
+                if substr in name:
+                    # A copy, so it can carry its own shard_id.
+                    yield from self._apply_one(
+                        name.replace(substr, new_substr, 1), data.clone()
+                    )
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -179,6 +195,7 @@ class WeightsMapper:
             orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+            orig_to_new_duplicate={},
         )
 
 

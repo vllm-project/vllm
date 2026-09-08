@@ -46,7 +46,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import (
-    _GEMMA4_EXPERT_PARENT_MAPPER,
+    _GEMMA4_EXPERTS_MAPPER,
     Gemma4ForCausalLM,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -1032,7 +1032,7 @@ class Gemma4ForConditionalGeneration(
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
-    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = _GEMMA4_EXPERTS_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",

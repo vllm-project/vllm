@@ -36,7 +36,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.models.gemma4 import Gemma4Model
+from vllm.model_executor.models.gemma4 import (
+    _GEMMA4_EXPERTS_MAPPER,
+    Gemma4ForCausalLM,
+    Gemma4Model,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4DummyInputsBuilder,
     Gemma4ForConditionalGeneration,
@@ -46,7 +50,11 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -158,15 +166,12 @@ class DiffusionGemmaForConditionalGeneration(
     set by DiffusionGemmaModelState.prepare_inputs().
     """
 
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = _GEMMA4_EXPERTS_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             "model.decoder.": "model.",
             "model.encoder.language_model.": "model.",
             "model.encoder.vision_tower.": "vision_tower.",
             "model.encoder.embed_vision.": "embed_vision.",
-        },
-        orig_to_new_substr={
-            ".experts.": ".moe.experts.",
         },
     )
 
@@ -432,18 +437,8 @@ class DiffusionGemmaForConditionalGeneration(
                 seen_weights.add(name)
                 yield name, weight
 
-        # Delegate to Gemma4ForCausalLM.load_weights for the backbone,
-        # which handles stacked params, MoE, k_eq_v, etc.
-        # Temporarily set self.config to text_config since Gemma4's
-        # load_weights expects it (e.g. tie_word_embeddings, layer_types).
-        from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
-
-        saved_config = self.config
-        self.config = self.model.config
-        try:
-            Gemma4ForCausalLM.load_weights(self, _remap_weights())
-        finally:
-            self.config = saved_config
+        mapper = Gemma4ForCausalLM.build_hf_to_vllm_mapper(self.model.config)
+        AutoWeightsLoader(self).load_weights(_remap_weights(), mapper=mapper)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
