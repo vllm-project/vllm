@@ -7,9 +7,9 @@ import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.models.qwen4_exp.nvidia.fp8_moe import Qwen4ExpRoutedExperts
 
 
 def _make_fp8_tp_experts(
@@ -21,6 +21,8 @@ def _make_fp8_tp_experts(
     mock_backend=True,
     num_experts=2,
     hidden_dim=256,
+    intermediate_size=640,
+    quant_config=None,
     config_overrides=None,
 ):
     # Exercise allocation and the public weight loader without selecting a GPU kernel.
@@ -34,22 +36,23 @@ def _make_fp8_tp_experts(
     config = make_dummy_moe_config(
         num_experts=num_experts,
         hidden_dim=hidden_dim,
-        intermediate_size=640,
+        intermediate_size=intermediate_size,
         experts_per_token=min(num_experts, 10),
     )
     config.routing_method = RoutingMethodType.RenormalizeNaive
     config.moe_parallel_config.tp_size = tp_size
     config.moe_parallel_config.tp_rank = tp_rank
-    config.intermediate_size_per_partition = 640 // tp_size
-    config.intermediate_size_per_partition_unpadded = 640 // tp_size
+    config.intermediate_size_per_partition = intermediate_size // tp_size
+    config.intermediate_size_per_partition_unpadded = intermediate_size // tp_size
     config.moe_backend = backend
     for field, value in (config_overrides or {}).items():
         setattr(config, field, value)
-    return Qwen4ExpRoutedExperts(
+    return RoutedExperts(
         "model.layers.0.mlp.experts",
         torch.bfloat16,
         config,
-        Fp8Config(is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]),
+        quant_config
+        or Fp8Config(is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]),
         expert_map_manager=SimpleNamespace(
             local_num_experts=num_experts,
             placement_strategy="linear",
@@ -63,28 +66,42 @@ def _make_fp8_tp_experts(
 
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize("batched", [False, True])
-def test_fp8_block_aligned_tp_preserves_checkpoint(monkeypatch, tp_size, batched):
+@pytest.mark.parametrize("intermediate_size", [640, 896])
+def test_fp8_block_aligned_tp_preserves_checkpoint(
+    monkeypatch, tp_size, batched, intermediate_size
+):
     """All ranks reconstruct the original dequantized projections, including
     padding-only ranks. Reloading must clear stale weights and scales.
     """
     generator = torch.Generator().manual_seed(42)
     weights = {
-        "w1": torch.randn(2, 640, 256, generator=generator).to(torch.float8_e4m3fn),
-        "w3": torch.randn(2, 640, 256, generator=generator).to(torch.float8_e4m3fn),
-        "w2": torch.randn(2, 256, 640, generator=generator).to(torch.float8_e4m3fn),
+        "w1": torch.randn(2, intermediate_size, 256, generator=generator).to(
+            torch.float8_e4m3fn
+        ),
+        "w3": torch.randn(2, intermediate_size, 256, generator=generator).to(
+            torch.float8_e4m3fn
+        ),
+        "w2": torch.randn(2, 256, intermediate_size, generator=generator).to(
+            torch.float8_e4m3fn
+        ),
     }
     scales = {
         name: torch.rand(2, w.shape[1] // 128, w.shape[2] // 128, generator=generator)
         + 0.1
         for name, w in weights.items()
     }
-    reconstructed = {name: [] for name in weights}
-    for rank, blocks in enumerate(torch.tensor_split(torch.arange(5), tp_size)):
-        layer = _make_fp8_tp_experts(monkeypatch, tp_size, rank)
+    reconstructed: dict[str, list[torch.Tensor]] = {name: [] for name in weights}
+    num_blocks = intermediate_size // 128
+    for rank, blocks in enumerate(
+        torch.tensor_split(torch.arange(num_blocks), tp_size)
+    ):
+        layer = _make_fp8_tp_experts(
+            monkeypatch, tp_size, rank, intermediate_size=intermediate_size
+        )
         assert layer.quant_method.weight_scale_refine is None
         assert layer.quant_method.moe_block_shape == [128, 128]
         width = layer.moe_config.intermediate_size_per_partition
-        assert width == {2: 384, 4: 256, 8: 128}[tp_size]
+        assert width == ((num_blocks + tp_size - 1) // tp_size) * 128
         for name in weights:
             prefix = "w2" if name == "w2" else "w13"
             for suffix, checkpoint in (
@@ -152,10 +169,27 @@ def test_fp8_block_aligned_tp_rejects_unsupported_layout(monkeypatch, field, val
         _make_fp8_tp_experts(monkeypatch, 4, 0, config_overrides={field: value})
 
 
-def test_fp8_aligned_tp_keeps_original_layout(monkeypatch):
-    layer = _make_fp8_tp_experts(monkeypatch, 5, 0)
-    assert layer.moe_config.intermediate_size_per_partition == 128
+@pytest.mark.parametrize("tp_size", [1, 5])
+def test_fp8_aligned_tp_keeps_original_layout(monkeypatch, tp_size):
+    layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0)
+    assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
+    assert layer.moe_config.tp_weight_shard is None
     assert layer.quant_method.weight_scale_refine is None
+
+
+def test_fp8_skipped_layer_keeps_original_tp_layout(monkeypatch, default_vllm_config):
+    layer = _make_fp8_tp_experts(
+        monkeypatch,
+        4,
+        0,
+        quant_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            weight_block_size=[128, 128],
+            ignored_layers=["model.layers.0.mlp.experts"],
+        ),
+    )
+    assert layer.moe_config.tp_weight_shard is None
+    assert layer.moe_config.intermediate_size_per_partition == 160
 
 
 def test_fp8_block_aligned_tp_rejects_presharded_weights(monkeypatch):

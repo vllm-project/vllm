@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    MoETPWeightShard,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -508,6 +509,41 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Set weight key and activation key for kernel compatibility
         if self.block_quant:
             assert self.weight_block_size is not None
+            # TRTLLM needs intact checkpoint blocks. Decide the allocation
+            # before refinement/backend selection, and retain the same bounds
+            # for the generic weight and scale loader.
+            if (
+                self.moe.moe_backend == "flashinfer_trtllm"
+                and self.quant_config.is_checkpoint_fp8_serialized
+                and self.weight_block_size == [128, 128]
+                and self.moe.tp_size > 1
+                and self.moe.intermediate_size_per_partition % 128 != 0
+            ):
+                if (
+                    self.moe.intermediate_size % 128 != 0
+                    or self.moe.hidden_dim % 128 != 0
+                    or self.moe.ep_size != 1
+                    or self.moe.is_lora_enabled
+                    or self.moe.has_bias
+                ):
+                    raise ValueError(
+                        "Block-aligned FP8 TP sharding requires 128-aligned "
+                        "global expert dimensions, pure TP, and no LoRA or "
+                        "expert bias."
+                    )
+                shard = MoETPWeightShard.block_aligned(
+                    self.moe.intermediate_size,
+                    128,
+                    self.moe.tp_size,
+                    self.moe.tp_rank,
+                )
+                self.moe.tp_weight_shard = shard
+                self.moe.intermediate_size_per_partition = shard.allocated_size
+                logger.info_once(
+                    "FP8 TRTLLM TP loading uses complete checkpoint blocks: "
+                    "local allocation %d, without weight requantization.",
+                    shard.allocated_size,
+                )
             # TP shards the intermediate dim of the expert weights, so a
             # per-shard size that is not a multiple of the checkpoint's block
             # size makes the checkpoint's block scales impossible to shard

@@ -350,6 +350,7 @@ class RoutedExperts(PluggableLayer):
         loaded_weight: torch.Tensor,
         tp_rank: int,
         load_full_w2: bool = False,
+        is_scale: bool = False,
     ):
         """
         Load grouped weight scales for group quantization or model weights
@@ -361,7 +362,31 @@ class RoutedExperts(PluggableLayer):
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
             load_full_w2: whether or not the w2 loaded should be sharded.
+            is_scale: whether checkpoint bounds are expressed in quantization blocks.
         """
+        shard = self.moe_config.tp_weight_shard
+        if shard is not None:
+            if load_full_w2:
+                raise ValueError("A TP weight shard cannot load replicated w2 scales.")
+            divisor = shard.block_size if is_scale else 1
+            expected_size = self.moe_config.intermediate_size // divisor
+            if loaded_weight.shape[shard_dim] != expected_size:
+                raise ValueError(
+                    "Block-aligned TP loading expects an unsharded checkpoint "
+                    f"projection of size {expected_size}, got "
+                    f"{loaded_weight.shape[shard_dim]}."
+                )
+            loaded_weight = loaded_weight.narrow(
+                shard_dim, shard.start // divisor, shard.size // divisor
+            )
+            destination = expert_data
+            if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
+                half = destination.shape[shard_dim] // 2
+                destination = destination.narrow(
+                    shard_dim, 0 if shard_id == "w1" else half, half
+                )
+            destination.fill_(1 if is_scale else 0)
+
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
             # w2 scales, as indicated by `load_full` argument, for all tp cases
@@ -370,7 +395,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=load_full_w2,
+                load_full=load_full_w2 or shard is not None,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -379,6 +404,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
+                load_full=shard is not None,
             )
 
     def _load_per_channel_weight_scale(
@@ -854,6 +880,7 @@ class RoutedExperts(PluggableLayer):
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
                     load_full_w2=getattr(param, "load_full_w2", False),
+                    is_scale=True,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
