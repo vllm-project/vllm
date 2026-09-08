@@ -164,6 +164,73 @@ def test_draft_model_tensor_parallelism(vllm_runner):
     assert_draft_model_correctness(sd_case, vllm_runner)
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
+@pytest.mark.parametrize("draft_sample_method", ["greedy", "probabilistic"])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="V2 requires CUDA")
+@multi_gpu_only(num_gpus=2)
+def test_draft_model_v2_tensor_parallelism(
+    monkeypatch, enforce_eager, draft_sample_method, vllm_runner
+):
+    """Both models must be sharded across actual V2 workers, without fallback."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def check_worker(worker, eager):
+        from vllm.distributed import get_tp_group
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+        from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
+            StandaloneDraftModelSpeculator,
+        )
+
+        runner = worker.model_runner
+        assert worker.use_v2_model_runner
+        assert isinstance(runner, GPUModelRunner)
+        assert isinstance(runner.speculator, StandaloneDraftModelSpeculator)
+        tp_group = get_tp_group()
+        assert tp_group.world_size == 2
+        for model in (runner.model, runner.speculator.model):
+            assert model.lm_head.tp_size == 2
+            assert model.lm_head.tp_rank == tp_group.rank_in_group
+        decode_cg = runner.speculator.decode_cudagraph_manager
+        assert decode_cg is not None
+        assert bool(decode_cg.graphs) is not eager
+        return tp_group.rank_in_group
+
+    prompts = get_test_prompts(mm_enabled=False, num_prompts=20)
+    with vllm_runner(
+        "Qwen/Qwen3-1.7B",
+        tensor_parallel_size=2,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 2,
+            "draft_sample_method": draft_sample_method,
+            "enforce_eager": enforce_eager,
+        },
+        max_model_len=2048,
+        max_num_seqs=len(prompts),
+        gpu_memory_utilization=0.5,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+    ) as runner:
+        assert sorted(runner.collective_rpc(check_worker, args=(enforce_eager,))) == [
+            0,
+            1,
+        ]
+        sampling = (
+            SamplingParams(temperature=1.0, seed=42, max_tokens=10)
+            if draft_sample_method == "probabilistic"
+            else greedy_sampling()
+        )
+        outputs = runner.llm.chat(prompts, sampling)
+        assert len(outputs) == len(prompts)
+        assert all(output.outputs and output.outputs[0].token_ids for output in outputs)
+        metrics = runner.llm.get_metrics()
+        assert compute_acceptance_rate(metrics) > 0
+        assert compute_acceptance_len(metrics) > 1
+
+
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_engine_args_tensor_parallelism():
     """Ensure the vllm_config for the draft model is created correctly,

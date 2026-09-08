@@ -21,17 +21,19 @@ from vllm.platforms import current_platform
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("draft_tp", "draft_max_len", "draft_eager", "unsupported"),
+    ("target_tp", "draft_tp", "draft_max_len", "draft_eager", "unsupported"),
     [
-        (1, 2048, None, None),
-        (2, 2048, None, "distributed standalone drafting"),
-        (1, 1024, None, "standalone drafting with a shorter draft context"),
-        (1, 2048, False, None),
-        (1, 2048, True, "standalone drafting with a different draft eager setting"),
+        (1, 1, 2048, None, None),
+        (2, 2, 2048, None, None),
+        (1, 2, 2048, None, "standalone drafting with different TP sizes"),
+        (2, 1, 2048, None, "standalone drafting with different TP sizes"),
+        (1, 1, 1024, None, "standalone drafting with a shorter draft context"),
+        (1, 1, 2048, False, None),
+        (1, 1, 2048, True, "standalone drafting with a different draft eager setting"),
     ],
 )
 def test_standalone_draft_runner_selection(
-    monkeypatch, draft_tp, draft_max_len, draft_eager, unsupported
+    monkeypatch, target_tp, draft_tp, draft_max_len, draft_eager, unsupported
 ):
     """Unsupported drafts fall back by default and explain forced-V2 failures."""
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
@@ -41,6 +43,7 @@ def test_standalone_draft_runner_selection(
     config = object.__new__(VllmConfig)
     config.compilation_config = CompilationConfig()
     config.parallel_config = ParallelConfig()
+    config.parallel_config.tensor_parallel_size = target_tp
     config.cache_config = CacheConfig()
     config.lora_config = None
     config.model_config = cast(

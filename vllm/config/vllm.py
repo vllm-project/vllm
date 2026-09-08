@@ -2578,14 +2578,14 @@ class VllmConfig:
                 parallel = self.parallel_config
                 draft_parallel = speculative_config.draft_parallel_config
                 if (
-                    parallel.tensor_parallel_size != 1
-                    or parallel.pipeline_parallel_size != 1
+                    parallel.pipeline_parallel_size != 1
                     or parallel.data_parallel_size != 1
                     or parallel.decode_context_parallel_size != 1
                     or parallel.prefill_context_parallel_size != 1
-                    or draft_parallel.tensor_parallel_size != 1
                 ):
                     unsupported.append("distributed standalone drafting")
+                if draft_parallel.tensor_parallel_size != parallel.tensor_parallel_size:
+                    unsupported.append("standalone drafting with different TP sizes")
                 if speculative_config.use_heterogeneous_vocab:
                     unsupported.append(
                         "standalone drafting with heterogeneous vocabularies"
