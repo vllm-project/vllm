@@ -6,6 +6,7 @@ from functools import partial
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
@@ -42,10 +43,17 @@ def async_copy_to_gpu(
 
 
 class UvaBuffer:
-    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+    def __init__(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        *,
+        zero_initialize: bool = True,
+    ):
         if not is_uva_available():
             raise RuntimeError("UVA is not available")
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        allocate = torch.zeros if zero_initialize else torch.empty
+        self.cpu = allocate(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
         self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
 
@@ -86,6 +94,39 @@ class UvaBufferPool:
         uva = self.copy_to_uva(x)
         # CPU-to-GPU copy
         return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
+
+
+class GrowableUvaBufferPool:
+    """Grow each slot lazily; callers must retire GPU readers before reuse.
+
+    Like UvaBufferPool, this relies on the runner's in-flight batch bound.
+    """
+
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        max_concurrency: int | None = None,
+    ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
+        self.dtype = dtype
+        self.max_concurrency = max_concurrency
+        self._uva_bufs: list[UvaBuffer | None] = [None] * max_concurrency
+        self._curr = 0
+
+    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+        self._curr = (self._curr + 1) % self.max_concurrency
+        n = len(x)
+        buf = self._uva_bufs[self._curr]
+        if buf is None or buf.cpu.numel() < n:
+            capacity = 1 << (max(1, n) - 1).bit_length()
+            # Fully overwrite the exposed prefix below; the capacity tail is unused.
+            buf = UvaBuffer(capacity, self.dtype, zero_initialize=False)
+            self._uva_bufs[self._curr] = buf
+
+        dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
+        dst[:n] = x
+        return buf.uva[:n]
 
 
 class UvaBackedTensor:
@@ -131,6 +172,7 @@ class StagedWriteTensor:
         self.dtype = dtype
         self.device = device
         self.max_concurrency = max_concurrency
+        self.uva_instead_of_gpu = uva_instead_of_gpu
 
         if not uva_instead_of_gpu:
             # Create a GPU tensor (default)
@@ -151,6 +193,11 @@ class StagedWriteTensor:
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_contents = (
+            GrowableUvaBufferPool(dtype, max_concurrency)
+            if uva_instead_of_gpu and envs.VLLM_STAGED_WRITE_USE_UVA_CONTENTS
+            else None
+        )
 
     def stage_write(
         self, index: int, start: int, x: Iterable[int] | Iterable[float]
@@ -180,10 +227,14 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        # Special handling for write_contents
-        write_contents = async_tensor_h2d(
-            self._staged_write_contents, device=self.device, dtype=self.dtype
-        )
+        if self.write_contents is None:
+            write_contents = async_tensor_h2d(
+                self._staged_write_contents, device=self.device, dtype=self.dtype
+            )
+        else:
+            write_contents = self.write_contents.copy_to_uva(
+                self._staged_write_contents
+            )
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
