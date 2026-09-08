@@ -333,10 +333,97 @@ def test_inc_model_prefix_early_exit() -> None:
             },
         }
     )
+    layer = object.__new__(LinearBase)
 
     # get_quant_method checks model. prefix for unquantized early-exit
-    result = config.get_quant_method(DummyLayer(), "layers.1.mlp.gate_proj")
+    result = config.get_quant_method(layer, "layers.1.mlp.gate_proj")
     assert isinstance(result, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_parallel_lm_head_returns_unquantized() -> (
+    None
+):
+    """ParallelLMHead with bits >= 16 returns UnquantizedLinearMethod via the
+    early-exit path (parallel_lm_head is explicitly handled alongside LinearBase).
+    """
+    config = make_config(extra_config={"lm_head": {"bits": 16}})
+    layer = object.__new__(ParallelLMHead)
+
+    method = config.get_quant_method(layer, "lm_head")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
+    """Regression test: non-Linear/non-MoE layers with bits >= 16 must return
+    None from the early-exit path instead of being misclassified as linear.
+    """
+    config = make_config(extra_config={"layer": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "layer")
+
+    assert method is None
+
+
+@pytest.mark.parametrize(
+    "layer_factory",
+    [
+        pytest.param(
+            lambda: object.__new__(LinearBase),
+            id="LinearBase",
+        ),
+        pytest.param(
+            lambda: object.__new__(ParallelLMHead),
+            id="ParallelLMHead",
+        ),
+    ],
+)
+def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
+    layer_factory,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for both
+    LinearBase and ParallelLMHead layers."""
+    config = make_config(extra_config={"model.layer": {"bits": 16}})
+    layer = layer_factory()
+
+    method = config.get_quant_method(layer, "layer")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
+    monkeypatch,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for
+    RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
+
+    class DummyUnquantizedFusedMoEMethod:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.inc.UnquantizedFusedMoEMethod",
+        DummyUnquantizedFusedMoEMethod,
+    )
+
+    config = make_config(extra_config={"model.moe_layer": {"bits": 16}})
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = None
+
+    method = config.get_quant_method(layer, "moe_layer")
+
+    assert isinstance(method, DummyUnquantizedFusedMoEMethod)
+    assert method.moe_config is None
+
+
+def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
+    """``model.``-prefixed extra_config entries return None for unhandled
+    layer types (non-Linear, non-MoE)."""
+    config = make_config(extra_config={"model.unknown": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "unknown")
+
+    assert method is None
 
 
 def test_inc_config_parser_regex_match() -> None:
@@ -577,6 +664,96 @@ def test_inc_resolve_scheme_selects_wna16() -> None:
     scheme = resolve_scheme(layer_config)
 
     assert isinstance(scheme, INCWna16Scheme)
+
+
+@pytest.mark.parametrize("bits", [2, 3])
+@pytest.mark.parametrize(
+    "packing_format", ["auto_round:auto_gptq", "auto_round:auto_awq"]
+)
+def test_wna16_cuda_low_bit_linear_routes_to_humming(
+    monkeypatch, bits, packing_format
+) -> None:
+    expected_method = object()
+    captured = {}
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_linear_method",
+        lambda layer_config: captured.update({"layer_config": layer_config})
+        or expected_method,
+    )
+
+    layer_config = make_layer_config(bits=bits, packing_format=packing_format)
+    method = INCWna16Scheme().get_linear_method(
+        make_config(), object(), "model.layers.0.mlp.down_proj", layer_config
+    )
+
+    assert method is expected_method
+    assert captured["layer_config"] is layer_config
+
+
+@pytest.mark.parametrize("bits", [2, 3])
+def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
+    expected_method = object()
+    captured = {}
+
+    class DummyMoeConfig:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_moe_method",
+        lambda layer, layer_config: captured.update(
+            {"layer": layer, "layer_config": layer_config}
+        )
+        or expected_method,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+    layer_config = make_layer_config(bits=bits)
+    method = INCWna16Scheme().get_moe_method(
+        make_config(), layer, "model.layers.0.mlp", layer_config
+    )
+
+    assert method is expected_method
+    assert captured["layer"] is layer
+    assert captured["layer_config"] is layer_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test only exercises the CUDA Marlin path.",
+)
+@pytest.mark.parametrize("bits", [4, 8])
+def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
+    """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
+    model can mix high-bit Marlin and low-bit humming layers."""
+    called = {"humming": False}
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_linear_method",
+        lambda layer_config: called.update({"humming": True}),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "model.layers.0.mlp.down_proj",
+        make_layer_config(bits=bits),
+    )
+
+    assert called["humming"] is False
+    assert isinstance(method, INCLinearMethod)
 
 
 def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:

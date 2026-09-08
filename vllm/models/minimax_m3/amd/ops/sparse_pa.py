@@ -32,14 +32,13 @@ def _is_fp8_kv_cache_tensor(kv_cache: torch.Tensor) -> bool:
 
 
 @triton.jit
-def _write_sparse_block_table_row(
-    topk_row,  # [topk] int32, selected logical block ids for this query
+def _write_sparse_block_table_row_from_values(
+    blk,  # [BLOCK_SIZE_T] int32 selected logical block ids for this query
     bt_row,  # [max_blocks] int32, this request's logical page table
     sbt_row,  # [topk * PAGES_PER_BLOCK] int32, physical 16-page table
     ctx_ptr,  # int32, this query's attended context length
     abs_pos,  # absolute position of this query token, may be negative
     max_topk,
-    stride_topk_k,
     SPARSE_BLOCK_SIZE_C: tl.constexpr,
     PAGES_PER_BLOCK: tl.constexpr,
     BLOCK_PAGE_STRIDE: tl.constexpr,
@@ -56,8 +55,7 @@ def _write_sparse_block_table_row(
     self_blk = abs_pos // SPARSE_BLOCK_SIZE_C
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
-    blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
-    valid = (causal_len > 0) & (blk >= 0) & (blk <= self_blk)
+    valid = (off_t < max_topk) & (causal_len > 0) & (blk >= 0) & (blk <= self_blk)
     is_tail = valid & (blk == self_blk)
     is_full = valid & (blk < self_blk)
 
@@ -87,6 +85,36 @@ def _write_sparse_block_table_row(
     ctx = n_full * SPARSE_BLOCK_SIZE_C + tl.where(has_tail, tail_tokens, 0)
     ctx = tl.where(has_tail, ctx, tl.minimum(n_valid * SPARSE_BLOCK_SIZE_C, causal_len))
     tl.store(ctx_ptr, ctx)
+
+
+@triton.jit
+def _write_sparse_block_table_row(
+    topk_row,  # [topk] int32, selected logical block ids for this query
+    bt_row,  # [max_blocks] int32, this request's logical page table
+    sbt_row,  # [topk * PAGES_PER_BLOCK] int32, physical 16-page table
+    ctx_ptr,  # int32, this query's attended context length
+    abs_pos,  # absolute position of this query token, may be negative
+    max_topk,
+    stride_topk_k,
+    SPARSE_BLOCK_SIZE_C: tl.constexpr,
+    PAGES_PER_BLOCK: tl.constexpr,
+    BLOCK_PAGE_STRIDE: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+):
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
+    _write_sparse_block_table_row_from_values(
+        blk,
+        bt_row,
+        sbt_row,
+        ctx_ptr,
+        abs_pos,
+        max_topk,
+        SPARSE_BLOCK_SIZE_C,
+        PAGES_PER_BLOCK,
+        BLOCK_PAGE_STRIDE,
+        BLOCK_SIZE_T,
+    )
 
 
 @triton.jit
@@ -169,7 +197,7 @@ def _build_sparse_block_table_prefill_kernel(
     )
 
 
-def _alloc_sparse_block_table(
+def minimax_m3_alloc_sparse_block_table(
     topk_idx: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert topk_idx.shape[0] == 1, "AITER sparse PA requires num_kv_heads == 1"
@@ -190,7 +218,7 @@ def minimax_m3_build_sparse_block_table_prefill(
     block_page_stride: int = PAGES_PER_SPARSE_BLOCK,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build one page-16 sparse block table row per prefill query token."""
-    sparse_bt, sparse_ctx = _alloc_sparse_block_table(topk_idx)
+    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(topk_idx)
     topk = topk_idx.shape[-1]
     _build_sparse_block_table_prefill_kernel[(topk_idx.shape[1],)](
         topk_idx,
@@ -227,7 +255,7 @@ def minimax_m3_build_sparse_block_table_decode(
         "MiniMax-M3 decode top-k rows must equal batch * decode_query_len: "
         f"{total_q} != {expected_q}"
     )
-    sparse_bt, sparse_ctx = _alloc_sparse_block_table(topk_idx)
+    sparse_bt, sparse_ctx = minimax_m3_alloc_sparse_block_table(topk_idx)
     topk = topk_idx.shape[-1]
     _build_sparse_block_table_kernel[(total_q,)](
         topk_idx,
@@ -330,7 +358,9 @@ def _sides_are_packed(k_cache: torch.Tensor, v_cache: torch.Tensor) -> bool:
     return v_cache.shape[0] != k_cache.shape[0]
 
 
-def minimax_m3_block_page_stride(k_cache: torch.Tensor, v_cache: torch.Tensor) -> int:
+def minimax_m3_sparse_block_page_stride(
+    k_cache: torch.Tensor, v_cache: torch.Tensor
+) -> int:
     """How many page ids one sparse block spans.
 
     Each side owns ``PAGES_PER_SPARSE_BLOCK`` pages. When the sides are dense
@@ -338,6 +368,9 @@ def minimax_m3_block_page_stride(k_cache: torch.Tensor, v_cache: torch.Tensor) -
     both sides' pages and V is reached from the same page id at a fixed offset.
     """
     return PAGES_PER_SPARSE_BLOCK * (2 if _sides_are_packed(k_cache, v_cache) else 1)
+
+
+minimax_m3_block_page_stride = minimax_m3_sparse_block_page_stride
 
 
 def _gluon_scale_arg(
@@ -386,26 +419,34 @@ def minimax_m3_sparse_attn_decode_aiter(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
     decode_query_len: int = 1,
-    sparse_bt: torch.Tensor | None = None,
-    sparse_ctx: torch.Tensor | None = None,
+    sparse_block_table: torch.Tensor | None = None,
+    sparse_context_lens: torch.Tensor | None = None,
 ) -> None:
     # An indexer whose top-k already emitted the table hands it in; the winners
     # were in that kernel's LDS, so resolving them there costs a wave and this
     # pass is skipped entirely.
-    if sparse_bt is None or sparse_ctx is None:
-        sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
-            topk_idx,
-            block_table,
-            seq_lens,
-            decode_query_len,
-            minimax_m3_block_page_stride(k_cache, v_cache),
+    if (sparse_block_table is None) != (sparse_context_lens is None):
+        raise ValueError(
+            "MiniMax-M3 prepared sparse block table and context lengths "
+            "must be provided together"
         )
+    if sparse_block_table is None:
+        sparse_block_table, sparse_context_lens = (
+            minimax_m3_build_sparse_block_table_decode(
+                topk_idx,
+                block_table,
+                seq_lens,
+                decode_query_len,
+                minimax_m3_sparse_block_page_stride(k_cache, v_cache),
+            )
+        )
+    assert sparse_context_lens is not None
     _run_gluon_decode(
         q,
         k_cache,
         v_cache,
-        sparse_bt,
-        sparse_ctx,
+        sparse_block_table,
+        sparse_context_lens,
         num_kv_heads,
         sm_scale,
         output,
@@ -437,7 +478,7 @@ def minimax_m3_sparse_attn_prefill_aiter(
             block_table,
             query_req_id,
             query_abs_pos,
-            minimax_m3_block_page_stride(k_cache, v_cache),
+            minimax_m3_sparse_block_page_stride(k_cache, v_cache),
         )
     _run_gluon_decode(
         q,

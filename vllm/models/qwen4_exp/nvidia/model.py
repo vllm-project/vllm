@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -141,9 +140,9 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
-# The checkpoint keeps down and injection projections separate; runtime packs
-# them into adjacent logical shards of one MergedColumnParallelLinear.
-_HC_WEIGHTS_MAPPER = WeightsMapper(
+# The checkpoint stores these projections separately; runtime packs each group
+# into adjacent logical shards of a MergedColumnParallelLinear.
+_EXTRA_WEIGHTS_MAPPER = WeightsMapper(
     orig_to_new_stacked={
         "hyper_connection.input_mix_weight_down.weight": (
             "hyper_connection.input_mix_weight_down_block_inject.weight",
@@ -153,6 +152,8 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
             "hyper_connection.input_mix_weight_down_block_inject.weight",
             1,
         ),
+        "ple.key_proj": ("ple.kv_proj", 0),
+        "ple.value_proj": ("ple.kv_proj", 1),
     }
 )
 
@@ -282,11 +283,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if prev_block_output is None:
+            assert prev_injection is None
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
             # PLE adds directly to the multi-stream state, so pending HC state
             # must be materialized before the addition.
-            if prev_block_output is not None and prev_injection is not None:
+            if prev_block_output is not None:
                 hidden_states = attn_hc.combine(
                     hidden_states, prev_block_output, prev_injection
                 )
@@ -302,7 +305,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
-        if prev_block_output is not None and prev_injection is not None:
+        if prev_block_output is not None:
             hidden_states, block_input, injection = attn_hc.combine_and_mix(
                 hidden_states, prev_block_output, prev_injection
             )
@@ -377,19 +380,8 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "query_start_loc": 0,
-        "ngram_context": 0,
-        "deepstack_input_embeds": 0,
-    }
-)
 class Qwen4ExpModel(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -612,6 +604,7 @@ class Qwen4ExpForCausalLM(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "input_mix_weight_down_block_inject": [
@@ -848,11 +841,12 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
             "block_inject_weight",
             "_input_mix_padding",
-        ]
+        ],
     }
 
     @staticmethod

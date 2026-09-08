@@ -756,9 +756,16 @@ class MultiModalDataParser:
             np.ndarray
             | MediaWithBytes[np.ndarray]
             | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+            | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
+            # Allow None video items, valid requests can contain empty URLs
+            # if they use multi-modal uuids.
+            if data_item is None:
+                new_videos.append(None)
+                metadata_lst.append(None)
+                continue
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
                 if metadata is None:

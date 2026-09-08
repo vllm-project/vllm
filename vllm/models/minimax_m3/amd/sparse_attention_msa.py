@@ -26,12 +26,13 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         output: torch.Tensor,
         *,
         query_fp8: torch.Tensor | None = None,
+        decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         from vllm.models.minimax_m3.amd.ops.sparse_pa import (
             PAGES_PER_SPARSE_BLOCK,
-            minimax_m3_block_page_stride,
             minimax_m3_sparse_attn_decode_aiter,
             minimax_m3_sparse_attn_prefill_aiter,
+            minimax_m3_sparse_block_page_stride,
         )
 
         attn_metadata = get_forward_context().attn_metadata
@@ -68,7 +69,7 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
             # the packing off the layout rather than off these tensors. The two
             # only disagree if the resolved layout gives each side its own
             # plane, and a silent disagreement reads unrelated pages.
-            stride = minimax_m3_block_page_stride(k_cache, v_cache)
+            stride = minimax_m3_sparse_block_page_stride(k_cache, v_cache)
             expected = PAGES_PER_SPARSE_BLOCK * PAGE16_SIDES_PER_BLOCK
             if stride != expected:
                 raise RuntimeError(
@@ -81,6 +82,13 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
+            if sparse_bt_buf is not None and sparse_ctx_buf is not None:
+                sparse_block_table = sparse_bt_buf[: nd * kvh]
+                sparse_context_lens = sparse_ctx_buf[: nd * kvh]
+            elif decode_sparse_table is not None:
+                sparse_block_table, sparse_context_lens = decode_sparse_table
+            else:
+                sparse_block_table = sparse_context_lens = None
             minimax_m3_sparse_attn_decode_aiter(
                 q[:nd],
                 k_cache,
@@ -94,10 +102,8 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 k_scale=k_scale,
                 v_scale=v_scale,
                 decode_query_len=d.decode_query_len,
-                sparse_bt=None if sparse_bt_buf is None else sparse_bt_buf[: nd * kvh],
-                sparse_ctx=(
-                    None if sparse_ctx_buf is None else sparse_ctx_buf[: nd * kvh]
-                ),
+                sparse_block_table=sparse_block_table,
+                sparse_context_lens=sparse_context_lens,
             )
 
         if main_md.num_prefills > 0:
