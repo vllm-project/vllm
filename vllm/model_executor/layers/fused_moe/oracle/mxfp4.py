@@ -472,12 +472,7 @@ def _filter_by_activation(
             if b in _FLEXIBLE_ACTIVATION_BACKENDS
             or _backend_activation_key(b) == requested_activation_key
         ]
-    bf16 = [
-        b
-        for b in backends
-        if b in _FLEXIBLE_ACTIVATION_BACKENDS
-        or _backend_activation_key(b) is None
-    ]
+    bf16 = [b for b in backends if _backend_activation_key(b) is None]
     return bf16 if bf16 else backends
 
 
