@@ -12,9 +12,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionBackend,
+    Mamba2AttentionMetadataBuilder,
     build_exact_replay_metadata,
+    exact_replay_decode_positions,
 )
 
 SHAPE_KWARGS = dict(
@@ -69,6 +72,24 @@ def _config(**cache_overrides) -> VllmConfig:
 def test_check_accepts_the_supported_configuration():
     assert Mamba2AttentionBackend.supports_batch_invariance()
     Mamba2AttentionBackend.check_batch_invariant_config(_config())
+
+
+def test_decode_keeps_full_cudagraph_support(monkeypatch):
+    """Decode rows run fixed-shape kernels, so decode-only graphs stay allowed."""
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    support = Mamba2AttentionMetadataBuilder.get_cudagraph_support(_config(), None)
+    assert support == AttentionCGSupport.UNIFORM_BATCH
+
+
+def test_decode_positions_ignore_cudagraph_padding_rows():
+    # sequence lengths after this step's token: mid chunk, completing a chunk,
+    # just past a boundary, and two padding rows (length 0) as the runner pads
+    seq_lens = torch.tensor([301, 512, 513, 0, 0], dtype=torch.int32)
+    pos = exact_replay_decode_positions(seq_lens, 256)
+    assert pos.tolist() == [44, 255, 0, 0, 0]
+    out = torch.full((5,), -1, dtype=torch.int32)
+    assert exact_replay_decode_positions(seq_lens, 256, out=out) is out
+    assert out.tolist() == [44, 255, 0, 0, 0]
 
 
 @pytest.mark.parametrize(

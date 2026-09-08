@@ -768,10 +768,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if self.exact_replay:
                 replay_bufs = ExactReplayBuffers(*self.kv_cache[2:5])
                 exact_replay_p = attn_metadata.exact_replay_p
-                exact_replay_d = attn_metadata.exact_replay_d
+                exact_replay_pos_d = attn_metadata.exact_replay_pos_d
             else:
                 replay_bufs = None
-                exact_replay_p = exact_replay_d = None
+                exact_replay_p = exact_replay_pos_d = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -1128,21 +1128,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
 
             if self.exact_replay:
-                assert exact_replay_d is not None
+                assert exact_replay_pos_d is not None
                 assert preallocated_ssm_out_d is not None
                 assert replay_bufs is not None
+                # One token per row without speculative decoding: compute only
+                # that row from the buffered chunk instead of re-running the
+                # scan over the partial chunk. Rows may include CUDA graph
+                # padding, which points at the null block.
+                assert num_decode_tokens == num_decodes
                 n_groups = self.n_groups // self.tp_size
                 slots_d = state_indices_tensor_d_input
                 if slots_d.dim() == 2:
                     slots_d = slots_d[:, 0]
-                # One token per row: compute only that row from the buffered
-                # chunk instead of re-running the scan over the partial chunk.
-                replay_fn = (
-                    exact_replay_emit
-                    if num_decode_tokens == num_decodes
-                    else exact_replay_ssd
-                )
-                replay_fn(
+                exact_replay_emit(
                     hidden_states_d.view(
                         -1, self.num_heads // self.tp_size, self.head_dim
                     ),
@@ -1157,7 +1155,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ),
                     ssm_state=ssm_state,
                     slots=slots_d,
-                    meta=exact_replay_d,
+                    pos=exact_replay_pos_d,
                     chunk_size=chunk_size,
                     buffers=replay_bufs,
                 )

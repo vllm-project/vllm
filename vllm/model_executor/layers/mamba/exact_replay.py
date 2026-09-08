@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
 from vllm.model_executor.layers.mamba.ops.ssd_emit import (
     _bmm_chunk_workspace_range_fwd,
     _chunk_scan_workspace_range_fwd,
+    _fold_chunk_fwd,
     _workspace_chunk_cumsum_fwd,
 )
 
@@ -160,41 +161,40 @@ def exact_replay_emit(
     out: torch.Tensor,
     ssm_state: torch.Tensor,
     slots: torch.Tensor,
-    meta,
+    pos: torch.Tensor,
     chunk_size: int,
     buffers: ExactReplayBuffers,
 ) -> None:
-    """One decode step, one token per sequence, through the row-gated kernels.
+    """One decode step, one token per row, through the row-gated kernels.
 
-    Instead of re-running the chunked scan over each sequence's partial chunk,
-    the step writes its token into the buffers and computes only that token's
+    Instead of re-running the chunked scan over each row's partial chunk, the
+    kernels write the token into the buffers and compute only that token's
     output row from the buffered inputs and the boundary state in
     ``ssm_state`` (zero while the sequence is still in its first chunk, see
-    ``zero_state_rows``). Sequences that complete a chunk fold it into the
-    boundary state with the single-shot kernels, so the bits match a
-    single-shot prefill exactly.
+    ``ExactReplayMetadata.zero_state_rows``). Rows whose token completes a
+    chunk fold it into the boundary state with the same arithmetic as the
+    prefill kernels, so the bits match a single-shot prefill exactly.
+
+    Every kernel runs over all rows with shapes that depend only on the batch
+    size and skips rows with a negative slot, so the step can be captured in
+    a CUDA graph and padded rows are harmless.
 
     Args:
-        x, dt, B, C: ``(num_seqs, ...)`` inputs of this step's tokens.
+        x, dt, B, C: ``(num_rows, ...)`` inputs of this step's tokens.
         A, D, dt_bias: per-head parameters as in :func:`exact_replay_ssd`.
-        out: ``(num_seqs, nheads, head_dim)`` preallocated output.
+        out: ``(num_rows, nheads, head_dim)`` preallocated output.
         ssm_state: the fp32 SSM cache.
-        slots: ``(num_seqs,)`` state slot of each sequence.
-        meta: ``ExactReplayMetadata`` for these rows, all with one token.
+        slots: ``(num_rows,)`` int32 state slot of each row.
+        pos: ``(num_rows,)`` int32 position of each row's token inside its
+            partial chunk, i.e. its computed token count modulo ``chunk_size``.
         chunk_size: the model's SSD chunk size.
         buffers: the partial-chunk input buffers.
     """
-    num_rows, nheads, head_dim = x.shape
-    ngroups, dstate = B.shape[1], B.shape[2]
+    num_rows, nheads, _ = x.shape
+    ngroups = B.shape[1]
     device = x.device
-    slots64 = slots.to(torch.int64)
-    slots32 = slots.to(torch.int32)
-    pos32 = meta.row_pos
-    pos64 = pos32.to(torch.int64)
-
-    buffers.x[slots64, pos64] = x
-    buffers.dt[slots64, pos64] = dt
-    buffers.B[slots64, pos64] = B
+    assert slots.dtype == torch.int32 and pos.dtype == torch.int32
+    assert slots.shape == (num_rows,) and pos.shape == (num_rows,)
 
     rows = torch.arange(num_rows, dtype=torch.int32, device=device)
     dt_out = torch.empty(
@@ -206,14 +206,15 @@ def exact_replay_emit(
         buffers.dt,
         A,
         chunk_size,
-        slots32,
-        pos32,
+        slots,
+        pos,
         dt_bias,
+        current_dt=dt,
         dt_out=dt_out,
         dA_cumsum=dA_cumsum,
     )
     _bmm_chunk_workspace_range_fwd(
-        C, buffers.B, chunk_size, slots32, pos32, rows, pos32, out=cb
+        C, buffers.B, chunk_size, slots, pos, rows, pos, out=cb, current_b=B
     )
     _chunk_scan_workspace_range_fwd(
         cb,
@@ -222,48 +223,14 @@ def exact_replay_emit(
         dA_cumsum,
         C,
         ssm_state,
-        slots32,
-        slots32,
-        pos32,
+        slots,
+        slots,
+        pos,
         rows,
-        pos32,
+        pos,
         rows,
         out,
         D=D,
+        current_x=x,
     )
-
-    if meta.boundary_rows.numel() == 0:
-        return
-    # Fold the completed chunks into their boundary states with the same
-    # kernels a single-shot prefill uses; C does not enter the state.
-    fold_slots = slots64[meta.boundary_rows]
-    n_fold = fold_slots.numel()
-    x_f = buffers.x[fold_slots].reshape(n_fold * chunk_size, nheads, head_dim)
-    dt_f = buffers.dt[fold_slots].reshape(n_fold * chunk_size, nheads)
-    B_f = buffers.B[fold_slots].reshape(n_fold * chunk_size, ngroups, dstate)
-    cu = torch.arange(
-        0, (n_fold + 1) * chunk_size, chunk_size, dtype=torch.int32, device=device
-    )
-    seq = torch.arange(n_fold, dtype=torch.int32, device=device)
-    states = mamba_chunk_scan_combined_varlen(
-        x_f,
-        dt_f,
-        A,
-        B_f,
-        torch.zeros_like(B_f),
-        chunk_size=chunk_size,
-        D=D,
-        z=None,
-        dt_bias=dt_bias,
-        seq_idx=seq,
-        cu_seqlens=cu,
-        cu_chunk_seqlens=cu,
-        last_chunk_indices=seq,
-        initial_states=ssm_state[fold_slots],
-        return_intermediate_states=False,
-        dt_softplus=True,
-        dt_limit=(0.0, float("inf")),
-        out=torch.empty_like(x_f),
-        state_dtype=ssm_state.dtype,
-    )
-    ssm_state[fold_slots] = states
+    _fold_chunk_fwd(buffers.x, buffers.B, dt_out, dA_cumsum, ssm_state, slots, pos)
