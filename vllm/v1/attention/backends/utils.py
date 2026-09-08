@@ -2,26 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import math
-from collections.abc import Callable
-from dataclasses import dataclass, field, fields, make_dataclass
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, fields
 from typing import (
     TYPE_CHECKING,
     Any,
-    Literal,
     Protocol,
     TypeVar,
     cast,
-    get_args,
 )
 
 import numpy as np
 import torch
 from typing_extensions import runtime_checkable
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import _layout_from_name
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -44,8 +45,6 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
-KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
@@ -360,10 +359,9 @@ def create_composite_attention_backend(
             return True
 
         @classmethod
-        def get_required_kv_cache_layout(cls):
-            return (
-                general_backend.get_required_kv_cache_layout()
-                or decode_backend.get_required_kv_cache_layout()
+        def supported_kv_cache_layouts(cls):
+            return tuple(
+                get_supported_kv_cache_layouts((general_backend, decode_backend))
             )
 
         @classmethod
@@ -384,6 +382,14 @@ def create_composite_attention_backend(
         f"Composite[{general_backend.__name__},{decode_backend.__name__}]"
     )
     return CompositeAttentionBackend
+
+
+_LN_2 = math.log(2.0)
+
+
+def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
+    """Convert a base-2 log-sum-exp tensor to natural-log units."""
+    return lse * _LN_2
 
 
 def compute_mm_prefix_range_tensor(
@@ -486,44 +492,159 @@ def fill_mm_prefix_query_ranges(
     return num_actual_tokens
 
 
-def is_valid_kv_cache_layout(value: str) -> bool:
-    return value in get_args(KVCacheLayoutType)
+_FLASHINFER_LAYOUT_NAMES = {
+    "LBNHC": "NHD",
+    "LBHNC": "HND",
+    "BLHNC": "HND",
+    "BLNHC": "NHD",
+    "BHLNC": "HND",
+}
 
 
-@functools.lru_cache
-def get_kv_cache_layout():
-    # Format specified by the code.
-    global _KV_CACHE_LAYOUT_OVERRIDE
+def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:
+    """Return the layout name in FlashInfer's convention (NHD/HND)."""
+    assert layout.name in _FLASHINFER_LAYOUT_NAMES, (
+        f"KV cache layout {layout.name} has no FlashInfer equivalent; FlashInfer "
+        "rejects it in supported_kv_cache_layouts"
+    )
+    return _FLASHINFER_LAYOUT_NAMES[layout.name]
 
-    cache_layout: Literal["NHD", "HND"] | None = None
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.debug_once(
-            "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
-            "Setting KV cache layout to %s.",
-            cache_layout,
+
+# Preference order when no backend declares a supported set; LBNHC (NHD)
+# first to match main's default.
+_DEFAULT_LAYOUT_PREFERENCE = (
+    KVCacheLayout.LBNHC,
+    KVCacheLayout.LBHNC,
+    KVCacheLayout.BLNHC,
+    KVCacheLayout.BLHNC,
+    KVCacheLayout.BHLNC,
+    KVCacheLayout.LHBNC,
+)
+
+
+def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
+    return [layout.name for layout in layouts]
+
+
+def get_supported_kv_cache_layouts(
+    backends: Iterable[type[AttentionBackend]],
+) -> list[KVCacheLayout]:
+    """Layouts every one of the worker's backends supports, most preferred first.
+
+    Every backend declares the layouts its kernels support, most preferred first
+    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    nothing declares follow the default preference. Identical declarations keep
+    their order; otherwise the layout the most backends put first wins, ties
+    keeping the enum order. An empty intersection is a hard error.
+    """
+    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
+        layouts
+        for backend in backends
+        if (layouts := backend.supported_kv_cache_layouts()) is not None
+    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+
+    first = supported_layouts_lists[0]
+    if all(layouts == first for layouts in supported_layouts_lists[1:]):
+        return list(first)
+
+    priorities: dict[KVCacheLayout, int] = defaultdict(int)
+    for preferred_layout, *_ in supported_layouts_lists:
+        priorities[preferred_layout] += 1
+    supported_layouts = set.intersection(*map(set, supported_layouts_lists))
+    candidates = sorted(
+        (layout for layout in KVCacheLayout if layout in supported_layouts),
+        key=lambda layout: priorities[layout],
+        reverse=True,
+    )
+    if not candidates:
+        raise ValueError(
+            "No KV cache layout satisfies every supported set: "
+            f"{list(map(_layout_names, supported_layouts_lists))}."
         )
-        return cache_layout
+    return candidates
 
-    # Format specified by the user.
-    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
-    # When neither the user nor the override specified a layout, get default
-    if cache_layout is None:
-        cache_layout = get_kv_connector_cache_layout()
+
+def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
+    """Adopt a layout resolved elsewhere (the engine core) in this process."""
+    layout = _layout_from_name(layout_name)
+    existing = cache_config.kv_cache_layout
+    if existing is not None and existing != layout.name:
+        raise ValueError(
+            f"KV cache layout is already resolved to {existing}; "
+            f"cannot change it to {layout.name}."
+        )
+    cache_config.kv_cache_layout = layout.name
+
+
+def resolve_kv_cache_layout(
+    vllm_config: VllmConfig,
+    supported_layouts: list[list[str]],
+    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+) -> KVCacheLayout:
+    """Resolve one KV cache layout for the whole model.
+
+    Runs once in the engine core. Every worker reports the layouts its backends
+    support, most preferred first (``get_supported_kv_cache_layouts``); all
+    ranks run the same backends, so their lists must agree. Specs mixing HNC
+    shapes narrow the candidates to block-compact layouts. An explicit
+    ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
+    with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
+    connector's preference is used when compatible and dropped with a warning
+    otherwise. A layout already present on ``cache_config`` wins outright, and
+    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
+    reaches workers through the ``set_kv_cache_layout`` RPC and
+    ``KVCacheConfig.kv_cache_layout``.
+    """
+    cache_config = vllm_config.cache_config
+    if cache_config.kv_cache_layout is not None:
+        return cache_config.get_resolved_kv_cache_layout()
+
+    assert supported_layouts and all(supported_layouts), (
+        "No worker reported supported KV cache layouts."
+    )
+    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
+        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
+    )
+    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
+
+    # A block-compact layout means the block is densely packed in memory, so any mix of
+    # specs can re-interpret HNC with different sizes as long as the total number of
+    # bytes is the same. If not block-compact, each spec must agree on HNC to alias
+    # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    hnc_shapes = {
+        (spec.num_heads, spec.num_states, spec.page_size_bytes)
+        for spec in kv_cache_specs or ()
+    }
+    if len(hnc_shapes) > 1:
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "Specs with mixed HNC shapes need a block-compact layout, but "
+                f"none is in every supported set: {supported_layouts}."
+            )
+
+    if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
+        layout = _layout_from_name(requested)
+        if layout not in candidates:
+            raise ValueError(
+                f"VLLM_KV_CACHE_LAYOUT={requested} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}."
+            )
+    elif (connector := get_kv_connector_cache_layout(vllm_config)) is not None:
+        layout = _layout_from_name(connector)
+        if layout not in candidates:
+            logger.warning_once(
+                f"KV connector cache layout {connector} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}. "
+                f"Using {candidates[0].name} instead."
+            )
+            layout = candidates[0]
     else:
-        assert is_valid_kv_cache_layout(cache_layout)
-        logger.info_once(
-            "`VLLM_KV_CACHE_LAYOUT` environment variable "
-            "detected. Setting KV cache layout to %s.",
-            cache_layout,
-        )
-    return cache_layout
+        layout = candidates[0]
 
-
-def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
-    global _KV_CACHE_LAYOUT_OVERRIDE
-    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    get_kv_cache_layout.cache_clear()
+    logger.info_once("Using %s KV cache layout.", layout.name)
+    cache_config.kv_cache_layout = layout.name
+    return layout
 
 
 @dataclass
@@ -595,7 +716,10 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."
@@ -691,7 +815,9 @@ def make_local_attention_virtual_batches(
     block_size: int = 0,
 ) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
-    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    with gpu_sync_allowed():
+        # TODO see https://github.com/vllm-project/vllm/pull/31852
+        seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 
@@ -883,8 +1009,14 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    # `num_decode_tokens` is a histogram over `logits_indices`, so its total is
+    # just how many there were -- already known as a Python int.
+    total_num_decode_tokens = num_logits_indices
+
+    # Largest per-request logits count.
+    decode_max_query_len = common_attn_metadata.max_logits_per_req
+    assert decode_max_query_len is not None
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
@@ -1059,6 +1191,8 @@ def kv_layouts_compatible(
     head_size: int,
     block_size: int | None,
     kv_cache_dtype: str | None,
+    head_size_v: int | None = None,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> bool:
     """Return whether two backends can safely share one physical KV cache."""
     if general_backend is decode_backend:
@@ -1073,13 +1207,9 @@ def kv_layouts_compatible(
     ):
         return False
 
-    general_layout = general_backend.get_required_kv_cache_layout()
-    decode_layout = decode_backend.get_required_kv_cache_layout()
-    if (
-        general_layout is not None
-        and decode_layout is not None
-        and general_layout != decode_layout
-    ):
+    try:
+        get_supported_kv_cache_layouts((general_backend, decode_backend))
+    except ValueError:
         return False
 
     if not (
@@ -1091,25 +1221,17 @@ def kv_layouts_compatible(
     if not _intersect_kernel_block_sizes(general_backend, decode_backend):
         return False
 
-    if (
-        general_backend.indexes_kv_by_block_stride()
-        != decode_backend.indexes_kv_by_block_stride()
-    ):
-        return False
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
-    shape_args = (1024, block_size or 16, num_kv_heads, head_size)
-    general_shape = general_backend.get_kv_cache_shape(
-        *shape_args, cache_dtype_str=kv_cache_dtype or "auto"
+    spec = FullAttentionSpec(
+        block_size=block_size or 16,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        head_size_v=head_size_v if head_size_v is not None else head_size,
+        dtype=dtype,
+        kv_quant_mode=get_kv_quant_mode(kv_cache_dtype or "auto"),
     )
-    decode_shape = decode_backend.get_kv_cache_shape(
-        *shape_args, cache_dtype_str=kv_cache_dtype or "auto"
-    )
-    if general_shape != decode_shape:
-        return False
-
-    return general_backend.get_kv_cache_stride_order(
-        include_num_layers_dimension=False
-    ) == decode_backend.get_kv_cache_stride_order(include_num_layers_dimension=False)
+    return general_backend.customize_spec(spec) == decode_backend.customize_spec(spec)
 
 
 def split_prefill_chunks(
@@ -1246,19 +1368,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     assert attn_output.dim() == 4, f"attn_output must be 4D, got {attn_output.dim()}D"
     total_tokens = attn_output.shape[0] * attn_output.shape[1]
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
-
-
-def subclass_attention_metadata(
-    name_prefix: str,
-    metadata_cls: Any,
-    fields: list[tuple[str, Any, Any]],
-) -> Any:
-    """
-    Return a new subclass of `metadata_cls` with additional fields
-    """
-    name: str = name_prefix + metadata_cls.__name__  # type: ignore
-    Wrapped = make_dataclass(name, fields, bases=(metadata_cls,))
-    return Wrapped
 
 
 @runtime_checkable

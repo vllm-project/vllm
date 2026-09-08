@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -31,9 +31,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     create_composite_attention_backend,
     find_attention_impl_variant,
-    get_kv_cache_layout,
+    get_supported_kv_cache_layouts,
     kv_layouts_compatible,
-    set_kv_cache_layout,
+    resolve_kv_cache_layout,
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, init_attn_backend
@@ -159,35 +160,23 @@ class _Backend(AttentionBackend):
     def get_supported_kernel_block_sizes(cls):
         return cls.kernel_block_sizes
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"
-    ):
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        return (1, 0, 2, 3, 4) if include_num_layers_dimension else (0, 1, 2, 3)
-
 
 class _DifferentCrossLayerPackingBackend(_Backend):
-    @staticmethod
-    def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        return (1, 2, 0, 3, 4) if include_num_layers_dimension else (0, 1, 2, 3)
+    @classmethod
+    def supported_kv_cache_layouts(cls):
+        return (KVCacheLayout.BLHNC,)
 
 
 class _DifferentLayerLayoutBackend(_Backend):
-    @staticmethod
-    def get_kv_cache_stride_order(include_num_layers_dimension=False):
-        return (1, 0, 3, 2, 4) if include_num_layers_dimension else (0, 2, 1, 3)
+    @classmethod
+    def supported_kv_cache_layouts(cls):
+        return (KVCacheLayout.LBHNC,)
 
 
 class _DifferentShapeBackend(_Backend):
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"
-    ):
-        return (num_blocks, num_kv_heads, block_size, head_size)
+    @classmethod
+    def customize_spec(cls, spec):
+        return replace(spec, state_content_bytes=spec.head_size)
 
 
 class _Fixed16Backend(_Backend):
@@ -204,14 +193,14 @@ class _WritesInForwardBackend(_Backend):
 
 class _NHDBackend(_Backend):
     @classmethod
-    def get_required_kv_cache_layout(cls):
-        return "NHD"
+    def supported_kv_cache_layouts(cls):
+        return (KVCacheLayout.LBNHC,)
 
 
 class _HNDBackend(_Backend):
     @classmethod
-    def get_required_kv_cache_layout(cls):
-        return "HND"
+    def supported_kv_cache_layouts(cls):
+        return (KVCacheLayout.LBHNC,)
 
 
 class _FlexibleGeneralBackend(_Backend):
@@ -252,28 +241,28 @@ def test_flexible_general_backend_adopts_decode_required_layout():
     """A flexible general backend must adopt a compatible decode requirement."""
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
 
-    set_kv_cache_layout("NHD")
-    try:
-        with (
-            set_current_vllm_config(config),
-            patch(
-                "vllm.model_executor.layers.attention.attention.get_attn_backend",
-                return_value=_HNDDecodeBackend,
-            ),
-        ):
-            layer = Attention(
-                num_heads=8,
-                head_size=128,
-                scale=0.1,
-                attn_backend=_FlexibleGeneralBackend,
-            )
+    with (
+        set_current_vllm_config(config),
+        patch(
+            "vllm.model_executor.layers.attention.attention.get_attn_backend",
+            return_value=_HNDDecodeBackend,
+        ),
+    ):
+        layer = Attention(
+            num_heads=8,
+            head_size=128,
+            scale=0.1,
+            attn_backend=_FlexibleGeneralBackend,
+        )
 
-        backend = layer.get_attn_backend()
-        assert backend.general_backend_cls is _FlexibleGeneralBackend
-        assert backend.decode_backend_cls is _HNDDecodeBackend
-        assert get_kv_cache_layout() == "HND"
-    finally:
-        set_kv_cache_layout(None)
+    backend = layer.get_attn_backend()
+    assert backend.general_backend_cls is _FlexibleGeneralBackend
+    assert backend.decode_backend_cls is _HNDDecodeBackend
+    layouts = get_supported_kv_cache_layouts([backend])
+    assert (
+        resolve_kv_cache_layout(config, [[x.name for x in layouts]])
+        == KVCacheLayout.LBHNC
+    )
 
 
 def test_builder_wrapping_backends_are_not_routed():
@@ -305,32 +294,31 @@ def test_layers_cannot_require_different_kv_layouts():
     """One model cannot route layers through conflicting physical layouts."""
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
 
-    set_kv_cache_layout("NHD")
-    try:
-        with (
-            set_current_vllm_config(config),
-            patch(
-                "vllm.model_executor.layers.attention.attention.get_attn_backend",
-                side_effect=[_HNDDecodeBackend, _NHDDecodeBackend],
-            ),
-        ):
-            Attention(
-                num_heads=8,
-                head_size=128,
-                scale=0.1,
-                prefix="layer.0",
-                attn_backend=_FlexibleGeneralBackend,
+    with (
+        set_current_vllm_config(config),
+        patch(
+            "vllm.model_executor.layers.attention.attention.get_attn_backend",
+            side_effect=[_HNDDecodeBackend, _NHDDecodeBackend],
+        ),
+    ):
+        first = Attention(
+            num_heads=8,
+            head_size=128,
+            scale=0.1,
+            prefix="layer.0",
+            attn_backend=_FlexibleGeneralBackend,
+        )
+        second = Attention(
+            num_heads=8,
+            head_size=128,
+            scale=0.1,
+            prefix="layer.1",
+            attn_backend=_FlexibleGeneralBackend,
+        )
+        with pytest.raises(ValueError, match="No KV cache layout"):
+            get_supported_kv_cache_layouts(
+                [first.get_attn_backend(), second.get_attn_backend()]
             )
-            with pytest.raises(ValueError, match="across layers"):
-                Attention(
-                    num_heads=8,
-                    head_size=128,
-                    scale=0.1,
-                    prefix="layer.1",
-                    attn_backend=_FlexibleGeneralBackend,
-                )
-    finally:
-        set_kv_cache_layout(None)
 
 
 @pytest.mark.parametrize(
@@ -344,7 +332,11 @@ def test_layers_cannot_require_different_kv_layouts():
 )
 def test_layout_compatibility_rejects_unsafe_pairings(decode_backend):
     """Reject each independently unsafe way two backends can share KV cache."""
-    general_backend = _NHDBackend if decode_backend is _HNDBackend else _Backend
+    general_backend = (
+        _NHDBackend
+        if decode_backend in (_HNDBackend, _DifferentLayerLayoutBackend)
+        else _Backend
+    )
     assert not kv_layouts_compatible(
         general_backend,
         decode_backend,
@@ -643,6 +635,33 @@ def test_prefill_batch_never_dispatches_a_uniform_decode_graph(monkeypatch):
     assert decode_desc.decode_only
     assert prefill_desc.cg_mode == CUDAGraphMode.PIECEWISE
     assert not prefill_desc.decode_only
+
+
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_reused_dp_sync_preserves_prefill_graph_constraint(monkeypatch, has_prefill):
+    """A drafter reusing the target's DP agreement must honor remote prefills."""
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
+
+    manager = _make_cudagraph_manager(monkeypatch)
+    sync = DPSyncState(
+        num_tokens_across_dp=torch.tensor([4, 4]),
+        uniform_token_count=1,
+        eager=False,
+        num_reqs=4,
+        has_prefill=has_prefill,
+    )
+    desc, _ = dispatch_cg_and_sync_dp(
+        manager,
+        num_reqs=4,
+        num_tokens=4,
+        uniform_token_count=1,
+        dp_size=2,
+        dp_rank=0,
+        dp_sync=sync,
+    )
+    assert desc.cg_mode == (
+        CUDAGraphMode.PIECEWISE if has_prefill else CUDAGraphMode.FULL
+    )
 
 
 class _SingleTokenDecodeBuilder(_DecodeBuilder):

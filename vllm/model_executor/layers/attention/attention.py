@@ -19,7 +19,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -183,7 +186,9 @@ def _init_kv_cache_quant(
     layer._o_scale_float = None
 
     quant_method = (
-        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+        resolve_quant_method(quant_config, layer, prefix=prefix)
+        if quant_config
+        else None
     )
 
     # See [Note: Register q/k/v/prob scales in state dict]
@@ -413,12 +418,9 @@ class Attention(nn.Module, AttentionLayerBase):
         ):
             from vllm.v1.attention.backends.utils import (
                 create_composite_attention_backend,
-                get_kv_cache_layout,
                 kv_layouts_compatible,
-                set_kv_cache_layout,
             )
 
-            general_kv_layout = get_kv_cache_layout()
             selected_decode_backend = get_attn_backend(
                 head_size,
                 dtype,
@@ -438,12 +440,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 if cache_config is not None and cache_config.user_specified_block_size
                 else None
             )
-            required_layout = (
-                selected_decode_backend.get_required_kv_cache_layout()
-                or self.attn_backend.get_required_kv_cache_layout()
-            )
-            if required_layout is not None:
-                set_kv_cache_layout(required_layout)
             compatible = kv_layouts_compatible(
                 self.attn_backend,
                 selected_decode_backend,
@@ -451,9 +447,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=head_size,
                 block_size=selector_block_size,
                 kv_cache_dtype=kv_cache_dtype,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
             )
             if not compatible:
-                set_kv_cache_layout(general_kv_layout)
                 if decode_backend is None:
                     logger.info_once(
                         "Automatically selected decode backend %s is not "
@@ -472,27 +469,6 @@ class Attention(nn.Module, AttentionLayerBase):
                         f"physical KV cache. Choose a decode backend with a "
                         f"matching KV layout."
                     )
-            required_layout = (
-                selected_decode_backend.get_required_kv_cache_layout()
-                or self.attn_backend.get_required_kv_cache_layout()
-            )
-            if required_layout is not None:
-                static_forward_context = (
-                    vllm_config.compilation_config.static_forward_context
-                )
-                for layer in static_forward_context.values():
-                    if not isinstance(layer, AttentionLayerBase):
-                        continue
-                    backend = layer.get_attn_backend()
-                    existing_layout = backend.get_required_kv_cache_layout()
-                    if existing_layout not in (None, required_layout):
-                        set_kv_cache_layout(general_kv_layout)
-                        raise ValueError(
-                            "Attention backends across layers require "
-                            f"incompatible KV cache layouts: {existing_layout} "
-                            f"and {required_layout}."
-                        )
-                set_kv_cache_layout(required_layout)
             composite_backend = create_composite_attention_backend(
                 self.attn_backend, selected_decode_backend
             )
@@ -683,7 +659,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
             if self.quant_config
             else None
         )
@@ -718,14 +694,17 @@ class Attention(nn.Module, AttentionLayerBase):
             # bytes per block. Otherwise (page_size_padded is None) the smallest
             # block is fine — ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
-            sw_per_token = SlidingWindowSpec(
-                block_size=1,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                head_size_v=self.head_size_v,
-                dtype=self.kv_cache_torch_dtype,
-                kv_quant_mode=quant_mode,
-                sliding_window=self.sliding_window,
+            # The backend owns its packing
+            sw_per_token = self.attn_backend.customize_spec(
+                SlidingWindowSpec(
+                    block_size=1,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    kv_quant_mode=quant_mode,
+                    sliding_window=self.sliding_window,
+                )
             ).real_page_size_bytes
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend, sw_per_token, shared_page, block_size
@@ -739,24 +718,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
-            )
-        elif self.kv_cache_dtype.startswith("turboquant_"):
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
-            )
-            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
-
-            tq_config = TurboQuantConfig.from_cache_dtype(
-                self.kv_cache_dtype, self.head_size
-            )
-            return TQFullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                head_size_v=self.head_size,
-                dtype=self.kv_cache_torch_dtype,
-                kv_quant_mode=quant_mode,
-                tq_slot_size=tq_config.slot_size_aligned,
             )
         else:
             return FullAttentionSpec(
@@ -886,22 +847,8 @@ def unified_attention_with_output(
     )
 
 
-def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_attention_with_output_fake,
 )

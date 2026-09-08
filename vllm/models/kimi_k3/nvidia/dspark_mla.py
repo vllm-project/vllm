@@ -399,9 +399,14 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
-    checkpoint_skip_substrs = ("confidence_head", "embed_tokens", "lm_head")
-
     hf_to_vllm_mapper = WeightsMapper(
+        # confidence_head is training-only. The frozen target embedding and LM
+        # head are shared after this draft-specific checkpoint is loaded.
+        orig_to_new_substr={
+            "confidence_head": None,
+            "embed_tokens": None,
+            "lm_head": None,
+        },
         orig_to_new_prefix={"": "model."},
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -416,9 +421,7 @@ class K3DSparkForCausalLM(nn.Module):
         assert vllm_config.speculative_config is not None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = K3DSparkModel(
             vllm_config=vllm_config,
             start_layer_id=target_layer_num,
@@ -477,12 +480,7 @@ class K3DSparkForCausalLM(nn.Module):
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # confidence_head is training-only. The frozen target embedding and LM
-        # head are shared after this draft-specific checkpoint is loaded.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=list(self.checkpoint_skip_substrs),
-        )
+        loader = AutoWeightsLoader(self)
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
