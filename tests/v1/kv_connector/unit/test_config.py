@@ -3,9 +3,17 @@
 
 """Tests for KV cache offloading configuration."""
 
+from typing import cast
+
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
@@ -80,6 +88,7 @@ def test_kv_connector(
         return
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
 
     assert kv_transfer_config.kv_connector == expected_backend
@@ -115,9 +124,12 @@ def _build_config(
     )
     cfg = VllmConfig.__new__(VllmConfig)
     cfg.kv_transfer_config = kv_transfer_config
-    cfg.model_config = SimpleNamespace(
-        enable_sleep_mode=enable_sleep_mode,
-        enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
+    cfg.model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            enable_sleep_mode=enable_sleep_mode,
+            enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
+        ),
     )
     cfg._verify_kv_transfer_compat()
     return cfg
@@ -177,6 +189,7 @@ def test_kv_offloading_size_only_uses_native_default():
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
