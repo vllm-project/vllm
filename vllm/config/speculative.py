@@ -847,7 +847,18 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if initial_architecture == "BailingMoeV3ForCausalLM":
+        if initial_architecture == "BailingMoeV3VLForConditionalGeneration":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = copy.deepcopy(hf_config.text_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if initial_architecture in (
+            "BailingMoeV3ForCausalLM",
+            "BailingMoeV3VLForConditionalGeneration",
+        ):
             hf_config.model_type = "bailing_hybrid_v3_mtp"
         elif (
             hf_config.model_type == "bailing_hybrid"
