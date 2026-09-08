@@ -18,6 +18,7 @@ from unittest.mock import create_autospec, patch
 
 import pytest
 
+import vllm.snapshot.attachments as snapshot_attachments
 import vllm.snapshot.runtime as snapshot_runtime
 import vllm.snapshot.server as snapshot_server
 from vllm.entrypoints.cli import snapshot as snapshot_cli
@@ -27,6 +28,12 @@ from vllm.entrypoints.cli.launch import (
     cmd_init,
 )
 from vllm.entrypoints.common import startup
+from vllm.snapshot.attachments import (
+    GeneratedFile,
+    SnapshotAttachmentError,
+    capture_attachments,
+    collect_generated_files,
+)
 from vllm.snapshot.controller import (
     LocalSnapshotTools,
     SnapshotCreateError,
@@ -36,6 +43,7 @@ from vllm.snapshot.controller import (
     restore_snapshot,
 )
 from vllm.snapshot.manifest import (
+    SnapshotAttachment,
     SnapshotCompatibilityError,
     SnapshotManifest,
     SnapshotRuntimeIdentity,
@@ -45,7 +53,11 @@ from vllm.snapshot.manifest import (
     validate_identity,
     write_manifest_atomic,
 )
-from vllm.snapshot.runtime import ProcessInventory, _decode_endpoint, _TcpSocketRecord
+from vllm.snapshot.runtime import (
+    ProcessInventory,
+    _decode_endpoint,
+    _TcpSocketRecord,
+)
 from vllm.snapshot.server import SnapshotCanaryError
 from vllm.snapshot.types import Oracle, oracles_match
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -806,7 +818,13 @@ def test_snapshot_create_preserves_bounded_criu_diagnostics_after_cleanup(
 
     criu_tools._run = run  # type: ignore[method-assign]
 
-    def fail_dump(artifact: Path, work_dir: Path, _inventory: ProcessInventory) -> None:
+    def fail_dump(
+        artifact: Path,
+        work_dir: Path,
+        _inventory: ProcessInventory,
+        *,
+        portable: bool = False,
+    ) -> None:
         images = artifact / "images"
         images.mkdir()
         if failure_kind != "missing":
@@ -1502,7 +1520,7 @@ def test_snapshot_dump_rejects_unavailable_link_remap_inventory_before_criu(
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
 
     with pytest.raises(SnapshotCreateError, match="inventory CRIU link remaps"):
-        tools.dump(workdir, ProcessInventory(100, (100,), (100,), "GPU"))
+        tools.dump(workdir, workdir, ProcessInventory(100, (100,), (100,), "GPU"))
 
 
 def test_snapshot_restore_rejects_saved_remap_without_prefix(
@@ -1566,7 +1584,7 @@ def test_snapshot_dump_preserves_primary_failure_when_cleanup_inventory_fails(
     monkeypatch.setattr(tools, "_criu", fail_dump)
 
     with pytest.raises(SnapshotCreateError) as failure:
-        tools.dump(workdir, ProcessInventory(100, (100,), (100,), "GPU"))
+        tools.dump(workdir, workdir, ProcessInventory(100, (100,), (100,), "GPU"))
 
     assert "RuntimeError: dump failed" in str(failure.value)
     assert "cleanup inventory failed" in str(failure.value)
@@ -1598,7 +1616,7 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
     )
     monkeypatch.setattr(tools, "_tcp_records", lambda: (tcp_record,))
     with pytest.raises(SnapshotCreateError, match=message) as excinfo:
-        tools.inventory(100, tmp_path)
+        tools.inventory(100, tmp_path, tmp_path)
     if blocked_state == "tcp":
         assert "pid 101" in str(excinfo.value)
         assert "1.1.1.1:443" in str(excinfo.value)
@@ -1654,7 +1672,7 @@ def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
     artifact.mkdir(mode=0o700)
     recorded = (
         (str(tmp_path / "kernel.so"), "b" * 64),
-        (str(tmp_path / "launcher.lock"), "locked"),
+        (str(tmp_path / "launcher.lock"), "a" * 64),
     )
     write_manifest_atomic(artifact, _manifest(external_cache_files=recorded))
 
@@ -1673,6 +1691,10 @@ def _pin_generated_cache_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "triton_cache_default"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor_cache"))
+    monkeypatch.setenv("FLASHINFER_CACHE_DIR", str(tmp_path / "flashinfer_cache"))
+    monkeypatch.setattr(
+        snapshot_attachments, "_MACHINE_STATE_ROOTS", (str(tmp_path / "libuuid"),)
+    )
 
 
 def _unreadable(_path: Path) -> str:
@@ -1703,10 +1725,12 @@ def test_snapshot_inventory_records_open_generated_cache_files(
     }
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101, 102))
-    monkeypatch.setattr(tools, "_descriptor_targets", lambda pid: targets[pid])
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda pid: targets[pid])
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
     monkeypatch.setattr(tools, "current_identity", lambda _uuid: _runtime_identity())
+    inventory = tools.inventory(100, artifact, artifact)
 
     manifest = tools.make_manifest(
         argparse.Namespace(
@@ -1716,17 +1740,77 @@ def test_snapshot_inventory_records_open_generated_cache_files(
             tokenizer_revision=None,
         ),
         ("Qwen/Qwen3-0.6B",),
-        tools.inventory(100, artifact),
+        inventory,
         _oracle(),
         artifact,
     )
 
-    # Weights, sockets, the cache directory itself, files inside the artifact,
-    # and deleted targets that CRIU remaps are all left out.
+    # Weights, sockets, the cache root directory itself, files inside the
+    # artifact, and deleted targets that CRIU remaps are all left out. A lock
+    # file is recorded by existence only, since its content is volatile.
     assert manifest.external_cache_files == (
         (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
         (str(lock), "locked"),
     )
+    # An in-place checkpoint records no generated files: attachments are a
+    # portable create's inventory.
+    assert inventory.generated_files == ()
+
+
+def test_snapshot_carries_libuuid_clock_file_with_cache_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    libuuid_root = tmp_path / "libuuid"
+    libuuid_root.mkdir()
+    clock = libuuid_root / "clock.txt"
+    clock.write_bytes(b"clock: 3610 tv: 0000001789454500 00707119 adj: 0\n")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(clock),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
+
+    # libuuid keeps the clock file open for the process lifetime, so CRIU
+    # reopens its path on restore; the watermark is machine state, so it
+    # travels as warm state instead of a fingerprinted dependency.
+    assert inventory.generated_files == (
+        GeneratedFile(str(clock)),
+        GeneratedFile(str(tmp_path / "work" / "child.log")),
+    )
+
+
+def test_snapshot_attachment_target_check_allows_libuuid_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from vllm.snapshot.attachments import _check_target
+
+    # The real root is uuidd-owned and group-writable by design, so the
+    # private-path contract cannot hold for it; a sibling directory with the
+    # same permissions outside the root stays refused. The mode is set
+    # explicitly: mkdir() filters it through the process umask, and the
+    # directory has to stay group-writable whatever umask the host runs with.
+    state_root = tmp_path / "libuuid"
+    state_root.mkdir()
+    state_root.chmod(0o775)
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    sibling.chmod(0o775)
+    monkeypatch.setattr(
+        snapshot_attachments, "_MACHINE_STATE_ROOTS", (str(state_root),)
+    )
+
+    _check_target(state_root)
+    _check_target(state_root / "clock.txt")
+
+    with pytest.raises(SnapshotSecurityError, match="group- or world-writable"):
+        _check_target(sibling / "clock.txt")
 
 
 def test_snapshot_inventory_marks_a_cache_file_it_cannot_read(
@@ -1746,15 +1830,18 @@ def test_snapshot_inventory_marks_a_cache_file_it_cannot_read(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(
-        tools, "_descriptor_targets", lambda _pid: (str(kernel), str(lock))
+        snapshot_attachments,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(lock)),
     )
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
-    monkeypatch.setattr(tools, "_sha256", _unreadable)
+    monkeypatch.setattr(snapshot_attachments, "sha256_file", _unreadable)
 
     # A file that cannot be digested keeps its own marker, so the manifest says
     # which entries restore can check for existence only.
-    assert tools.inventory(100, artifact).external_cache_files == (
+    assert tools.inventory(100, artifact, artifact).external_cache_files == (
         (str(kernel), "unreadable"),
         (str(lock), "locked"),
     )
@@ -1784,17 +1871,389 @@ def test_snapshot_inventory_matches_resolved_cache_roots_not_siblings(
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
     monkeypatch.setattr(
-        tools, "_descriptor_targets", lambda _pid: (str(kernel), str(stale))
+        snapshot_attachments,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(stale)),
     )
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
     monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
     monkeypatch.setattr(tools, "_tcp_records", lambda: ())
 
     # A cache root reached through a symlink still covers the file the kernel
     # reports by its real path, and a directory that merely shares the root's
     # name prefix is not part of the cache at all.
-    assert tools.inventory(100, artifact).external_cache_files == (
+    assert tools.inventory(100, artifact, artifact).external_cache_files == (
         (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
     )
+
+
+def test_snapshot_inventory_records_a_generated_file_the_tree_only_mapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: ())
+    monkeypatch.setattr(
+        snapshot_attachments, "_mapping_targets", lambda _pid: (str(kernel),)
+    )
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    # A kernel reached only through its pages holds no descriptor. CRIU still
+    # reopens its path, so without this the artifact stayed pointed at a file
+    # the host could replace with no early error.
+    inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
+    assert inventory.generated_files == (
+        GeneratedFile(str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+        GeneratedFile(str(tmp_path / "work" / "child.log")),
+    )
+
+
+def test_snapshot_collect_refuses_an_oversized_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    # The limit is enforced while the inventory is assembled, so a cache
+    # holding a file past it fails create before CRIU runs at all.
+    with pytest.raises(SnapshotAttachmentError, match="byte limit"):
+        collect_generated_files(
+            (100,),
+            artifact,
+            tmp_path / "work",
+            tuple(),
+            (16, 1 << 30),
+        )
+
+
+def test_snapshot_collect_refuses_a_total_size_past_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    stale = cache_root / "stale.so"
+    stale.write_bytes(b"unreferenced compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    with pytest.raises(SnapshotAttachmentError, match="byte limit"):
+        collect_generated_files(
+            (100,),
+            artifact,
+            tmp_path / "work",
+            tuple(),
+            (1 << 30, 20),
+        )
+
+
+def test_snapshot_capture_refuses_a_file_that_changed_since_inventory(
+    tmp_path: Path,
+):
+    cache = tmp_path / "triton_cache"
+    cache.mkdir()
+    kernel = cache / "kernel.so"
+    kernel.write_bytes(b"a different kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    # The inventory digested one version, then something rewrote the file
+    # before capture copied it: staging the new bytes would record a digest
+    # the fingerprints can never verify at restore.
+    with pytest.raises(SnapshotAttachmentError, match="changed since inventory"):
+        capture_attachments(
+            artifact,
+            (
+                GeneratedFile(
+                    str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()
+                ),
+            ),
+        )
+
+
+def test_snapshot_dump_stages_attachments_after_the_image_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache = tmp_path / "triton_cache"
+    cache.mkdir()
+    kernel = cache / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    kernel.chmod(0o755)
+    lock = cache / "launcher.lock"
+    lock.write_bytes(b"held by the steady point")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    child_log = artifact / "child.log"
+    child_log.parent.mkdir(mode=0o700)
+    child_log.write_bytes(b"")
+    staged_before_dump: list[bool] = []
+
+    def record_dump(
+        _action: str, _artifact: Path, _arguments: list[str], _work_dir: Path
+    ) -> None:
+        staged_before_dump.append((artifact / "attachments").exists())
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_criu", record_dump)
+    monkeypatch.setattr(tools, "_link_remap_names", lambda: set())
+    monkeypatch.setattr(tools, "_capture_link_remaps", lambda *_args: None)
+    inventory = ProcessInventory(
+        100,
+        (100,),
+        (100,),
+        "GPU-abc",
+        generated_files=(
+            GeneratedFile(str(child_log)),
+            GeneratedFile(str(kernel)),
+            GeneratedFile(str(lock)),
+        ),
+    )
+
+    captured = tools.dump(artifact, artifact, inventory, portable=True)
+
+    # Nothing was staged while the captured tree was still running to rewrite it.
+    assert staged_before_dump == [False]
+    assert [item.path for item in captured] == [
+        str(child_log),
+        str(kernel),
+        str(lock),
+    ]
+    assert captured[0].digest == "cache"
+    staged = artifact / "attachments" / Path(str(kernel).lstrip("/"))
+    assert staged.read_bytes() == b"compiled kernel"
+    assert staged.stat().st_mode & 0o777 == 0o755
+
+
+def test_snapshot_inventory_carries_unreferenced_cache_files_as_warm_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    stale = cache_root / "stale.so"
+    stale.write_bytes(b"unreferenced compiled kernel")
+    lock = cache_root / "launcher.lock"
+    lock.write_bytes(b"held by pid 100")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(
+        snapshot_attachments,
+        "fd_targets",
+        lambda _pid: (str(kernel), str(lock)),
+    )
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+
+    inventory = tools.inventory(100, artifact, tmp_path / "work", portable=True)
+
+    # A file the image does not reference still travels as warm state, marked
+    # differently from the bytes the restore itself depends on.
+    assert inventory.generated_files == (
+        GeneratedFile(str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+        GeneratedFile(str(lock), hashlib.sha256(b"held by pid 100").hexdigest()),
+        GeneratedFile(str(stale)),
+        GeneratedFile(str(tmp_path / "work" / "child.log")),
+    )
+    # The warm-state entries carry no fingerprint: a target machine's own
+    # compiled state may differ without breaking anything.
+
+
+def test_snapshot_in_place_checkpoint_walks_no_cache_and_carries_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cache_root = tmp_path / "triton_cache"
+    cache_root.mkdir()
+    kernel = cache_root / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    stale = cache_root / "stale.so"
+    stale.write_bytes(b"unreferenced compiled kernel")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    (artifact / "child.log").write_bytes(b"")
+    _pin_generated_cache_roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(cache_root))
+
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100,))
+    monkeypatch.setattr(snapshot_attachments, "fd_targets", lambda _pid: (str(kernel),))
+    monkeypatch.setattr(snapshot_attachments, "_mapping_targets", lambda _pid: ())
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("100, GPU-abc",))
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+    monkeypatch.setattr(tools, "_criu", lambda *_args: None)
+    monkeypatch.setattr(tools, "_link_remap_names", lambda: set())
+    monkeypatch.setattr(tools, "_capture_link_remaps", lambda *_args: None)
+
+    # Without --portable the cache roots are not walked: only the files the
+    # tree holds open are fingerprinted, and nothing is carried at all.
+    inventory = tools.inventory(100, artifact, artifact)
+    assert inventory.generated_files == ()
+    assert inventory.external_cache_files == (
+        (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
+    )
+    assert tools.dump(artifact, artifact, inventory) == ()
+    assert not (artifact / "attachments").exists()
+
+
+def test_snapshot_materialize_leaves_a_targets_own_cache_state_alone(
+    tmp_path: Path,
+):
+    from vllm.snapshot.attachments import materialize_attachments
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    compiled = target / "compiled.so"
+    compiled.write_bytes(b"target machine compiled this")
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    captured = capture_attachments(artifact, (GeneratedFile(str(compiled)),))
+    manifest_entry = captured[0]
+
+    # A cache attachment does not back the restore, so a target's own content
+    # is never overwritten, whatever it holds.
+    assert materialize_attachments(artifact, (manifest_entry,)) == []
+    assert compiled.read_bytes() == b"target machine compiled this"
+
+    # Only a missing file is written back.
+    compiled.unlink()
+    assert materialize_attachments(artifact, (manifest_entry,)) == [compiled]
+    assert compiled.read_bytes() == b"target machine compiled this"
+
+
+def test_snapshot_restore_rematerializes_a_cache_file_the_host_rotated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    kernel = tmp_path / "kernel.so"
+    kernel.write_bytes(b"compiled kernel")
+    artifact = _local_restore_artifact(tmp_path)
+    tools = LocalSnapshotTools()
+    captured = capture_attachments(artifact, (GeneratedFile(str(kernel)),))
+    manifest = _manifest(attachments=tuple(captured), work_dir=str(artifact))
+    kernel.unlink()
+    reopened: list[bool] = []
+
+    class Restored(RuntimeError):
+        """Stands in for CRIU so the test can see what it was handed."""
+
+    def fail_restore(*_args: object) -> None:
+        reopened.append(kernel.exists())
+        raise Restored("criu stopped here")
+
+    monkeypatch.setattr(tools, "_criu", fail_restore)
+
+    with pytest.raises(Restored, match="criu stopped here"):
+        tools.restore(artifact, manifest)
+
+    # The path was back before CRIU ran, then taken away again because this
+    # restore attempt failed.
+    assert reopened == [True]
+    assert not kernel.exists()
+    marker = json.loads((artifact / "release.json").read_text())
+    assert marker == {"release": False}
+
+
+def test_snapshot_restore_rematerializes_a_work_dir_child_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    child_log = work_dir / "child.log"
+    child_log.write_bytes(b"startup log")
+    artifact = _local_restore_artifact(tmp_path)
+    tools = LocalSnapshotTools()
+    captured = capture_attachments(artifact, (GeneratedFile(str(child_log)),))
+    manifest = _manifest(
+        portable=True,
+        work_dir=str(work_dir),
+        cleanup_work_dir=False,
+        attachments=tuple(captured),
+    )
+    # A work directory a create (or an earlier failed restore) left behind
+    # carries no log, so restore has to put the captured one back before CRIU
+    # reopens it by path.
+    child_log.unlink()
+    reopened: list[bool] = []
+
+    class Restored(RuntimeError):
+        """Stands in for CRIU so the test can see what it was handed."""
+
+    def fail_restore(*_args: object) -> None:
+        reopened.append(child_log.exists())
+        raise Restored("criu stopped here")
+
+    monkeypatch.setattr(tools, "_criu", fail_restore)
+
+    with pytest.raises(Restored, match="criu stopped here"):
+        tools.restore(artifact, manifest)
+
+    # The log was back before CRIU ran, then taken away again because this
+    # restore attempt failed.
+    assert reopened == [True]
+    assert not child_log.exists()
+
+
+def test_snapshot_manifest_round_trips_attachments(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    attachments = (
+        SnapshotAttachment(
+            path="/cache/kernel.so",
+            digest="a" * 64,
+            size=108936,
+        ),
+    )
+    write_manifest_atomic(artifact, _manifest(attachments=attachments))
+
+    assert read_manifest(artifact).attachments == attachments
+
+    # An artifact captured before this field existed still restores, carrying
+    # nothing.
+    legacy = _manifest().model_dump(mode="json")
+    del legacy["attachments"]
+    (artifact / "manifest.json").write_text(json.dumps(legacy))
+
+    assert read_manifest(artifact).attachments == ()
 
 
 def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
@@ -1810,7 +2269,7 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
         work_dir=str(artifact),
         external_cache_files=(
             (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
-            (str(lock), "locked"),
+            (str(lock), hashlib.sha256(b"held by pid 100").hexdigest()),
         ),
     )
     before = {
@@ -1824,8 +2283,8 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
         tools.restore(artifact, manifest)
     assert str(kernel) in str(changed.value)
 
-    # Restoring the digest gets past the first entry, so the lock file is only
-    # checked for existence: the second failure proves the first one passed.
+    # Restoring the digest gets past the first entry, so the missing lock file
+    # is the second failure: it proves the first one passed.
     kernel.write_bytes(b"compiled kernel")
     lock.unlink()
     with pytest.raises(SnapshotRestoreError, match="vanished since capture") as gone:
@@ -1855,7 +2314,7 @@ def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
     )
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
-    monkeypatch.setattr(tools, "_sha256", _unreadable)
+    monkeypatch.setattr(snapshot_attachments, "sha256_file", _unreadable)
 
     # A recorded digest that cannot be read again is a failed check, not a file
     # to wave through on existence.

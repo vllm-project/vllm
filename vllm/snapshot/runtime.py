@@ -32,6 +32,19 @@ import regex as re
 from pydantic import ValidationError
 
 from vllm.logger import init_logger
+from vllm.snapshot.attachments import (
+    _CACHE_LOCKED,
+    _CACHE_UNREADABLE,
+    GeneratedFile,
+    SnapshotAttachment,
+    cache_fingerprint,
+    capture_attachments,
+    collect_generated_files,
+    fd_targets,
+    materialize_attachments,
+    rollback_attachments,
+    sha256_file,
+)
 from vllm.snapshot.manifest import (
     ReadyMarker,
     SnapshotManifest,
@@ -77,10 +90,6 @@ _WORK_DIR_PREFIX = "vllm-snapshot-work-"
 
 
 _CACHE_REMEDY = "recreate the snapshot or restore with the same cache state"
-# Recorded instead of a digest for files whose content is volatile by design.
-_CACHE_LOCKED = "locked"
-# Recorded instead of a digest for a file capture found but could not read.
-_CACHE_UNREADABLE = "unreadable"
 
 
 def _generated_cache_prefixes() -> tuple[str, ...]:
@@ -101,7 +110,10 @@ def _generated_cache_prefixes() -> tuple[str, ...]:
         for root in (
             envs.VLLM_CACHE_ROOT,
             os.environ.get("TRITON_CACHE_DIR") or "~/.triton/cache",
-            "~/.cache/flashinfer",
+            os.environ.get("FLASHINFER_CACHE_DIR") or "~/.cache/flashinfer",
+            # torch's hummingbird launcher cache: the compiled launcher is
+            # mmap'd by the engine, so CRIU reopens it on restore.
+            "~/.humming",
             *((inductor_root,) if inductor_root else ()),
         )
     )
@@ -130,6 +142,7 @@ class ProcessInventory:
     cuda_holders: tuple[int, ...]
     gpu_uuid: str
     external_cache_files: tuple[tuple[str, str], ...] = ()
+    generated_files: tuple[GeneratedFile, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -366,22 +379,6 @@ class LocalSnapshotTools:
     def _cuda_pids(self, rows: tuple[str, ...]) -> tuple[int, ...]:
         return tuple(sorted({int(line.split(",", 1)[0].strip()) for line in rows}))
 
-    def _descriptor_targets(self, pid: int) -> tuple[str, ...]:
-        descriptor_dir = Path("/proc") / str(pid) / "fd"
-        try:
-            descriptors = tuple(descriptor_dir.iterdir())
-        except FileNotFoundError as error:
-            raise SnapshotCreateError(
-                f"snapshot process exited during descriptor inventory: {pid}"
-            ) from error
-        targets: list[str] = []
-        for descriptor in descriptors:
-            try:
-                targets.append(os.readlink(descriptor))
-            except FileNotFoundError:
-                continue
-        return tuple(targets)
-
     def _descriptor_inventory(
         self, process_tree: tuple[int, ...]
     ) -> tuple[tuple[int, ...], dict[int, int]]:
@@ -389,7 +386,7 @@ class LocalSnapshotTools:
         io_uring_pids: list[int] = []
         socket_owners: dict[int, int] = {}
         for pid in process_tree:
-            targets = self._descriptor_targets(pid)
+            targets = fd_targets(pid)
             if "anon_inode:[io_uring]" in targets:
                 io_uring_pids.append(pid)
             for target in targets:
@@ -425,22 +422,6 @@ class LocalSnapshotTools:
                 )
         return tuple(records)
 
-    def _cache_fingerprint(self, path: Path) -> str | None:
-        """Digest a cache file, or mark the ones whose content is volatile."""
-        try:
-            if not stat.S_ISREG(path.stat().st_mode):
-                return None
-        except OSError:
-            return None
-        if path.name.endswith(".lock"):
-            return _CACHE_LOCKED
-        try:
-            return self._sha256(path)
-        except OSError:
-            # Restore can only check that this one still exists, so record the
-            # downgrade rather than passing it off as a volatile file.
-            return _CACHE_UNREADABLE
-
     def _external_cache_files(
         self, process_tree: tuple[int, ...], artifact: Path
     ) -> tuple[tuple[str, str], ...]:
@@ -456,13 +437,19 @@ class LocalSnapshotTools:
         artifact_prefix = f"{os.path.abspath(artifact)}{os.sep}"
         candidates: set[str] = set()
         for pid in process_tree:
-            for target in self._descriptor_targets(pid):
+            for target in fd_targets(pid):
                 if target.endswith(" (deleted)") or target.startswith(artifact_prefix):
                     continue
                 if target.endswith(".lock") or target.startswith(prefixes):
                     candidates.add(target)
         recorded = (
-            (path, self._cache_fingerprint(Path(path))) for path in sorted(candidates)
+            (
+                path,
+                _CACHE_LOCKED
+                if path.endswith(".lock")
+                else cache_fingerprint(Path(path)),
+            )
+            for path in sorted(candidates)
         )
         return tuple(
             (path, fingerprint)
@@ -470,7 +457,9 @@ class LocalSnapshotTools:
             if fingerprint is not None
         )
 
-    def inventory(self, root_pid: int, artifact: Path) -> ProcessInventory:
+    def inventory(
+        self, root_pid: int, artifact: Path, work_dir: Path, *, portable: bool = False
+    ) -> ProcessInventory:
         process_tree = self._tree_pids(root_pid)
         cuda_rows = self._cuda_process_rows()
         cuda_holders = tuple(
@@ -488,12 +477,27 @@ class LocalSnapshotTools:
             )
         _validate_tcp_connections(self._tcp_records(), socket_owners)
         gpu_uuid = self._gpu_uuid_for_pids(cuda_holders, cuda_rows)
+        if portable:
+            # A portable artifact carries every file itself, so restore
+            # verifies the copies it materializes and needs no fingerprints
+            # of what the host happens to hold.
+            generated_files = collect_generated_files(
+                process_tree,
+                artifact,
+                work_dir,
+                _generated_cache_prefixes(),
+            )
+            external_cache_files = ()
+        else:
+            generated_files = ()
+            external_cache_files = self._external_cache_files(process_tree, artifact)
         return ProcessInventory(
             root_pid=root_pid,
             process_tree=process_tree,
             cuda_holders=cuda_holders,
             gpu_uuid=gpu_uuid,
-            external_cache_files=self._external_cache_files(process_tree, artifact),
+            external_cache_files=external_cache_files,
+            generated_files=generated_files,
         )
 
     def _gpu_uuid_for_pids(self, pids: tuple[int, ...], rows: tuple[str, ...]) -> str:
@@ -734,7 +738,14 @@ class LocalSnapshotTools:
         finally:
             os.close(descriptor)
 
-    def dump(self, artifact: Path, work_dir: Path, inventory: ProcessInventory) -> None:
+    def dump(
+        self,
+        artifact: Path,
+        work_dir: Path,
+        inventory: ProcessInventory,
+        *,
+        portable: bool = False,
+    ) -> tuple[SnapshotAttachment, ...]:
         images = artifact / "images"
         images.mkdir(mode=0o700)
         fd_map = artifact / "ignored-nvidia-fds.tsv"
@@ -761,6 +772,10 @@ class LocalSnapshotTools:
                 artifact,
                 self._link_remap_names() - remaps_before,
             )
+            if portable:
+                attachments = capture_attachments(artifact, inventory.generated_files)
+            else:
+                attachments = ()
         except BaseException as primary:
             try:
                 remaps_after = self._link_remap_names()
@@ -774,6 +789,7 @@ class LocalSnapshotTools:
                 (self.shm_dir / name).unlink(missing_ok=True)
             raise
         self._record_child_log_size(artifact, work_dir)
+        return tuple(attachments)
 
     def verify_dead(self, inventory: ProcessInventory) -> None:
         process = self._children.get(inventory.root_pid)
@@ -794,18 +810,11 @@ class LocalSnapshotTools:
             return (error.stdout or error.stderr).splitlines()[0]
         return result.stdout.splitlines()[0] if result.stdout else "unknown"
 
-    def _sha256(self, path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
     def _plugin_identity(self) -> tuple[tuple[str, str], ...]:
         if self.plugin_dir is None:
             return ()
         return tuple(
-            (f"snapshot_plugin_sha256:{path.name}", self._sha256(path))
+            (f"snapshot_plugin_sha256:{path.name}", sha256_file(path))
             for path in sorted(self.plugin_dir.glob("*.so"))
         )
 
@@ -872,6 +881,7 @@ class LocalSnapshotTools:
         inventory: ProcessInventory,
         oracle: Oracle,
         artifact: Path,
+        attachments: tuple[SnapshotAttachment, ...] = (),
         *,
         work_dir: Path | None = None,
         cleanup_work_dir: bool | None = None,
@@ -928,6 +938,7 @@ class LocalSnapshotTools:
             process_tree=inventory.process_tree,
             cuda_holders=inventory.cuda_holders,
             external_cache_files=inventory.external_cache_files,
+            attachments=attachments,
             oracle_token_ids=oracle.token_ids,
             oracle_text=oracle.text,
             oracle_sampled_token_logprob=oracle.sampled_token_logprob,
@@ -948,7 +959,7 @@ class LocalSnapshotTools:
             cuda_runtime=cuda_runtime,
             driver_version=driver_version,
             criu_version=self._version([self.criu, "--version"]),
-            cuda_checkpoint_sha256=self._sha256(Path(self.cuda_checkpoint)),
+            cuda_checkpoint_sha256=sha256_file(Path(self.cuda_checkpoint)),
             kernel_release=platform.release(),
             host_id=host_id,
             gpu_name=gpu_name,
@@ -1112,6 +1123,7 @@ class LocalSnapshotTools:
         work_dir: Path,
         root_pid: int,
         staged_remaps: dict[str, tuple[int, int]],
+        materialized: list[Path],
         primary: BaseException,
     ) -> NoReturn:
         secondary: list[str] = []
@@ -1133,6 +1145,13 @@ class LocalSnapshotTools:
             self._rollback_link_remaps(staged_remaps)
         except BaseException as error:
             secondary.append(f"remap rollback failed: {_error_detail(error)}")
+        try:
+            secondary.extend(
+                f"attachment rollback failed: {detail}"
+                for detail in rollback_attachments(materialized)
+            )
+        except BaseException as error:
+            secondary.append(f"attachment rollback failed: {_error_detail(error)}")
         if secondary:
             raise SnapshotRestoreError(
                 f"snapshot restore failed: {_error_detail(primary)}; "
@@ -1156,7 +1175,7 @@ class LocalSnapshotTools:
             if fingerprint in (_CACHE_LOCKED, _CACHE_UNREADABLE):
                 continue
             try:
-                current = self._sha256(target)
+                current = sha256_file(target)
             except OSError as error:
                 raise SnapshotRestoreError(
                     f"external cache file is unreadable since capture: {path}; "
@@ -1210,14 +1229,18 @@ class LocalSnapshotTools:
                     f"captured PID availability probe failed: {pid}"
                 ) from error
             raise SnapshotRestoreError(f"captured PID is already occupied: {pid}")
-        self._verify_external_cache_files(manifest)
         expected_root_pid = manifest.process_tree[0]
+        materialized: list[Path] = []
         staged_remaps: dict[str, tuple[int, int]] = {}
         work_dir = self._prepare_restore_work_dir(manifest)
         (work_dir / "release.json").unlink(missing_ok=True)
         (work_dir / "restored.pid").unlink(missing_ok=True)
         pidfile = work_dir / "restored.pid"
         try:
+            # CRIU reopens referenced files by their original paths.
+            # Ensure attachments are available at those paths before restoring.
+            materialized = materialize_attachments(artifact, manifest.attachments)
+            self._verify_external_cache_files(manifest)
             self._reset_child_log(work_dir, artifact)
             staged_remaps = self._restore_link_remaps(artifact)
             self._criu(
@@ -1249,7 +1272,7 @@ class LocalSnapshotTools:
                 )
         except BaseException as error:
             self._abort_failed_restore(
-                work_dir, expected_root_pid, staged_remaps, error
+                work_dir, expected_root_pid, staged_remaps, materialized, error
             )
         return restored_pid
 
