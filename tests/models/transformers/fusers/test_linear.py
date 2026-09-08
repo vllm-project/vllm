@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.model_executor.models.transformers.fuser import get_fuser, get_fusers
+from vllm.model_executor.models.transformers.fuser import Fusers, get_fuser, get_fusers
 from vllm.model_executor.models.transformers.fusers import (
     GLUFuser,
     MergedColumnParallelFuser,
@@ -207,6 +207,21 @@ class MutatingParallelLinears(FourParallelLinears):
         a = self.proj_a(x)
         x.add_(1)
         return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class PlainQKV(nn.Module):
+    """q/k/v returned as a bare tuple: no reshape stands between the calls and
+    the return, so both QKVFuser and MergedColumnParallelFuser can rewrite it."""
+
+    def __init__(self, hidden: int = 32, heads: int = 4, head_dim: int = 8):
+        super().__init__()
+        self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.k_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.head_dim = head_dim
+
+    def forward(self, x):
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
 
 
 class ExtraProjAttention(FakeAttention):
@@ -601,6 +616,40 @@ def test_merged_column_fuser_supports_any_number_of_linears(
     dispatch_cpu_unquantized_gemm(merged, remove_weight=False)
     for actual, reference in zip(fused(x), expected):
         torch.testing.assert_close(actual, reference)
+
+
+def test_merged_name_is_unique_per_linear_names():
+    """The computed name must not collide across different projections, so
+    stacking two unrelated fusions can never clobber packed_modules_mapping."""
+    ab_c = MergedColumnParallelFuser(source_cls="M", linear_names=("a_b", "c"))
+    a_bc = MergedColumnParallelFuser(source_cls="M", linear_names=("a", "b_c"))
+    assert ab_c.merged_name != a_bc.merged_name
+    # Same names -> same (and therefore safely re-mergeable) name.
+    dup = MergedColumnParallelFuser(source_cls="M", linear_names=("a_b", "c"))
+    assert ab_c.merged_name == dup.merged_name
+
+
+def test_heterogeneous_instances_fall_back_to_merged_column_fuser(
+    default_vllm_config,
+):
+    """Same class and structure -> both fusers are cached as candidates. A
+    layer whose out_features aren't a multiple of its own head_dim (as a
+    misconfigured or heterogeneous checkpoint might have) fails QKVFuser's
+    validation and must still fuse via the generic fallback, while a
+    well-formed sibling of the same class keeps using QKVFuser."""
+    with torch.device("meta"):
+        container = nn.Module()
+        container.compatible = PlainQKV(head_dim=8)
+        container.incompatible = PlainQKV(head_dim=8)
+    container.incompatible.head_dim = 5  # 32 % 5 != 0, unlike q_proj's 32 % 8
+
+    candidates = get_fusers(container.compatible)
+    assert any(isinstance(f, QKVFuser) for f in candidates)
+    assert any(isinstance(f, MergedColumnParallelFuser) for f in candidates)
+
+    fusers = Fusers(container, default_vllm_config)
+    assert isinstance(fusers[container.compatible][0], QKVFuser)
+    assert isinstance(fusers[container.incompatible][0], MergedColumnParallelFuser)
 
 
 @pytest.mark.parametrize("kv_heads", [1, 2])
