@@ -25,6 +25,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    GATHER_INITIAL_STATES_KERNEL,
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
@@ -281,6 +282,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            GATHER_INITIAL_STATES_KERNEL.register_warmup(
+                row_size=self.local_num_heads * self.head_dim * self.head_dim,
+                state_dtype=self.get_state_dtype()[1],
+                indices_dtype=torch.int32,
+                launch_pdl=current_platform.is_arch_support_pdl(),
+            )
 
     def forward(
         self,
