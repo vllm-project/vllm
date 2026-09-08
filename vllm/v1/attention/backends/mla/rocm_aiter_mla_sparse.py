@@ -322,9 +322,12 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "fp8_e4m3",
     ]
 
+    # 16/32/64 are listed alongside MultipleOf(16) because
+    # select_common_block_size only draws its fallback candidates from
+    # int-format entries.
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, MultipleOf(16)]
+        return [1, 16, 32, 64, MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:

@@ -17,28 +17,9 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 )
 
 
-# The aiter sparse kernels also handle 16 and 32, so extend rather than replace the
-# base declaration -- narrowing it to [16, 32] made select_common_block_size silently
-# downgrade a requested 64 to 32 via its largest-divisor fallback.
-class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list:
-        return list(
-            set(ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32])
-        )
-
-
-class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list:
-        return list(
-            set(DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32])
-        )
-
-
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
     def get_attn_backend(self):
-        return DeepseekV32ROCmIndexerBackend
+        return DeepseekV32IndexerBackend
 
     @property
     def uses_shuffled_layout(self) -> bool:
@@ -60,7 +41,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             config,
             prefix,
             topk_indices_buffer,
-            attn_backend=DeepseekV32MLASparseBackend,
+            attn_backend=ROCMAiterMLASparseBackend,
         )
 
         self.indexer_op: SparseAttnIndexer | None = None

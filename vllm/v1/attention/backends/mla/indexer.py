@@ -246,7 +246,11 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
+        # The ROCm ints duplicate MultipleOf(16) so select_common_block_size,
+        # which only pools int-format entries, has fallback candidates.
+        if current_platform.is_rocm():
+            return [1, 16, 32, 64, MultipleOf(16)]
+        return [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
