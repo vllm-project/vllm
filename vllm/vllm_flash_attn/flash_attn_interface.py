@@ -444,6 +444,9 @@ def compile_flash_attn_varlen_func_from_specs(
     k_shape: tuple[int, ...],
     v_shape: tuple[int, ...],
     q_dtype: torch.dtype,
+    k_dtype: torch.dtype | None = None,
+    v_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
     v_stride: tuple[int, ...] | None = None,
     k_stride: tuple[int, ...] | None = None,
     cu_seqlens_q_shape: tuple[int, ...] | None = None,
@@ -466,6 +469,7 @@ def compile_flash_attn_varlen_func_from_specs(
     softcap: float | None = None,
     mask_mod=None,
     aux_tensor_shapes: list[tuple[int, ...]] | None = None,
+    fp8_kv_dequant: bool = False,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -490,14 +494,17 @@ def compile_flash_attn_varlen_func_from_specs(
     if softmax_scale is None:
         softmax_scale = q_shape[-1] ** (-0.5)
 
+    k_dtype = q_dtype if k_dtype is None else k_dtype
+    v_dtype = k_dtype if v_dtype is None else v_dtype
+    out_dtype = q_dtype if out_dtype is None else out_dtype
     q = _make_compile_only_tensor_spec(q_shape, q_dtype)
-    k = _make_compile_only_tensor_spec(k_shape, q_dtype, stride=k_stride)
-    v = _make_compile_only_tensor_spec(v_shape, q_dtype, stride=v_stride)
+    k = _make_compile_only_tensor_spec(k_shape, k_dtype, stride=k_stride)
+    v = _make_compile_only_tensor_spec(v_shape, v_dtype, stride=v_stride)
     cu_seqlens_q = _make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4)
     aux_tensors = None
     out = _make_compile_only_tensor_spec(
         (*q_shape[:-1], v_shape[-1]),
-        q_dtype,
+        out_dtype,
     )
     lse = None
     if return_softmax_lse:
@@ -544,23 +551,24 @@ def compile_flash_attn_varlen_func_from_specs(
         out=out,
         lse=lse,
         q_descale=(
-            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            _make_compile_only_tensor_spec((1, 1), torch.float32, 4)
             if q_descale
             else None
         ),
         k_descale=(
-            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            _make_compile_only_tensor_spec((1, 1), torch.float32, 4)
             if k_descale
             else None
         ),
         v_descale=(
-            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            _make_compile_only_tensor_spec((1, 1), torch.float32, 4)
             if v_descale
             else None
         ),
         mask_mod=mask_mod,
         aux_tensors=aux_tensors,
         compile_only=True,
+        fp8_kv_dequant=fp8_kv_dequant,
     )
 
 
