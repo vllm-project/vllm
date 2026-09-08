@@ -453,7 +453,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             is_lm_head_weight = name.startswith("lm_head.")
             if is_lm_head_weight:
                 self.has_own_lm_head = True
-            # Only process MTP and LM head weights - 
+            # Only process MTP and LM head weights -
             # skip all non-MTP and non-LM head weights
             if (
                 not name.startswith("mtp.")
