@@ -17,6 +17,9 @@ from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.metrics import (
+    HiSparseMetricName,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
     _flatten_row_mirrors,
@@ -46,7 +49,44 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._metrics_calls = 0
+    worker._metrics_event = MagicMock()
+    worker._metrics_pending = False
+    worker.leader_runtimes = []
     return worker
+
+
+def test_hisparse_worker_stats_report_completed_snapshot(monkeypatch):
+    """Counters are snapshotted every interval and reported once complete."""
+    worker = _make_hisparse_worker()
+    worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
+    worker._metrics_event.query.return_value = True
+    compute_stream = MagicMock()
+    group = SimpleNamespace(
+        swap_stats=torch.tensor([12, 4], dtype=torch.uint64),
+        swap_stats_host=torch.empty(2, dtype=torch.uint64),
+        stats_row_bytes=16,
+        copy_stream=MagicMock(),
+    )
+    worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        hisparse_worker_module, "current_stream", lambda: compute_stream
+    )
+
+    assert worker.get_kv_connector_stats() is None
+    compute_stream.wait_stream.assert_called_once_with(group.copy_stream)
+    group.copy_stream.wait_stream.assert_called_once_with(compute_stream)
+    assert group.swap_stats.tolist() == [0, 0]
+
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce() == {
+        HiSparseMetricName.CACHE_HITS: 12,
+        HiSparseMetricName.CACHE_MISSES: 4,
+        HiSparseMetricName.HOST_TO_DEVICE_BYTES: 64,
+    }
+    assert worker.get_kv_connector_stats() is None
 
 
 def test_hisparse_row_mirrors_follow_runner_request_order():

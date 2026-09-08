@@ -2001,6 +2001,19 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
         torch.testing.assert_close(gathered, expected)
 
+    # Re-resolving the resident top-k counts every valid entry as a hit.
+    runtime.index_group.swap_stats.zero_()
+    torch.accelerator.synchronize()
+    cache.runtime.begin_forward()
+    cache.swap_in(
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        logical_topk_indices=topk.clone(),
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+    assert runtime.index_group.swap_stats.tolist() == [(top_k - 1) * num_reqs, 0]
+
 
 @requires_hisparse_ops
 def test_hisparse_multi_step_swaps_match_independent():

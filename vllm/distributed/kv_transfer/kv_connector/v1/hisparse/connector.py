@@ -17,8 +17,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.metrics import (
+    HISPARSE_METRIC_DEFINITIONS,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+    TypedKVConnectorPromMetrics,
+    TypedKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.attention.backend import AttentionMetadata
@@ -232,6 +243,37 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def reset_capture_state(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.reset_hot_state()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            TypedKVConnectorStats(data=data)
+            if data is not None
+            else TypedKVConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return TypedKVConnectorPromMetrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+            HISPARSE_METRIC_DEFINITIONS,
+        )
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
