@@ -97,8 +97,17 @@ def dequant_nvfp4_kv_cache(
     global_scale: float,
     head_size: int,
     block_size: int,
+    swizzle_sf: bool = True,
 ) -> torch.Tensor:
-    """Dequantize an NVFP4 KV cache with 4x4-swizzled block scales.
+    """Dequantize an NVFP4 KV cache.
+
+    ``swizzle_sf`` must match how the store kernel laid out the block
+    scales: ``reshape_and_cache_nvfp4_kernel`` writes K scales linearly on
+    every arch, and V scales 4x4-swizzled only when the device major CC is
+    < 12 (the SM100 trtllm-gen layout); sm12x writes V linearly too.
+    Unswizzling a linearly-written cache permutes scales across the
+    4-token groups of a page and, under a sparse slot mapping, reads
+    bytes no token ever wrote.
 
     The input must be in HND layout so that the last two dims are
     (block_size, last_dim).  For NHD caches, permute to HND first.
@@ -118,18 +127,21 @@ def dequant_nvfp4_kv_cache(
     scale_dim = head_size // 16
 
     fp4_packed = fp4_data
-    sf_swizzled = block_scale.view(torch.uint8)
+    sf_raw = block_scale.view(torch.uint8)
 
-    # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
-    # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
-    batch_shape = sf_swizzled.shape[:-2]
-    T, S = block_size, scale_dim
-    sg = S // 4
-    sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
-    ndim = sf_reshape.ndim
-    # Swap the last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
-    perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
-    sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    if swizzle_sf:
+        # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
+        # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
+        batch_shape = sf_raw.shape[:-2]
+        T, S = block_size, scale_dim
+        sg = S // 4
+        sf_reshape = sf_raw.reshape(*batch_shape, T // 4, 4, sg, 4)
+        ndim = sf_reshape.ndim
+        # Swap last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
+        perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
+        sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    else:
+        sf_linear = sf_raw
     sf_f32 = sf_linear.view(torch.float8_e4m3fn).to(torch.float32)
 
     # Unpack fp4

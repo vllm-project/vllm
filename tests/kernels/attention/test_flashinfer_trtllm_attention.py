@@ -116,11 +116,14 @@ def make_nvfp4_kv_cache(
     v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
 
     # Dequantize for the FA2 reference baseline.
+    # Match the store kernel's scale layout: K is linear on every arch;
+    # V is 4x4-swizzled only on CC < 12 (SM100 trtllm-gen).
+    v_swizzled = current_platform.get_device_capability().major < 12
     ref_k = dequant_nvfp4_kv_cache(
-        k_data, k_scales, kv_scale_val, head_size, block_size
+        k_data, k_scales, kv_scale_val, head_size, block_size, swizzle_sf=False
     ).to(torch.bfloat16)
     ref_v = dequant_nvfp4_kv_cache(
-        v_data, v_scales, kv_scale_val, head_size, block_size
+        v_data, v_scales, kv_scale_val, head_size, block_size, swizzle_sf=v_swizzled
     ).to(torch.bfloat16)
     ref_kv_bf16 = torch.stack([ref_k, ref_v], dim=1)  # [N, 2, H, T, D]
 
