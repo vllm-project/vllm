@@ -31,6 +31,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.logprob_triton_warmup import logprob_triton_warmup
 from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
@@ -168,6 +169,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        if worker.use_v2_model_runner:
+            logprob_triton_warmup(worker.model_runner)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
