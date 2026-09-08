@@ -41,6 +41,9 @@ constexpr uint32_t HIST2048_THRESHOLD = 8192;
 // Large path: fixed shared memory for histograms + scalars
 constexpr size_t kFixedSmemLarge =
     ((RADIX + RADIX + 5) * sizeof(uint32_t) + 15) & ~size_t(15);
+// The blocked emission loads `shared_ordered` 128 bits at a time.
+static_assert(kFixedSmemLarge % 16 == 0,
+              "shared_ordered must stay 16-byte aligned");
 
 // ============================================================================
 // Common helpers
@@ -273,30 +276,86 @@ __device__ void det_select_row(const float* __restrict__ row, int n,
   }
   const uint32_t pivot = prefix;
   const uint32_t fin = remaining;
+  // Blocked emission, four elements per thread: thread `tx` owns the four
+  // consecutive indices [base + 4*tx, base + 4*tx + 4). Blocked (not striped)
+  // ownership is what keeps the position formula below valid unchanged -- it
+  // needs the scan to run in index order, and blocked layout preserves index
+  // order both within a thread and across threads. This runs one BlockScan and
+  // one barrier per 4*N_THREADS elements instead of per N_THREADS: at
+  // n = 16384 that is 4 of each rather than 16. The selected set and its order
+  // are untouched, since the position is a pure function of index, pivot and
+  // `fin`.
+  constexpr int kItems = 4;
+  constexpr int kTile = kItems * N_THREADS;
+  static_assert(kTile <= 0xFFFF,
+                "the emission packs two per-tile counts into one uint32");
+  // `keys` sits at `smem + fixed`, and `fixed` is 2048 plus a multiple of 128,
+  // so the 128-bit blocked load below is aligned and conflict-free.
+  const bool row_aligned = ((reinterpret_cast<uintptr_t>(row) & 15) == 0);
   uint32_t run_gt = 0, run_eq = 0;
-  for (int base = 0; base < n; base += N_THREADS) {
-    const int i = base + tx;
-    const bool valid = (i < n);
-    uint32_t key = 0;
-    if (valid) key = cached ? keys[i] : convert_to_uint32_v2(row[i]);
-    const uint32_t fgt = (valid && key > pivot) ? 1u : 0u;
-    const uint32_t feq = (valid && key == pivot) ? 1u : 0u;
-    // Both flags in one scan: they are mutually exclusive and a tile holds at
-    // most N_THREADS elements, so each count fits in 16 bits.
+  for (int base = 0; base < n; base += kTile) {
+    const int mine = base + tx * kItems;
+    uint32_t key[kItems];
+    bool valid[kItems];
+    if (mine + kItems <= n) {
+      if (cached) {
+        const uint4 v = *reinterpret_cast<const uint4*>(keys + mine);
+        key[0] = v.x;
+        key[1] = v.y;
+        key[2] = v.z;
+        key[3] = v.w;
+      } else if (row_aligned) {
+        float v0, v1, v2, v3;
+        load_float4(row + mine, v0, v1, v2, v3);
+        key[0] = convert_to_uint32_v2(v0);
+        key[1] = convert_to_uint32_v2(v1);
+        key[2] = convert_to_uint32_v2(v2);
+        key[3] = convert_to_uint32_v2(v3);
+      } else {
+#pragma unroll
+        for (int j = 0; j < kItems; ++j)
+          key[j] = convert_to_uint32_v2(row[mine + j]);
+      }
+#pragma unroll
+      for (int j = 0; j < kItems; ++j) valid[j] = true;
+    } else {
+#pragma unroll
+      for (int j = 0; j < kItems; ++j) {
+        const int i = mine + j;
+        valid[j] = (i < n);
+        key[j] =
+            valid[j] ? (cached ? keys[i] : convert_to_uint32_v2(row[i])) : 0u;
+      }
+    }
+    uint32_t fgt[kItems], feq[kItems];
+    uint32_t agg = 0;
+#pragma unroll
+    for (int j = 0; j < kItems; ++j) {
+      fgt[j] = (valid[j] && key[j] > pivot) ? 1u : 0u;
+      feq[j] = (valid[j] && key[j] == pivot) ? 1u : 0u;
+      // Both flags in one scan: they are mutually exclusive and a tile holds at
+      // most kTile elements, so each count fits in 16 bits.
+      agg += fgt[j] | (feq[j] << 16);
+    }
     uint32_t packed_rank, packed_total;
-    ScanT(*scan_tmp).ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
-    const uint32_t rgt = packed_rank & 0xFFFFu, req = packed_rank >> 16;
-    const uint32_t tgt = packed_total & 0xFFFFu, teq = packed_total >> 16;
+    ScanT(*scan_tmp).ExclusiveSum(agg, packed_rank, packed_total);
     // Final ascending position directly. The number of selected elements at
     // lower indices is (# greater before) + min(# equal before, fin), since
     // exactly the first `fin` equal elements by index are kept. True for a `>`
     // element (the min saturates) and for a kept `==` element (it does not),
-    // so one expression serves both and no reordering pass is needed.
-    const uint32_t g = run_gt + rgt;
-    const uint32_t e = run_eq + req;
-    if (fgt || (feq && e < fin)) out[g + (e < fin ? e : fin)] = i;
-    run_gt += tgt;
-    run_eq += teq;
+    // so one expression serves both and no reordering pass is needed. The
+    // block-wide exclusive prefix is continued serially over this thread's own
+    // four, in index order.
+    uint32_t g = run_gt + (packed_rank & 0xFFFFu);
+    uint32_t e = run_eq + (packed_rank >> 16);
+#pragma unroll
+    for (int j = 0; j < kItems; ++j) {
+      if (fgt[j] || (feq[j] && e < fin)) out[g + (e < fin ? e : fin)] = mine + j;
+      g += fgt[j];
+      e += feq[j];
+    }
+    run_gt += packed_total & 0xFFFFu;
+    run_eq += packed_total >> 16;
     __syncthreads();
   }
 }
@@ -1071,27 +1130,59 @@ __device__ void radix_topk(const float* __restrict__ row_input,
     __shared__ typename ScanT::TempStorage det_scan_tmp;
     static_assert(kThreadsPerBlock <= 0xFFFF,
                   "the emission packs two per-tile counts into one uint32");
+    // Blocked emission, four elements per thread -- see det_select_row for why
+    // blocked ownership is required and why it cannot change the result.
+    constexpr uint32_t kItems = 4;
+    constexpr uint32_t kTile = kItems * kThreadsPerBlock;
+    static_assert(kTile <= 0xFFFF,
+                  "the emission packs two per-tile counts into one uint32");
     uint32_t run_gt = 0, run_eq = 0;
-    for (uint32_t base = 0; base < actual_chunk_size;
-         base += kThreadsPerBlock) {
-      const uint32_t i = base + tx;
-      const bool valid = (i < actual_chunk_size);
-      const uint32_t fgt =
-          (valid && shared_ordered[i] > ordered_pivot) ? 1u : 0u;
-      const uint32_t feq =
-          (valid && shared_ordered[i] == ordered_pivot) ? 1u : 0u;
+    for (uint32_t base = 0; base < actual_chunk_size; base += kTile) {
+      const uint32_t mine = base + tx * kItems;
+      uint32_t key[kItems];
+      bool valid[kItems];
+      if (mine + kItems <= actual_chunk_size) {
+        // `shared_ordered` starts at `smem_raw + kFixedSmemLarge`, a multiple
+        // of 16, so this 128-bit blocked load is aligned and conflict-free.
+        const uint4 v = *reinterpret_cast<const uint4*>(shared_ordered + mine);
+        key[0] = v.x;
+        key[1] = v.y;
+        key[2] = v.z;
+        key[3] = v.w;
+#pragma unroll
+        for (uint32_t j = 0; j < kItems; ++j) valid[j] = true;
+      } else {
+#pragma unroll
+        for (uint32_t j = 0; j < kItems; ++j) {
+          const uint32_t i = mine + j;
+          valid[j] = (i < actual_chunk_size);
+          key[j] = valid[j] ? shared_ordered[i] : 0u;
+        }
+      }
+      uint32_t fgt[kItems], feq[kItems];
+      uint32_t agg = 0;
+#pragma unroll
+      for (uint32_t j = 0; j < kItems; ++j) {
+        fgt[j] = (valid[j] && key[j] > ordered_pivot) ? 1u : 0u;
+        feq[j] = (valid[j] && key[j] == ordered_pivot) ? 1u : 0u;
+        agg += fgt[j] | (feq[j] << 16);
+      }
       uint32_t packed_rank, packed_total;
-      ScanT(det_scan_tmp)
-          .ExclusiveSum(fgt | (feq << 16), packed_rank, packed_total);
+      ScanT(det_scan_tmp).ExclusiveSum(agg, packed_rank, packed_total);
       // Same direct placement, with the per-CTA prefixes folded in. CTA c owns
       // a lower contiguous index interval than CTA c+1, so CTA order and index
       // order agree and the position computed here is final.
-      const uint32_t g = gt_before + run_gt + (packed_rank & 0xFFFFu);
-      const uint32_t e = eq_before + run_eq + (packed_rank >> 16);
-      if (fgt || (feq && e < remaining_eq)) {
-        const uint32_t pos = g + (e < remaining_eq ? e : remaining_eq);
-        if (pos < static_cast<uint32_t>(TopK))
-          row_output[pos] = static_cast<int32_t>(my_chunk_start + i);
+      uint32_t g = gt_before + run_gt + (packed_rank & 0xFFFFu);
+      uint32_t e = eq_before + run_eq + (packed_rank >> 16);
+#pragma unroll
+      for (uint32_t j = 0; j < kItems; ++j) {
+        if (fgt[j] || (feq[j] && e < remaining_eq)) {
+          const uint32_t pos = g + (e < remaining_eq ? e : remaining_eq);
+          if (pos < static_cast<uint32_t>(TopK))
+            row_output[pos] = static_cast<int32_t>(my_chunk_start + mine + j);
+        }
+        g += fgt[j];
+        e += feq[j];
       }
       run_gt += packed_total & 0xFFFFu;
       run_eq += packed_total >> 16;
