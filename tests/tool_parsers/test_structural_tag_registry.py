@@ -8,6 +8,7 @@ import pytest
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -537,6 +538,50 @@ def test_auto_tool_choice_skips_structural_tag_without_strict(
     )
 
     assert tag is None
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_force_strict_tool_calling_attaches_tag_without_strict(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_FORCE_STRICT_TOOL_CALLING overrides the per-tool opt-in.
+
+    Without it, `tool_choice="auto"` and no strict tool means free-form decoding, and a
+    drifted tool call still returns HTTP 200 with `tool_calls: null`. Operators serving
+    clients they cannot patch need a server-side way to enforce the grammar.
+    """
+    monkeypatch.setattr(envs, "VLLM_FORCE_STRICT_TOOL_CALLING", True)
+
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_force_strict_tool_calling_defaults_off(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """The override must be opt-in: the default must not change existing behaviour."""
+    assert envs.VLLM_FORCE_STRICT_TOOL_CALLING is False
+
+    assert (
+        get_model_structural_tag(
+            model=model,
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
 
 
 def test_get_function_parameters_relaxes_function_strict_false():

@@ -238,6 +238,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_FORCE_STRICT_TOOL_CALLING: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -1776,6 +1777,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enforce function parameter schemas in structural-tag based tool calling.
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
+    # Treat every tool as strict for structural-tag tool calling, even when the
+    # request marks no tool `strict` and uses `tool_choice: "auto"`.
+    #
+    # By default a structural tag is attached only if the client opts in per
+    # tool. Clients that never set `strict` therefore decode tool calls
+    # free-form, and when that drifts the response is still HTTP 200 with
+    # `finish_reason: "stop"` and `tool_calls: null` -- the malformed call is
+    # left in `content`, so an agent loop reads it as a finished turn rather
+    # than an error. Operators serving fixed, trusted clients they cannot patch
+    # can set this to enforce the grammar server-side.
+    #
+    # Off by default: it constrains decoding for every request, and a tool
+    # schema that xgrammar cannot compile becomes a request error instead of a
+    # free-form answer.
+    "VLLM_FORCE_STRICT_TOOL_CALLING": lambda: (
+        os.getenv("VLLM_FORCE_STRICT_TOOL_CALLING", "False").lower() in ("true", "1")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker

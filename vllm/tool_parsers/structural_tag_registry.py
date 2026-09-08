@@ -30,6 +30,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
@@ -114,7 +115,11 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    if (
+        tool_choice == "auto"
+        and not _any_tool_strict(tools)
+        and not envs.VLLM_FORCE_STRICT_TOOL_CALLING
+    ):
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
