@@ -100,17 +100,6 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         m = input.numel() // n
         return create_fp4_output_tensors(m, n, input.device, is_sf_swizzled_layout)
 
-    @register_fake("_C::scaled_fp4_quant.out")
-    def _scaled_fp4_quant_out_fake(
-        input: torch.Tensor,
-        input_scale: torch.Tensor,
-        is_sf_swizzled_layout: bool,
-        *,
-        output: torch.Tensor,
-        output_scale: torch.Tensor,
-    ) -> None:
-        return None
-
 
 # page attention ops
 def paged_attention_rocm(
@@ -738,27 +727,6 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
-
-
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
-
-    @register_fake("_rocm_C::moe_gptq_gemm_rdna3")
-    def _moe_gptq_gemm_rdna3_fake(
-        a: torch.Tensor,
-        c: torch.Tensor,
-        b_q_weight: torch.Tensor,
-        b_scales: torch.Tensor,
-        b_qzeros: torch.Tensor,
-        topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
-        expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
-        top_k: int,
-        block_size_m: int,
-        mul_topk_weight: bool,
-        output_topk: int = 0,
-    ) -> None:
-        return
 
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
@@ -1508,7 +1476,7 @@ def cutlass_w4a8_moe_mm(
     c_strides: torch.Tensor,
     group_scale_strides: torch.Tensor,
     maybe_schedule: str | None = None,
-):
+) -> None:
     """
     Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
     W4A8 quantization scheme. Uses group-wise quantization (INT4 -> FP8)
@@ -2065,7 +2033,7 @@ def scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
+        Output int8 tensor, scales, and optionally azp.
     """
     if current_platform.is_xpu():
         # XPU has no _C int8 quant op; use the torch.compile reference.
@@ -2437,17 +2405,6 @@ def fp32_router_gemm(
     return output
 
 
-if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
-
-    @register_fake("_C::fp32_router_gemm")
-    def fp32_router_gemm_fake(
-        output: torch.Tensor,
-        mat_a: torch.Tensor,
-        mat_b: torch.Tensor,
-    ) -> None:
-        return
-
-
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2501,6 +2458,8 @@ def topk_hash_softplus_sqrt(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -2513,6 +2472,8 @@ def topk_hash_softplus_sqrt(
         input_tokens,
         hash_indices_table,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
 
@@ -2539,9 +2500,9 @@ def grouped_topk(
         bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
         scoring_func: 0=none (no activation), 1=sigmoid
     """
-    if not current_platform.is_cuda():
+    if not (current_platform.is_cuda() or current_platform.is_xpu()):
         raise NotImplementedError(
-            "The fused grouped_topk kernel is only available on CUDA platforms"
+            "The fused grouped_topk kernel is only available on CUDA and XPU platforms"
         )
     return torch.ops._moe_C.grouped_topk(
         scores,
@@ -2553,6 +2514,26 @@ def grouped_topk(
         bias,
         scoring_func,
     )
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "grouped_topk"):
+
+    @register_fake("_moe_C::grouped_topk")
+    def _grouped_topk_fake(
+        scores: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        topk: int,
+        renormalize: bool,
+        routed_scaling_factor: float,
+        bias: torch.Tensor,
+        scoring_func: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = scores.size(0)
+        return (
+            scores.new_empty((num_tokens, topk), dtype=torch.float32),
+            scores.new_empty((num_tokens, topk), dtype=torch.int32),
+        )
 
 
 def moe_wna16_marlin_gemm(
@@ -3860,7 +3841,7 @@ def onednn_scaled_int8_quant(
     scale: torch.Tensor | None = None,
     azp: torch.Tensor | None = None,
     symmetric: bool = True,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
@@ -3873,7 +3854,7 @@ def onednn_scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
+        Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     token_num = input.numel() // input.shape[-1]
@@ -4357,19 +4338,6 @@ def safeFusedQuantizeNv(
     """
     torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
     return
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
-
-    @register_fake("vllm::safeFusedQuantizeNv")
-    def _fake_fused_quantize_nv(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        xh_e2m1: torch.Tensor,
-        xh_e4m3: torch.Tensor,
-        global_scale: torch.Tensor,
-    ) -> None:
-        return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
