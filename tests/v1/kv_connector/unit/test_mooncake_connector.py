@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -38,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MLAAttentionSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -1402,3 +1404,203 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+@pytest.mark.parametrize(
+    "producer_tp,consumer_tp,gqa_len,mla_len,valid",
+    [
+        (4, 1, 16384, 8192, True),
+        (4, 1, 8192, 8192, False),
+        (4, 1, 16384, 4096, False),
+        (1, 4, 1024, 8192, True),
+        (1, 4, 4096, 8192, False),
+        (1, 4, 1024, 4096, False),
+    ],
+)
+def test_validate_asymmetric_region_lengths_mixed_replicated(
+    producer_tp, consumer_tp, gqa_len, mla_len, valid
+):
+    """Validate GQA shards and full MLA side-cache blocks in both TP directions."""
+
+    def region(name, length, replicated=False):
+        return TransferRegion(
+            layer_name=name,
+            layer_index=0,
+            base_addr=0,
+            block_len=length,
+            kv_block_len=length,
+            replicated=replicated,
+        )
+
+    error = _validate_asymmetric_region_lengths(
+        [region("gqa", 4096), region("indexer", 8192, True)],
+        [region("gqa", gqa_len), region("indexer", mla_len, True)],
+        local_tp_size=producer_tp,
+        remote_tp_size=consumer_tp,
+        producer_cache_replicated=False,
+    )
+    assert (error is None) == valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "p_tp_rank", [0, 1], ids=["rank0_sends_mla", "rank1_skips_mla"]
+)
+async def test_send_kv_to_decode_mixed_replicated_regions(monkeypatch, p_tp_rank):
+    """Mixed GQA+MLA model: het-TP send plans replicated regions per region.
+
+    Producer TP=4 sends to a consumer TP=1. The TP-sharded GQA region is
+    written at the producer rank's slice offset, while the TP-invariant MLA
+    region (e.g. MiniMax-M3's lightning indexer) is sent whole at offset 0
+    by producer rank 0 only.
+    """
+
+    P_TP_SIZE = 4
+    GQA_BLOCK_LEN = 4096
+    MLA_BLOCK_LEN = 8192
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+
+        # Override TP rank/size to simulate P TP=4.
+        prefill_worker.tp_rank = p_tp_rank
+        prefill_worker.tp_size = P_TP_SIZE
+        prefill_worker._tp_size[prefill_worker.engine_id] = P_TP_SIZE
+        prefill_worker.transfer_topo.tp_rank = p_tp_rank
+        prefill_worker.transfer_topo.tp_size = P_TP_SIZE
+
+        prefill_worker._layer_specs["model.layers.0.self_attn"] = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float16,
+        )
+        prefill_worker._layer_specs["model.layers.0.indexer"] = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+        )
+
+        prefill_worker.kv_caches_base_addr = [0x1000, 0x3000]
+        prefill_worker.block_len_per_layer = [GQA_BLOCK_LEN, MLA_BLOCK_LEN]
+        prefill_worker.kv_block_len_per_layer = [GQA_BLOCK_LEN, MLA_BLOCK_LEN]
+        prefill_worker.registered_layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.0.indexer",
+        ]
+        prefill_worker.registered_layer_indices = [0, 0]
+
+        origin_sender_loop = prefill_worker.sender_loop
+        prefill_worker.sender_loop = asyncio.get_event_loop()
+
+        transfer_id = "xfer-mixed-1"
+        send_meta = SendBlockMeta(
+            p_req_id="p-req-mixed",
+            transfer_id=transfer_id,
+            local_block_ids=[[10, 11]],
+            ready=asyncio.Event(),
+        )
+        prefill_worker.reqs_need_send[transfer_id] = send_meta
+        send_meta.ready.set()
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={"d-req-mixed": (transfer_id, [[20, 21]])},
+            kv_caches_base_addr=[0xA000, 0xB000],
+            block_lens=[GQA_BLOCK_LEN * P_TP_SIZE, MLA_BLOCK_LEN],
+            kv_block_lens=[GQA_BLOCK_LEN * P_TP_SIZE, MLA_BLOCK_LEN],
+            registered_layer_names=[
+                "model.layers.0.self_attn",
+                "model.layers.0.indexer",
+            ],
+            registered_layer_indices=[0, 0],
+        )
+        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
+        mock_socket.send_multipart = AsyncMock()
+        identity = b"consumer-mixed"
+
+        with patch.object(
+            prefill_worker, "_send_blocks", return_value=0
+        ) as mock_send_blocks:
+            await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
+
+        src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
+
+        # The GQA shard lands at this rank's TP-ratio slice of the remote
+        # region (no coalescing: remote block is tp_ratio times larger).
+        gqa_dst_off = (p_tp_rank % P_TP_SIZE) * GQA_BLOCK_LEN
+        expected_src = [
+            0x1000 + 10 * GQA_BLOCK_LEN,
+            0x1000 + 11 * GQA_BLOCK_LEN,
+        ]
+        expected_dst = [
+            0xA000 + 20 * GQA_BLOCK_LEN * P_TP_SIZE + gqa_dst_off,
+            0xA000 + 21 * GQA_BLOCK_LEN * P_TP_SIZE + gqa_dst_off,
+        ]
+        expected_lengths = [GQA_BLOCK_LEN, GQA_BLOCK_LEN]
+        if p_tp_rank == 0:
+            # The replicated MLA region is sent whole by rank 0 only, as one
+            # coalesced transfer at offset 0.
+            expected_src.append(0x3000 + 10 * MLA_BLOCK_LEN)
+            expected_dst.append(0xB000 + 20 * MLA_BLOCK_LEN)
+            expected_lengths.append(2 * MLA_BLOCK_LEN)
+
+        assert src_ptrs == expected_src
+        assert dst_ptrs == expected_dst
+        assert lengths == expected_lengths
+
+        mock_socket.send_multipart.assert_called_once()
+        _, sent_payload = mock_socket.send_multipart.call_args[0][0]
+        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
+        assert response.status == MooncakeXferResponseStatus.FINISH
+        assert response.ok_reqs == ["d-req-mixed"]
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
+
+
+def test_replicated_layer_classification_per_group():
+    """Replication is classified per layer from the spec type.
+
+    MiniMax-M3 mixes a TP-sharded GQA cache (FullAttentionSpec) with a
+    1-head MLA-typed indexer side cache (replicated). A GQA layer must not
+    be classified replicated from num_kv_heads: the spec carries the
+    per-rank head count (total // tp_size), so a TP-sharded layer is
+    indistinguishable from a replicated one by head count alone.
+    """
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        worker = connector.connector_worker
+        worker.tp_size = 4
+        worker._layer_specs["gqa_sharded"] = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        )
+        worker._layer_specs["indexer"] = MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        )
+
+        # Per-rank num_kv_heads=1 on a TP=4 producer: still TP-sharded.
+        assert not worker._is_replicated_layer("gqa_sharded")
+        assert worker._is_replicated_layer("indexer")
+        assert not worker._is_replicated_layer("unknown")
+
+        worker.shutdown()
