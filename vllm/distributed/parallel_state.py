@@ -27,9 +27,9 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import namedtuple
+from collections import deque, namedtuple
 from collections.abc import Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
@@ -76,6 +76,37 @@ class Handle(Protocol):
     def is_completed(self) -> bool: ...
 
     def wait(self) -> None: ...
+
+
+class _RetainedHandle:
+    """Handle that retains source tensors until all posted work completes.
+
+    Used by ``isend_object`` to keep the serialized CPU tensors alive while
+    gloo copies them in the background; ``wait`` drops the refs once drained.
+
+    ``wait`` must be idempotent: gloo ``Work.wait()`` is single-shot for
+    point-to-point operations — calling it a second time on an already
+    completed send blocks forever (verified empirically). Both the worker's
+    top-of-step drain of ``_pp_send_work`` and ``_reap_completed_isends``
+    may wait the same entry's metadata handle, so the second caller must
+    not re-wait the underlying works.
+    """
+
+    def __init__(self, works: list[Any], retained: tuple[torch.Tensor, ...]) -> None:
+        self._works = works
+        self._retained = retained
+        self._waited = False
+
+    def is_completed(self) -> bool:
+        return all(w.is_completed() for w in self._works)
+
+    def wait(self) -> None:
+        if self._waited:
+            return
+        for w in self._works:
+            w.wait()
+        self._waited = True
+        self._retained = ()
 
 
 def _split_tensor_dict(
@@ -147,6 +178,16 @@ def _apply_to_device_comms(
 
     for dc in comms:
         action(dc)
+
+
+def suspend_device_comms() -> None:
+    """Release device communicator memory (collective; comms must be idle)."""
+    _apply_to_device_comms(lambda comm: comm.suspend())
+
+
+def resume_device_comms() -> None:
+    """Restore suspended device communicators (collective)."""
+    _apply_to_device_comms(lambda comm: comm.resume())
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -532,6 +573,15 @@ class GroupCoordinator:
             and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
 
+        # FIFO of in-flight ``isend_tensor_dict`` calls: one entry per call,
+        # (handles, sent source tensors). Self-retention keeps the send
+        # buffers alive for fire-and-forget callers that drop the returned
+        # handles; entries are reaped lazily on the next ``isend_tensor_dict``
+        # (see ``_reap_completed_isends``). Lazily created instead of plain
+        # attribute init because some subclasses replicate ``__init__``
+        # without calling ``super().__init__``.
+        self._pending_isends: deque[tuple[list[Handle], list[torch.Tensor]]] = deque()
+
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
         """Create a new device-side ProcessGroup with the same per-rank membership
         as this coordinator's `device_group`, but backed by a distinct communicator.
@@ -626,6 +676,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_fi_pcie_ipc_context: AbstractContextManager[Any] = nullcontext()
         maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
@@ -642,6 +693,10 @@ class GroupCoordinator:
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+            if isinstance(self.device_communicator, CudaCommunicator):
+                fi_pcie_ipc_ar_comm = self.device_communicator.fi_pcie_ipc_ar_comm
+                if fi_pcie_ipc_ar_comm is not None:
+                    maybe_fi_pcie_ipc_context = fi_pcie_ipc_ar_comm.capture()
 
             from vllm._aiter_ops import rocm_aiter_ops
 
@@ -656,7 +711,12 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_fi_pcie_ipc_context,
+            maybe_aiter_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -882,6 +942,33 @@ class GroupCoordinator:
 
         return obj
 
+    def isend_object(self, obj: Any, dst: int) -> Handle:
+        """Non-blocking ``send_object``: isend size + pickled object on the
+        CPU group. Returns a handle that retains the serialized source
+        tensors until ``wait`` drains both sends.
+        """
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert dst != self.rank_in_group, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank."
+        )
+
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+
+        retained = (size_tensor, object_tensor)
+        works: list[Any] = []
+        for tensor in retained:
+            work = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.cpu_group
+            )
+            if work is not None:
+                works.append(work)
+
+        return _RetainedHandle(works, retained)
+
     def broadcast_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any] | None = None,
@@ -1014,7 +1101,50 @@ class GroupCoordinator:
         )
         for handle in handles:
             handle.wait()
+        # The sync path waited every handle, so the self-retention entry
+        # appended by ``isend_tensor_dict`` is already drained; drop it
+        # instead of leaking the tensor refs until the next async send.
+        pending = getattr(self, "_pending_isends", None)
+        if pending and pending[-1][0] is handles:
+            pending.pop()
         return None
+
+    def _reap_completed_isends(self) -> None:
+        """Lazily drop self-retained ``isend_tensor_dict`` entries that have
+        completed, oldest first (FIFO).
+
+        gloo ``Work.is_completed()`` is unreliable (it can report completion
+        before the background copy of the source buffer finishes), so the
+        metadata handle (``handles[0]``, a gloo-backed ``_RetainedHandle``) is
+        never used as the completion gate. Instead we gate on the tensor-send
+        handles (``handles[1:]``), which run on the device backend where
+        ``is_completed()`` is reliable. Once all tensor sends are done the
+        peer must already have posted the matching tensor recvs — and since
+        the receiver ingests metadata before tensors, the gloo metadata send
+        is then guaranteed complete, so ``wait()`` on it is ~instant and only
+        serves to drop the retained refs.
+
+        Metadata-only entries (``handles[1:]`` empty, e.g. an empty
+        ``IntermediateTensors``) have no reliable completion signal; drop them
+        best-effort without blocking on the gloo metadata wait.
+        """
+        pending = getattr(self, "_pending_isends", None)
+        if pending is None:
+            # Subclasses that replicate __init__ without calling
+            # super().__init__ may not have the attribute yet.
+            self._pending_isends = pending = deque()
+        while pending:
+            handles, _ = pending[0]
+            tensor_handles = handles[1:]
+            if not tensor_handles:
+                pending.popleft()
+                continue
+            if not all(h.is_completed() for h in tensor_handles):
+                # The oldest send is still in flight; FIFO ordering means the
+                # rest are no further along, so stop here.
+                break
+            handles[0].wait()
+            pending.popleft()
 
     def isend_tensor_dict(
         self,
@@ -1023,6 +1153,16 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Handle]:
+        """Send the input tensor dictionary asynchronously.
+
+        The returned handles are additionally self-retained in
+        ``self._pending_isends`` (together with the sent source tensors) and
+        reaped lazily on subsequent calls, so fire-and-forget callers that
+        drop the handles cannot free or overwrite the send buffers while the
+        sends are still in flight. Callers that do keep the handles may
+        ``wait()`` them as before; the retention entry is dropped on reap
+        either way.
+        """
         if self.world_size <= 1:
             return []
 
@@ -1048,12 +1188,16 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        self.send_object(metadata_list, dst=dst)
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
-        handles: list[Handle] = []
+        # Reap completed sends before posting new ones, bounding the
+        # self-retention FIFO.
+        self._reap_completed_isends()
+        handles: list[Handle] = [self.isend_object(metadata_list, dst=dst)]
+
+        sent_tensors: list[torch.Tensor] = []
         for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 continue
@@ -1070,6 +1214,19 @@ class GroupCoordinator:
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
+            sent_tensors.append(tensor)
+
+        # Self-retain for fire-and-forget callers: keep the handles and
+        # the source tensors alive until the sends complete (reaped
+        # lazily by ``_reap_completed_isends``). Without this, dropping
+        # the returned handles would GC the ``_RetainedHandle``'s
+        # serialized metadata buffers mid-send, and non-CUDA devices
+        # have no ``record_stream`` equivalent protecting the tensor
+        # sources.
+        pending = getattr(self, "_pending_isends", None)
+        if pending is None:
+            self._pending_isends = pending = deque()
+        pending.append((handles, sent_tensors))
 
         return handles
 
@@ -1223,14 +1380,17 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
+        # Device communicators can own collective workspaces whose teardown
+        # uses these process groups (for example FlashInfer PCIe IPC barriers).
+        # Release them before destroying the groups they depend on.
+        if self.device_communicator is not None:
+            self.device_communicator.destroy()
         if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group
         if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
             del self.cpu_group
-        if self.device_communicator is not None:
-            self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
