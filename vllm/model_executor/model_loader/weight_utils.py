@@ -1067,9 +1067,62 @@ def runai_safetensors_weights_iterator(
             yield name, tensor.clone()
 
 
+def _fastsafetensors_memory_budget(
+    device: torch.device, pg: Any, derive: bool = True
+) -> int | None:
+    """Device memory the fastsafetensors fit planner may spend.
+
+    Model parameters are allocated before weights are loaded, so the free
+    memory read here is the headroom left for staging buffers. All ranks agree
+    on one value so they compute identical load plans.
+
+    Args:
+        device: Device the weights are loaded onto.
+        pg: Process group the loader runs under.
+        derive: Whether to derive a budget from free memory. False contributes
+            0, leaving the load unplanned unless a budget was set explicitly.
+            Ranks may disagree: the reduce below makes one abstaining rank
+            leave every rank unplanned.
+
+    Returns:
+        Budget in bytes, or None if it could not be determined.
+    """
+    # Zero means "no bound". Every rank contributes a value and takes part in
+    # the reduce below, whatever its local state: a rank that returned early
+    # would leave the others blocked in the all-reduce while it went on to the
+    # loader's broadcast sequence. MIN then makes the ranks agree, and any rank
+    # contributing 0 -- an explicit disable, a consumer whose residency the
+    # planner cannot model, or a failed reading -- leaves them all unplanned.
+    override = envs.VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET
+    if override >= 0:
+        budget = override
+    elif not derive:
+        budget = 0
+    else:
+        try:
+            free, _ = current_platform.mem_get_info()
+            # Headroom for allocator rounding, fixed pools, and the small
+            # allocations some load_weights implementations make while
+            # iterating (a vocab index tensor, a classifier bias, a transient
+            # per-layer QKV concat). accumulate_resident=False models no
+            # growth rather than proving none; this reserve absorbs the
+            # difference, which is comfortable at those sizes.
+            budget = max(free - max(free // 20, 1 << 30), 0)
+        except Exception as e:
+            logger.warning("fastsafetensors memory budget unavailable (%s)", e)
+            budget = 0
+
+    if pg.size() > 1 and torch.distributed.is_initialized():
+        agreed = torch.tensor([budget], dtype=torch.int64, device=device)
+        torch.distributed.all_reduce(agreed, op=torch.distributed.ReduceOp.MIN)
+        budget = int(agreed.item())
+    return budget or None
+
+
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    accumulate_resident: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1077,7 +1130,26 @@ def fastsafetensors_weights_iterator(
     Uses ParallelLoader for pipelined loading: the producer thread
     prepares metadata for the next shard while the consumer yields
     tensors from the current shard.
+
+    Args:
+        hf_weights_files: Safetensors files to load.
+        use_tqdm_on_load: Whether to show a progress bar.
+        accumulate_resident: Whether device memory grows as tensors are
+            yielded. False when parameters are allocated before loading and
+            only copied into, which is the common case.
+
+    Note:
+        Collective. Every rank must call this the same number of times in the
+        same order: the budget all-reduces, and the loader broadcasts. A model
+        is loaded once per weights source, so a model whose ``secondary_weights``
+        differed between ranks -- gated on the pipeline stage owning a submodule,
+        say -- would leave the ranks issuing different numbers of collectives
+        and the load would hang. Today every source list is built from config
+        alone, before any pipeline branching. Each source is planned
+        separately and reads free memory at its own point, so a load with
+        several sources has a budget per source rather than one overall.
     """
+    from fastsafetensors import BudgetInfeasibleError
     from fastsafetensors.parallel_loader import ParallelLoader
 
     if torch.distributed.is_initialized():
@@ -1096,15 +1168,64 @@ def fastsafetensors_weights_iterator(
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
 
+    all_local = envs.VLLM_FASTSAFETENSORS_ALL_LOCAL
+    # The planner charges every byte read as resident, which is only accurate
+    # when the consumer copies into preallocated parameters. A consumer that
+    # keeps less than it reads -- online quantization stores a smaller
+    # quantized parameter than the checkpoint bytes it consumes -- would be
+    # over-charged by the quantization ratio and refused a load that fits, so
+    # leave those unplanned unless a budget was asked for explicitly.
+    budget = _fastsafetensors_memory_budget(device, pg, derive=not accumulate_resident)
+
     def _make_loader(nogds: bool) -> "ParallelLoader":
-        return ParallelLoader(
+        kwargs = dict(
             pg=pg,
             hf_weights_files=hf_weights_files,
             queue_size=queue_size,
             use_tqdm_on_load=tqdm_enabled,
             device=str(device),
             nogds=nogds,
+            all_local=all_local,
+            accumulate_resident=accumulate_resident,
         )
+        if budget is None:
+            return ParallelLoader(**kwargs)
+        try:
+            return ParallelLoader(
+                device_memory_budget=budget,
+                # Allocate each chunk at its planned budget rather than its
+                # span, so the caching allocator reuses blocks instead of
+                # fragmenting when the model barely fits. Capped at the largest
+                # shard so a load never stages more than one whole shard, which
+                # is what it would have staged unplanned; without the cap the
+                # budget is the only bound and a small checkpoint would reserve
+                # most of free memory. The cap binds only where the plan
+                # already fits a whole file, so chunked plans are unchanged,
+                # and a shard is never smaller than its largest tensor, so it
+                # cannot make a feasible plan infeasible.
+                max_batch_bytes=max(
+                    (os.path.getsize(f) for f in hf_weights_files), default=0
+                )
+                or None,
+                use_chunk_budget_as_allocation_size=True,
+                **kwargs,
+            )
+        except BudgetInfeasibleError as e:
+            # Raised while planning, before any tensor is read. Staging whole
+            # shards instead would need a buffer at least as large as the
+            # tensor the plan could not place, so falling back is more likely
+            # to run out of memory, not less.
+            raise BudgetInfeasibleError(
+                f"{e}\nThe checkpoint does not fit in the device memory left "
+                "after allocating model parameters. The default loader "
+                "(--load-format auto) copies tensor by tensor from lazy mmap "
+                "and needs no shard-sized staging buffer, so it can load this "
+                "checkpoint on this device, more slowly. Otherwise, free "
+                "device memory or use more of it via tensor parallelism. "
+                "Setting VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET=0 removes "
+                "the memory bound and stages whole shards, which is likely to "
+                "run out of memory during loading."
+            ) from e
 
     # GDS can fail either at construction or lazily inside the producer
     # thread during iteration (e.g. cuFileHandleRegister returning
