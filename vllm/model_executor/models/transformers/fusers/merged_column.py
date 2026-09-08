@@ -10,16 +10,12 @@ from torch import fx, nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.models.transformers.fusers.base import (
-    StackedFuser,
-    local_output_sizes,
-)
+from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     innermost_block,
     is_linear,
     recover_forward,
-    replace_expr,
     single_self_call,
 )
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
@@ -114,24 +110,8 @@ class MergedColumnParallelFuser(StackedFuser):
             ):
                 raise ValueError("parallel projections cross other operations")
 
-        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
-        temps = [f"_vllm_merged_{index}" for index in range(len(calls))]
-        if names & set(temps):
-            raise ValueError("fused temporaries would shadow existing names")
-        targets = ", ".join(temps)
-        sections = local_output_sizes(self.merged_name)
-        source = f"{targets} = self.{self.merged_name}(__arg__).split({sections}, -1)"
-        assign = ast.parse(source).body[0]
-        arg = next(
-            node
-            for node in ast.walk(assign)
-            if isinstance(node, ast.Name) and node.id == "__arg__"
-        )
-        replace_expr(assign, arg, calls[0].args[0])
-        ast.copy_location(assign, block[index])
-        block.insert(index, assign)
-        for call, temp in zip(calls, temps):
-            replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
+        # l1(x), l2(x), ... -> merged(x).split(merged.output_sizes / merged.tp_size, -1)
+        self._splice_merged_split(funcdef, calls, block, index)
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
