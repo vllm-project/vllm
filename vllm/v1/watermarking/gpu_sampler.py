@@ -83,6 +83,7 @@ class GPUWatermarkSampler(Sampler):
                 self.sampling_states.seeds.gpu,
                 pos,
                 apply_temperature=False,
+                is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
             )
 
