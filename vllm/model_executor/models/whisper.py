@@ -1033,20 +1033,55 @@ class WhisperForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
 
-        # add fake zeros bias for k_proj to state_dict
-        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        # add fake zeros bias for k_proj to state_dict. Covers the
+        # ``.k_proj.weight`` and the compressed-tensors packed
+        # ``.k_proj.weight_packed`` checkpoints.
+        k_proj_weight_suffixes = (".k_proj.weight", ".k_proj.weight_packed")
+        for suffix in k_proj_weight_suffixes:
+            weights = _create_fake_bias_for_k_proj(
+                weights, suffix, out_features=self.config.d_model
+            )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[tuple[str, torch.Tensor]], fake_bias_key_name: str
+    weights: Iterable[tuple[str, torch.Tensor]],
+    fake_bias_key_name: str,
+    out_features: int | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Create full zeros bias for k_proj weight in self-attn and x-attn layers.
-    So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
+    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
+    So that the bias for k_proj in qkv_proj or kv_proj can be initialized with
+    zeros.
+
+    If the checkpoint already provides a real ``.bias`` entry for the given
+    weight, it is forwarded as-is and no fake bias is injected for that layer.
+    """
+    # Map the weight-name suffix to the corresponding bias-name suffix, e.g.
+    # ".k_proj.weight_packed" / ".k_proj.weight" -> ".k_proj.bias",
+    # ".wk.weight" -> ".wk.bias". ``.weight_packed`` is stripped first so the
+    # longer suffix wins.
+    bias_key_name = (
+        fake_bias_key_name.removesuffix(".weight_packed").removesuffix(".weight")
+        + ".bias"
+    )
+
+    real_bias_names: set[str] = set()
+    pending: dict[str, torch.Tensor] = {}
     for name, weight in weights:
         yield name, weight
+
+        if name.endswith(bias_key_name):
+            real_bias_names.add(name)
+            pending.pop(name, None)
+            continue
+
         if name.endswith(fake_bias_key_name):
-            bias = torch.zeros(weight.size(0))
-            bias_name = name.replace("weight", "bias")
-            yield bias_name, bias
+            bias_name = name[: -len(fake_bias_key_name)] + bias_key_name
+            if bias_name not in real_bias_names:
+                pending[bias_name] = torch.zeros(
+                    out_features if out_features is not None else weight.size(0)
+                )
+
+    for bias_name, bias in pending.items():
+        yield bias_name, bias
