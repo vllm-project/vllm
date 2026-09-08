@@ -53,11 +53,10 @@ if [[ "${UPDATE_NIGHTLY_INDEX:-1}" == "1" && \
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 fi
 
-# detect version from any wheel in the commit directory
-# download the first wheel we find to extract version metadata
-first_wheel_key=$($PYTHON -c "import json; obj=json.load(open('$obj_json')); print(next((c['Key'] for c in obj.get('Contents', []) if c['Key'].endswith('.whl')), ''))")
+# detect version from a vLLM wheel in the commit directory
+first_wheel_key=$($PYTHON -c "import json; obj=json.load(open('$obj_json')); print(next((c['Key'] for c in obj.get('Contents', []) if c['Key'].rsplit('/', 1)[-1].startswith('vllm-') and c['Key'].endswith('.whl')), ''))")
 if [[ -z "$first_wheel_key" ]]; then
-    echo "Error: No wheels found in $S3_COMMIT_PREFIX"
+    echo "Error: No vLLM wheel found in $S3_COMMIT_PREFIX"
     exit 1
 fi
 first_wheel=$(basename "$first_wheel_key")

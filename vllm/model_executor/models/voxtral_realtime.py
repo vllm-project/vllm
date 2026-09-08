@@ -63,7 +63,6 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
-        is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # there are no placeholder audio tokens for streaming
         # so we need to build the place placeholder positions manually
