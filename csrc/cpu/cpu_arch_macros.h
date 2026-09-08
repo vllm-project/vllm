@@ -58,6 +58,64 @@
       };
   #endif
 
+  #if !defined(__AVX512F__) && defined(__AVX2__)
+    #define DEFINE_FAST_EXP                                                    \
+      const __m256 vec_factorial_1 = _mm256_set1_ps(0.999999701f);             \
+      const __m256 vec_factorial_2 = _mm256_set1_ps(0.499991506f);             \
+      const __m256 vec_factorial_3 = _mm256_set1_ps(0.166676521f);             \
+      const __m256 vec_factorial_4 = _mm256_set1_ps(0.0418978221f);            \
+      const __m256 vec_factorial_5 = _mm256_set1_ps(0.00828929059f);           \
+      const __m256 vec_exp_log2ef =                                            \
+          _mm256_castsi256_ps(_mm256_set1_epi32(0x3fb8aa3b));                  \
+      const __m256 vec_half = _mm256_set1_ps(0.5f);                            \
+      const __m256 vec_one = _mm256_set1_ps(1.f);                              \
+      const __m256 vec_zero = _mm256_set1_ps(0.f);                             \
+      const __m256 vec_two = _mm256_set1_ps(2.f);                              \
+      const __m256 vec_ln2f =                                                  \
+          _mm256_castsi256_ps(_mm256_set1_epi32(0x3f317218));                  \
+      const __m256 vec_ln_flt_min =                                            \
+          _mm256_castsi256_ps(_mm256_set1_epi32(0xc2aeac50));                  \
+      const __m256 vec_ln_flt_max =                                            \
+          _mm256_castsi256_ps(_mm256_set1_epi32(0x42b17218));                  \
+      const __m256i vec_127 = _mm256_set1_epi32(0x0000007f);                   \
+      const int n_mantissa_bits = 23;                                          \
+      auto avx2_expf = [&](__m256 values) __attribute__((always_inline)) {     \
+        auto less_ln_flt_min_mask =                                            \
+            _mm256_cmp_ps(values, vec_ln_flt_min, 1 /*_CMP_LT_OS*/);           \
+        auto vec_src = _mm256_min_ps(values, vec_ln_flt_max);                  \
+        vec_src = _mm256_max_ps(vec_src, vec_ln_flt_min);                      \
+        auto vec_fx = _mm256_fmadd_ps(vec_src, vec_exp_log2ef, vec_half);      \
+        /* AVX2 lacks cvt_roundps_epi32; use round_ps + cvtps_epi32 */         \
+        auto vec_fx_rnd = _mm256_round_ps(                                     \
+            vec_fx, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);                \
+        auto vec_fx_i = _mm256_cvtps_epi32(vec_fx_rnd);                        \
+        vec_fx = _mm256_cvtepi32_ps(vec_fx_i);                                 \
+        auto vec_exp_poly = _mm256_fnmadd_ps(vec_fx, vec_ln2f, vec_src);       \
+        auto vec_res =                                                         \
+            _mm256_fmadd_ps(vec_exp_poly, vec_factorial_5, vec_factorial_4);   \
+        vec_res = _mm256_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_3);     \
+        vec_res = _mm256_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_2);     \
+        vec_res = _mm256_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_1);     \
+        vec_res = _mm256_fmadd_ps(vec_exp_poly, vec_res, vec_one);             \
+        auto vec_exp_number = _mm256_sub_ps(vec_fx, vec_one);                  \
+        auto vec_exp_number_i = _mm256_cvtps_epi32(vec_exp_number);            \
+        auto vec_two_pow_n_i = _mm256_add_epi32(vec_exp_number_i, vec_127);    \
+        vec_two_pow_n_i = _mm256_slli_epi32(vec_two_pow_n_i, n_mantissa_bits); \
+        auto vec_two_pow_n = _mm256_castsi256_ps(vec_two_pow_n_i);             \
+        /* _mm256_blendv_ps: mask sign-bit=1 selects b (zero), else a */       \
+        vec_two_pow_n =                                                        \
+            _mm256_blendv_ps(vec_two_pow_n, vec_zero, less_ln_flt_min_mask);   \
+        vec_res = _mm256_mul_ps(vec_res, vec_two_pow_n);                       \
+        vec_res = _mm256_mul_ps(vec_res, vec_two);                             \
+        return vec_res;                                                        \
+      };                                                                       \
+      auto fast_exp = [&](const vec_op::FP32Vec16& vec)                        \
+                          __attribute__((always_inline)) {                     \
+                            return vec_op::FP32Vec16(avx2_expf(vec.reg_low),   \
+                                                     avx2_expf(vec.reg_high)); \
+                          };
+  #endif
+
 #endif
 
 #ifdef __aarch64__

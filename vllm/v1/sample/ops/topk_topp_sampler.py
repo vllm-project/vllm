@@ -15,6 +15,21 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
+try:
+    from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._custom_ops import (
+        cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+    )
+    from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+    # Probe the dispatcher: raises AttributeError on non-CPU builds where
+    # the op is absent (the Python wrappers import cleanly regardless).
+    torch.ops._C.cpu_topk_sampling  # noqa: B018
+
+    _HAS_CPU_SAMPLING_OPS = True
+except (ImportError, AttributeError):
+    _HAS_CPU_SAMPLING_OPS = False
+
 logger = init_logger(__name__)
 
 
@@ -193,7 +208,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p(logits, k, p)
+        logits = apply_top_k_top_p_cpu(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -429,6 +444,50 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+
+
+def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    if not _HAS_CPU_SAMPLING_OPS:
+        return apply_top_k_only(logits, k)
+    logits = logits.contiguous()
+    _cpu_topk_sampling_op(logits, k.to(torch.int32))
+    return logits
+
+
+def apply_top_k_top_p_cpu(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
+    if p is None and k is None:
+        return logits
+
+    if k is not None:
+        # k=0 is not valid; callers use k=vocab_size to disable top-k.
+        assert (k > 0).all(), (
+            "k values must be > 0; use k=vocab_size to disable top-k filtering"
+        )
+
+    if p is None:
+        return _apply_top_k_only_cpu(logits, k)
+
+    if k is None:
+        if _HAS_CPU_SAMPLING_OPS:
+            logits = logits.contiguous()
+            _cpu_topp_sampling_op(logits, p.float())
+            return logits
+        return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
+
+    # Joint k+p path.
+    if _HAS_CPU_SAMPLING_OPS:
+        logits = logits.contiguous()
+        _cpu_topk_topp_sampling_op(logits, k.to(torch.int32), p.float())
+        return logits
+
+    # Fallback: sequential top-k then top-p.
+    logits = _apply_top_k_only_cpu(logits, k)
+    return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
 
 def empty_exponential_noise_like(
