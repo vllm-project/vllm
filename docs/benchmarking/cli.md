@@ -159,6 +159,30 @@ In this example, the benchmark observes two 40 ms ITL samples. The three tokens
 in the second streamed output do not create additional ITL samples, so mean ITL
 is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
 
+#### Saving Server-Side Per-Request Metrics
+
+When the server is started with
+[`--enable-per-request-metrics`](../features/per_request_metrics.md#enabling),
+`vllm bench serve` can preserve the server-side queue time and TTFT for each
+request:
+
+```bash
+vllm bench serve \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --save-result \
+  --save-detailed
+```
+
+The detailed result includes `server_queue_times` and `server_ttfts`, in
+seconds, when at least one request has an available server queue time or
+TTFT. Their indices align with the other per-request arrays, with unavailable
+values represented as `null`. Both arrays are omitted when neither metric is
+available for any request.
+
+`server_queue_times` measures server scheduler waiting time, while
+`server_ttfts` measures time from scheduling to first token generation.
+These differ from the client-side `queue_times` and `ttfts`.
+
 #### Results Visualization
 
 The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
