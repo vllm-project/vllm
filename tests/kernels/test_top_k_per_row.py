@@ -616,6 +616,26 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
             ),
             decode_kernel,
         ),
+        (
+            dict(
+                is_prefill=False,
+                compress_ratio=4,
+                num_rows=1,
+                max_valid_seq_len=65_537,
+                on_gfx950=True,
+            ),
+            decode_kernel,
+        ),
+        (
+            dict(
+                is_prefill=False,
+                compress_ratio=4,
+                num_rows=256,
+                max_valid_seq_len=125_000,
+                on_gfx950=True,
+            ),
+            decode_kernel,
+        ),
     ]
     for kwargs, expected_kernel in eligible_cases:
         assert get_kernel(**kwargs) is expected_kernel
@@ -630,20 +650,6 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
     )
     ineligible_cases = [
         dict(is_prefill=True, compress_ratio=1, num_rows=1, on_gfx950=True),
-        dict(
-            is_prefill=False,
-            compress_ratio=4,
-            num_rows=1,
-            max_valid_seq_len=65_537,
-            on_gfx950=True,
-        ),
-        dict(
-            is_prefill=False,
-            compress_ratio=4,
-            num_rows=256,
-            max_valid_seq_len=125_000,
-            on_gfx950=True,
-        ),
         dict(
             is_prefill=False,
             compress_ratio=4,

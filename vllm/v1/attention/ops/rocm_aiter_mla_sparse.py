@@ -39,10 +39,6 @@ def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | N
     return top_k_per_row_prefill, top_k_per_row_decode
 
 
-_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
-_GFX950_C4A_NATIVE_MAX_ROWS = 256
-
-
 def _get_aiter_top_k_kernel(
     *,
     is_prefill: bool,
@@ -53,17 +49,6 @@ def _get_aiter_top_k_kernel(
 ) -> Callable[..., None] | None:
     if compress_ratio <= 1 or not on_gfx950:
         return None
-
-    if not is_prefill:
-        assert max_valid_seq_len is not None
-        # AITER v0.1.19 decode is one-block only. This measured gfx950
-        # FP32/k=1024 compressed-row boundary is independent of the native
-        # split-count boundary in sampler.cu.
-        if (
-            num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
-            and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
-        ):
-            return None
 
     topk_ops = _get_aiter_topk_ops()
     if topk_ops is None:
