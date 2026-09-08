@@ -32,7 +32,13 @@ constexpr size_t kMediumHeaderSize =
 constexpr int MAX_BUFFERED_ITEMS = 4096;
 constexpr size_t kSmemMedium =
     kMediumHeaderSize + 2 * MAX_BUFFERED_ITEMS * sizeof(int);  // 35968
-constexpr uint32_t RADIX_THRESHOLD = 16384;
+// Rows at or below this width take the single-CTA cached select; wider rows take the multi-CTA
+// cooperative radix. The bound is shared memory, not speed: det_select_row caches the row's
+// ordered keys at 4 bytes each and needs fixed + 4n <= the device opt-in, i.e. n <= 24,280 on a
+// 101,376 B part -- so 24,576 would silently fall to the uncached path. Measured on GB10, every
+// width in 16,384 < n <= 22,016 costs 16-53 % more on the multi-CTA path (worst at 64 rows:
+// 17,408 is 53.3 -> 34.8 us), while n = 16,384 and n >= 24,576 are unchanged.
+constexpr uint32_t RADIX_THRESHOLD = 22016;
 
 // Decode path constants
 constexpr int kDecodeBins = 2048;
