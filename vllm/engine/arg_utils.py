@@ -726,6 +726,9 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    enable_mamba_fine_grained_prefix_cache: bool = (
+        CacheConfig.enable_mamba_fine_grained_prefix_cache
+    )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -772,7 +775,10 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda", "flashinfer"] | None = (
+        None
+    )
+    kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1285,6 +1291,10 @@ class EngineArgs:
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
+            "--enable-mamba-fine-grained-prefix-cache",
+            **cache_kwargs["enable_mamba_fine_grained_prefix_cache"],
+        )
+        cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
         )
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
@@ -1747,9 +1757,16 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "flashinfer"],
             default=None,
             help="Select KDA prefill backend.",
+        )
+        parser.add_argument(
+            "--kda-decode-backend",
+            dest="kda_decode_backend",
+            choices=["auto", "native", "flashinfer", "triton"],
+            default=None,
+            help="Select KDA decode backend.",
         )
         return parser
 
@@ -2062,6 +2079,9 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            enable_mamba_fine_grained_prefix_cache=(
+                self.enable_mamba_fine_grained_prefix_cache
+            ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
@@ -2567,6 +2587,8 @@ class EngineArgs:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
+        if self.kda_decode_backend is not None:
+            self.additional_config["kda_decode_backend"] = self.kda_decode_backend
 
         config = VllmConfig(
             model_config=model_config,
