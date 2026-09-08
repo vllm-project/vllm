@@ -303,6 +303,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
+            num_redundant_experts=self.num_redundant_experts,
         )
 
         params_dict = dict(self.named_parameters())

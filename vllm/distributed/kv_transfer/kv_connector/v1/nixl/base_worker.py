@@ -2521,7 +2521,11 @@ class NixlBaseConnectorWorker:
 
             if not in_progress:
                 # Only report request as completed when all transfers are done.
-                done_req_ids.add(req_id)
+                # A request failed in an earlier poll was already reported via
+                # _failed_recv_reqs and its metadata popped by get_finished();
+                # don't report it again, just drop the remaining handles.
+                if req_id in self._recving_metadata:
+                    done_req_ids.add(req_id)
                 del transfers[req_id]
             else:
                 transfers[req_id] = in_progress
@@ -2536,11 +2540,15 @@ class NixlBaseConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # Use .get() here as the metadata cleanup is handled by get_finished()
+        # (multi-read) One handle is created per remote rank, and they do not
+        # all fail in the same _pop_done_transfers poll. The request is
+        # reported failed on the first one, which pops its metadata in
+        # get_finished(); on the later failures only the handle cleanup is left.
         # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-        self._failed_recv_reqs.put(req_id)
+        if (meta := self._recving_metadata.get(req_id)) is not None:
+            if not self._is_hma_required:
+                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+            self._failed_recv_reqs.put(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
