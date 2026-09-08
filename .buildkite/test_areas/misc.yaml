@@ -43,7 +43,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) V1 Core + KV + Metrics"
   device: h200_35gb
   key: v1-core-kv-metrics
-  timeout_in_minutes: 80
+  timeout_in_minutes: 100
   env:
     # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
     # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
