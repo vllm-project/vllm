@@ -163,7 +163,7 @@ def render_message(
     elif role == "developer":
         if not content:
             raise ValueError(f"Invalid message for role `{role}`: {msg}")
-        content_developer = ""
+        content_developer = "\n\n# The user's message is: {}".format(content)
         if tools:
             content_developer += "\n\n" + render_tools(tools)
 
@@ -171,8 +171,6 @@ def render_message(
             content_developer += "\n\n" + response_format_template.format(
                 schema=to_json(response_format)
             )
-
-        content_developer += "\n\n# The user's message is: {}".format(content)
 
         prompt += user_msg_template.format(content=content_developer)
         if index == last_user_idx and thinking_mode == "thinking":
