@@ -18,6 +18,28 @@ CompileKeyT = TypeVar("CompileKeyT")
 LaunchSpec = tuple[tuple[int, ...], dict[str, Any]]
 
 
+def triton_warmup_inputs(
+    kernel: Any,
+    *args: Any,
+    grid: tuple[int, ...],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build launcher inputs from Triton's native positional argument order."""
+    arg_names = tuple(kernel.arg_names)
+    if len(args) > len(arg_names):
+        raise ValueError(
+            f"Received {len(args)} positional inputs for {len(arg_names)} "
+            "Triton kernel arguments"
+        )
+    inputs = dict(zip(arg_names, args))
+    duplicate_names = inputs.keys() & kwargs.keys()
+    if duplicate_names:
+        raise ValueError(
+            f"Triton inputs passed twice: {', '.join(sorted(duplicate_names))}"
+        )
+    return {"grid": grid, **inputs, **kwargs}
+
+
 def triton_scalar_specialization_rep(value: int) -> int:
     """Return an integer with the same default Triton JIT specialization.
 
