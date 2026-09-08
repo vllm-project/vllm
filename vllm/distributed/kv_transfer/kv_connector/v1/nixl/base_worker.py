@@ -2924,6 +2924,7 @@ class NixlBaseConnectorWorker:
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
+            is_recv: Whether failures require receive-side invalidation and reporting.
         Returns:
             set of req_ids that have all done xfers
         """
