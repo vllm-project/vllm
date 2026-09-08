@@ -22,11 +22,6 @@ from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 
-pytestmark = pytest.mark.skip(
-    reason="ColQwen3 model's weight tying is incompatible with "
-    "transformers v5 (missing all_tied_weights_keys)"
-)
-
 MODELS = [
     "TomoroAI/tomoro-colqwen3-embed-4b",
     "OpenSearch-AI/Ops-Colqwen3-4B",
@@ -50,7 +45,9 @@ TEXT_DOCUMENTS = [
 ]
 
 DTYPE = "half"
-GPU_MEMORY_UTILIZATION = 0.7
+# The Tomoro model needs room for its vision encoder and a 4096-token KV cache
+# on the 16 GiB devices used by the H200 MIG test lane.
+GPU_MEMORY_UTILIZATION = 0.8
 
 
 def _make_base64_image(
