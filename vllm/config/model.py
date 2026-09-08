@@ -2449,6 +2449,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
