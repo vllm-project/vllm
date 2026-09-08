@@ -2392,7 +2392,7 @@ class EngineArgs:
 
         if (
             retention_interval_unset
-            and model_config.has_inner_state
+            and model_config.is_hybrid
             and speculative_config is not None
             and speculative_config.use_eagle()
         ):
@@ -2402,7 +2402,7 @@ class EngineArgs:
             # to dense checkpoints instead.
             cache_config.prefix_cache_retention_interval = None
             logger.info_once(
-                "Mamba model with EAGLE speculative decoding: defaulting "
+                "Hybrid model with EAGLE speculative decoding: defaulting "
                 "prefix_cache_retention_interval to dense checkpointing."
             )
 

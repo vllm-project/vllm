@@ -55,24 +55,27 @@ def test_prefix_caching_from_cli():
 
 
 @pytest.mark.parametrize(
-    ("has_inner_state", "use_eagle", "explicit", "expected"),
+    ("is_hybrid", "has_inner_state", "use_eagle", "explicit", "expected"),
     [
-        pytest.param(True, True, "unset", None, id="mamba-eagle-dense"),
-        pytest.param(True, True, 0, 0, id="mamba-eagle-explicit-zero"),
-        pytest.param(True, True, None, None, id="mamba-eagle-explicit-none"),
-        pytest.param(True, True, 64, 64, id="mamba-eagle-explicit-interval"),
-        pytest.param(True, False, "unset", 0, id="mamba-without-eagle"),
-        pytest.param(False, True, "unset", 0, id="eagle-without-mamba"),
-        pytest.param(False, False, "unset", 0, id="plain-model"),
+        pytest.param(True, False, True, "unset", None, id="hybrid-eagle-dense"),
+        pytest.param(True, True, True, "unset", None, id="hybrid-with-inner-state"),
+        pytest.param(True, False, True, 0, 0, id="hybrid-eagle-explicit-zero"),
+        pytest.param(True, False, True, None, None, id="hybrid-eagle-explicit-none"),
+        pytest.param(True, False, True, 64, 64, id="hybrid-eagle-explicit-interval"),
+        pytest.param(True, False, False, "unset", 0, id="hybrid-without-eagle"),
+        pytest.param(False, True, True, "unset", 0, id="non-hybrid-inner-state"),
+        pytest.param(False, False, True, "unset", 0, id="eagle-without-hybrid"),
+        pytest.param(False, False, False, "unset", 0, id="plain-model"),
     ],
 )
 def test_prefix_cache_retention_interval_default_resolution(
-    monkeypatch, has_inner_state, use_eagle, explicit, expected
+    monkeypatch, is_hybrid, has_inner_state, use_eagle, explicit, expected
 ):
-    """An unset ``prefix_cache_retention_interval`` resolves to dense (None)
-    for Mamba models with EAGLE-style speculative decoding — sparse retention
-    (0) leaves no reachable Mamba state checkpoints under EAGLE, so prefix
-    caching never hits — and to 0 otherwise. Explicit values are respected."""
+    """Default to dense for hybrid + EAGLE.
+
+    Non-hybrid defaults and explicit retention values must remain unchanged.
+    """
+    monkeypatch.setattr(ModelConfig, "is_hybrid", property(lambda self: is_hybrid))
     monkeypatch.setattr(
         ModelConfig, "has_inner_state", property(lambda self: has_inner_state)
     )
