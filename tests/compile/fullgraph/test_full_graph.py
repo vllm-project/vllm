@@ -184,7 +184,10 @@ def run_model(
     # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
     wait_for_memory_to_settle(
         threshold_ratio=1.0
-        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+        - (
+            model_kwargs.get("gpu_memory_utilization")
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
     )
 
     llm = LLM(
