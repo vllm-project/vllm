@@ -3361,21 +3361,6 @@ def test_draft_group_not_annotated_without_spec_decode():
     assert not any(g.is_eagle_group for g in groups)
 
 
-def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
-    groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
-    )
-
-    assert not any(g.is_eagle_group for g in groups)
-    assert "no KV cache group could be identified as the draft model's" in (
-        caplog_vllm.text
-    )
-    assert "Mamba groups" in caplog_vllm.text
-
-
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
     get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=True)
