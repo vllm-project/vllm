@@ -441,7 +441,11 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
-RUN ldconfig
+# Keep the copied profiler's runtime dependency installed across apt autoremove.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libdw1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
