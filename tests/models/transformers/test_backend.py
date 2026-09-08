@@ -243,7 +243,7 @@ def test_distributed(
     "model, quantization_kwargs",
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
-        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
+        ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
