@@ -253,7 +253,7 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2024.11.0
     # via genai-perf
-fastsafetensors==0.3.3
+fastsafetensors==0.4.0
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
