@@ -171,6 +171,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w13_parameter_shape = w13.shape
         w2_parameter_shape = w2.shape
 
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            unpadded = self.moe.intermediate_size_per_partition_unpadded
+            assert unpadded is not None
+            intermediate = w2.shape[-1]
+            # Reloads overwrite only checkpoint slices; the previous in-place
+            # permutation can leave nonzero values in the raw padding slots.
+            if intermediate > unpadded:
+                w13[:, unpadded:intermediate].zero_()
+                if self.moe.is_act_and_mul:
+                    w13[:, intermediate + unpadded :].zero_()
+                w2[:, :, unpadded:].zero_()
+
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
@@ -179,11 +191,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w2_weight=w2,
         )
         if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-            w13_block_shape = w13_new.shape
-            w2_block_shape = w2_new.shape
             w13_new = w13_new.view(w13_parameter_shape)
             w2_new = w2_new.view(w2_parameter_shape)
-            self._flashinfer_block_shapes = (w13_block_shape, w2_block_shape)
 
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
@@ -216,12 +225,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def _kernel_weights(
         self, layer: "RoutedExperts"
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        block_shapes = getattr(self, "_flashinfer_block_shapes", None)
-        if block_shapes is None:
+        if self.unquantized_backend != UnquantizedMoeBackend.FLASHINFER_TRTLLM:
             return layer.w13_weight, layer.w2_weight
+
+        # IPC caches restore tensor shapes/storage, not method attributes.
+        # BlockMajorK uses 128-byte blocks, i.e. 64 BF16 elements.
+        def block_view(weight: torch.Tensor) -> torch.Tensor:
+            if weight.ndim == 4:
+                return weight
+            experts, rows, cols = weight.shape
+            return weight.view(experts, cols // 64, rows, 64)
+
         return (
-            layer.w13_weight.view(block_shapes[0]),
-            layer.w2_weight.view(block_shapes[1]),
+            block_view(layer.w13_weight),
+            block_view(layer.w2_weight),
         )
 
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
