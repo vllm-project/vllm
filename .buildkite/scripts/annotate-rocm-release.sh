@@ -18,7 +18,11 @@ if [ -z "${RELEASE_VERSION}" ]; then
   RELEASE_VERSION="1.0.0.dev"
 fi
 
-ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
+ROCM_BASE_IMAGE_TAG=$(buildkite-agent meta-data get rocm-base-image-tag 2>/dev/null || true)
+if [ -z "${ROCM_BASE_IMAGE_TAG}" ]; then
+  echo "ERROR: rocm-base-image-tag metadata not found" >&2
+  exit 1
+fi
 
 # S3 URLs
 S3_BUCKET="${S3_BUCKET:-vllm-wheels}"
@@ -94,10 +98,10 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-
 To download and upload the image:
 
 \`\`\`
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base
+docker pull ${ROCM_BASE_IMAGE_TAG}
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
+docker tag ${ROCM_BASE_IMAGE_TAG} vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:latest-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 docker push vllm/vllm-openai-rocm:latest-base

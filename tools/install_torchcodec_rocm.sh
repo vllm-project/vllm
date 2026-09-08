@@ -9,36 +9,28 @@
 set -e
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
-# Pin to a specific release for reproducibility; update as needed.
-TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
-# Cache directory for pre-built wheels to avoid redundant recompilation.
-TORCHCODEC_WHEEL_CACHE="${TORCHCODEC_WHEEL_CACHE:-/root/.cache/torchcodec-wheels}"
+# v0.10.0, pinned to the immutable commit for reproducibility.
+TORCHCODEC_COMMIT="${TORCHCODEC_COMMIT:-0b261b98080925f2b709712a5491a1e8dd817065}"
+TORCHCODEC_CONSTRAINTS="${TORCHCODEC_CONSTRAINTS:-}"
+TORCHCODEC_FORCE_REBUILD="${TORCHCODEC_FORCE_REBUILD:-0}"
 
 echo "=== TorchCodec Installation Script ==="
 
-# Check if torchcodec is already installed and working
-if python3 -c "from torchcodec.decoders import VideoDecoder" 2>/dev/null; then
+case "$TORCHCODEC_FORCE_REBUILD" in
+    0 | 1) ;;
+    *)
+        echo "Error: TORCHCODEC_FORCE_REBUILD must be 0 or 1"
+        exit 2
+        ;;
+esac
+
+if [ "$TORCHCODEC_FORCE_REBUILD" = "0" ] \
+    && python3 -c "from torchcodec.decoders import VideoDecoder" 2>/dev/null; then
     echo "TorchCodec is already installed and working. Skipping."
     exit 0
 fi
 
-# Try to install from cached wheel first
-ARCH_TAG="${PYTORCH_ROCM_ARCH:-all}"
-# Normalize arch tag (replace ; with _) for use in filename
-ARCH_TAG="${ARCH_TAG//;/_}"
-CACHED_WHEEL="${TORCHCODEC_WHEEL_CACHE}/torchcodec-${TORCHCODEC_BRANCH}-${ARCH_TAG}.whl"
-
-if [ -f "$CACHED_WHEEL" ]; then
-    echo "Found cached wheel: $CACHED_WHEEL"
-    pip install "$CACHED_WHEEL" && {
-        echo "Installed from cached wheel."
-        echo "=== TorchCodec installation complete ==="
-        exit 0
-    }
-    echo "Cached wheel installation failed, rebuilding from source..."
-fi
-
-echo "TorchCodec not found. Installing from source..."
+echo "Building TorchCodec from source..."
 
 # Install system dependencies (FFmpeg + pkg-config) if not already present.
 # The Docker test image pre-installs these, so this is a fallback for other envs.
@@ -70,10 +62,25 @@ fi
 
 # Install Python build dependencies
 echo "Installing Python build dependencies..."
-pip install pybind11 setuptools wheel
+constraint_args=()
+build_requirements=(packaging pybind11 setuptools wheel)
+if [ -n "$TORCHCODEC_CONSTRAINTS" ]; then
+    if [ ! -f "$TORCHCODEC_CONSTRAINTS" ]; then
+        echo "Error: TorchCodec constraints file not found: $TORCHCODEC_CONSTRAINTS"
+        exit 1
+    fi
+    constraint_args=(--constraint "$TORCHCODEC_CONSTRAINTS")
+else
+    build_requirements=(
+        packaging==26.2 pybind11==3.0.4 setuptools==79.0.1 wheel==0.48.0
+    )
+fi
+python3 -m pip install --no-deps \
+    "${constraint_args[@]}" "${build_requirements[@]}"
 
 # Set pybind11 cmake path so CMake can find it
-export pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
+pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
+export pybind11_DIR
 export CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}"
 echo "pybind11_DIR set to: $pybind11_DIR"
 
@@ -95,8 +102,13 @@ trap cleanup EXIT
 
 # Clone and build
 cd "$BUILD_DIR"
-echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
-git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec
+echo "Cloning TorchCodec from $TORCHCODEC_REPO (commit: $TORCHCODEC_COMMIT)..."
+printf '%s\n' "$TORCHCODEC_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+git init -q torchcodec
+git -C torchcodec remote add origin "$TORCHCODEC_REPO"
+git -C torchcodec fetch --depth 1 origin "$TORCHCODEC_COMMIT"
+git -C torchcodec checkout -q --detach FETCH_HEAD
+test "$(git -C torchcodec rev-parse HEAD)" = "$TORCHCODEC_COMMIT"
 
 cd torchcodec
 
@@ -114,22 +126,19 @@ if command -v ccache &> /dev/null; then
 fi
 
 echo "Building TorchCodec (MAX_JOBS=$MAX_JOBS)..."
-pip wheel . --no-build-isolation --no-deps -w "$BUILD_DIR/dist"
+# Never reuse a locally built wheel across changes to the parent ROCm/Torch ABI.
+python3 -m pip wheel . --no-cache-dir --no-build-isolation --no-deps \
+    -w "$BUILD_DIR/dist"
 
 # Install the built wheel
-# shellcheck disable=SC2012  # `ls` sorting is relied on here; TODO: switch to `find` in a follow-up cleanup PR
-BUILT_WHEEL=$(ls "$BUILD_DIR/dist"/torchcodec-*.whl 2>/dev/null | head -1)
+BUILT_WHEEL=$(find "$BUILD_DIR/dist" -maxdepth 1 -type f \
+    -name 'torchcodec-*.whl' -print -quit)
 if [ -z "$BUILT_WHEEL" ]; then
     echo "Error: No wheel produced"
     exit 1
 fi
 
-pip install "$BUILT_WHEEL"
-
-# Cache the wheel for future runs
-mkdir -p "$TORCHCODEC_WHEEL_CACHE"
-cp "$BUILT_WHEEL" "$CACHED_WHEEL"
-echo "Cached wheel to: $CACHED_WHEEL"
+python3 -m pip install --force-reinstall --no-deps "$BUILT_WHEEL"
 
 # Verify installation
 echo "Verifying installation..."
