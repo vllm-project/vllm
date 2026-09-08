@@ -2541,7 +2541,11 @@ def test_heterogeneous_vocab_rejects_local_argmax_reduction():
     speculative_config.use_heterogeneous_vocab = True
     speculative_config.use_local_argmax_reduction = True
 
-    with pytest.raises(ValueError, match="cannot be used together"):
+    with pytest.raises(
+        ValueError,
+        match="use_heterogeneous_vocab and use_local_argmax_reduction cannot "
+        "be used together",
+    ):
         speculative_config._verify_args()
 
 

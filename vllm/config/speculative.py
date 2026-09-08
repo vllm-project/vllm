@@ -1778,6 +1778,7 @@ class SpeculativeConfig:
             )
 
         if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            # See https://github.com/vllm-project/vllm/issues/51561.
             raise ValueError(
                 "use_heterogeneous_vocab and use_local_argmax_reduction cannot "
                 "be used together because local argmax reduction bypasses the "
