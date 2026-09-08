@@ -251,7 +251,7 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
-    consumer_cache_replicated: bool,
+    total_num_kv_heads: int | None = None,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -265,7 +265,11 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if producer_cache_replicated or consumer_cache_replicated:
+    if total_num_kv_heads is not None:
+        # TP ranks beyond the KV-head count replicate existing shards.
+        local_tp_size = min(local_tp_size, total_num_kv_heads)
+        remote_tp_size = min(remote_tp_size, total_num_kv_heads)
+    elif producer_cache_replicated:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
@@ -1243,9 +1247,10 @@ class MooncakeConnectorWorker:
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
-            consumer_cache_replicated=(
-                self.use_mla
-                or meta.remote_tp_size > self.transfer_topo.total_num_kv_heads
+            total_num_kv_heads=(
+                None
+                if self.use_mla or self.kv_cache_config.has_mamba_layers
+                else self.transfer_topo.total_num_kv_heads
             ),
         )
         if validation_err is not None:
@@ -1554,10 +1559,6 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
-                    is_mamba_group=isinstance(
-                        group_specs[group_index].kv_cache_spec,
-                        MambaSpec,
-                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2091,7 +2092,6 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
-        is_mamba_group: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2103,7 +2103,7 @@ class MooncakeConnectorWorker:
             producer_cache_replicated=self._producer_cache_is_replicated(),
             total_num_kv_heads=(
                 None
-                if self.use_mla or is_mamba_group
+                if self.use_mla or self.kv_cache_config.has_mamba_layers
                 else self.transfer_topo.total_num_kv_heads
             ),
         )

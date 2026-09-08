@@ -104,21 +104,33 @@ def test_sender_plan_gqa_to_replicated_tp8(
     assert plan == (True, expected_src_offsets[remote_tp_rank], 0, 65536)
 
 
-def test_region_length_validation_allows_replicated_consumer():
-    local_region = TransferRegion("layer", 0, 0, 262144, 262144)
-    remote_region = TransferRegion("layer", 0, 0, 65536, 65536)
+@pytest.mark.parametrize(
+    "local_tp,remote_tp,local_len,remote_len,valid",
+    [
+        (1, 8, 262144, 65536, True),
+        (8, 1, 65536, 262144, True),
+        (1, 8, 262144, 131072, False),
+        (8, 1, 131072, 262144, False),
+    ],
+)
+def test_region_length_validation_checks_replicated_gqa_heads(
+    local_tp, remote_tp, local_len, remote_len, valid
+):
+    """Replicated heads must have matching, whole per-head payloads."""
+    local_region = TransferRegion("layer", 0, 0, local_len, local_len)
+    remote_region = TransferRegion("layer", 0, 0, remote_len, remote_len)
 
     assert (
         _validate_asymmetric_region_lengths(
             local_regions=[local_region],
             remote_regions=[remote_region],
-            local_tp_size=1,
-            remote_tp_size=8,
-            producer_cache_replicated=False,
-            consumer_cache_replicated=True,
+            local_tp_size=local_tp,
+            remote_tp_size=remote_tp,
+            producer_cache_replicated=local_tp > 4,
+            total_num_kv_heads=4,
         )
         is None
-    )
+    ) == valid
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
