@@ -124,9 +124,6 @@ class FlattenSampledKernel(
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-_FLATTEN_SAMPLED_KERNEL = FlattenSampledKernel()
-
-
 class RejectionSampler:
     def __init__(
         self,
@@ -384,3 +381,6 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
+
+
+_FLATTEN_SAMPLED_KERNEL = FlattenSampledKernel()

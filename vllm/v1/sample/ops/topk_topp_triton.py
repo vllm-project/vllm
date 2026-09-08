@@ -1333,6 +1333,8 @@ def _topp_sb_mask_kernel(
 
 
 class TopKTopPKernel(VllmTritonJitKernel["TopKTopPKernel.CompileKey"]):
+    kernel = staticmethod(_topk_topp_kernel)
+
     @dataclass(frozen=True)
     class CompileKey:
         logits_stride: int
@@ -1345,8 +1347,6 @@ class TopKTopPKernel(VllmTritonJitKernel["TopKTopPKernel.CompileKey"]):
         topp_enabled: bool
         split_covers_ponly: bool
         num_warps: int
-
-    kernel = staticmethod(_topk_topp_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1404,12 +1404,8 @@ class TopKTopPKernel(VllmTritonJitKernel["TopKTopPKernel.CompileKey"]):
             buffer=TritonWarmupTensor(torch.float32),
             percentile_to_std_table=TritonWarmupTensor(torch.float32),
             normal_cdf_to_sigma_table=TritonWarmupTensor(torch.float32),
-            k=TritonWarmupTensor(torch.int32)
-            if compile_key.topk_enabled
-            else logits,
-            p=TritonWarmupTensor(torch.float32)
-            if compile_key.topp_enabled
-            else logits,
+            k=TritonWarmupTensor(torch.int32) if compile_key.topk_enabled else logits,
+            p=TritonWarmupTensor(torch.float32) if compile_key.topp_enabled else logits,
             batch_size=compile_key.batch_size,
             mask_value=compile_key.mask_value,
             vocab_size=compile_key.vocab_size,
@@ -1464,17 +1460,15 @@ class TopKTopPKernel(VllmTritonJitKernel["TopKTopPKernel.CompileKey"]):
         )
 
 
-class TopPSplitStatsKernel(
-    VllmTritonJitKernel["TopPSplitStatsKernel.CompileKey"]
-):
+class TopPSplitStatsKernel(VllmTritonJitKernel["TopPSplitStatsKernel.CompileKey"]):
+    kernel = staticmethod(_topp_sb_stats_kernel)
+
     @dataclass(frozen=True)
     class CompileKey:
         logits_stride: int
         has_k: bool
         vocab_size: int
         splits: int
-
-    kernel = staticmethod(_topp_sb_stats_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1550,6 +1544,8 @@ class TopPSplitStatsKernel(
 
 
 class TopPSplitStepKernel(VllmTritonJitKernel["TopPSplitStepKernel.CompileKey"]):
+    kernel = staticmethod(_topp_sb_step_kernel)
+
     @dataclass(frozen=True)
     class CompileKey:
         logits_stride: int
@@ -1557,8 +1553,6 @@ class TopPSplitStepKernel(VllmTritonJitKernel["TopPSplitStepKernel.CompileKey"])
         has_k: bool
         vocab_size: int
         splits: int
-
-    kernel = staticmethod(_topp_sb_step_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1645,6 +1639,8 @@ class TopPSplitStepKernel(VllmTritonJitKernel["TopPSplitStepKernel.CompileKey"])
 
 
 class TopPSplitMaskKernel(VllmTritonJitKernel["TopPSplitMaskKernel.CompileKey"]):
+    kernel = staticmethod(_topp_sb_mask_kernel)
+
     @dataclass(frozen=True)
     class CompileKey:
         logits_stride: int
@@ -1652,8 +1648,6 @@ class TopPSplitMaskKernel(VllmTritonJitKernel["TopPSplitMaskKernel.CompileKey"])
         vocab_size: int
         splits: int
         mask_value: float
-
-    kernel = staticmethod(_topp_sb_mask_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1737,12 +1731,6 @@ class TopPSplitMaskKernel(VllmTritonJitKernel["TopPSplitMaskKernel.CompileKey"])
             BLOCK=8192,
             num_warps=8,
         )
-
-
-_TOPK_TOPP_KERNEL = TopKTopPKernel()
-_TOPP_SPLIT_STATS_KERNEL = TopPSplitStatsKernel()
-_TOPP_SPLIT_STEP_KERNEL = TopPSplitStepKernel()
-_TOPP_SPLIT_MASK_KERNEL = TopPSplitMaskKernel()
 
 
 def _apply_topp_split(
@@ -1943,3 +1931,9 @@ def reset_buffer_cache():
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
     torch.accelerator.empty_cache()
+
+
+_TOPK_TOPP_KERNEL = TopKTopPKernel()
+_TOPP_SPLIT_STATS_KERNEL = TopPSplitStatsKernel()
+_TOPP_SPLIT_STEP_KERNEL = TopPSplitStepKernel()
+_TOPP_SPLIT_MASK_KERNEL = TopPSplitMaskKernel()

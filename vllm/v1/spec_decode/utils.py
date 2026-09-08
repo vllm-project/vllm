@@ -691,9 +691,6 @@ class CopyAndExpandDflashInputsKernel(
         )
 
 
-_COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL = CopyAndExpandDflashInputsKernel()
-
-
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def update_num_computed_tokens_for_batch_change(
     num_computed_tokens: torch.Tensor,
@@ -731,3 +728,6 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
     rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
+
+
+_COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL = CopyAndExpandDflashInputsKernel()

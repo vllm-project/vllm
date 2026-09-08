@@ -10,8 +10,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
-    triton_warmup_inputs,
     triton_scalar_specialization_rep,
+    triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
@@ -1066,9 +1066,6 @@ class ComputeLocalLogitsStatsKernel(
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = ComputeLocalLogitsStatsKernel()
-
-
 class ComputeCumulativeLogPKernel(
     VllmTritonJitKernel["ComputeCumulativeLogPKernel.CompileKey"]
 ):
@@ -1171,9 +1168,6 @@ class ComputeCumulativeLogPKernel(
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-_COMPUTE_CUMULATIVE_LOG_P_KERNEL = ComputeCumulativeLogPKernel()
-
-
 class ComputeLocalResidualMassKernel(
     VllmTritonJitKernel["ComputeLocalResidualMassKernel.CompileKey"]
 ):
@@ -1253,9 +1247,6 @@ class ComputeLocalResidualMassKernel(
         self, grid: tuple[int, ...], *args: Any, **kwargs: Any
     ) -> tuple[tuple[int, ...], dict[str, Any]]:
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
-
-
-_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = ComputeLocalResidualMassKernel()
 
 
 class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
@@ -1387,9 +1378,6 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-_REJECTION_KERNEL = RejectionKernel()
-
-
 class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
     kernel = staticmethod(_resample_kernel)
 
@@ -1503,9 +1491,6 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
 
 
-_RESAMPLE_KERNEL = ResampleKernel()
-
-
 class InsertResampledKernel(
     VllmTritonJitKernel["InsertResampledKernel.CompileKey"]
 ):
@@ -1567,9 +1552,6 @@ class InsertResampledKernel(
         self, grid: tuple[int, ...], *args: Any, **kwargs: Any
     ) -> tuple[tuple[int, ...], dict[str, Any]]:
         return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
-
-
-_INSERT_RESAMPLED_KERNEL = InsertResampledKernel()
 
 
 def rejection_sample(
@@ -1839,3 +1821,11 @@ def rejection_sample(
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
     )
     return sampled, num_sampled
+
+
+_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = ComputeLocalLogitsStatsKernel()
+_COMPUTE_CUMULATIVE_LOG_P_KERNEL = ComputeCumulativeLogPKernel()
+_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = ComputeLocalResidualMassKernel()
+_REJECTION_KERNEL = RejectionKernel()
+_RESAMPLE_KERNEL = ResampleKernel()
+_INSERT_RESAMPLED_KERNEL = InsertResampledKernel()

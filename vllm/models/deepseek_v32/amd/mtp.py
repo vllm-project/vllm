@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
@@ -37,13 +38,12 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-
 from vllm.models.deepseek_v32.common.kernels import (
     _FUSED_EH_NORM_KERNEL,
     fused_eh_norm,
 )
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from .model import DeepseekV32DecoderLayer
 

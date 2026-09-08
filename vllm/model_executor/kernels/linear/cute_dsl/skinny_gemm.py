@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
@@ -100,6 +101,7 @@ class ShapeDynamicSkinnyGemm(
     @staticmethod
     def _stream() -> Any:
         from cuda.bindings.driver import CUstream
+
         from vllm.utils.torch_utils import current_stream
 
         return CUstream(current_stream().cuda_stream)
@@ -262,5 +264,4 @@ class ShapeDynamicSkinnyGemm(
         ), output
 
 
-SHAPE_DYNAMIC_SKINNY_GEMM = ShapeDynamicSkinnyGemm()
-shape_dynamic_skinny_gemm = SHAPE_DYNAMIC_SKINNY_GEMM
+shape_dynamic_skinny_gemm = ShapeDynamicSkinnyGemm()
