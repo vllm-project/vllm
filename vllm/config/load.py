@@ -97,6 +97,14 @@ class LoadConfig:
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    verify_weights: bool = False
+    """If True, verify the integrity of each weight tensor after loading from
+    the checkpoint. Checks for NaN, Inf, and all-zero values that may indicate
+    corrupted or incomplete weight files. Adds a small overhead to model
+    loading but can catch silently corrupted weights before they cause subtle
+    inference errors. Note that this cannot detect all forms of corruption
+    (e.g., valid-but-incorrect values); use external sha256 verification
+    for full integrity checking."""
     device: str | None = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
