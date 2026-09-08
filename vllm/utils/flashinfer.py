@@ -21,6 +21,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -181,6 +182,31 @@ def _lazy_import_wrapper(
     return wrapper
 
 
+def pin_host_range_buf(length: int) -> None:
+    """Pin flashinfer's cached host-side arange buffer covering `length`.
+
+    flashinfer's decode plan() builds its host qo_indptr from the cached
+    `_get_range_buf` entry and copies it to the GPU with non_blocking=True on
+    every call; the cache entry is unpinned, so the copy silently blocks the
+    host. Replace the entry with a pinned copy so the copies stay async.
+    """
+    if not PIN_MEMORY:
+        return
+    mod = _get_submodule("flashinfer.utils")
+    if mod is None:
+        return
+    get_range_buf = getattr(mod, "_get_range_buf", None)
+    cache_buf = getattr(mod, "_cache_buf", None)
+    ceil_pow2 = getattr(mod, "_ceil_pow2", None)
+    if get_range_buf is None or cache_buf is None or ceil_pow2 is None:
+        return
+    get_range_buf(length, "cpu")  # Ensure the cache entry exists.
+    key = (f"range_{ceil_pow2(length)}", "cpu")
+    buf = cache_buf[key]
+    if not buf.is_pinned():
+        cache_buf[key] = buf.pin_memory()
+
+
 # Create lazy wrappers for each function
 flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_bf16_moe"
@@ -221,6 +247,9 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 flashinfer_b12x_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "b12x_fused_moe"
 )
+flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
+    "flashinfer.fused_moe.utils", "get_hybrid_num_tokens_buckets"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -237,6 +266,14 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
+)
+flashinfer_recurrent_kda = _lazy_import_wrapper(
+    "flashinfer.kda",
+    "recurrent_kda",
+)
+flashinfer_fused_kda_decode = _lazy_import_wrapper(
+    "flashinfer.kda_decode",
+    "fused_kda_decode",
 )
 
 
@@ -370,6 +407,28 @@ def has_flashinfer_bf16_fp4() -> bool:
     mod = _get_submodule("flashinfer.gemm")
     return mod is not None and all(
         hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
+    )
+
+
+@functools.cache
+def has_flashinfer_recurrent_kda() -> bool:
+    """Return whether FlashInfer recurrent KDA prefill is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda")
+    return mod is not None and callable(getattr(mod, "recurrent_kda", None))
+
+
+@functools.cache
+def has_flashinfer_fused_kda_decode() -> bool:
+    """Return whether FlashInfer fused KDA decode is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda_decode")
+    return (
+        mod is not None
+        and bool(getattr(mod, "_FUSED_KDA_DECODE_AVAILABLE", False))
+        and callable(getattr(mod, "fused_kda_decode", None))
     )
 
 
@@ -682,19 +741,11 @@ if has_flashinfer():
 
         concat_mla_k(k, k_nope, k_pe)
 
-    def _flashinfer_concat_mla_k_fake(
-        k: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
-    ) -> None:
-        return
-
     # Register flashinfer concat_mla_k custom op
     direct_register_custom_op(
         op_name="flashinfer_concat_mla_k",
         op_func=_flashinfer_concat_mla_k,
         mutates_args=["k"],  # k tensor is modified in-place
-        fake_impl=_flashinfer_concat_mla_k_fake,
     )
 
     @torch.library.custom_op(
@@ -1238,11 +1289,14 @@ __all__ = [
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_b12x_fused_moe",
+    "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
+    "flashinfer_recurrent_kda",
+    "flashinfer_fused_kda_decode",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
@@ -1250,6 +1304,8 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_recurrent_kda",
+    "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
