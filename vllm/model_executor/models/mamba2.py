@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    MambaStateShapes,
     SupportsMambaPrefixCaching,
 )
 from vllm.sequence import IntermediateTensors
@@ -168,7 +169,10 @@ class Mamba2Model(nn.Module):
 
 
 class Mamba2ForCausalLM(
-    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
+    nn.Module,
+    HasInnerState,
+    IsAttentionFree,
+    SupportsMambaPrefixCaching,
 ):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".A_log": ".A"})
 
@@ -176,7 +180,7 @@ class Mamba2ForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -187,7 +191,7 @@ class Mamba2ForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -197,6 +201,8 @@ class Mamba2ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+            - in batch-invariant mode: the partial-chunk buffer shapes
+              (x, dt, B, C), see MambaStateShapeCalculator.mamba2_state_shape
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -211,6 +217,7 @@ class Mamba2ForCausalLM(
             state_size=hf_config.state_size,
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
+            chunk_size=vllm_config.model_config.get_mamba_chunk_size(),
         )
 
     @classmethod

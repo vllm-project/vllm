@@ -90,6 +90,15 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int, int],
         tuple[int, int, int],
     ]
+    # Mamba2 in batch-invariant mode: (conv, ssm) plus the partial-chunk
+    # buffers (x, dt, B), see MambaStateShapeCalculator.mamba2_state_shape.
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+    ]
 )
 
 

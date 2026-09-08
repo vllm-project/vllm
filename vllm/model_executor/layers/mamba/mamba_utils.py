@@ -20,6 +20,19 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+Mamba2StateShapes: TypeAlias = (
+    tuple[tuple[int, int], tuple[int, int, int]]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+    ]
+)
+"""``(conv, ssm)``, plus the partial-chunk buffers ``(x, dt, B)`` in
+batch-invariant mode."""
+
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
@@ -78,9 +91,24 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        if not envs.VLLM_BATCH_INVARIANT:
+            return cls._mamba_state_dtype(
+                model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+            )
+        # Batch-invariant mode replays every SSD step from the sequence's last
+        # chunk boundary (see exact_replay.py). The boundary state must
+        # round-trip losslessly, so the SSM state stays fp32; the buffered
+        # partial-chunk inputs (x, raw dt, B) use the activation dtype.
+        if mamba_ssm_cache_dtype not in ("auto", "float32"):
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 keeps the Mamba2 SSM state in float32; "
+                f"--mamba-ssm-cache-dtype {mamba_ssm_cache_dtype} is not supported"
+            )
+        conv_state_dtype, _ = cls._mamba_state_dtype(
+            model_dtype, mamba_cache_dtype, "float32"
         )
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (conv_state_dtype, torch.float32, *([activation_dtype] * 3))
 
     @classmethod
     def append_replayssm_ring(
@@ -192,7 +220,8 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        chunk_size: int | None = None,
+    ) -> Mamba2StateShapes:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
         n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
@@ -207,7 +236,27 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
-        return conv_state_shape, temporal_state_shape
+        if not envs.VLLM_BATCH_INVARIANT:
+            return conv_state_shape, temporal_state_shape
+        # Batch-invariant mode replays every SSD step from the sequence's last
+        # chunk boundary (see exact_replay.py) and buffers the inputs of the
+        # partial chunk after it: x, raw dt and B for chunk_size tokens,
+        # token-major so a slot's prefix is already in the kernels' varlen
+        # layout.
+        if chunk_size is None:
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 needs the Mamba2 chunk size to size the "
+                "partial-chunk buffers of the state"
+            )
+        local_nheads = divide(num_heads, tp_world_size)
+        local_ngroups = divide(n_groups, tp_world_size)
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            (chunk_size, local_nheads, head_dim),
+            (chunk_size, local_nheads),
+            (chunk_size, local_ngroups, state_size),
+        )
 
     @classmethod
     def append_replayssm_ring(
