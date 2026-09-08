@@ -715,7 +715,7 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     )
 
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
+    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
     layer_config = make_layer_config(bits=bits)
     method = INCWna16Scheme().get_moe_method(
         make_config(), layer, "model.layers.0.mlp", layer_config
