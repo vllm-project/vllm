@@ -79,7 +79,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
-from vllm.v1.worker.block_table import SlotMappingMode, get_block_table_width
+from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
@@ -573,17 +573,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         block_sizes = []
         max_num_blocks_per_group = []
-        slot_mapping_modes = []
+        slot_mapping_enabled = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
-            slot_mapping_modes.append(
-                SlotMappingMode.NONE
-                if isinstance(layer_spec, (HiSparseHotSpec, CircularBufferSpec))
-                else SlotMappingMode.TOKEN_TO_KV_SLOT
+            slot_mapping_enabled.append(
+                not isinstance(layer_spec, (HiSparseHotSpec, CircularBufferSpec))
             )
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
@@ -643,10 +641,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
-            slot_mapping_modes=slot_mapping_modes,
-            slot_mapping_enabled=[
-                mode is not SlotMappingMode.NONE for mode in slot_mapping_modes
-            ],
+            slot_mapping_enabled=slot_mapping_enabled,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
