@@ -932,7 +932,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         return scheme
 
     def get_scheme_dict(
-        self, layer: torch.nn.Module, layer_name: str | None = None
+        self,
+        layer: torch.nn.Module,
+        layer_name: str | None = None,
+        match_module: bool = True,
     ) -> dict[str, QuantizationArgs | str | None] | None:
         """
         Extract the QuantizationArgs for a given layer.
@@ -943,6 +946,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "input_activations": QuantizationArgs | None,
                 "format": str | None
             } | None
+
+        Args:
+            layer: module being matched
+            layer_name: fully qualified module name
+            match_module: whether to fall back to matching the module class name
         """
         # TODO (@kylesayrs): support ignore module names with ct matching utils
         if should_ignore_layer(
@@ -957,6 +965,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 module=layer,
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
+                match_module=match_module,
             )
             if matched_target is not None:
                 scheme_dict = self.target_scheme_map[matched_target]
