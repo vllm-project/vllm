@@ -272,16 +272,16 @@ def _cp_gather_indexer_quant_cache_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
-    NUM_TOKENS: tl.constexpr,
-    NUM_BATCHES: tl.constexpr,
-    BLOCK_TABLE_WIDTH: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr,
+    num_tokens,
+    num_batches,
+    block_table_width,
+    num_blocks,
 ):
     tid = tl.program_id(0)
     offset = tl.arange(0, HEAD_DIM)
-    valid_tid = tid < NUM_TOKENS
+    valid_tid = tid < num_tokens
     batch_id = tl.load(token_to_seq_ptr + tid, mask=valid_tid, other=-1)
-    valid_batch = (batch_id >= 0) & (batch_id < NUM_BATCHES)
+    valid_batch = (batch_id >= 0) & (batch_id < num_batches)
     safe_batch_id = tl.where(valid_batch, batch_id, 0)
     batch_start = tl.load(cu_seqlen_ptr + safe_batch_id, mask=valid_batch, other=0)
     batch_end = tl.load(cu_seqlen_ptr + safe_batch_id + 1, mask=valid_batch, other=0)
@@ -294,7 +294,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     valid_block_table = (
         valid_token
         & (block_table_id >= 0)
-        & (block_table_id < BLOCK_TABLE_WIDTH)
+        & (block_table_id < block_table_width)
         & (block_offset >= 0)
         & (block_offset < block_size)
     )
@@ -303,7 +303,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     block_id = tl.load(
         block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
     )
-    valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
+    valid_block = valid_block_table & (block_id >= 0) & (block_id < num_blocks)
     # The packed KV layout makes per-block strides large
     # enough that block_id * stride can exceed 32-bit range.
     safe_block_id = tl.where(valid_block, block_id, 0).to(tl.int64)
