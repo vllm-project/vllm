@@ -13,6 +13,12 @@
     "INSTALL_RUBIN_PRERELEASE": {
       "default": "false"
     },
+    "EFA_INSTALLER_VERSION": {
+      "default": "1.47.0"
+    },
+    "EFA_INSTALLER_SHA256": {
+      "default": "2df4201e046833c7dc8160907bee7f52b76ff80ed147376a2d0ed8a0dd66b2db"
+    },
     "NCCL_VERSION": {
       "default": "2.30.7"
     },

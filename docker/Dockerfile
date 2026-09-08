@@ -28,6 +28,8 @@ ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
 ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
+ARG EFA_INSTALLER_VERSION=1.47.0
+ARG EFA_INSTALLER_SHA256=2df4201e046833c7dc8160907bee7f52b76ff80ed147376a2d0ed8a0dd66b2db
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -1181,6 +1183,8 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
@@ -1227,6 +1231,26 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
             uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
+    fi
+
+# Install the EFA userspace stack for NIXL's bundled LIBFABRIC plugin. Kernel
+# modules and host limits remain the responsibility of the container host.
+RUN if [ "${INSTALL_KV_CONNECTORS}" = "true" ]; then \
+        EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+        curl -fsSL --retry 3 --retry-all-errors \
+            "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+            -o "${EFA_INSTALLER_ARCHIVE}"; \
+        echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" \
+            | sha256sum -c -; \
+        tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+        (cd /tmp/aws-efa-installer && \
+            ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify); \
+        test -x /opt/amazon/efa/bin/fi_info; \
+        /opt/amazon/efa/bin/fi_info --version; \
+        find /usr/local/lib -name libplugin_LIBFABRIC.so -print -quit \
+            | grep -q .; \
+        rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+            /var/lib/apt/lists/*; \
     fi
 
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
