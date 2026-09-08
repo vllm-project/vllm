@@ -426,12 +426,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM4.1-8B",
         min_transformers_version="4.56",
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "hf": "HF remote code imports removed `is_torch_fx_available`; "
-            "the upstream compatibility shim request was closed as not planned: "
-            "https://github.com/huggingface/transformers/issues/44561"
-        },
         trust_remote_code=True,
     ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(

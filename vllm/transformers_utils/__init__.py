@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import envs
+from vllm.transformers_utils.compat import install_remote_code_shims
 
 if envs.VLLM_USE_MODELSCOPE:
     try:
@@ -24,3 +25,6 @@ if envs.VLLM_USE_MODELSCOPE:
             "Please install modelscope>=1.18.1 via "
             "`pip install modelscope>=1.18.1` to use ModelScope."
         ) from err
+
+# Patch here, before remote code from the Hub is executed
+install_remote_code_shims()
