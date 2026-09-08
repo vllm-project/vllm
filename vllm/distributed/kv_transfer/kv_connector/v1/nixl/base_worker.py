@@ -407,8 +407,6 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
-        # mypy will complain on re-assignment otherwise.
-        self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
