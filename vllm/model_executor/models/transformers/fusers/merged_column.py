@@ -31,8 +31,14 @@ class MergedColumnParallelFuser(StackedFuser):
     """Fuser for merging column-parallel linear projections."""
 
     linear_names: tuple[str, ...]
-    merged_name: ClassVar[str] = "merged_proj"
     merged_cls_name: ClassVar[str] = "MergedColumnParallelLinear"
+
+    @property
+    def merged_name(self) -> str:
+        """Programmatic name for the merged projection, based on the original names."""
+        # len is used to disambiguate names like `a_b` + `c` vs `a` + `b_c`
+        parts = "_".join(f"{len(name)}_{name}" for name in self.linear_names)
+        return f"merged_proj_{parts}"
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:
@@ -78,7 +84,8 @@ class MergedColumnParallelFuser(StackedFuser):
             return None
         if (names := cls._names(groups[0])) is None:
             return None
-        return cls(source_cls=type(module).__name__, linear_names=names)
+        fuser = cls(source_cls=type(module).__name__, linear_names=names)
+        return None if hasattr(module, fuser.merged_name) else fuser
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace the parallel calls with one merged call and split."""

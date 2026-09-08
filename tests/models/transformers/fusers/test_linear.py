@@ -596,8 +596,9 @@ def test_merged_column_fuser_supports_any_number_of_linears(
         ((f"parallel.{name}", weight) for name, weight in weights), mapper=mapper
     )
 
-    assert isinstance(fused.merged_proj, MergedColumnParallelLinear)
-    dispatch_cpu_unquantized_gemm(fused.merged_proj, remove_weight=False)
+    merged = getattr(fused, fuser.merged_name)
+    assert isinstance(merged, MergedColumnParallelLinear)
+    dispatch_cpu_unquantized_gemm(merged, remove_weight=False)
     for actual, reference in zip(fused(x), expected):
         torch.testing.assert_close(actual, reference)
 
