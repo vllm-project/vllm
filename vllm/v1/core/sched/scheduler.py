@@ -378,7 +378,7 @@ class Scheduler(SchedulerInterface):
             if batch_invariant_prefill_chunk_size is not None:
                 if needs_mamba_cache_alignment:
                     # One grid for FLA chunk partitions and align-mode state
-                    # saves (PR #46592 architecture; GDN uses FLA_CHUNK_SIZE).
+                    # saves. GDN uses FLA_CHUNK_SIZE.
                     batch_invariant_prefill_chunk_size = math.lcm(
                         batch_invariant_prefill_chunk_size,
                         self.mamba_state_block_size,
