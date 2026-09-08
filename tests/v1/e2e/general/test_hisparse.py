@@ -49,11 +49,13 @@ def _offload_load_bytes() -> float:
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
-@pytest.mark.parametrize("kv_offloading_size", [None, 1], ids=["standalone", "offload"])
+@pytest.mark.parametrize(
+    "with_offloading", [False, True], ids=["standalone", "offload"]
+)
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
-    kv_offloading_size: int | None,
+    with_offloading: bool,
 ):
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
@@ -67,6 +69,27 @@ def test_hisparse_spill_and_prefix_restore(
         [2000 + request_idx * 128 + i % 64 for i in range(257)]
         for request_idx in range(4)
     ]
+    hisparse_connector = {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 1},
+    }
+    kv_transfer_config = KVTransferConfig(**hisparse_connector)
+    if with_offloading:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    hisparse_connector,
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                    },
+                ]
+            },
+        )
 
     with vllm_runner(
         MODEL,
@@ -77,17 +100,12 @@ def test_hisparse_spill_and_prefix_restore(
                 device_buffer_size=512,
             )
         ),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="HiSparseConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"host_pool_gib": 1},
-        ),
+        kv_transfer_config=kv_transfer_config,
         block_size=64,
         max_model_len=320,
         max_num_batched_tokens=1024,
         max_num_seqs=4,
         num_gpu_blocks_override=128,
-        kv_offloading_size=kv_offloading_size,
         disable_log_stats=False,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
@@ -103,5 +121,5 @@ def test_hisparse_spill_and_prefix_restore(
         runner.generate_greedy([[42]], max_tokens=1)
 
         assert actual == expected
-        if kv_offloading_size is not None:
+        if with_offloading:
             assert _offload_load_bytes() > load_bytes

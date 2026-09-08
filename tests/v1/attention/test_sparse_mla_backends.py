@@ -22,12 +22,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import (
-    CUDAGraphMode,
-    HiSparseConfig,
-    SpeculativeConfig,
-    set_current_vllm_config,
-)
+from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
@@ -89,7 +84,6 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops import flashmla
 from vllm.v1.hisparse import runtime as hisparse_runtime
-from vllm.v1.hisparse import runtime as hisparse_runtime_module
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
@@ -1823,8 +1817,8 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
         block_size=block_size,
     )
     runtime.bind_source_cache(
-        torch.arange(block_size * row_width, dtype=torch.float32)
-        .view(1, block_size, row_width)
+        torch.arange(2 * block_size * row_width, dtype=torch.float32)
+        .view(2, block_size, row_width)
         .pin_memory()
     )
     runtime.request_state_indices = torch.tensor([1], dtype=torch.int32, device=device)
@@ -1834,14 +1828,14 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     runtime.begin_forward()
     cache_handle.swap_in(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
-        block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
+        block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         logical_topk_indices=torch.tensor([[0]], dtype=torch.int32, device=device),
         block_size=block_size,
     )
     torch.accelerator.synchronize()
 
     assert (runtime.index_group.device_global_indices[0] == -1).all()
-    assert (runtime.index_group.device_global_indices[1] == 0).any()
+    assert (runtime.index_group.device_global_indices[1] == block_size).any()
 
 
 @requires_hisparse_ops
@@ -1953,7 +1947,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
     num_reqs = 4
 
     kv_pool = torch.randn(
-        (num_blocks, block_size, row_width), dtype=torch.float32
+        (num_blocks + 1, block_size, row_width), dtype=torch.float32
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
@@ -1969,9 +1963,9 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
     cache.runtime.begin_forward()
 
     blocks_per_req = num_blocks // num_reqs
-    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(
-        num_reqs, blocks_per_req
-    )
+    block_table = torch.arange(
+        1, num_blocks + 1, dtype=torch.int32, device=device
+    ).view(num_reqs, blocks_per_req)
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
     base = torch.arange(top_k, dtype=torch.int32, device=device)
@@ -2116,11 +2110,13 @@ def test_hisparse_multi_step_writes_request_major_output():
         block_size=block_size,
         max_swap_rows=num_reqs * query_len,
     )
-    host = torch.arange(num_reqs * block_size * row_width, dtype=torch.float32).view(
-        num_reqs, block_size, row_width
-    )
+    host = torch.arange(
+        (num_reqs + 1) * block_size * row_width, dtype=torch.float32
+    ).view(num_reqs + 1, block_size, row_width)
     cache.runtime.bind_source_cache(host.pin_memory())
-    block_table = torch.arange(num_reqs, dtype=torch.int32, device=device).view(-1, 1)
+    block_table = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device).view(
+        -1, 1
+    )
     request_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     logical = torch.tensor(
         [
@@ -2168,17 +2164,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
 
 @requires_hisparse_ops
-@pytest.mark.parametrize(
-    ("cudagraph_mode", "expected_layer_mirrors"),
-    [
-        (CUDAGraphMode.NONE, 1),
-        (CUDAGraphMode.PIECEWISE, 0),
-        (CUDAGraphMode.FULL, 0),
-    ],
-)
-def test_hisparse_kv_update_uses_common_resident_write_path(
-    monkeypatch, cudagraph_mode, expected_layer_mirrors
-):
+def test_hisparse_kv_update_writes_resident_and_staging_caches():
     device = torch.device(DEVICE_TYPE)
     block_size = 4
     row_width = 8
@@ -2208,12 +2194,7 @@ def test_hisparse_kv_update_uses_common_resident_write_path(
     k_pe = torch.randn(8, 1, 2, device=device)
     cache_handle.num_actual_tokens = slots.numel()
     cache_handle.decode_batch = False
-    cache_handle.submit_layer_mirror = MagicMock()
-    monkeypatch.setattr(
-        hisparse_runtime_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=cudagraph_mode),
-    )
+    cache_handle.host_mirror_required = True
     source_cache = torch.zeros_like(cache_handle.view.cache)
     impl = object.__new__(FlashMLASparseImpl)
     layer = SimpleNamespace(
@@ -2242,7 +2223,6 @@ def test_hisparse_kv_update_uses_common_resident_write_path(
     staged = cache_handle.mirror_staging_cache.view(-1, row_width)
     staged_expected = torch.cat([kv_c[:3], k_pe[:3, 0]], dim=-1)
     torch.testing.assert_close(staged[:3], staged_expected)
-    assert cache_handle.submit_layer_mirror.call_count == expected_layer_mirrors
 
 
 @requires_hisparse_ops
@@ -2324,8 +2304,8 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     )
 
     source = (
-        torch.arange(32 * row_width, dtype=torch.float32)
-        .view(8, block_size, row_width)
+        torch.arange(36 * row_width, dtype=torch.float32)
+        .view(9, block_size, row_width)
         .pin_memory()
     )
     runtime.bind_source_cache(source)
@@ -2334,7 +2314,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     runtime.begin_forward()
     attention_indices = cache.swap_in(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
-        block_table=torch.arange(8, dtype=torch.int32, device=device).view(1, 8),
+        block_table=torch.arange(1, 9, dtype=torch.int32, device=device).view(1, 8),
         logical_topk_indices=torch.tensor(
             [[0, 1, 2, 3]], dtype=torch.int32, device=device
         ),
@@ -2706,6 +2686,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.squeeze(1).cpu().pin_memory()
     cache_handle.runtime.bind_source_cache(kv_pool)
+    cache_handle.source_block_table = metadata.block_table
 
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
