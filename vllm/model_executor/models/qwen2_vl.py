@@ -1668,7 +1668,9 @@ class Qwen2VLForConditionalGeneration(
             )
 
         values = metadata | {
-            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+            "pixel_values": self.input_norm(
+                self._get_pixel_values_by_modality(mm_kwargs), self.visual.dtype
+            ),
         }
         return EncoderCudaGraphReplayBuffers(values=values)
 
@@ -1686,7 +1688,9 @@ class Qwen2VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        pixel_values = self.input_norm(
+            self._get_pixel_values_by_modality(mm_kwargs), self.visual.dtype
+        )
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from typing import Any, TypedDict
 
 import numpy.typing as npt
@@ -8,6 +9,7 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.model_executor.models.qwen2_vl import Qwen2VLForConditionalGeneration
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
 
@@ -80,6 +82,62 @@ MULTIIMAGE_PROMPT = qwen2_vl_chat_template(
     "For each image, reply with a short sentence ",
     "(no more than 10 words).",
 )
+
+
+def test_qwen2_vl_encoder_cudagraph_normalizes_pixels() -> None:
+    """Graph replay and eager fallback match the normal image input path."""
+
+    class InputNorm:
+        def __init__(self):
+            self.dtypes: list[torch.dtype] = []
+
+        def __call__(
+            self, pixel_values: torch.Tensor, dtype: torch.dtype
+        ) -> torch.Tensor:
+            self.dtypes.append(dtype)
+            return pixel_values.to(dtype) + 1
+
+    class Visual:
+        dtype = torch.float16
+
+        def prepare_encoder_metadata(
+            self, *_args, **_kwargs
+        ) -> dict[str, torch.Tensor]:
+            return {}
+
+        def __call__(
+            self, pixel_values: torch.Tensor, grid_thw: list[list[int]]
+        ) -> torch.Tensor:
+            self.pixel_values = pixel_values
+            self.grid_thw = grid_thw
+            return pixel_values
+
+    visual = Visual()
+    input_norm = InputNorm()
+    adapter = SimpleNamespace(
+        visual=visual,
+        input_norm=input_norm,
+        get_input_modality=lambda _: "image",
+        _get_grid_thw_by_modality=lambda kwargs: kwargs["image_grid_thw"],
+        _get_pixel_values_by_modality=lambda kwargs: kwargs["pixel_values"],
+    )
+    pixel_values = torch.zeros(2, 12)
+    mm_kwargs = {
+        "pixel_values": pixel_values,
+        "image_grid_thw": [[1, 1, 2]],
+    }
+
+    replay = Qwen2VLForConditionalGeneration.prepare_encoder_cudagraph_replay_buffers(
+        adapter, mm_kwargs, max_batch_size=1, max_frames_per_batch=1
+    )
+    expected = torch.ones_like(pixel_values, dtype=visual.dtype)
+    torch.testing.assert_close(replay.values["pixel_values"], expected)
+
+    output = Qwen2VLForConditionalGeneration.encoder_eager_forward(adapter, mm_kwargs)
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(visual.pixel_values, expected)
+    assert visual.grid_thw == [[1, 1, 2]]
+    assert input_norm.dtypes == [visual.dtype, visual.dtype]
 
 
 class Qwen2VLPromptImageEmbeddingInput(TypedDict):
