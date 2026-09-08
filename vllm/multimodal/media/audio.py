@@ -38,8 +38,8 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
-    # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+except (ImportError, RuntimeError, OSError) as exc:
+    # RuntimeError / OSError: torchcodec is installed but the system ffmpeg is missing.
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
@@ -288,7 +288,7 @@ def load_audio_torchcodec(
     try:
         decoder = AudioDecoder(path, sample_rate=sample_rate)
         metadata = decoder.metadata
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         # torchcodec loads its ffmpeg-backed core lazily at construction, so
         # an ffmpeg-less (or ABI-incompatible) install can fail here rather
         # than at import. Treat that as backend-unavailable, not bad input.
