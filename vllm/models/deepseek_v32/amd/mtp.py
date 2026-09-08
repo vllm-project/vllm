@@ -273,6 +273,15 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
+                # A tied top-level embed_tokens has no spec layer to rewrite
+                # from; the draft needs its own copy under PP.
+                param = params_dict.get(name) if "embed_tokens" in name else None
+                if param is not None:
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
                 continue
             is_fusion_moe_shared_experts_layer = (
                 self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
