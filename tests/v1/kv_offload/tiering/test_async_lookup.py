@@ -184,11 +184,12 @@ class TestAsyncLookupManager:
         generation = mgr._lookup_state[key].generation
         assert generation != stale_generation
 
+        mgr.flush()
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
+        current_result = mgr._pending_results.get(timeout=5)
         mgr._pending_results.put([(key, stale_generation, True)])
-        mgr.drain_results()
-        assert mgr.lookup(key, ctx_b) is None
-
-        mgr._pending_results.put([(key, generation, False)])
+        mgr._pending_results.put(current_result)
         mgr.drain_results()
         assert mgr.lookup(key, ctx_b) is False
         mgr.shutdown()

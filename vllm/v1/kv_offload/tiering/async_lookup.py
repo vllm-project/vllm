@@ -58,7 +58,9 @@ class LookupPhase(Enum):
 class LookupState:
     generation: int
     phase: LookupPhase = LookupPhase.PENDING
-    result: bool | None = None  # Populated when phase is RESOLVED.
+    # None while pending/in flight; True if the key exists; False if absent or
+    # explicitly marked missing after a failed load.
+    result: bool | None = None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
