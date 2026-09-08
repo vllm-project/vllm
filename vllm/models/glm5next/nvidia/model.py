@@ -812,6 +812,17 @@ class Glm5NextModel(nn.Module):
                 and layer.mlp.use_mega_moe
                 for layer in self.layers
             )
+            # EPLB: the mapping enumerates physical experts, so it must cover
+            # the redundant replicas or their slots are never loaded.
+            num_redundant_experts = next(
+                (
+                    layer.mlp.n_redundant_experts
+                    for layer in self.layers
+                    if isinstance(layer, Glm5NextDecoderLayer)
+                    and isinstance(layer.mlp, Glm5NextMoE)
+                ),
+                0,
+            )
             if uses_mega_moe:
                 expert_params_mapping = make_deepseek_v4_expert_params_mapping(
                     self.config.n_routed_experts,
@@ -826,6 +837,7 @@ class Glm5NextModel(nn.Module):
                     ckpt_down_proj_name="down_proj",
                     ckpt_up_proj_name="up_proj",
                     num_experts=self.config.n_routed_experts,
+                    num_redundant_experts=num_redundant_experts,
                 )
         else:
             expert_params_mapping = []
@@ -913,28 +925,38 @@ class Glm5NextModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for idx, (
+                is_expert_weight = False
+                for (
                     param_name,
                     weight_name,
                     expert_id,
                     expert_shard_id,
-                ) in enumerate(expert_params_mapping):
+                ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
+                    # A checkpoint expert may map to several physical replicas
+                    # under EPLB; keep `name` intact and try the next entry
+                    # when this physical expert is not local to the rank.
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
                         continue
-                    param = params_dict[name]
+                    param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
-                    weight_loader(
+                    success = weight_loader(
                         param,
                         loaded_weight,
-                        name,
+                        name_mapped,
                         expert_id=expert_id,
                         shard_id=expert_shard_id,
+                        return_success=True,
                     )
-                    break
+                    if success:
+                        name = name_mapped
+                        break
                 else:
+                    if is_expert_weight:
+                        continue
                     # Skip loading extra bias for GPTQ models.
                     if (
                         name.endswith(".bias")
@@ -1067,7 +1089,7 @@ class Glm5NextForCausalLM(
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(
-    Glm4vForConditionalGeneration, HasInnerState, IsHybrid
+    Glm4vForConditionalGeneration, HasInnerState, IsHybrid, MixtureOfExperts
 ):
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
@@ -1142,9 +1164,46 @@ class Glm5NextForConditionalGeneration(
                 architectures=["Glm5NextForCausalLM"],
             )
 
+        self.set_moe_parameters()
+
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def set_moe_parameters(self) -> None:
+        self.moe_mlp_layers = [
+            layer.mlp
+            for layer in self.language_model.model.layers
+            if isinstance(layer, Glm5NextDecoderLayer)
+            and isinstance(layer.mlp, Glm5NextMoE)
+        ]
+        self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        self.num_moe_layers = len(self.moe_layers)
+        if not self.num_moe_layers:
+            return
+        example_moe = self.moe_mlp_layers[0]
+        self.num_expert_groups = self.config.text_config.n_group
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        if not self.num_moe_layers:
+            return
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
