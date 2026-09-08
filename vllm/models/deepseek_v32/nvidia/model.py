@@ -5,12 +5,12 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
-
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
+    _FUSED_EMBED_NORM_KERNEL,
     fused_embed_norm,
     has_full_vocab_on_rank,
     make_input_embedding,
@@ -223,6 +223,18 @@ class DeepseekV32Model(torch.nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        if (
+            self.replicated_embed
+            and vllm_config.kernel_config.enable_jit_warmup
+            and self.start_layer < self.end_layer
+        ):
+            _FUSED_EMBED_NORM_KERNEL.register_warmup(
+                ids_dtype=torch.int64,
+                table_dtype=self.embed_tokens.weight.dtype,
+                table_stride=self.embed_tokens.weight.stride(0),
+                hidden_size=config.hidden_size,
+                has_norm=True,
+            )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
