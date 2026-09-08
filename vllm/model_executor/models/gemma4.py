@@ -545,7 +545,8 @@ class Gemma4Attention(nn.Module):
             q = self.q_norm(q)
             q = q.flatten(-2, -1)
             q, _ = self.rotary_emb(positions, q, None)
-            attn_output = self.attn(q, None, None)
+            kv = q.new_empty(q.shape[0], self.kv_size)
+            attn_output = self.attn(q, kv, kv)
         else:
             # For k_eq_v, K weights are loaded into both K and V slots of
             # qkv_proj, so V == K automatically.
