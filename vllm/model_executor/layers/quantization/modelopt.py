@@ -137,6 +137,15 @@ LINEAR_ALGOS: dict[str, tuple[str, str]] = {
     "MXFP8": ("modelopt_mxfp8", "mxfp8_config"),
 }
 
+# MoE uses the same checkpoint algo strings as linear. PcPt / PB_WO are
+# linear-only today — mixed-precision MoE only dispatches these four.
+MOE_ALGOS: dict[str, tuple[str, str]] = {
+    "FP8": ("modelopt", "fp8_config"),
+    "NVFP4": ("modelopt_fp4", "nvfp4_config"),
+    "W4A16_NVFP4": ("modelopt_fp4", "w4a16_nvfp4_config"),
+    "MXFP8": ("modelopt_mxfp8", "mxfp8_config"),
+}
+
 # MIXED_PRECISION is not a linear algo; it selects a per-layer algo from the
 # table above.
 QUANT_ALGOS = [*LINEAR_ALGOS, "MIXED_PRECISION"]
@@ -162,7 +171,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     # config resolves the algo per-prefix instead and does not set this.
     quant_method: str
 
-    FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
     def __init__(
@@ -239,12 +247,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
-            quant_method = self.FusedMoEMethodCls(
-                quant_config=self, moe_config=layer.moe_config
+            return build_moe_method(
+                self, self.quant_method, prefix, layer.moe_config
             )
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
 
         return None
 
@@ -704,7 +709,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
 ModelOptFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
@@ -1095,7 +1099,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
 
-ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
 ModelOptNvFp4Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
@@ -1465,7 +1468,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
 
 # Register the method classes for ModelOptMxFp8Config
-ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
@@ -1755,27 +1757,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, RoutedExperts):
             if quant_algo in _BLOCK_FP8_MOE_ALGOS:
                 return Fp8MoEMethod(self.fp8_block_config, layer)
-            if quant_algo == "FP8":
-                return ModelOptFp8MoEMethod(
-                    quant_config=self.fp8_config,
-                    moe_config=layer.moe_config,
-                )
-            if quant_algo == "NVFP4":
-                return ModelOptNvFp4FusedMoE(
-                    quant_config=self.nvfp4_config,
-                    moe_config=layer.moe_config,
-                )
-            if quant_algo == "W4A16_NVFP4":
-                return ModelOptNvFp4FusedMoE(
-                    quant_config=self.w4a16_nvfp4_config,
-                    moe_config=layer.moe_config,
-                )
-            if quant_algo == "MXFP8":
-                return ModelOptMxFp8FusedMoE(
-                    quant_config=self.mxfp8_config,
-                    moe_config=layer.moe_config,
-                )
-            return None
+            if quant_algo is None or quant_algo not in MOE_ALGOS:
+                return None
+            _, subcfg_attr = MOE_ALGOS[quant_algo]
+            return build_moe_method(
+                getattr(self, subcfg_attr),
+                quant_algo,
+                prefix,
+                layer.moe_config,
+            )
 
         return None
 
@@ -2550,3 +2540,43 @@ def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
         return builder(config, prefix)
     spec, ctx, format_scheme = resolve(algo, config, prefix)
     return ModelOptLinearMethod(spec, ctx, format_scheme)
+
+
+# Bespoke-method escape hatch for MoE, same idea as LINEAR_METHOD_BUILDERS.
+# Empty until a format cannot reuse ModelOptFp8MoEMethod / NvFp4 / MxFp8.
+FUSED_MOE_METHOD_BUILDERS: dict[str, Callable[..., FusedMoEMethodBase]] = {}
+
+
+def build_moe_method(
+    config,
+    algo: str,
+    prefix: str,
+    moe_config: FusedMoEConfig,
+) -> FusedMoEMethodBase:
+    """Construct the MoE method for ``algo``.
+
+    Single indirection for homogeneous and mixed-precision dispatch, mirroring
+    ``build_linear_method``. Step 1 still returns the existing per-format
+    classes; later PRs swap FP8 (then NVFP4 / MXFP8) for a generic
+    ``ModelOptMoEMethod`` without editing either ``get_quant_method``.
+    """
+    builder = FUSED_MOE_METHOD_BUILDERS.get(algo)
+    if builder is not None:
+        return builder(config, prefix, moe_config)
+
+    # Homogeneous ModelOptFp8Config can have FP8 / PcPt / PB_WO as
+    # ``quant_method``; all three still use ModelOptFp8MoEMethod today.
+    if algo in ("FP8", "FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO"):
+        method = ModelOptFp8MoEMethod(quant_config=config, moe_config=moe_config)
+    elif algo in ("NVFP4", "W4A16_NVFP4"):
+        method = ModelOptNvFp4FusedMoE(quant_config=config, moe_config=moe_config)
+    elif algo == "MXFP8":
+        method = ModelOptMxFp8FusedMoE(quant_config=config, moe_config=moe_config)
+    else:
+        raise NotImplementedError(
+            f"build_moe_method: unsupported ModelOpt MoE algo {algo!r}"
+        )
+
+    if getattr(method, "backend", "") == "marlin":
+        method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+    return method
