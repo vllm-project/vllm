@@ -1431,9 +1431,9 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
-            # Absolute checkpoint position selected by the scheduler for the
-            # current allocation.
-            self._checkpoint_positions: dict[str, int] = {}
+            # checkpoint position and reserved block index for the current
+            # allocation.
+            self._checkpoints: dict[str, tuple[int, int]] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1722,7 +1722,14 @@ class MambaManager(SingleTypeKVCacheManager):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
             if not apply_admission_cap:
-                self._checkpoint_positions[request_id] = checkpoint_position
+                if checkpoint_position > 0:
+                    checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+                    self._checkpoints[request_id] = (
+                        checkpoint_position,
+                        checkpoint_idx,
+                    )
+                else:
+                    self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
                 if not (checkpoint_block and blocks_allocated):
@@ -1760,8 +1767,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            checkpoint_position = self._checkpoint_positions.get(request_id, 0)
-            checkpoint_block = int(checkpoint_position > 0)
+            checkpoint_block = int(request_id in self._checkpoints)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
@@ -1893,7 +1899,7 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-            self._checkpoint_positions.pop(request_id, None)
+            self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
@@ -1963,10 +1969,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
-        checkpoint_position = self._checkpoint_positions.get(request.request_id, 0)
-        if checkpoint_position > 0:
-            # TODO: Store the reserved slot explicitly for multi-module MTP.
-            checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+        checkpoint = self._checkpoints.get(request.request_id)
+        if checkpoint is not None:
+            checkpoint_position, checkpoint_idx = checkpoint
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
