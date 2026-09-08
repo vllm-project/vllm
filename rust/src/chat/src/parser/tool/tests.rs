@@ -281,3 +281,38 @@ fn factory_parses_pythonic_tool_call_list() {
     assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
     assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo","days":3}"#);
 }
+
+#[test]
+fn factory_new_registers_olmo3_by_name() {
+    // OLMo 3 is selected explicitly with `--tool-call-parser olmo3`, matching
+    // Python; neither side maps an OLMo model-name pattern to it.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::OLMO3));
+    factory.create(names::OLMO3, &[]).unwrap();
+    assert_eq!(
+        factory.resolve_name_for_model("allenai/Olmo-3-7B-Instruct"),
+        None
+    );
+}
+
+#[test]
+fn factory_parses_olmo3_function_calls_block() {
+    let factory = ToolParserFactory::new();
+
+    let mut parser = factory.create(names::OLMO3, &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser
+        .parse_into(
+            "<function_calls>\nget_weather(city='Tokyo', days=3)\n</function_calls>",
+            &mut output,
+        )
+        .unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo","days":3}"#);
+}

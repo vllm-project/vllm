@@ -4,9 +4,11 @@
 //! Shared parser core for pythonic tool calls.
 
 mod llama4;
+mod olmo3;
 mod value;
 
 pub use llama4::Llama4PythonicToolParser;
+pub use olmo3::Olmo3PythonicToolParser;
 use value::{
     StringRun, decode_string_run, json_object_key, json_string_content, python_value, string_quote,
 };
@@ -24,28 +26,74 @@ type PythonicInput<'i> = Partial<&'i str>;
 
 /// Model-specific configuration for the shared pythonic grammar.
 ///
-/// Only the optional markers wrapping the tool-call list vary across models
-/// that reuse this grammar; the list itself is byte-identical.
+/// Only the optional markers wrapping the tool calls and the way the calls are
+/// delimited vary across models that reuse this grammar; the calls themselves
+/// are byte-identical.
 #[derive(Debug, Clone, Copy)]
 struct PythonicConfig {
     /// Human-readable parser name used in error messages.
     parser_name: &'static str,
-    /// Marker that may precede the tool-call list.
+    /// Marker that may precede the tool calls.
     start_marker: Option<&'static str>,
-    /// Marker that may follow the tool-call list.
+    /// Marker that may follow the tool calls.
     end_marker: Option<&'static str>,
+    /// How the tool calls are delimited.
+    sequence: PythonicSequence,
+}
+
+/// How consecutive tool calls are delimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PythonicSequence {
+    /// A Python list of calls: `[first(...), second(...)]`.
+    List,
+    /// Whitespace-separated calls, one per line, closed by the end marker or by
+    /// the end of the stream: `first(...)\nsecond(...)`.
+    Lines,
+}
+
+impl PythonicSequence {
+    /// Return whether buffered `text` opens tool calls rather than plain text.
+    ///
+    /// Returns `None` while the buffered text may still grow into either
+    /// answer.
+    fn opens_calls(self, text: &str) -> Option<bool> {
+        match self {
+            Self::List => Some(text.chars().next()? == '['),
+            // Without an opening bracket to look for, a leading `name(` is what
+            // tells a block of tool calls apart from natural text.
+            Self::Lines => match call_start_event(&mut Partial::new(text)) {
+                Ok(_) => Some(true),
+                Err(ErrMode::Incomplete(_)) => None,
+                Err(_) => Some(false),
+            },
+        }
+    }
+
+    /// Return whether the end of the stream also ends the tool calls.
+    fn closes_at_stream_end(self) -> bool {
+        matches!(self, Self::Lines)
+    }
 }
 
 const PYTHONIC_CONFIG: PythonicConfig = PythonicConfig {
     parser_name: "pythonic",
     start_marker: None,
     end_marker: None,
+    sequence: PythonicSequence::List,
 };
 
 const LLAMA4_PYTHONIC_CONFIG: PythonicConfig = PythonicConfig {
     parser_name: "Llama 4 pythonic",
     start_marker: Some("<|python_start|>"),
     end_marker: Some("<|python_end|>"),
+    sequence: PythonicSequence::List,
+};
+
+const OLMO3_CONFIG: PythonicConfig = PythonicConfig {
+    parser_name: "OLMo 3",
+    start_marker: Some("<function_calls>"),
+    end_marker: Some("</function_calls>"),
+    sequence: PythonicSequence::Lines,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,11 +198,11 @@ impl PythonicToolParser {
         let Some(rest) = self.strip_start_marker(self.buffer.trim_start()) else {
             return false;
         };
-        let Some(first) = rest.trim_start().chars().next() else {
+        let Some(opens_calls) = self.config.sequence.opens_calls(rest.trim_start()) else {
             return false;
         };
 
-        self.mode = if first == '[' {
+        self.mode = if opens_calls {
             PythonicMode::ListStart
         } else {
             PythonicMode::Passthrough
@@ -176,12 +224,23 @@ impl PythonicToolParser {
         }
     }
 
-    /// Strip the configured end marker from text after the tool-call list.
+    /// Strip the configured end marker from text after the tool calls.
     fn strip_end_marker<'a>(&self, text: &'a str) -> &'a str {
         let Some(marker) = self.config.end_marker else {
             return text;
         };
         text.strip_suffix(marker).unwrap_or(text).trim_end()
+    }
+
+    /// Fail when buffered text follows the parsed tool calls.
+    fn check_no_trailing_text(&self) -> Result<()> {
+        if self.strip_end_marker(self.buffer.trim()).is_empty() {
+            return Ok(());
+        }
+        Err(parsing_failed!(
+            "trailing text after {} tool calls",
+            self.config.parser_name
+        ))
     }
 
     /// Apply one parsed pythonic event to parser state and output.
@@ -303,13 +362,11 @@ impl ToolParser for PythonicToolParser {
         let mut output = ToolParserOutput::default();
         match self.mode {
             PythonicMode::Start | PythonicMode::Passthrough => output.push_text(&self.buffer),
-            PythonicMode::Done => {
-                if !self.strip_end_marker(self.buffer.trim()).is_empty() {
-                    return Err(parsing_failed!(
-                        "trailing text after {} tool calls",
-                        self.config.parser_name
-                    ));
-                }
+            PythonicMode::Done => self.check_no_trailing_text()?,
+            // Newline-separated calls are also closed by the end of the stream,
+            // so the end marker may be missing.
+            PythonicMode::ListNext if self.config.sequence.closes_at_stream_end() => {
+                self.check_no_trailing_text()?
             }
             _ => {
                 return Err(parsing_failed!(
@@ -338,42 +395,66 @@ fn parse_next_pythonic_event(
             unreachable!("pythonic parser driver must commit before parsing events")
         }
         PythonicMode::ListStart => list_start_event(input, config),
-        PythonicMode::ListNext => list_next_event(input),
+        PythonicMode::ListNext => list_next_event(input, config),
         PythonicMode::Arguments { first } => arguments_event(input, *first),
         PythonicMode::StringValue { quote } => string_value_event(input, *quote),
-        // Text after the closing `]` is only reported once, at `finish()`.
+        // Text after the tool calls is only reported once, at `finish()`.
         PythonicMode::Done => incomplete(),
     }
 }
 
-/// Parse the opening `[` and the first call of a pythonic tool-call list.
+/// Parse the start of the pythonic tool calls, up to their first call.
 fn list_start_event(
     input: &mut PythonicInput<'_>,
     config: PythonicConfig,
 ) -> ModalResult<PythonicEvent> {
-    preceded(
-        (ws0, optional_marker(config.start_marker), literal("["), ws0),
-        call_start_event,
-    )
-    .context(StrContext::Label("pythonic tool call list"))
-    .parse_next(input)
+    let start = (ws0, optional_marker(config.start_marker));
+    match config.sequence {
+        PythonicSequence::List => preceded((start, literal("["), ws0), call_start_event)
+            .context(StrContext::Label("pythonic tool call list"))
+            .parse_next(input),
+        PythonicSequence::Lines => preceded((start, ws0), call_start_event)
+            .context(StrContext::Label("pythonic tool call block"))
+            .parse_next(input),
+    }
 }
 
 /// Parse the separator or terminator after one pythonic call.
-fn list_next_event(input: &mut PythonicInput<'_>) -> ModalResult<PythonicEvent> {
-    preceded(
-        ws0,
-        alt((
-            list_end_event,
-            preceded((literal(","), ws0), alt((list_end_event, call_start_event))),
-        )),
-    )
-    .parse_next(input)
+fn list_next_event(
+    input: &mut PythonicInput<'_>,
+    config: PythonicConfig,
+) -> ModalResult<PythonicEvent> {
+    match config.sequence {
+        PythonicSequence::List => preceded(
+            ws0,
+            alt((
+                list_end_event,
+                preceded((literal(","), ws0), alt((list_end_event, call_start_event))),
+            )),
+        )
+        .parse_next(input),
+        PythonicSequence::Lines => preceded(
+            ws0,
+            alt((block_end_event(config.end_marker), call_start_event)),
+        )
+        .parse_next(input),
+    }
 }
 
 /// Parse the closing `]` of a pythonic tool-call list.
 fn list_end_event(input: &mut PythonicInput<'_>) -> ModalResult<PythonicEvent> {
     literal("]").value(PythonicEvent::ListEnd).parse_next(input)
+}
+
+/// Parse the end marker closing a block of newline-separated calls.
+fn block_end_event<'i>(
+    marker: Option<&'static str>,
+) -> impl Parser<PythonicInput<'i>, PythonicEvent, ErrMode<ContextError>> {
+    move |input: &mut PythonicInput<'i>| {
+        // Without an end marker the block only ends at the end of the stream.
+        let marker = marker.ok_or_else(|| ErrMode::Backtrack(ContextError::new()))?;
+        literal(marker).value(PythonicEvent::ListEnd).parse_next(input)
+    }
 }
 
 /// Parse the start of one pythonic call, up to its opening `(`.
@@ -446,7 +527,7 @@ fn string_value_event(input: &mut PythonicInput<'_>, quote: char) -> ModalResult
     })
 }
 
-/// Parse an optional marker wrapping the tool-call list.
+/// Parse an optional marker wrapping the tool calls.
 fn optional_marker<'i>(
     marker: Option<&'static str>,
 ) -> impl Parser<PythonicInput<'i>, (), ErrMode<ContextError>> {
