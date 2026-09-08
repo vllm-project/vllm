@@ -177,7 +177,7 @@ class _FrameworkPinAdapter:
 
     def _resolve_pin(
         self, parent: ParentManager, keys: Collection[BlockKey]
-    ) -> tuple[str, dict[BlockKey, MemDescriptor | None]] | None:
+    ) -> tuple[str, dict[BlockKey, list[MemDescriptor] | None]] | None:
         offload_keys = tuple(OffloadKey(bytes(key)) for key in keys)
         request_id = f"kvcr-source:{self._next_request_id}"
         self._next_request_id += 1
@@ -202,13 +202,13 @@ class _FrameworkPinAdapter:
             if len(job_keys) != len(block_ids) or set(job_keys) != set(hit_keys):
                 return None
 
-            descriptors: dict[BlockKey, MemDescriptor | None] = {
+            descriptors: dict[BlockKey, list[MemDescriptor] | None] = {
                 BlockKey(bytes(key)): None for key in offload_keys
             }
             descriptors.update(
                 (
                     BlockKey(bytes(key)),
-                    self._tier._make_descriptor(block_id),
+                    [self._tier._make_descriptor(block_id)],
                 )
                 for key, block_id in zip(job_keys, block_ids)
             )
@@ -377,16 +377,19 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     -1, secondary_g2_slots * self._primary_row_stride
                 )
                 local_dram = LocalDramOptions(
-                    address=ctypes.addressof(ctypes.c_char.from_buffer(local_mapping)),
-                    length=len(local_mapping),
-                    slot_count=secondary_g2_slots,
+                    pools=[
+                        (
+                            "",
+                            ctypes.addressof(ctypes.c_char.from_buffer(local_mapping)),
+                            len(local_mapping),
+                        )
+                    ],
                     backend=local_dram_backend,
                 )
         guard_config = (
             KVCRGuardConfig(
                 kvcr_service_socket_path=kvcr_service_socket_path,
                 guard_index=dp_local_rank,
-                row_stride=self._primary_row_stride,
                 compatibility_digest=compatibility_digest,
             )
             if kvcr_service_socket_path is not None and compatibility_digest is not None
@@ -404,6 +407,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         try:
             self._kvcr = KVCR(
                 KVCRConfig(
+                    pool_layouts=[("", self._primary_row_stride)],
                     enable_telemetry=enable_telemetry,
                     operation_timeout_ms=operation_timeout_ms,
                     nixl_agent_name=nixl_agent_name,
@@ -459,7 +463,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): self._make_descriptor(int(block_id))
+            self._key_adapter.encode(key): [self._make_descriptor(int(block_id))]
             for key, block_id in zip(
                 job_metadata.keys, job_metadata.block_ids, strict=True
             )
@@ -483,7 +487,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): self._make_descriptor(int(block_id))
+            self._key_adapter.encode(key): [self._make_descriptor(int(block_id))]
             for key, block_id in zip(
                 job_metadata.keys, job_metadata.block_ids, strict=True
             )

@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("kvcr")
 
-from kvcr import KVCRBindings, ROUTER_HINT_KEY
+from kvcr import ROUTER_HINT_KEY, KVCRBindings
 from kvcr.config import G3Options, KVCRBackendConfigs, KVCRConfig, KVCRGuardConfig
 from kvcr.policy import FIFOPolicy, G3FIFOPolicy, G3LRUPolicy, LRUPolicy
 from kvcr.types import (
@@ -76,9 +76,11 @@ class RecordingKVCR:
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
         self.deliver_calls: list[
-            tuple[OpHandle, dict[BlockKey, MemDescriptor], str | None]
+            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]], str | None]
         ] = []
-        self.deposit_calls: list[tuple[OpHandle, dict[BlockKey, MemDescriptor]]] = []
+        self.deposit_calls: list[
+            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]]]
+        ] = []
         self.completed: list[tuple[OpHandle, dict[BlockKey, OpEntryResult]]] = []
         self._next_op_handle = 1
 
@@ -103,7 +105,7 @@ class RecordingKVCR:
 
     def deliver(
         self,
-        blocks: Mapping[BlockKey, MemDescriptor],
+        blocks: Mapping[BlockKey, list[MemDescriptor]],
         request_id: str | None = None,
     ) -> OpHandle:
         op_handle = self._next_op_handle
@@ -114,7 +116,7 @@ class RecordingKVCR:
 
     def deposit(
         self,
-        blocks: Mapping[BlockKey, MemDescriptor],
+        blocks: Mapping[BlockKey, list[MemDescriptor]],
     ) -> OpHandle:
         op_handle = self._next_op_handle
         self._next_op_handle += 1
@@ -241,9 +243,10 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
     assert kvcr.guard_config == KVCRGuardConfig(
         kvcr_service_socket_path="/tmp/kvcr.sock",
         guard_index=1,
-        row_stride=tier._primary_row_stride,
         compatibility_digest="Opaque-Digest",
     )
+    assert kvcr.config is not None
+    assert kvcr.config.pool_layouts == [("", tier._primary_row_stride)]
     assert kvcr.backend_configs.local_dram is None
 
 
@@ -304,9 +307,10 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
     _, blocks, request_id = kvcr.deliver_calls[0]
     assert request_id == "req"
     assert list(blocks) == [key]
-    assert blocks[key].end_point_name == kvcr.nixl_agent_name
-    assert blocks[key].addr == tier._primary_base_addr + 2 * 16
-    assert blocks[key].size == 16
+    (descriptor,) = blocks[key]
+    assert descriptor.end_point_name == kvcr.nixl_agent_name
+    assert descriptor.addr == tier._primary_base_addr + 2 * 16
+    assert descriptor.size == 16
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -383,8 +387,9 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     assert result is not None
     pin_handle, descriptors = result
     assert descriptors[keys[1]] is None
-    descriptor = descriptors[keys[2]]
-    assert descriptor is not None
+    block_descriptors = descriptors[keys[2]]
+    assert block_descriptors is not None
+    (descriptor,) = block_descriptors
     assert descriptor.addr == (tier._primary_base_addr + 5 * tier._primary_row_stride)
     assert lifecycle == ["new", "finished"]
 
@@ -478,14 +483,15 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     )
     local_dram = kvcr.backend_configs.local_dram
     assert local_dram is not None
-    assert local_dram.length == 2 * tier._primary_row_stride
-    assert local_dram.slot_count == 2
+    assert [(name, size) for name, _, size in local_dram.pools] == [
+        ("", 2 * tier._primary_row_stride)
+    ]
 
     key = OffloadKey(b"k0")
     tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, block_id=2))
 
     _, blocks = kvcr.deposit_calls[0]
-    assert blocks[key].addr == tier._primary_base_addr + 2 * 16
+    assert blocks[key][0].addr == tier._primary_base_addr + 2 * 16
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None
@@ -525,7 +531,7 @@ def test_kvcr_tier_waits_for_all_completions_and_drains(monkeypatch):
 
         def deliver(
             self,
-            blocks: Mapping[BlockKey, MemDescriptor],
+            blocks: Mapping[BlockKey, list[MemDescriptor]],
             request_id: str | None = None,
         ) -> OpHandle:
             op_handle = self._next_op_handle
