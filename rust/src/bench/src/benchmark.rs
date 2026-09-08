@@ -17,7 +17,7 @@ use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics}
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
-use crate::rate_control::compute_schedule;
+use crate::rate_control::{RequestSchedule, compute_schedule};
 use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
@@ -412,6 +412,12 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             "{} random rerank requests (batch={}, reranker={})",
             config.num_prompts, config.random_batch_size, config.is_reranker,
         ),
+        DatasetName::TimedTrace => format!(
+            "{} requests from timed trace ({}, chunk_hash_size={})",
+            config.num_prompts,
+            config.dataset_path.as_deref().unwrap_or("unknown"),
+            config.timed_trace_chunk_hash_size,
+        ),
     };
     tracing::info!(
         dataset = ?config.dataset_name,
@@ -602,6 +608,25 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 &config.request_id_prefix,
                 config.random_batch_size,
                 config.is_reranker,
+            )?
+        }
+        DatasetName::TimedTrace => {
+            let tok = tokenizer.as_ref().ok_or_else(|| {
+                BenchError::Config("Timed trace dataset requires a tokenizer".into())
+            })?;
+            crate::datasets::timed_trace::load_timed_trace_dataset(
+                tok,
+                config.dataset_path.as_deref().unwrap_or_default(),
+                config.num_prompts,
+                &config.request_id_prefix,
+                &crate::datasets::timed_trace::TimedTraceOptions {
+                    chunk_size: config.timed_trace_chunk_hash_size,
+                    sec_multiplier: config.timed_trace_sec_multiplier,
+                    label_timestamp: &config.timed_trace_label_timestamp,
+                    label_input_length: &config.timed_trace_label_input_length,
+                    label_output_length: &config.timed_trace_label_output_length,
+                    label_hash_ids: &config.timed_trace_label_hash_ids,
+                },
             )?
         }
     };
@@ -855,14 +880,24 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         );
     }
 
-    // Compute request schedule
-    let schedule = compute_schedule(
-        input_requests.len(),
-        config.request_rate,
-        config.burstiness,
-        config.seed,
-        config.ramp_up.as_ref(),
-    );
+    // Compute request schedule: the trace's recorded arrival offsets when
+    // self-timed, synthetic gamma inter-arrivals otherwise. Either way the
+    // dispatch loop below sleeps to benchmark_start + delay, an absolute
+    // deadline, so trace replay does not accumulate drift.
+    let schedule = if config.self_timed {
+        RequestSchedule {
+            delays: input_requests.iter().map(|r| r.timestamp.unwrap_or(0.0)).collect(),
+            rates: vec![0.0; input_requests.len()],
+        }
+    } else {
+        compute_schedule(
+            input_requests.len(),
+            config.request_rate,
+            config.burstiness,
+            config.seed,
+            config.ramp_up.as_ref(),
+        )
+    };
 
     // Progress bar
     let pb = if config.disable_tqdm {
