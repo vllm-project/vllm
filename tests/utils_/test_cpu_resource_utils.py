@@ -189,6 +189,8 @@ def test_check_cgroup_memory_available_skips_without_snapshot(
 
     log_debug.assert_not_called()
     log_warning.assert_not_called()
+
+
 @pytest.fixture
 def synthesized_cpu_list(monkeypatch: pytest.MonkeyPatch) -> list[LogicalCPUInfo]:
     cpu_list = [LogicalCPUInfo(id=0, physical_core=0, numa_node=0)]
@@ -208,6 +210,8 @@ def test_get_cpu_list_falls_back_when_lscpu_fails(
     synthesized_cpu_list: list[LogicalCPUInfo],
     error: Exception,
 ) -> None:
+    monkeypatch.setattr(cru.sys, "platform", "linux")
+
     def raise_error(*args, **kwargs):
         raise error
 
@@ -222,6 +226,7 @@ def test_get_cpu_list_falls_back_when_lscpu_output_is_unparsable(
     synthesized_cpu_list: list[LogicalCPUInfo],
     lscpu_output: str,
 ) -> None:
+    monkeypatch.setattr(cru.sys, "platform", "linux")
     monkeypatch.setattr(
         subprocess, "check_output", lambda *args, **kwargs: lscpu_output
     )
