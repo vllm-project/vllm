@@ -8,6 +8,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
@@ -94,6 +95,25 @@ class SamplingMaskTensors(NamedTuple):
         max_num_kept: int,
     ) -> SamplingMaskTensors:
         """Capture the finite-logit support of every row with a sampled token."""
+        if current_platform.is_xpu():
+            _, vocab_size = logits.shape
+            token_ids, packed_mask, counts = torch.ops._xpu_C.compact_sampling_mask(
+                logits,
+                num_sampled_tokens,
+                max_num_kept,
+                MAX_COMPACT_SUPPORT,
+            )
+            return cls(token_ids, packed_mask, counts, vocab_size)
+        else:
+            return cls._from_logits_triton(logits, num_sampled_tokens, max_num_kept)
+
+    @classmethod
+    def _from_logits_triton(
+        cls,
+        logits: torch.Tensor,
+        num_sampled_tokens: torch.Tensor,
+        max_num_kept: int,
+    ) -> SamplingMaskTensors:
         num_reqs, vocab_size = logits.shape
         max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
         device = logits.device
