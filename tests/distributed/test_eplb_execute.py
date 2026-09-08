@@ -782,3 +782,42 @@ def test_rearrange_expert_weights_profile_mode(world_size):
         _test_rearrange_expert_weights_profile_mode,
         world_size,
     )
+
+
+def _test_eplb_communicator_pipeline_parallel(env, world_size, backend):
+    set_env_vars_and_device(env)
+    config = VllmConfig()
+    config.parallel_config.tensor_parallel_size = 2
+    config.parallel_config.pipeline_parallel_size = world_size // 2
+
+    with set_current_vllm_config(config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=2,
+            pipeline_model_parallel_size=world_size // 2,
+        )
+        ep_group = get_tp_group()
+        peer_rank = 1 - ep_group.rank_in_group
+        rank = torch.distributed.get_rank()
+        send_tensor = torch.full((16,), rank, device="cuda", dtype=torch.int32)
+        recv_tensor = torch.empty_like(send_tensor)
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group,
+            backend=backend,
+            expert_weights=[[send_tensor]],
+            expert_buffer=[recv_tensor],
+        )
+        communicator.add_send([send_tensor], peer_rank, expert_id=0)
+        communicator.add_recv([recv_tensor], peer_rank, expert_id=0)
+        communicator.execute()
+
+        expected = torch.full_like(recv_tensor, ep_group.ranks[peer_rank])
+        torch.testing.assert_close(recv_tensor, expected)
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("backend", ["torch_nccl", "torch_gloo"])
+def test_eplb_communicator_pipeline_parallel(world_size, backend):
+    """Transfer weights within each PP stage, including nonzero global ranks."""
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(_test_eplb_communicator_pipeline_parallel, world_size, backend)
