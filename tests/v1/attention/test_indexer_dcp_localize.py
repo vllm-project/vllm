@@ -23,7 +23,7 @@ from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 
 def _sparse_dcp_parity_case(
-    config, rank, world, next_n, seed, q_scale, k_scale, backend
+    config, rank, world, next_n, seed, q_scale, k_scale, backend, *, prefill=False
 ):
     from vllm import _custom_ops as ops
     from vllm.distributed import get_dcp_group
@@ -48,12 +48,14 @@ def _sparse_dcp_parity_case(
 
     device = torch.device(f"cuda:{rank}")
     torch.manual_seed(seed)
-    # GLM-5.3 dimensions. MTP3 verifies the current token plus three drafts.
+    # Representative MLA dimensions; MTP3 verifies the token plus three drafts.
     heads, index_heads, index_dim, topk = 64, 32, 128, 2048
     block_size, interleave, kv_rank, rope_dim = 64, 64, 512, 64
     lengths = [5, 65, 129, 193, 257, 2049, 4097, 8193]
     if next_n == 1:
         lengths = [1, 63, 64, 65, 255, 256, 257, 2049, 8193]
+    if prefill:
+        lengths = [65, 8193]
     batch, tokens = len(lengths), len(lengths) * next_n
     capacity = ((max(lengths) + 255) // 256) * 256
     bounds = (
@@ -77,6 +79,24 @@ def _sparse_dcp_parity_case(
     kv = torch.randn(
         batch, capacity, kv_rank + rope_dim, device=device, dtype=torch.bfloat16
     )
+    if prefill:
+        # Binary position keys and one-hot queries give exact scores pos/2**bits.
+        # Random FP32 scores can tie at the cutoff; TP1 and DCP may then choose
+        # different, equally valid tokens. Keep exact index assertions unambiguous.
+        bits = capacity.bit_length()
+        bit_ids = torch.arange(bits, device=device)
+        index_k.zero_()
+        index_k[:, :, :bits] = (
+            torch.arange(capacity, device=device)[:, None] >> bit_ids
+        ) & 1
+        index_q = (
+            torch.eye(index_heads, index_dim, device=device)
+            .expand(tokens, -1, -1)
+            .contiguous()
+            .to(torch.float8_e4m3fn)
+        )
+        weights.zero_()
+        weights[:, :bits] = torch.exp2(bit_ids.float() - bits)
     if is_flashmla:
         # DS-MLA has per-tile cache scales and BF16 queries, rather than
         # FlashInfer's per-layer FP8 scales. Exercise two input magnitudes.
@@ -145,7 +165,7 @@ def _sparse_dcp_parity_case(
     # before attention runs. No model identity or backend allowlist is supplied.
     builder_config = copy.copy(config)
     builder_config.model_config = SimpleNamespace(max_model_len=capacity)
-    if next_n > 1:
+    if next_n > 1 and not prefill:
         builder_config.speculative_config = SimpleNamespace(
             num_speculative_tokens=next_n - 1, enable_adaptive_verification=False
         )
@@ -176,14 +196,18 @@ def _sparse_dcp_parity_case(
         dcp_local_seq_lens=local_bounds[:, -1] if world > 1 else None,
     )
     metadata = builder.build(0, common)
-    assert metadata.decode is not None
-    torch.testing.assert_close(
-        metadata.decode.seq_lens.flatten(), local_bounds.flatten()
-    )
-    if world > 1:
+    if prefill:
+        assert metadata.decode is None and metadata.prefill is not None
+        assert metadata.num_prefills == batch
+    else:
+        assert metadata.decode is not None
         torch.testing.assert_close(
-            metadata.decode.global_seq_lens.flatten(), bounds.flatten()
+            metadata.decode.seq_lens.flatten(), local_bounds.flatten()
         )
+        if world > 1:
+            torch.testing.assert_close(
+                metadata.decode.global_seq_lens.flatten(), bounds.flatten()
+            )
     indices = torch.empty(tokens, topk, dtype=torch.int32, device=device)
     with set_forward_context({"indexer": metadata}, config):
         sparse_indexer.sparse_attn_indexer(
@@ -211,6 +235,17 @@ def _sparse_dcp_parity_case(
     valid = indices >= 0
     assert (indices[valid] < bounds.flatten()[:, None].expand_as(indices)[valid]).all()
     torch.testing.assert_close(valid.sum(1), bounds.flatten().clamp_max(topk).long())
+    if prefill:
+        # The strict score ordering independently determines the causal top-k.
+        for row, bound in enumerate(bounds.flatten().tolist()):
+            torch.testing.assert_close(
+                indices[row, valid[row]].sort().values,
+                torch.arange(
+                    max(0, bound - topk), bound, device=device, dtype=torch.int32
+                ),
+                rtol=0,
+                atol=0,
+            )
     manager = None
     if world > 1:
         manager = MLADCPManager(
@@ -326,7 +361,7 @@ def _sparse_dcp_parity_case(
             reference[row] = scores.softmax(-1) @ selected[:, :kv_rank]
             reference_lse[row] = scores.logsumexp(-1)
         result.update(sdpa=reference.cpu(), sdpa_lse=reference_lse.cpu())
-        if is_flashmla:
+        if is_flashmla and not prefill:
             # TP1's 64 local heads select the separate decode path in production.
             # Retain mixed-path LSE for diagnostics, but compare its real output.
             cache_lens = torch.full((batch,), topk, device=device, dtype=torch.int32)
@@ -423,6 +458,13 @@ def _mla_dcp_parity_worker(rank, world, directory, backend):
                                 f"ATTENTION_PARITY captured TP{world} {name}",
                                 flush=True,
                             )
+            # Ordinary prefill metadata exercises FP8 logits, local causal
+            # bounds and global top-k merge before the sparse MLA kernel.
+            result = _sparse_dcp_parity_case(
+                config, rank, world, 64, 0, 1.0, 1.0, backend, prefill=True
+            )
+            if rank == 0:
+                torch.save(result, directory / f"tp{world}-prefill-n64.pt")
     finally:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
@@ -435,7 +477,7 @@ def _mla_dcp_parity_worker(rank, world, directory, backend):
 )
 @pytest.mark.parametrize("backend", ["flashinfer", "flashmla"])
 def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
-    """Real sparse decode/MTP outputs with DCP interleave64 match unsharded TP1.
+    """Sparse prefill/decode/MTP outputs at interleave64 match unsharded TP1.
 
     Requires four SM100 GPUs. No fake logits, selected indices, attention
     kernels, or collectives. Artifacts retain the actual output tensors.
@@ -443,8 +485,9 @@ def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
     indices are exact and natural-log LSE is checked at 1e-4.
     This kernel-facing test also exercises multi-token attention below the
     separate backend MTP compatibility checks; it does not change those checks.
-    Sparse prefill kernels and fused model-level cache population are not
-    covered. The FP32 oracle checks attention given the indexer's selections.
+    Prefill uses the real indexer prefill kernels and sparse MLA attention.
+    Fused model-level cache population is not covered. The FP32 oracle checks
+    attention given the indexer's selections.
     """
     if torch.accelerator.device_count() < 4:
         pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
@@ -487,7 +530,7 @@ def test_sparse_dcp4_interleave64_attention_matches_tp1(tmp_path, backend):
                 .item(),
             }
         )
-    assert len(metrics) == 8
+    assert len(metrics) == 9
     (tmp_path / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     print(json.dumps(metrics, indent=2))
     for ref_path in sorted(tmp_path.glob("tp1-*.pt")):
