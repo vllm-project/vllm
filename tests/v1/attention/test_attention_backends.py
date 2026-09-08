@@ -972,25 +972,36 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets():
+@pytest.mark.parametrize(
+    ("qo_indptr_values", "num_decode_tokens", "expected_q_len"),
+    [
+        ([0, 3, 3], 3, 3),
+        ([0, 2, 4, 4, 4], 4, 2),
+    ],
+)
+def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
+    qo_indptr_values: list[int],
+    num_decode_tokens: int,
+    expected_q_len: int,
+):
     """Padded speculative decode keeps its actual packed query width."""
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
     builder.use_xqa = False
-    qo_indptr = torch.tensor([0, 3, 3], dtype=torch.int32)
+    qo_indptr = torch.tensor(qo_indptr_values, dtype=torch.int32)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
         qo_indptr,
         qo_indptr,
-        num_decodes=2,
-        num_decode_tokens=3,
+        num_decodes=len(qo_indptr_values) - 1,
+        num_decode_tokens=num_decode_tokens,
     )
 
-    assert q_len == 3
+    assert q_len == expected_q_len
     assert q_lens is None
     assert q_cu_seq_lens is not None
-    assert q_cu_seq_lens.tolist() == [0, 3, 3]
+    assert q_cu_seq_lens.tolist() == qo_indptr_values
 
 
 @pytest.mark.skipif(
