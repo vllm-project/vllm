@@ -101,23 +101,6 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
-def _bf16x3_router_specs_from_model(
-    model: torch.nn.Module,
-) -> tuple[tuple[int, int, int], ...]:
-    """Return ``(K, M, min_num_tokens)`` for eligible router layers."""
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    specs: set[tuple[int, int, int]] = set()
-    for module in model.modules():
-        if not isinstance(module, GateLinear) or not module.allow_bf16x3_router_gemm:
-            continue
-        min_num_tokens = module.FP32_MAX_TOKENS + 1
-        if not module.allow_fp32_router_gemm:
-            min_num_tokens = 1
-        specs.add((module.input_size, module.output_size, min_num_tokens))
-    return tuple(sorted(specs))
-
-
 def _warmup_bf16x3_router_gemm(
     model: torch.nn.Module,
     max_num_tokens: int,
@@ -125,16 +108,34 @@ def _warmup_bf16x3_router_gemm(
     from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
         warmup_bf16x3_router_gemm,
     )
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
-    specs = _bf16x3_router_specs_from_model(model)
-    if not specs:
+    gate = next(
+        (
+            module
+            for module in model.modules()
+            if isinstance(module, GateLinear) and module.allow_bf16x3_router_gemm
+        ),
+        None,
+    )
+    if gate is None:
         logger.debug_once(
-            "Skipping BF16x3 router GEMM warmup: no eligible GateLinear shapes found."
+            "Skipping BF16x3 router GEMM warmup: no eligible GateLinear found."
         )
         return
 
-    logger.info_once("Warming up BF16x3 router GEMM specs: %s.", specs)
-    configs = warmup_bf16x3_router_gemm(specs, max_num_tokens)
+    min_num_tokens = gate.FP32_MAX_TOKENS + 1 if gate.allow_fp32_router_gemm else 1
+    logger.info_once(
+        "Warming up BF16x3 router GEMM for K=%d, M=%d.",
+        gate.input_size,
+        gate.output_size,
+    )
+    configs = warmup_bf16x3_router_gemm(
+        gate.input_size,
+        gate.output_size,
+        min_num_tokens,
+        max_num_tokens,
+    )
     logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
 
 

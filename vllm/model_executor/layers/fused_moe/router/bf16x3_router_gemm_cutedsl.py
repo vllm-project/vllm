@@ -12,7 +12,6 @@ boundaries the epilogue warps drain the main-term accumulator into a register
 master accumulator and the MMA warp resets it.
 """
 
-from collections.abc import Iterable
 from functools import cache
 
 import cutlass
@@ -546,100 +545,60 @@ def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     return BN, split_k
 
 
-def _bf16x3_warmup_configs(
-    router_specs: Iterable[tuple[int, int, int]],
+def warmup_bf16x3_router_gemm(
+    K: int,
+    M: int,
+    min_num_tokens: int,
     max_num_tokens: int,
-    num_sms: int,
-) -> tuple[tuple[int, int], ...]:
-    """Return the reachable ``(K, BN)`` compile configurations."""
-    configs: set[tuple[int, int]] = set()
-    for K, M, min_num_tokens in router_specs:
-        if min_num_tokens > max_num_tokens:
-            continue
-
-        table_limit = min(max_num_tokens, 512)
-        for N in range(min_num_tokens, table_limit + 1):
-            BN, _ = _pick_tile_config(N, K, M, num_sms)
-            configs.add((K, BN))
-
-        if max_num_tokens > table_limit:
-            BN, _ = _pick_tile_config(max_num_tokens, K, M, num_sms)
-            configs.add((K, BN))
-
-    return tuple(sorted(configs))
-
-
-def _bf16x3_reduce_warmup_configs(
-    router_specs: Iterable[tuple[int, int, int]],
-    max_num_tokens: int,
-    num_sms: int,
-) -> tuple[tuple[int, int, int, int, int, int, int], ...]:
-    """Return the reachable Triton split-K reduction specializations."""
+) -> tuple[int, ...]:
+    """Compile every BF16x3 router GEMM configuration reachable at runtime."""
     from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+        TritonWarmupTensor,
         triton_scalar_specialization_rep,
     )
 
-    configs: set[tuple[int, int, int, int, int, int, int]] = set()
-    for K, M, min_num_tokens in router_specs:
-        for N in range(min_num_tokens, max_num_tokens + 1):
-            _, split_k = _pick_tile_config(N, K, M, num_sms)
-            if split_k == 1:
-                continue
-            BN, BM, block_s = _splitk_reduce_config(split_k)
-            configs.add(
-                (
-                    triton_scalar_specialization_rep(N),
-                    M,
-                    triton_scalar_specialization_rep(N * M),
-                    triton_scalar_specialization_rep(split_k),
-                    BN,
-                    BM,
-                    block_s,
-                )
-            )
-    return tuple(sorted(configs))
-
-
-def _warmup_splitk_reduce(
-    config: tuple[int, int, int, int, int, int, int],
-) -> None:
-    from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-        TritonWarmupTensor,
-    )
-
-    N, M, split_stride, split_k, BN, BM, block_s = config
-    partials = TritonWarmupTensor(torch.float32, shape=(split_k, N, M))
-    out = TritonWarmupTensor(torch.float32, shape=(N, M))
-    _splitk_reduce_kernel.warmup(
-        partials,
-        out,
-        N,
-        M,
-        split_stride,
-        split_k,
-        BN=BN,
-        BM=BM,
-        BS=block_s,
-        USE_PDL=True,
-        num_warps=4,
-        launch_pdl=True,
-        grid=(1, 1),
-    )
-
-
-def warmup_bf16x3_router_gemm(
-    router_specs: Iterable[tuple[int, int, int]],
-    max_num_tokens: int,
-) -> tuple[tuple[int, int], ...]:
-    """Compile every BF16x3 router GEMM configuration reachable at runtime."""
-    router_specs = tuple(router_specs)
     device = torch.accelerator.current_device_index()
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
-    configs = _bf16x3_warmup_configs(router_specs, max_num_tokens, num_sms)
-    for K, BN in configs:
+    gemm_configs: set[int] = set()
+    reduce_configs: set[tuple[int, int, int, int, int, int]] = set()
+    for N in range(min_num_tokens, max_num_tokens + 1):
+        BN, split_k = _pick_tile_config(N, K, M, num_sms)
+        gemm_configs.add(BN)
+        if split_k == 1:
+            continue
+        reduce_BN, reduce_BM, block_s = _splitk_reduce_config(split_k)
+        reduce_configs.add(
+            (
+                triton_scalar_specialization_rep(N),
+                triton_scalar_specialization_rep(N * M),
+                triton_scalar_specialization_rep(split_k),
+                reduce_BN,
+                reduce_BM,
+                block_s,
+            )
+        )
+
+    configs = tuple(sorted(gemm_configs))
+    for BN in configs:
         Sm100BF16x3RouterGemm.compile(K, BN)
-    for config in _bf16x3_reduce_warmup_configs(router_specs, max_num_tokens, num_sms):
-        _warmup_splitk_reduce(config)
+    for N, split_stride, split_k, BN, BM, block_s in sorted(reduce_configs):
+        partials = TritonWarmupTensor(torch.float32)
+        out = TritonWarmupTensor(torch.float32)
+        _splitk_reduce_kernel.warmup(
+            partials,
+            out,
+            N,
+            M,
+            split_stride,
+            split_k,
+            BN=BN,
+            BM=BM,
+            BS=block_s,
+            USE_PDL=True,
+            num_warps=4,
+            launch_pdl=True,
+            grid=(1, 1),
+        )
     return configs
 
 
