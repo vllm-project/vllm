@@ -47,6 +47,15 @@ class PlaceholderRangeInfo(BaseModel):
     and the mask cannot be recomputed from offset and length alone.
     """
 
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError(
+                f"is_embed has {len(self.is_embed)} entries but the "
+                f"placeholder spans {self.length} tokens"
+            )
+        return self
+
 
 def _has_serialized_mm_items(
     payload: dict[str, list[str | None]] | None,

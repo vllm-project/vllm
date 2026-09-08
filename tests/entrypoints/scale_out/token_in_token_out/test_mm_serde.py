@@ -400,3 +400,19 @@ def test_placeholder_without_is_embed_roundtrips_as_none():
     (placeholder,) = rebuild_mm_placeholders(features.mm_placeholders)["image"]
     assert placeholder.is_embed is None
     assert placeholder.get_num_embeds() == 3
+
+
+def test_placeholder_rejects_a_mask_shorter_than_the_span():
+    """The wire format has to check what ``PlaceholderRange`` does not.
+
+    ``is_embed`` is documented as a mask of shape ``(length,)`` and the
+    frozen dataclass never validates it, so a client-supplied short mask
+    would reach ``get_embeds_indices_in_range`` and slice the wrong rows
+    out of the encoder output.
+    """
+    try:
+        PlaceholderRangeInfo(offset=0, length=4, is_embed=[True])
+    except ValidationError as exc:
+        assert "is_embed has 1 entries" in str(exc)
+        return
+    raise AssertionError("expected a mask shorter than the span to fail")
