@@ -55,6 +55,46 @@ def partial_tag_overlap(text: str, tag: str) -> int:
     return 0
 
 
+def find_tag_outside_json_strings(
+    text: str, tag: str, start: int = 0
+) -> tuple[int, bool]:
+    """Find a tag that is not part of a JSON string literal.
+
+    Scanning starts outside a string and tracks JSON string and escape state,
+    so a tag inside a string value is argument data rather than markup.
+
+    Args:
+        text: The text to scan.
+        tag: The tag to look for, e.g. ``"</tool_call>"``.
+        start: Index in ``text`` to start scanning from.
+
+    Returns:
+        The index of the first such tag at or after ``start``, or -1 if there
+        is none, together with whether the scan reached the end of ``text``
+        inside an unterminated string literal.
+    """
+    pos = start
+    in_string = False
+    tag_pos = text.find(tag, start)
+    while pos < len(text):
+        quote = text.find('"', pos)
+        if in_string:
+            if quote == -1:
+                return -1, True
+            in_string = _is_escaped(text, quote)
+            pos = quote + 1
+            continue
+        if 0 <= tag_pos < pos:
+            tag_pos = text.find(tag, pos)
+        if tag_pos != -1 and (quote == -1 or tag_pos < quote):
+            return tag_pos, False
+        if quote == -1:
+            return -1, False
+        in_string = True
+        pos = quote + 1
+    return -1, in_string
+
+
 def find_common_prefix(s1: str, s2: str) -> str:
     """
     Finds a common prefix that is shared between two strings, if there is one.
