@@ -89,8 +89,6 @@ def apply_fp8_marlin_linear(
         a_scales=a_scales,
         global_scale=None,
         b_zeros=None,
-        g_idx=None,
-        perm=None,
         workspace=workspace,
         b_q_type=scalar_types.float8_e4m3fn,
         size_m=reshaped_x.size(0),
@@ -138,7 +136,6 @@ def prepare_fp8_layer_for_marlin(
 
     # WEIGHT
     # Repack weights to marlin format
-    perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = pack_fp8_to_int32(layer.weight, size_k_first)
     if not size_k_first:
         qweight = qweight.T.contiguous()
@@ -146,7 +143,6 @@ def prepare_fp8_layer_for_marlin(
 
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
-        perm=perm,
         size_k=padded_k,
         size_n=padded_n,
         num_bits=8,
@@ -283,7 +279,6 @@ def prepare_fp8_moe_layer_for_marlin(
     layer.workspace = marlin_make_workspace_new(
         device, 4, existing=getattr(layer, "workspace", None)
     )
-    perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
     # Repack weights to marlin format
@@ -295,7 +290,7 @@ def prepare_fp8_moe_layer_for_marlin(
             qweight = qweight.T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=8
+                b_q_weight=qweight, size_k=size_k, size_n=size_n, num_bits=8
             )
             tensor_list.append(marlin_qweight)
 
@@ -434,8 +429,6 @@ def apply_mxfp8_marlin_linear(
         a_scales=None,
         global_scale=None,
         b_zeros=None,
-        g_idx=None,
-        perm=None,
         workspace=workspace,
         b_q_type=scalar_types.float8_e4m3fn,
         size_m=reshaped_x.size(0),
@@ -470,14 +463,12 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     )
 
     # WEIGHT - repack FP8 weights to Marlin format
-    perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = pack_fp8_to_int32(layer.weight, size_k_first=False)
     qweight = qweight.T.contiguous()
     qweight = marlin_pad_qweight(qweight, part_size_n, part_size_k, padded_n, padded_k)
 
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
-        perm=perm,
         size_k=padded_k,
         size_n=padded_n,
         num_bits=8,
@@ -551,7 +542,6 @@ def prepare_mxfp8_moe_layer_for_marlin(
 
     device = w13.device
     param_dtype = torch.get_default_dtype()
-    perm = torch.empty(0, dtype=torch.int, device=device)
 
     layer.workspace = marlin_make_workspace_new(
         device, 4, existing=getattr(layer, "workspace", None)
@@ -571,7 +561,6 @@ def prepare_mxfp8_moe_layer_for_marlin(
             qweight = qweight.T.contiguous()
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight,
-                perm=perm,
                 size_k=size_k,
                 size_n=size_n,
                 num_bits=8,
@@ -615,8 +604,6 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         assert input_dtype == torch.float8_e4m3fn
 
     size_n, size_k = weight.shape
-    device = weight.device
-
     if group_size != -1:
         scales = weight.view(size_n, -1, group_size).abs().max(-1)[0] / 448
         repeated_scales = scales.repeat_interleave(group_size, 1)
@@ -629,10 +616,8 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         weight_ref = fp8_weight.to(weight.dtype) * repeated_scales
 
     packed_weight = pack_fp8_to_int32(fp8_weight, False).T.contiguous()
-    perm = torch.empty(0, dtype=torch.int, device=device)
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=packed_weight,
-        perm=perm,
         size_k=size_k,
         size_n=size_n,
         num_bits=8,

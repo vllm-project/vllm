@@ -34,10 +34,7 @@ def test_weight_loading(vllm_runner):
     """
 
     # MoE models need fp16.
-    NEEDS_FP16 = (
-        QUANTIZATION == "gptq"
-        or MODEL_NAME == "nm-testing/test-w4a16-mixtral-actorder-group"
-    )
+    NEEDS_FP16 = QUANTIZATION == "gptq"
     with vllm_runner(
         model_name=MODEL_NAME,
         revision=REVISION,

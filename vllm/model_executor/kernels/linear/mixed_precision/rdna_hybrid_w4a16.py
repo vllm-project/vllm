@@ -142,13 +142,13 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = tl.interleave(b, b)
         b = (b >> shifts_full) & 0xF
 
-        g_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
+        group_idx = (k_start * BLOCK_K) // group_size
+        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
+            zp_ptrs = zp_ptr + offs_n * num_groups + group_idx
             zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
             b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
         else:
@@ -476,9 +476,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if c.act_type not in (torch.float16, torch.bfloat16):
             return False, "requires float16 or bfloat16 activations"
 
-        if c.has_g_idx:
-            return False, "does not support g_idx reordering"
-
         gs = c.group_size
         if gs not in SUPPORTED_GROUP_SIZES:
             return (
@@ -541,7 +538,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         from vllm.utils.platform_utils import num_compute_units
 
         c = self.config
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1])
         N = w_q.shape[0]

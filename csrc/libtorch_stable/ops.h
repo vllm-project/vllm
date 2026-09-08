@@ -43,9 +43,6 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
-                                   torch::stable::Tensor const& perm);
-
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
@@ -587,11 +584,10 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
                                 torch::stable::Tensor b_q_weight,
                                 torch::stable::Tensor b_gptq_qzeros,
                                 torch::stable::Tensor b_gptq_scales,
-                                torch::stable::Tensor b_g_idx, bool use_exllama,
-                                bool use_v2_format, int64_t bit);
+                                bool use_exllama, bool use_v2_format,
+                                int64_t bit);
 
-void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
-                  int64_t bit);
+void gptq_shuffle(torch::stable::Tensor q_weight, int64_t bit);
 
 // Cache ops (shared CUDA/ROCm)
 void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
