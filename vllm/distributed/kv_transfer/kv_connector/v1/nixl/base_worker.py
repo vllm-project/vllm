@@ -9,7 +9,7 @@ import queue
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -489,14 +489,6 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
-        # Detects a restarted peer coming back under a new engine id.
-        self._engine_address: dict[EngineId, tuple[str, int]] = {}
-        # Queue: failures are also reported from background threads.
-        self._failed_engines: queue.Queue[EngineId] = queue.Queue()
-        # Never released: their sends are tracked per request, not per engine.
-        self._push_target_engines: set[EngineId] = set()
-        # Outlives a drain cancelled at shutdown. deque ops are atomic, no lock.
-        self._pending_releases: deque[tuple[list[int], list[str]]] = deque()
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -852,7 +844,6 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-        push_target: bool = False,
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
@@ -870,10 +861,6 @@ class NixlBaseConnectorWorker:
             fut = self._handshake_futures.get(engine_id)
             if fut is not None:
                 return fut
-            # Single-worker executor: the dead peer is removed before this load.
-            readdressed = self._engines_at_address(host, port, exclude=engine_id)
-            if readdressed:
-                self._release_remote_engines(readdressed, "it was replaced")
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake,
                 host,
@@ -896,9 +883,6 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
-                        self._engine_address[eid] = (host, port)
-                        if push_target:
-                            self._push_target_engines.add(eid)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -1993,10 +1977,14 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
+        already_reported = set[ReqId]()
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
-            assert meta is not None, f"{req_id} not found in recving_metadata list"
+            if meta is None:
+                # A failed request may still have reads draining on later steps.
+                already_reported.add(req_id)
+                continue
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -2036,9 +2024,9 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
-        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+        done_recving -= already_reported
 
-        self._release_failed_engines()
+        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -2161,17 +2149,22 @@ class NixlBaseConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # Use .get() here as the metadata cleanup is handled by get_finished()
-        if (meta := self._recving_metadata.get(req_id)) is not None:
-            # TODO (NickLucche) handle failed transfer for HMA.
-            if not self._is_hma_required:
-                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-            if meta.remote is not None:
-                self._failed_engines.put(meta.remote.engine_id)
-        self._failed_recv_reqs.put(req_id)
+        self._fail_recv_request(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
+
+    def _fail_recv_request(self, req_id: str) -> None:
+        # Use .get() here as the metadata cleanup is handled by get_finished()
+        meta = self._recving_metadata.get(req_id)
+        if meta is not None and not any(meta.local_block_ids):
+            # Notification-only requests have no pending receive in the scheduler.
+            self._recving_metadata.pop(req_id)
+            return
+        # TODO (NickLucche) handle failed transfer for HMA.
+        if meta is not None and not self._is_hma_required:
+            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+        self._failed_recv_reqs.put(req_id)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
@@ -2195,7 +2188,7 @@ class NixlBaseConnectorWorker:
 
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in self._remote_agents.get(engine_id, {}).values():
+            for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
@@ -2383,96 +2376,28 @@ class NixlBaseConnectorWorker:
             if now - last_active > self._engine_ttl:
                 self._cleanup_remote_engine(eid)
 
-    def _engines_at_address(
-        self, host: str, port: int, exclude: EngineId
-    ) -> list[EngineId]:
-        """Registered engines previously reached at ``host``:``port``.
-
-        A side-channel address belongs to one engine (the port is derived per
-        DP rank and the handshake rejects a mismatched engine id), so another
-        engine answering there means the first one is gone. Engines still in
-        use are left alone; they fall back to the TTL.
-
-        Called with ``_handshake_lock`` held.
-        """
-        in_use = self._engines_in_use()
-        return [
-            eid
-            for eid, address in self._engine_address.items()
-            if address == (host, port) and eid != exclude and eid not in in_use
-        ]
-
-    def _engines_in_use(self) -> set[EngineId]:
-        """Engines that must not be released yet.
-
-        Engines this worker pushes to are excluded wholesale: those sends are
-        tracked per request rather than per engine, so the writer thread may
-        be using their handles with nothing here to see it.
-        """
-        # Snapshot: the main thread mutates _recving_metadata concurrently.
-        recving = {
-            meta.remote.engine_id
-            for meta in list(self._recving_metadata.values())
-            if meta.remote is not None
-        }
-        return recving | self._push_target_engines
-
-    def _release_failed_engines(self) -> None:
-        """Release NIXL state for remote engines whose transfers failed.
-
-        A crashed peer is only observable through failing transfers, so
-        waiting for the TTL keeps its endpoints registered for up to an hour.
-        An engine still serving requests is skipped; a failure that persists
-        re-reports it on a later step.
-        """
-        failed: set[EngineId] = set()
-        while not self._failed_engines.empty():
-            try:
-                failed.add(self._failed_engines.get_nowait())
-            except queue.Empty:
-                break
-        if not failed:
-            return
-
-        releasable = [
-            eid for eid in failed - self._engines_in_use() if eid in self._remote_agents
-        ]
-        if releasable:
-            self._release_remote_engines(releasable, "its transfers failed")
-
-    def _release_remote_engines(self, engine_ids: list[EngineId], reason: str) -> None:
-        """Drop cached NIXL state so the next request re-handshakes."""
-        for engine_id in engine_ids:
-            with self._handshake_lock:
-                if (
-                    engine_id in self._handshake_futures
-                    or engine_id not in self._remote_agents
-                ):
-                    continue
-                self._cleanup_remote_engine(engine_id, log_eviction=False)
-            logger.info(
-                "Released NIXL state for remote engine %s because %s; "
-                "the next request to it will re-handshake.",
-                engine_id,
-                reason,
-            )
-
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
         """Remove all state for a single remote engine.
 
-        The NIXL resources are released on the handshake executor: NIXL is not
-        thread-safe, so an agent must not be removed while another one is being
-        loaded.
-
-        The bookkeeping is dropped on the calling thread and is not atomic, so
-        callers must already have established that nothing is using the engine
-        -- see ``_engines_in_use`` for the failure and restart paths, and
-        ``_engine_last_active`` for TTL eviction.
+        Releases NIXL resources (dlist handles, remote agents) and clears
+        all per-engine data structures. Used by both TTL eviction and
+        shutdown.
         """
-        self._pop_remote_engine_state(engine_id)
-        self._handshake_initiation_executor.submit(self._drain_pending_releases)
+        assert engine_id in self._remote_agents
+
+        # Notif-only engines (push-mode D side) have no descriptor state.
+        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        for agent_name in self._remote_agents.pop(engine_id).values():
+            self.nixl_wrapper.remove_remote_agent(agent_name)
+
+        self.kv_caches_base_addr.pop(engine_id, None)
+        self.dst_num_blocks.pop(engine_id, None)
+        self.tp_mappings.pop(engine_id, None)
+        if self.transfer_topo is not None:
+            self.transfer_topo.unregister_remote_engine(engine_id)
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
@@ -2487,40 +2412,6 @@ class NixlBaseConnectorWorker:
                 time.perf_counter() - last_active,
             )
 
-    def _pop_remote_engine_state(self, engine_id: EngineId) -> None:
-        """Drop cached state for a remote engine.
-
-        What NIXL still holds is queued onto ``_pending_releases`` rather than
-        freed here, so the caller chooses which thread frees it.
-        """
-        # Notif-only engines (push-mode D side) have no descriptor state.
-        handles = list(self.dst_xfer_side_handles.pop(engine_id, {}).values())
-        agent_names = list(self._remote_agents.pop(engine_id, {}).values())
-
-        self.kv_caches_base_addr.pop(engine_id, None)
-        self.dst_num_blocks.pop(engine_id, None)
-        self.tp_mappings.pop(engine_id, None)
-        if self.transfer_topo is not None:
-            self.transfer_topo.unregister_remote_engine(engine_id)
-        # Re-measured on the next handshake.
-        self._engine_clock_offset.pop(engine_id, None)
-        self._engine_address.pop(engine_id, None)
-        self._push_target_engines.discard(engine_id)
-        if handles or agent_names:
-            self._pending_releases.append((handles, agent_names))
-
-    def _drain_pending_releases(self) -> None:
-        """Hand removed engines' resources back to NIXL."""
-        while True:
-            try:
-                handles, agent_names = self._pending_releases.popleft()
-            except IndexError:
-                return
-            for handle in handles:
-                self.nixl_wrapper.release_dlist_handle(handle)
-            for agent_name in agent_names:
-                self.nixl_wrapper.remove_remote_agent(agent_name)
-
     def __del__(self):
         self.shutdown()
 
@@ -2529,7 +2420,7 @@ class NixlBaseConnectorWorker:
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
-        self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
+        self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
@@ -2542,9 +2433,7 @@ class NixlBaseConnectorWorker:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
         for engine_id in list(self._remote_agents):
-            self._pop_remote_engine_state(engine_id)
-        # Also frees anything a release cancelled above never got to.
-        self._drain_pending_releases()
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()

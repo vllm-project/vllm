@@ -209,6 +209,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker._invalid_remote_engines = set()
+    worker._recv_engine_by_req = {}
+    worker._remote_agents = {"remote-engine": {}}
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._engine_last_active = {}
     worker._bidirectional_kv_xfer_enabled = False
