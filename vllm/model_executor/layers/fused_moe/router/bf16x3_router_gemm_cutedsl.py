@@ -467,7 +467,7 @@ def _splitk_reduce_kernel(
 
 
 def _splitk_reduce_config(split_k: int) -> tuple[int, int, int]:
-    block_s = 1 << (split_k - 1).bit_length()
+    block_s = triton.next_power_of_2(split_k)
     if block_s >= 64:
         return 1, 32, block_s
     if block_s >= 8:
@@ -496,37 +496,43 @@ def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
     )
 
 
-# Tuned (BN, split_k) for mid-range token counts, from GB300 sweeps of the
-# FP32-router-weight models (MiniMax-M2/M3, Hunyuan-V3/V4, K=8192/M=256).
-# Selection is accuracy-constrained: per cell the fastest config whose MAE vs
-# FP64 is <= max(old-rule MAE, cuBLAS FP32 MAE), i.e. never worse than either
-# baseline. Lower split_k lengthens per-CTA TMEM accumulation chains and
-# raises MAE, so several cells keep high split_k. Outside this N range the
-# generic rule is within ~2%, so no rows are needed there.
-#
-# Rows are keyed by (K, M) = (hidden_size, num_experts) and cover the N
-# buckets (64, 128, 256, 512); N rounds up to the next bucket. Untabled shapes
-# use the shared default row. (128, 19) entries at N=512 reproduce the generic
-# rule because no faster config meets the accuracy bar there.
-_MID_RANGE_BUCKETS = (64, 128, 256, 512)
-_MID_RANGE_DEFAULT = ((16, 16), (32, 16), (64, 16), (128, 16))
-_MID_RANGE_TUNED = {
-    (4096, 192): ((32, 32), (64, 32), (128, 32), (128, 19)),  # Hunyuan-V3
-    (6144, 128): ((32, 64), (64, 64), (64, 32), (128, 32)),  # MiniMax-M3
-    (8192, 256): ((64, 64), (64, 32), (128, 32), (128, 19)),
+# Accuracy-constrained overrides from GB300 sweeps. Other shapes use
+# ``(next_power_of_2(N) // 4, 16)`` in this token range.
+_TILE_CONFIG_OVERRIDES = {
+    (4096, 192): {  # Hunyuan-V3
+        64: (32, 32),
+        128: (64, 32),
+        256: (128, 32),
+        512: (128, 19),
+    },
+    (6144, 128): {  # MiniMax-M3
+        64: (32, 64),
+        128: (64, 64),
+        256: (64, 32),
+        512: (128, 32),
+    },
+    (8192, 256): {
+        64: (64, 64),
+        128: (64, 32),
+        256: (128, 32),
+        512: (128, 19),
+    },
 }
 
 
-@cache
 def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     """Return (BN, split_k): tuned table mid-range, generic rule otherwise."""
     k_tiles = math_utils.cdiv(K, 64)
 
     if 32 < N <= 512:
-        rows = _MID_RANGE_TUNED.get((K, M), _MID_RANGE_DEFAULT)
-        for bucket, (BN, split_k) in zip(_MID_RANGE_BUCKETS, rows):
-            if bucket >= N:
-                return BN, min(split_k, k_tiles)
+        token_bucket = triton.next_power_of_2(N)
+        overrides = _TILE_CONFIG_OVERRIDES.get((K, M))
+        BN, split_k = (
+            overrides[token_bucket]
+            if overrides is not None
+            else (token_bucket // 4, 16)
+        )
+        return BN, min(split_k, k_tiles)
 
     # next power of 2 within 8 and 128
     BN = triton.next_power_of_2(N)
@@ -550,7 +556,7 @@ def _bf16x3_warmup_configs(
         if min_num_tokens > max_num_tokens:
             continue
 
-        table_limit = min(max_num_tokens, _MID_RANGE_BUCKETS[-1])
+        table_limit = min(max_num_tokens, 512)
         for N in range(min_num_tokens, table_limit + 1):
             BN, _ = _pick_tile_config(N, K, M, num_sms)
             configs.add((K, BN))
