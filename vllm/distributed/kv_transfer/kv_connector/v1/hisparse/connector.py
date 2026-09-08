@@ -71,18 +71,22 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 class HiSparseConnectorScheduler:
     def __init__(
         self,
-        coordinator: HiSparseCoordinator,
         *,
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
     ) -> None:
-        self.coordinator = coordinator
+        self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+
+    def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
+        assert self.coordinator is None
+        self.coordinator = coordinator
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
+        assert self.coordinator is not None
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
         )
@@ -160,6 +164,7 @@ class HiSparseConnectorScheduler:
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
+        assert self.coordinator is not None
         self.coordinator.update_spills(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
@@ -182,11 +187,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: HiSparseConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             speculative_config = vllm_config.speculative_config
-            self._async_speculative = bool(
-                vllm_config.scheduler_config.async_scheduling
-                and speculative_config is not None
+            self.connector_scheduler = HiSparseConnectorScheduler(
+                async_speculative=bool(
+                    vllm_config.scheduler_config.async_scheduling
+                    and speculative_config is not None
+                ),
+                draft_kv_lookahead=vllm_config.num_lookahead_tokens,
             )
-            self._draft_kv_lookahead = vllm_config.num_lookahead_tokens
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = HiSparseConnectorWorker(
                 vllm_config, kv_cache_config
@@ -197,12 +204,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_hisparse_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         if self.role != KVConnectorRole.SCHEDULER:
             raise ValueError("Only the scheduler connector accepts a coordinator")
-        assert self.connector_scheduler is None
-        self.connector_scheduler = HiSparseConnectorScheduler(
-            coordinator,
-            async_speculative=self._async_speculative,
-            draft_kv_lookahead=self._draft_kv_lookahead,
-        )
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_coordinator(coordinator)
 
     @property
     def requires_kv_delivery(self) -> bool:

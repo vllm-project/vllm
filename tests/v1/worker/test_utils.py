@@ -781,23 +781,6 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     torch.testing.assert_close(handle.mirror_slot_mapping, torch.tensor([4, 5]))
 
 
-def test_hisparse_runtime_invalidates_only_scheduled_request_states():
-    runtime = object.__new__(hisparse_runtime_module.HiSparseRuntime)
-    runtime.device = torch.device("cpu")
-    runtime.index_group = SimpleNamespace(
-        device_global_indices=torch.tensor(
-            [[6, 7, 8], [6, 9, 10], [6, 11, 12]], dtype=torch.int32
-        )
-    )
-
-    runtime.invalidate_slots(torch.tensor([6]), torch.tensor([1]))
-
-    torch.testing.assert_close(
-        runtime.index_group.device_global_indices,
-        torch.tensor([[6, 7, 8], [-1, 9, 10], [6, 11, 12]], dtype=torch.int32),
-    )
-
-
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
     """Followers must not allocate duplicate runtime state before profiling."""
     config = SimpleNamespace(

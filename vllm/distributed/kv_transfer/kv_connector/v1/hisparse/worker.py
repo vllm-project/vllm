@@ -146,12 +146,6 @@ def _select_written_row_mirrors(
     )
 
 
-def _is_hisparse_host_writer(
-    shared_host_region: SharedOffloadRegion | None,
-) -> bool:
-    return shared_host_region is None or get_tensor_model_parallel_rank() == 0
-
-
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,

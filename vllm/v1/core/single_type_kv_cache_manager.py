@@ -926,10 +926,6 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
 
-    def activate_hot(self, request_id: str) -> list[KVCacheBlock]:
-        self.require_hot(request_id)
-        return self.allocate_new_blocks(request_id, 0, 0)
-
     def get_num_blocks_to_allocate(
         self,
         request_id: str,

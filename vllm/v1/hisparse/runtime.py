@@ -627,17 +627,6 @@ class HiSparseRuntime:
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
         group.copy_stream.wait_stream(compute_stream)
 
-    def invalidate_slots(
-        self,
-        slots: torch.Tensor,
-        request_state_indices: torch.Tensor,
-    ) -> None:
-        """Drop scheduled requests' hot copies of recycled global slots."""
-        slots = slots.to(device=self.device, dtype=torch.int32)
-        state_indices = request_state_indices.to(device=self.device, dtype=torch.long)
-        sorted_slots = torch.sort(slots).values
-        self.invalidate_sorted_slots(sorted_slots, state_indices)
-
     def invalidate_sorted_slots(
         self,
         sorted_slots: torch.Tensor,

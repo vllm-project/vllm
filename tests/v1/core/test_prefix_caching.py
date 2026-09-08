@@ -263,10 +263,10 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     coordinator.build_offload_command.return_value = None
     coordinator.build_row_mirrors.return_value = ()
     scheduler = HiSparseConnectorScheduler(
-        coordinator,
         async_speculative=True,
         draft_kv_lookahead=4,
     )
+    scheduler.bind_coordinator(coordinator)
     scheduler_output = SimpleNamespace(
         block_table_updates=None,
         kv_cache_block_copies=None,

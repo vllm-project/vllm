@@ -302,6 +302,7 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    # TODO(NickLucche): group model-runner lifecycle hooks in the interface.
     def finish_forward(self) -> None:
         """Notify the connector that the model no longer reads this step's KV."""
         return
