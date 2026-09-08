@@ -2,16 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
 import prometheus_client
 import regex as re
 from fastapi import FastAPI, Response
 from prometheus_client import make_asgi_app
+from prometheus_client.core import GaugeMetricFamily
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
 from starlette.routing import Match, Mount
 from starlette.types import Scope
 
 from vllm.v1.metrics.prometheus import get_prometheus_registry
+
+if TYPE_CHECKING:
+    from vllm.engine.protocol import EngineClient
 
 
 def _patch_instrumentator_route_walk() -> None:
@@ -53,10 +60,35 @@ class PrometheusResponse(Response):
     media_type = prometheus_client.CONTENT_TYPE_LATEST
 
 
+class _EngineHealthCollector:
+    def __init__(self, app: FastAPI):
+        self.app = app
+
+    def collect(self) -> Iterable[GaugeMetricFamily]:
+        client: EngineClient | None = getattr(self.app.state, "engine_client", None)
+        if (
+            client is None
+            or not client.vllm_config.parallel_config.enable_fault_tolerance
+        ):
+            return
+
+        metric = GaugeMetricFamily(
+            "vllm:engine_healthy",
+            "Whether the engine reports healthy under fault tolerance.",
+            labels=["engine"],
+        )
+        for rank, healthy in client.get_engine_health().items():
+            metric.add_metric([str(rank)], int(healthy))
+        yield metric
+
+
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
 
     registry = get_prometheus_registry()
+    # Collect from this API's live cache, not shared multiprocess gauge files:
+    # another rank's metrics must not keep a dead endpoint looking healthy.
+    registry.register(_EngineHealthCollector(app))
 
     # `response_class=PrometheusResponse` is needed to return an HTTP response
     # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
@@ -72,7 +104,13 @@ def attach_router(app: FastAPI):
             "/server_info",
         ],
         registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+    ).add().instrument(app)
+
+    # Instrumentator.expose() replaces the registry in multiprocess mode,
+    # which would discard this API's engine-health collector.
+    @app.get("/metrics", response_class=PrometheusResponse)
+    def metrics() -> PrometheusResponse:
+        return PrometheusResponse(content=prometheus_client.generate_latest(registry))
 
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))

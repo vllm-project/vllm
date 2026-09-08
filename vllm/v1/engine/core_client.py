@@ -329,6 +329,9 @@ class EngineCoreClient(ABC):
     async def get_status(self):
         raise NotImplementedError
 
+    def get_engine_health(self) -> dict[int, bool]:
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -1317,6 +1320,12 @@ class AsyncMPClient(MPClient):
             "schema_version": 1,
             "total_engines": len(self.engine_ranks_managed),
             "engines": list(self._engine_status.values()),
+        }
+
+    def get_engine_health(self) -> dict[int, bool]:
+        return {
+            rank: status.get("status") == "healthy"
+            for rank, status in self._engine_status.copy().items()
         }
 
 

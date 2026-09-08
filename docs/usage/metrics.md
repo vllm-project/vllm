@@ -41,6 +41,26 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-spec-decode"
 
+## Fault Tolerance Metrics
+
+With `--enable-fault-tolerance`, each API server exposes
+`vllm:engine_healthy{engine="<rank>"}` for its managed engines. The value is `1`
+when the cached FT state is healthy and the client has not failed, and `0`
+when the engine is unhealthy, dead, or the client has failed. Recovery back to
+healthy restores the value to `1`.
+
+The metric is collected from the API server's local state on every scrape,
+including while inference is halted. It does not run GPU probes or wait for
+engine RPCs. In multi-port external load-balancer deployments, scrape each rank's
+API port separately; a healthy Pod can contain an unhealthy rank endpoint.
+The metric is not aggregated across API processes through Prometheus shared
+files. It is absent when FT is disabled or engine status is unavailable.
+
+Routers should exclude endpoints with a value of `0`, a missing metric, or a
+failed scrape. The cached state reflects detected faults, so this does not
+eliminate detection delay or requests racing a failure. Use this signal for
+traffic eligibility, not container liveness during recovery.
+
 ## NIXL KV Connector Metrics
 
 --8<-- "gen:metrics-nixl"
