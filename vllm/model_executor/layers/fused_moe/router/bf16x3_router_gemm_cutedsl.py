@@ -495,19 +495,23 @@ def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
 
 # Tuned (BN, split_k) for mid-range token counts, from GB300 sweeps of the
 # FP32-router-weight models (MiniMax-M2/M3, Hunyuan-V3/V4, K=8192/M=256).
-# The generic rule below already loses 10-45% at N=64..512; the tuned rows
-# are within ~4% of the per-shape optimum. Outside this N range the generic
-# rule is within ~2%, so no rows are needed there.
+# Selection is accuracy-constrained: per cell the fastest config whose MAE vs
+# FP64 is <= max(old-rule MAE, cuBLAS FP32 MAE), i.e. never worse than either
+# baseline. Lower split_k lengthens per-CTA TMEM accumulation chains and
+# raises MAE, so several cells keep high split_k. Outside this N range the
+# generic rule is within ~2%, so no rows are needed there.
 #
 # Rows are keyed by (K, M) = (hidden_size, num_experts) and cover the N
 # buckets (64, 128, 256, 512); N rounds up to the next bucket. Shapes without
-# an entry use _MID_RANGE_DEFAULT, which the three M>=192 shapes (2816/256,
-# 3072/256, 4096/192) share.
+# an entry use _MID_RANGE_DEFAULT, which the K<=3072 M=256 shapes (2816/256,
+# 3072/256) share. (128, 19) entries at N=512 reproduce the generic rule:
+# no faster config meets the accuracy bar there.
 _MID_RANGE_BUCKETS = (64, 128, 256, 512)
-_MID_RANGE_DEFAULT = ((16, 16), (32, 16), (64, 16), (64, 8))
+_MID_RANGE_DEFAULT = ((16, 16), (32, 16), (64, 16), (128, 16))
 _MID_RANGE_TUNED = {
-    (6144, 128): ((32, 64), (64, 64), (32, 16), (64, 16)),  # MiniMax-M3
-    (8192, 256): ((64, 64), (32, 16), (64, 16), (128, 16)),
+    (4096, 192): ((32, 32), (64, 32), (128, 32), (128, 19)),  # Hunyuan-V3
+    (6144, 128): ((32, 64), (64, 64), (64, 32), (128, 32)),  # MiniMax-M3
+    (8192, 256): ((64, 64), (64, 32), (128, 32), (128, 19)),
 }
 
 
