@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base classes for the Transformers backend fusers."""
 
+import ast
 import types
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from torch import fx, nn
 
+from vllm.model_executor.models.transformers.fx_utils import replace_expr
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
@@ -124,14 +126,14 @@ class StackedFuser(RewriteFuser):
 
     merged_name: ClassVar[str]
     """Attribute name of the merged module created by `update_attrs`."""
-    merged_cls: ClassVar[str]
+    merged_cls_name: ClassVar[str]
     """Name of the vLLM class the merged projection becomes (for logging)."""
 
     def info(self, name: str) -> str:
         sources = " + ".join(shard for shard, _ in self.shards)
         return (
             f"Fused: {sources} ({name}: {self.source_cls}) -> "
-            f"{self.merged_name} ({self.merged_cls})"
+            f"{self.merged_name} ({self.merged_cls_name})"
         )
 
     @property
@@ -157,3 +159,36 @@ class StackedFuser(RewriteFuser):
         """`{merged_name: [projection names]}` so quantization can unpack the
         fused layer into its per-shard configs."""
         return {self.merged_name: [name for name, _ in self.shards]}
+
+    def _splice_merged_split(
+        self,
+        funcdef: ast.FunctionDef,
+        calls: list[ast.Call],
+        block: list[ast.stmt],
+        index: int,
+    ) -> None:
+        """Insert `temps = self.<merged_name>(arg).split(sizes, -1)` at
+        `block[index]` and replace each of `calls` with its temp name.
+
+        `calls` must share one input argument; `block[index]` must be where
+        they are (or would be) evaluated. Raises if a generated temporary
+        would shadow an existing name in `funcdef`.
+        """
+        temps = [f"_vllm_merged_{i}" for i in range(len(calls))]
+        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
+        if names & set(temps):
+            raise ValueError("fused temporaries would shadow existing names")
+        targets = ", ".join(temps)
+        sections = local_output_sizes(self.merged_name)
+        source = f"{targets} = self.{self.merged_name}(__arg__).split({sections}, -1)"
+        assign = ast.parse(source).body[0]
+        arg = next(
+            node
+            for node in ast.walk(assign)
+            if isinstance(node, ast.Name) and node.id == "__arg__"
+        )
+        replace_expr(assign, arg, calls[0].args[0])
+        ast.copy_location(assign, block[index])
+        block.insert(index, assign)
+        for call, temp in zip(calls, temps):
+            replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
