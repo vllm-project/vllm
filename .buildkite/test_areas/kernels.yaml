@@ -312,8 +312,11 @@ steps:
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
+  - csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu
+  - csrc/libtorch_stable/quantization/fp4/
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
@@ -343,12 +346,16 @@ steps:
   - csrc/libtorch_stable/torch_bindings.cpp
   - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
+  - tests/kernels/attention/test_cache.py
+  - tests/kernels/quantization/nvfp4_utils.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/models/quantization/test_nvfp4.py
   commands:
     - nvidia-smi
     - |
@@ -356,6 +363,7 @@ steps:
       case "$$BUILDKITE_PARALLEL_JOB" in
         0)
           pytest -v -s tests/kernels/attention/test_attention_selector.py
+          pytest -v -s tests/kernels/attention/test_cache.py -k nvfp4
           pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
           pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
           pytest -v -s tests/kernels/test_top_k_per_row.py
