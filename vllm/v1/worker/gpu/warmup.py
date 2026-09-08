@@ -26,7 +26,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
-from vllm.v1.worker.extensible_kv_cache import ensure_kv_cache_blocks
+from vllm.v1.worker.extensible_kv_cache import (
+    ensure_kv_cache_blocks,
+    num_committable_kv_blocks,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -123,11 +126,12 @@ def run_mixed_prefill_decode_warmup(
     ]
     prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
     required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
-    if model_runner.kv_cache_config.num_blocks <= required_blocks:
+    num_blocks = num_committable_kv_blocks(model_runner)
+    if num_blocks <= required_blocks:
         logger.warning(
             "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
             "are available for %d required warmup blocks.",
-            model_runner.kv_cache_config.num_blocks,
+            num_blocks,
             required_blocks,
         )
         return False
@@ -301,7 +305,7 @@ def _warmup_kernels(
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
             num_reqs,
-            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+            max(1, (num_committable_kv_blocks(model_runner) - 1) // max_blocks_per_req),
         )
         ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
 
