@@ -15,7 +15,6 @@ from vllm.config.quantization import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -239,16 +238,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
-        if isinstance(layer, RoutedExperts):
-            assert issubclass(cls, OnlineMoEMethodBase)
-            activation_quant_key = get_activation_quant_key(
-                cls.default_activation_quant_key, "moe"
-            )
         return cls
 
     def resolve_quant_method_cls(
         self, layer: torch.nn.Module, prefix: str
-    ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
+    ) -> (
+        tuple[
+            OnlineQuantizationSource,
+            str,
+            str | None,
+            QuantSpec,
+            type,
+            QuantKey | None,
+        ]
+        | None
+    ):
         """Resolve quantization metadata and method class without instantiating it.
 
         Args:
@@ -257,8 +261,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
         Returns:
             A tuple of source, quantization key string, target pattern, spec,
-            and method class. Returns None when online quantization does not
-            apply to the layer.
+            method class, and activation quantization key. Returns None when
+            online quantization does not apply to the layer.
         """
         quant_spec: QuantSpec | None
         if self.args.targets is not None:
@@ -293,8 +297,26 @@ class OnlineQuantizationConfig(QuantizationConfig):
         quant_method_cls = self._get_method_cls(quant_spec, table, layer)
         if quant_method_cls is None:
             return None
+        if isinstance(layer, RoutedExperts):
+            assert issubclass(quant_method_cls, OnlineMoEMethodBase)
+            activation_quant_key = get_activation_quant_key(
+                quant_method_cls.default_activation_quant_key, "moe"
+            )
+        else:
+            assert isinstance(layer, LinearBase)
+            assert issubclass(quant_method_cls, OnlineLinearBase)
+            activation_quant_key = get_activation_quant_key(
+                quant_method_cls.default_activation_quant_key, "linear"
+            )
         assert quant_spec is not None
-        return source, quant_key_str, target_pattern, quant_spec, quant_method_cls
+        return (
+            source,
+            quant_key_str,
+            target_pattern,
+            quant_spec,
+            quant_method_cls,
+            activation_quant_key,
+        )
 
     def _resolve_targets_quant_method_metadata(
         self, prefix: str, layer: torch.nn.Module
@@ -372,18 +394,28 @@ class OnlineQuantizationConfig(QuantizationConfig):
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(layer, prefix)
         if resolved is not None:
-            source, quant_key_str, target_pattern, _, quant_method_cls = resolved
+            (
+                source,
+                quant_key_str,
+                target_pattern,
+                _,
+                quant_method_cls,
+                activation_quant_key,
+            ) = resolved
             self.quantized_layers[prefix] = (
                 source.value,
                 quant_key_str,
                 target_pattern,
             )
             if isinstance(layer, RoutedExperts):
-                assert issubclass(quant_method_cls, FusedMoEMethodBase)
-                return quant_method_cls(moe=layer.moe_config)
+                assert issubclass(quant_method_cls, OnlineMoEMethodBase)
+                return quant_method_cls(
+                    moe=layer.moe_config,
+                    activation_quant_key=activation_quant_key,
+                )
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            return quant_method_cls()
+            return quant_method_cls(activation_quant_key=activation_quant_key)
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
