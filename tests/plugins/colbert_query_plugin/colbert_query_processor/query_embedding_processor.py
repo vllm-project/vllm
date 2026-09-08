@@ -4,7 +4,7 @@ from collections.abc import Iterator, Sequence
 from typing import cast
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor

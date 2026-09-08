@@ -134,17 +134,15 @@ def test_causal_block_rows_see_prefix_plus_own_position(query_len):
 
 
 def test_cudagraph_padding_rows_present_no_kv_extent():
-    """Padding requests carry seq_len 0, so the causal tail drives their rows
-    negative. The kernel skips a row whose extent is not positive
-    (``if split_kv_end > split_kv_start``), so this is a no-op rather than a
-    bad read -- but only as long as the padding stays in that branch."""
+    """Causal flattening pins cudagraph padding rows (seq_len 0) to exactly
+    zero KV extent, keeping them in the kernel's skipped branch."""
     query_len = 4
     seq_lens = _seq_lens(query_len) + [0]
     captured = _run_forward_mqa(seq_lens, query_len, causal=True)
 
     padding = captured["seq_lens"].tolist()[-query_len:]
-    assert all(n <= 0 for n in padding), (
-        f"padding rows must not present a positive KV extent, got {padding}"
+    assert padding == [0] * query_len, (
+        f"padding rows must present exactly zero KV extent, got {padding}"
     )
 
 

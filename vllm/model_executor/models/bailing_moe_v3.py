@@ -115,23 +115,10 @@ def bailing_v3_kda_attention(
     )
 
 
-def bailing_v3_kda_attention_fake(
-    q_proj_states: torch.Tensor,
-    k_proj_states: torch.Tensor,
-    v_proj_states: torch.Tensor,
-    g1: torch.Tensor,
-    beta: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="bailing_v3_kda_attention",
     op_func=bailing_v3_kda_attention,
     mutates_args=["core_attn_out"],
-    fake_impl=bailing_v3_kda_attention_fake,
 )
 
 
@@ -813,7 +800,10 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             return
 
         assert isinstance(attn_metadata_map, dict)
-        attn_metadata = attn_metadata_map[self.prefix]
+        attn_metadata = attn_metadata_map.get(self.prefix)
+        if attn_metadata is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc

@@ -50,8 +50,8 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # forward_mqa flattens a uniform multi-token block to one decode row per
-    # query token, so causal verify and non-causal draft blocks both take the
-    # decode path. Setting either flag without the other breaks capture.
+    # query token, so causal and non-causal blocks both take the decode path.
+    # Subsumes #51171's flag-keyed override, which cannot lift a causal group.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
@@ -290,12 +290,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if query_len > 1:
             block_table = block_table.repeat_interleave(query_len, dim=0)
             if attn_metadata.causal:
-                # Row t attends the prefix plus block tokens 0..t. Padding rows
-                # carry seq_len 0, go non-positive, and the kernel skips them.
+                # Row t attends the prefix plus block tokens 0..t. Clamp holds
+                # padding rows at extent 0; the kernel skips them either way
+                # (split_kv_end == split_kv_start).
                 offsets = torch.arange(
                     1 - query_len, 1, device=seq_lens.device, dtype=seq_lens.dtype
                 )
-                seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten()
+                seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten().clamp(min=0)
             else:
                 # Non-causal draft block: every row sees the same prefix.
                 seq_lens = seq_lens.repeat_interleave(query_len)

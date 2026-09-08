@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
@@ -12,7 +11,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate
@@ -55,28 +59,40 @@ class JinaVLScorer(nn.Module):
 
 
 class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
-    def _apply_hf_processor_main(
+    def _cached_apply_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingInfo:
+        mm_info = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        for _, value in mm_data.items():
-            value.reverse()
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
+        # Score inputs are query-first, while the prompt template is document-first.
+        mm_kwargs = MultiModalKwargsItems(
+            {
+                modality: list(reversed(items))
+                for modality, items in mm_info.kwargs.items()
+            }
         )
-        processed_data.update(passthrough_data)
-        return processed_data
+        mm_hashes = {
+            modality: list(reversed(hashes))
+            for modality, hashes in mm_info.hashes.items()
+        }
+        mm_prompt_updates = {
+            modality: [
+                [
+                    self._recompute_cached_prompt_update(update, item_idx)
+                    for update in updates
+                ]
+                for item_idx, updates in enumerate(reversed(item_updates))
+            ]
+            for modality, item_updates in mm_info.prompt_updates.items()
+        }
+
+        return MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
