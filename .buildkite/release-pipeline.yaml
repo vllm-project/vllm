@@ -316,6 +316,64 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129" release-images'
 
+      - label: "Build release image - x86_64 - CUDA 13.4"
+        depends_on: ~
+        id: build-release-image-x86-cuda-13-4
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker buildx build --load \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134) \
+              --platform linux/amd64 \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.4 \
+              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 13.4"
+        depends_on: ~
+        id: build-release-image-arm64-cuda-13-4
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker buildx build --load \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134) \
+              --platform linux/arm64 \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.4 \
+              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134" release-images'
+
       - label: "Build release image - x86_64 - CUDA 13.0 - Ubuntu 24.04"
         depends_on: ~
         id: build-release-image-x86-ubuntu2404
@@ -513,6 +571,19 @@ steps:
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129" release-manifests'
 
+      - label: "Create multi-arch manifest - CUDA 13.4"
+        depends_on:
+          - build-release-image-x86-cuda-13-4
+          - build-release-image-arm64-cuda-13-4
+        id: create-multi-arch-manifest-cuda-13-4
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu134 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu134 --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.4" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134" release-manifests'
+
       - label: "Create multi-arch manifest - CUDA 13.0 - Ubuntu 24.04"
         depends_on:
           - build-release-image-x86-ubuntu2404
@@ -577,6 +648,24 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - label: "Publish nightly multi-arch image to DockerHub - CUDA 13.4"
+        depends_on:
+          - create-multi-arch-manifest-cuda-13-4
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds.sh cu134"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu134-nightly-"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
