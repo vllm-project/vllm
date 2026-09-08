@@ -122,6 +122,8 @@ if TYPE_CHECKING:
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_FASTSAFETENSORS_ALL_LOCAL: bool = False
+    VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET: int = -1
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -1133,6 +1135,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # at peak during loading.
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
+    ),
+    # Have every rank read its weights from storage instead of one rank
+    # reading and broadcasting. NVMe throughput scales with concurrent
+    # readers, while a broadcast funnels all I/O through rank 0 at a queue
+    # depth of one, so this is much faster on local storage -- at the cost
+    # of every rank reading the full checkpoint rather than 1/N of it.
+    # Leave disabled on shared or network storage, where the extra reads
+    # are served by the same device.
+    "VLLM_FASTSAFETENSORS_ALL_LOCAL": lambda: bool(
+        int(os.getenv("VLLM_FASTSAFETENSORS_ALL_LOCAL", "0"))
+    ),
+    # Device memory in bytes the fastsafetensors fit planner may spend when
+    # sizing sub-shard load chunks. -1 derives it from the memory free on the
+    # device. An infeasible plan is an error rather than a fallback: staging
+    # whole shards needs a buffer at least as large as the tensor the plan
+    # could not place. 0 removes the memory bound and stages whole shards,
+    # which is likely to run out of memory on a checkpoint that needed one.
+    "VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", "-1")
     ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
