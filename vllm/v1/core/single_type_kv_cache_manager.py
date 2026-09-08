@@ -151,6 +151,12 @@ class SingleTypeKVCacheManager(ABC):
             and num_local_computed_tokens % self.block_size != 0
         )
 
+    def _get_num_required_blocks(self, num_tokens: int) -> int:
+        return cdiv(num_tokens, self.block_size)
+
+    def _get_num_allocated_blocks(self, request_id: str) -> int:
+        return len(self.req_to_blocks.get(request_id, ()))
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -185,7 +191,7 @@ class SingleTypeKVCacheManager(ABC):
             The number of blocks to allocate.
         """
 
-        num_required_blocks = cdiv(num_tokens, self.block_size)
+        num_required_blocks = self._get_num_required_blocks(num_tokens)
         if apply_admission_cap and self._max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
@@ -199,7 +205,8 @@ class SingleTypeKVCacheManager(ABC):
             num_required_blocks = min(
                 num_required_blocks, self._max_admission_blocks_per_request
             )
-        num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
+        num_req_block_slots = len(self.req_to_blocks.get(request_id, ()))
+        num_req_blocks = self._get_num_allocated_blocks(request_id)
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
@@ -210,7 +217,7 @@ class SingleTypeKVCacheManager(ABC):
             return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
-        num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
+        num_local_computed_blocks = len(new_computed_blocks) + num_req_block_slots
         # Number of whole blocks that are skipped by the attention window.
         # If nothing is skipped, this is 0.
         num_skipped_blocks = num_skipped_tokens // self.block_size
@@ -223,9 +230,11 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
-        # of blocks are skipped; `num_req_blocks` of those may already be in
+        # of blocks are skipped; `num_req_block_slots` of those may already be in
         # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
-        num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
+        num_skipped_new_computed_blocks = max(
+            0, num_skipped_blocks - num_req_block_slots
+        )
 
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
@@ -368,9 +377,14 @@ class SingleTypeKVCacheManager(ABC):
             cow_blocks.append(cow_block)
 
         req_blocks = self.req_to_blocks[request_id]
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = num_required_blocks - len(req_blocks)
-        if num_new_blocks <= 0:
+        num_required_block_slots = cdiv(num_tokens, self.block_size)
+        num_required_blocks = self._get_num_required_blocks(num_tokens)
+        num_new_blocks = max(
+            num_required_blocks - self._get_num_allocated_blocks(request_id), 0
+        )
+        num_null_blocks = num_required_block_slots - len(req_blocks) - num_new_blocks
+        req_blocks.extend([self._null_block] * num_null_blocks)
+        if num_new_blocks == 0:
             return cow_blocks
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
@@ -915,6 +929,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # multi-module MTP store-side lag can still reconstruct the window from
         # cached blocks.
         self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
+
+    def _get_num_required_blocks(self, num_tokens: int) -> int:
+        num_window_blocks = self.kv_cache_spec.max_admission_blocks_per_request(
+            max_in_flight_tokens=0,
+            max_model_len=num_tokens,
+        )
+        return min(super()._get_num_required_blocks(num_tokens), num_window_blocks)
+
+    def _get_num_allocated_blocks(self, request_id: str) -> int:
+        return sum(
+            block is not self._null_block
+            for block in self.req_to_blocks.get(request_id, ())
+        )
 
     @classmethod
     def _contiguous_blocks_for_hit(

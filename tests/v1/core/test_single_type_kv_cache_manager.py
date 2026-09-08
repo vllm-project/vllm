@@ -629,7 +629,7 @@ def test_get_num_blocks_to_allocate():
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        sliding_window=4,  # Placeholder value, not related to test result
+        sliding_window=100,  # Large enough not to cap this generic allocation test
     )
 
     block_pool = BlockPool(
@@ -732,14 +732,13 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     )
 
 
-def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
+def test_sliding_window_caps_predictor_and_allocator_at_window_size():
     """In forward steps, `get_num_blocks_to_allocate` must return exactly what
     `allocate_new_blocks` will pull; otherwise `block_pool.get_new_blocks`
     raises `ValueError: Cannot get N free blocks from the pool`.
     """
     block_size = 2
     sliding_window = 8  # 4-block live window
-    cap = sliding_window // block_size
 
     spec = SlidingWindowSpec(
         block_size=block_size,
@@ -757,11 +756,12 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
         enable_caching=False,
         kv_cache_group_id=0,
         scheduler_block_size=spec.block_size,
-        max_admission_blocks_per_request=cap,
+        max_admission_blocks_per_request=10**9,
     )
 
     request_id = "req"
     total_computed = 0
+    allocated_per_step = []
     # Walk through request forward steps. Check num_blocks returned by
     # `get_num_blocks_to_allocate` matches what `allocate_new_blocks` pulls
     for num_tokens in (4, 8, 12, 16):
@@ -780,4 +780,15 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"num_tokens={num_tokens}: predictor returned {predicted} "
             f"but allocator pulled {len(new_blocks)}"
         )
+        allocated_per_step.append(len(new_blocks))
         total_computed = num_tokens
+
+    assert allocated_per_step == [2, 2, 1, 0]
+    assert len(manager.req_to_blocks[request_id]) == 8
+    assert (
+        sum(
+            block is block_pool.null_block
+            for block in manager.req_to_blocks[request_id]
+        )
+        == 3
+    )

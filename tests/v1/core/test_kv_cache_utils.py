@@ -1547,7 +1547,6 @@ def test_get_max_concurrency_for_kv_cache_config():
         enable_chunked_prefill=True,
         max_model_len=model_config.max_model_len,
         is_encoder_decoder=model_config.is_encoder_decoder,
-        # Pin to sync: SWA per-request bounds grow with overlapping batches.
         async_scheduling=False,
     )
 
@@ -1585,7 +1584,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     assert max_concurrency_full_attention == 1.5
 
     kv_cache_config_sliding_window = KVCacheConfig(
-        num_blocks=129 * 3,
+        num_blocks=65 * 3,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)], sliding_window_spec),
@@ -1597,7 +1596,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     assert max_concurrency_sliding_window == 3
 
     kv_cache_config_hybrid_model = KVCacheConfig(
-        num_blocks=(1024 + 129) * 3,
+        num_blocks=(1024 + 65) * 3,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)], full_attention_spec),
@@ -1617,11 +1616,11 @@ def test_get_max_concurrency_for_kv_cache_config():
     assert max_concurrency == max_concurrency_hybrid_model
 
     # Unequal group sizes in the standard layout: each group's pages cost
-    # whole pool blocks, so a request needs 1024 + 129 = 1153 blocks — the
+    # whole pool blocks, so a request needs 1024 + 65 = 1089 blocks — the
     # same as the equal-hybrid case above, regardless of the second group
     # holding only 2 layers.
     kv_cache_config_unequal_groups = KVCacheConfig(
-        num_blocks=1153 * 3,
+        num_blocks=1089 * 3,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)], full_attention_spec),
@@ -1637,16 +1636,16 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     # UniformTypeKVCacheSpecs group (worker config shape): the aggregated
     # spec's memory/page ratio equals a single layer's page count, so the
-    # group needs 1024 blocks and the request 1153 in total. The previous
+    # group needs 1024 blocks and the request 1089 in total. The previous
     # formula normalized both groups' memory by the first group's page size,
-    # reporting 3459/1057 = 3.27 here instead of 3 — and a different value
-    # again for the scheduler-config shape below.
+    # reporting a value above 3 here — and a different value again for the
+    # scheduler-config shape below.
     uniform_full_spec = UniformTypeKVCacheSpecs(
         block_size=full_attention_spec.block_size,
         kv_cache_specs={f"layer_{i}": full_attention_spec for i in range(4)},
     )
     kv_cache_config_uniform_group = KVCacheConfig(
-        num_blocks=1153 * 3,
+        num_blocks=1089 * 3,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(4)], uniform_full_spec),
