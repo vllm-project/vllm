@@ -68,6 +68,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -449,7 +450,9 @@ class SarvamMLABlock(nn.Module):
 
 
 class SarvamMLAModel(nn.Module, EagleModelMixin):
-    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
+    """Sarvam MLA backbone with EAGLE3 auxiliary capture across pipeline stages."""
+
+    supports_aux_hidden_states_over_pp = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -476,8 +479,10 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
         self.embed_dim = config.hidden_size
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
-        if get_pp_group().is_first_rank or (
-            self.tie_word_embeddings and get_pp_group().is_last_rank
+        if (
+            get_pp_group().is_first_rank
+            or (self.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
@@ -519,13 +524,10 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         """Run this stage and optionally return its auxiliary hidden states.
 
-        Auxiliary captures are local to this stage, matching Qwen3 MoE.
-        Pipeline transport carries only hidden states and residual; EAGLE3
-        capture across pipeline stages is not supported by this model.
-
         Returns:
-            Intermediate tensors on non-final stages. On the final stage,
-            normalized hidden states, paired with auxiliary states if captured.
+            Intermediate tensors with local auxiliary states on non-final stages.
+            On the final stage, normalized hidden states paired with the ordered
+            auxiliary states from all stages if captured.
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -539,9 +541,12 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -557,13 +562,18 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         if residual is None:
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
