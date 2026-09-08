@@ -15,7 +15,7 @@ ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
-ARG ROCM_RUNTIME_COMMIT="a1107fa1b5f8aa853b5dc1af0f09930fcab2700c"
+ARG ROCM_RUNTIME_COMMIT="b539bf7eebfd99ad0a69668caa1f4037034d501f"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
