@@ -1728,6 +1728,7 @@ def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
+    devices: list[int] | None = None,
 ) -> None:
     """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
@@ -1735,6 +1736,15 @@ def wait_for_memory_to_settle(
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
+
+    Args:
+        threshold_ratio: Per-device (or shared) used-memory ratio to wait for.
+        timeout_s: Give up after this many seconds.
+        devices: Logical device indices to wait on. Defaults to every visible
+            device. Pass the indices the current engine actually used so the
+            wait does not block on GPUs owned by other processes sharing the
+            node (e.g. under an ``ZE_AFFINITY_MASK``/``CUDA_VISIBLE_DEVICES``
+            that still exposes several devices).
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
@@ -1742,11 +1752,17 @@ def wait_for_memory_to_settle(
     num_gpus = current_platform.device_count()
     if num_gpus == 0:
         return
+    if devices is None:
+        devices = list(range(num_gpus))
+    else:
+        devices = [device for device in devices if 0 <= device < num_gpus]
+    if not devices:
+        return
     if threshold_ratio is None:
         threshold_ratio = 0.1
 
     wait_for_gpu_memory_to_clear(
-        devices=list(range(num_gpus)),
+        devices=devices,
         threshold_ratio=threshold_ratio,
         timeout_s=timeout_s,
         stable_duration_s=2.0,
