@@ -26,6 +26,10 @@ class XPUKimiGatedDeltaNetAttention(BaseKimiGatedDeltaNetAttention):
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
+        """Run the fused XPU KDA convolution and recurrence op in place.
+
+        Writes the attention output directly into ``core_attn_out``.
+        """
         attn_metadata_raw = get_forward_context().attn_metadata
         if attn_metadata_raw is None:
             return
@@ -96,12 +100,15 @@ class XPUKimiGatedDeltaNetAttention(BaseKimiGatedDeltaNetAttention):
 
 
 class KimiK3DeltaAttention(XPUKimiGatedDeltaNetAttention):
+    """XPU KDA variant used by Kimi-K3, requiring a full-rank bounded gate."""
+
     def __init__(
         self,
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
+        """Initialize the layer and validate the full-rank gate config."""
         super().__init__(config, vllm_config, prefix)
         if not self.use_full_rank_gate:
             raise ValueError("XPU Kimi-K3 KDA requires a full-rank gate")
@@ -110,12 +117,15 @@ class KimiK3DeltaAttention(XPUKimiGatedDeltaNetAttention):
 
 
 class KimiLinearDeltaAttention(XPUKimiGatedDeltaNetAttention):
+    """XPU KDA variant used by Kimi-Linear, requiring a low-rank unbounded gate."""
+
     def __init__(
         self,
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
+        """Initialize the layer and validate the low-rank gate config."""
         super().__init__(config, vllm_config, prefix)
         if self.use_full_rank_gate:
             raise ValueError("XPU Kimi-Linear KDA requires a low-rank gate")

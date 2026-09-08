@@ -71,6 +71,8 @@ from .ops.attn_res import attn_res
 
 
 class KimiMLP(nn.Module):
+    """Gated MLP block used for Kimi-K3 shared experts (silu/situ activation)."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -82,6 +84,7 @@ class KimiMLP(nn.Module):
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
     ) -> None:
+        """Build the gate/up and down projections and activation function."""
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
@@ -112,6 +115,7 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply gate-up projection, activation, then down projection."""
         gate_up, _ = self.gate_up_proj(hidden_states)
         hidden_states = self.act_fn(gate_up)
         hidden_states, _ = self.down_proj(hidden_states)
@@ -119,16 +123,20 @@ class KimiMLP(nn.Module):
 
 
 class KimiRoutedOutputTransform(nn.Module):
+    """Optional norm + up-projection applied to latent-MoE routed outputs."""
+
     def __init__(
         self,
         norm: RMSNorm | None,
         up_proj: ReplicatedLinear,
     ) -> None:
+        """Store the optional norm layer and up-projection layer."""
         super().__init__()
         self.norm = norm
         self.up_proj = up_proj
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply the optional RMSNorm followed by the up-projection."""
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
         hidden_states, _ = self.up_proj(hidden_states)
@@ -147,6 +155,9 @@ class KimiMoE(nn.Module):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
     ) -> None:
+        """Build the router gate, shared/routed experts, and optional latent MoE
+        projections.
+        """
         super().__init__()
         if enable_eplb or num_redundant_experts:
             raise NotImplementedError(
@@ -287,6 +298,7 @@ class KimiMoE(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Route tokens to experts and return the combined MoE output."""
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
         router_logits, _ = self.gate(hidden_states)
@@ -316,6 +328,7 @@ class KimiMLAAttention(nn.Module):
         prefix: str = "",
         **kwargs: object,
     ) -> None:
+        """Build the MLA q/kv projections and wrap them in the XPU MLA backend."""
         super().__init__()
         del kwargs
         if not use_nope:
@@ -442,6 +455,7 @@ class KimiMLAAttention(nn.Module):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
+        """Run MLA attention and write the result into ``output`` in place."""
         output.copy_(self.mla_attn(positions, hidden_states))
 
 
@@ -454,6 +468,7 @@ class KimiDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
+        """Build attention (MLA or KDA), MLP/MoE, norms, and attn-res state."""
         super().__init__()
         self.hidden_size = config.hidden_size
         self.layer_idx = int(prefix.rsplit(".", 1)[1])
@@ -571,6 +586,7 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """Run ``self_attn`` into a freshly allocated output tensor."""
         output = torch.empty_like(hidden_states)
         self.self_attn(
             positions=positions,
@@ -585,6 +601,11 @@ class KimiDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         prefix_sum: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Apply the pre-attention norm, or the fused attn-res mixture.
+
+        Returns the normalized hidden states, the (possibly unchanged)
+        prefix-sum state, and the residual to use post-attention.
+        """
         if not self.use_attn_res:
             assert hidden_states is not None
             if residual is None:
@@ -616,6 +637,11 @@ class KimiDecoderLayer(nn.Module):
         residual: torch.Tensor,
         prefix_sum: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Apply the post-attention norm, or the fused attn-res mixture.
+
+        Returns the MLP-input hidden states, the updated prefix-sum state,
+        and the residual to carry into the next layer.
+        """
         if not self.use_attn_res:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
@@ -651,6 +677,7 @@ class KimiDecoderLayer(nn.Module):
         prefix_sum: torch.Tensor | None = None,
         **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Run attention, then MLP/MoE, threading the attn-res prefix state."""
         del kwargs
         hidden_states, prefix_sum, residual = self._pre_attn_norm(
             hidden_states, residual, prefix_sum
@@ -678,6 +705,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        """Build embeddings, decoder layers, and (on the last PP rank) the
+        final norm and optional attn-res output projection.
+        """
         super().__init__()
         config = vllm_config.model_config.hf_text_config
         self.config = config
@@ -695,6 +725,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> KimiDecoderLayer:
+            """Construct one decoder layer at the given weight-name prefix."""
             return KimiDecoderLayer(config, vllm_config, prefix)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -739,6 +770,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        """Allocate zeroed hidden-state/residual buffers for pipeline parallel
+        capture, sizing the residual to the attn-res block history if enabled.
+        """
         hidden_shape = (batch_size, self.config.hidden_size)
         if not self.use_attn_res:
             return IntermediateTensors(
@@ -764,6 +798,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Look up token embeddings for ``input_ids``."""
         return self.embed_tokens(input_ids)
 
     def _maybe_add_hidden_state(
@@ -773,6 +808,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
+        """Append the hidden state for Eagle3 auxiliary layers, if configured.
+
+        When attn-res is enabled, the residual is dropped since it does not
+        represent a full running sum at intermediate layers.
+        """
         if self.config.attn_res_block_size is not None:
             residual = None
         return super()._maybe_add_hidden_state(
@@ -787,6 +827,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Embed inputs, run all decoder layers, and apply the final norm.
+
+        Handles both the plain residual-stream path and the attn-res path
+        (block-wise prefix-sum residual), returning intermediate tensors on
+        non-last pipeline-parallel ranks.
+        """
         del kwargs
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -896,6 +942,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]
         ],
     ) -> set[str]:
+        """Load and remap checkpoint weights into fused/sharded parameters.
+
+        Handles the fused KDA in/out projections, gate-up MLP fusion, MoE
+        expert weight mapping, and packed vs. unpacked expert weight layouts.
+
+        Returns:
+            The set of parameter names that were successfully loaded.
+        """
         kda_config = self.config.linear_attn_config
         use_full_rank_gate = bool(
             kda_config and kda_config.get("use_full_rank_gate", False)
@@ -1019,6 +1073,7 @@ class KimiLinearForCausalLM(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        """Build the language model, lm_head, and logits processor."""
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
@@ -1042,6 +1097,7 @@ class KimiLinearForCausalLM(
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Delegate token embedding to the wrapped ``KimiLinearModel``."""
         return self.model.embed_input_ids(input_ids)
 
     def make_empty_intermediate_tensors(
@@ -1050,6 +1106,7 @@ class KimiLinearForCausalLM(
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        """Delegate intermediate tensor allocation to the wrapped model."""
         return self.model.make_empty_intermediate_tensors(batch_size, dtype, device)
 
     def forward(
@@ -1060,6 +1117,7 @@ class KimiLinearForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Delegate the forward pass to the wrapped ``KimiLinearModel``."""
         return self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -1069,6 +1127,7 @@ class KimiLinearForCausalLM(
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[torch.dtype, torch.dtype]:
+        """Return the KDA conv/recurrent state dtypes for this config."""
         return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -1079,6 +1138,7 @@ class KimiLinearForCausalLM(
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Return the KDA conv/recurrent state shapes for this config."""
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         num_spec = (
@@ -1098,13 +1158,18 @@ class KimiLinearForCausalLM(
     def get_mamba_state_copy_func(
         cls,
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        """Return the copy functions used to move KDA state during CUDA graph
+        capture and decode-step advancement.
+        """
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Apply the final norm and project hidden states to vocab logits."""
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights into this module, remapping HF prefixes to vLLM ones."""
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

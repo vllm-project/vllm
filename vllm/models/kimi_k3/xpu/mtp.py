@@ -15,11 +15,13 @@ class KimiK3MTP(nn.Module):
     """Placeholder for the native Intel XPU Kimi-K3 MTP draft model."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        """Raise NotImplementedError; native XPU MTP is not yet supported."""
         super().__init__()
         del vllm_config, prefix
         raise NotImplementedError("Native XPU Kimi-K3 MTP is not implemented.")
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Not implemented: see class docstring."""
         raise NotImplementedError
 
     def forward(
@@ -31,6 +33,7 @@ class KimiK3MTP(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Not implemented: see class docstring."""
         raise NotImplementedError
 
     def compute_logits(
@@ -38,9 +41,11 @@ class KimiK3MTP(nn.Module):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
+        """Not implemented: see class docstring."""
         raise NotImplementedError
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Not implemented: see class docstring."""
         raise NotImplementedError
 
 

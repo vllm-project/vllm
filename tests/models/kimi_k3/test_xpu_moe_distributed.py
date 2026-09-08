@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _parallel_sizes(mode: str) -> tuple[int, int, bool]:
+    """Return the tensor-parallel sizes to exercise in the distributed MoE test."""
     if mode == "tp1":
         return 1, 1, False
     if mode == "tp2":
@@ -46,6 +47,9 @@ def _distributed_worker(
     port: int,
     result_queue: SimpleQueue,
 ) -> None:
+    """Distributed worker entry point that runs the XPU MoE layer under the given
+    tensor- parallel configuration.
+    """
     tensor_parallel_size, data_parallel_size, enable_expert_parallel = _parallel_sizes(
         mode
     )
@@ -175,6 +179,9 @@ def _distributed_worker(
 
 
 def _run_parallel_mode(mode: str) -> torch.Tensor:
+    """Launch ``_distributed_worker`` across multiple processes for a given tensor-
+    parallel size.
+    """
     tensor_parallel_size, data_parallel_size, _ = _parallel_sizes(mode)
     world_size = tensor_parallel_size * data_parallel_size
     context = mp.get_context("spawn")
@@ -193,6 +200,7 @@ def _run_parallel_mode(mode: str) -> torch.Tensor:
     [("tp2", 2), ("ep2", 2), ("tp2_ep4", 4)],
 )
 def test_xpu_kimi_moe_distributed_matches_tp1(mode: str, required_devices: int) -> None:
+    """Verify XPU KimiMoE output is invariant to the tensor-parallel degree used."""
     if torch.xpu.device_count() < required_devices:
         pytest.skip(f"{mode} requires {required_devices} XPU devices")
 

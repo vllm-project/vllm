@@ -37,6 +37,12 @@ def _validate_expert_map(
     local_num_experts: int,
     device: torch.device,
 ) -> None:
+    """Validate that ``expert_map`` matches the expected XPU MoE contract.
+
+    Raises:
+        ValueError: If the dtype, shape, contiguity, device, or value range
+            of ``expert_map`` does not match the expected contract.
+    """
     if expert_map.dtype != torch.int32:
         raise ValueError("XPU MoE expert_map must have dtype torch.int32")
     if expert_map.dim() != 1 or expert_map.numel() != global_num_experts:
@@ -63,6 +69,12 @@ def prepare_fp8_moe_layer_for_xpu(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Transpose fp8 MoE weights and scales into the XPU kernel layout.
+
+    Returns:
+        The ``(w13, w13_scale, w2, w2_scale)`` tuple with weights transposed
+        on their last two dimensions and 3-D scales similarly transposed.
+    """
     if w13_scale is not None and w13_scale.ndim == 3:
         w13_scale = w13_scale.transpose(-1, -2).contiguous()
     if w2_scale is not None and w2_scale.ndim == 3:
@@ -76,6 +88,8 @@ def prepare_fp8_moe_layer_for_xpu(
 
 
 class XPUExperts(mk.FusedMoEExpertsModular):
+    """Fused MoE expert execution backed by ``vllm_xpu_kernels.XpuFusedMoe``."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -83,6 +97,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the expert module and check for Xe2/Xe3 GPU support."""
         super().__init__(
             moe_config,
             quant_config,
@@ -100,22 +115,27 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
+        """Whether this expert implementation expects unquantized inputs."""
         return self._expects_unquantized_inputs
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
+        """Return the activation tensor layout expected by this backend."""
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
     def _supports_current_device() -> bool:
+        """Return whether the current platform is XPU."""
         return current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
+        """Return whether activation-without-multiply variants are supported."""
         return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        """Return whether ``activation`` is supported by the XPU kernel."""
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
@@ -127,6 +147,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """Return whether ``moe_parallel_config`` is supported (always True)."""
         return True
 
     @staticmethod
@@ -134,6 +155,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         SUPPORTED_W_A = [
             (None, None),
             (kFp8StaticTensorSym, None),
@@ -142,6 +164,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        """Return the no-op finalizer, since weighting/reduce happens in-kernel."""
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -155,6 +178,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        """Return workspace and output shapes; no extra workspace is needed."""
         workspace1 = (0,)
         workspace2 = (0,)
         output = (M, K)
@@ -178,6 +202,12 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        """Run the fused MoE forward pass, writing results into ``output``.
+
+        Lazily constructs the underlying ``XpuFusedMoe`` kernel wrapper on
+        first call, then dispatches tokens to experts and writes the
+        combined result into ``output`` in place.
+        """
         if expert_map is not None:
             _validate_expert_map(
                 expert_map,
@@ -225,6 +255,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
 
 class XPUExpertsFp8(XPUExperts):
+    """XPU MoE experts for static-tensor fp8 weight quantization."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -232,6 +264,7 @@ class XPUExpertsFp8(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the fp8 expert module."""
         super().__init__(
             moe_config,
             quant_config,
@@ -244,6 +277,7 @@ class XPUExpertsFp8(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
@@ -252,6 +286,8 @@ class XPUExpertsFp8(XPUExperts):
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):
+    """XPU MoE experts for static mxfp8 weight quantization."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -259,6 +295,7 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the mxfp8 expert module and assert the quant dtype."""
         super().__init__(
             moe_config,
             quant_config,
@@ -272,6 +309,7 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         SUPPORTED_W_A = [
             (kMxfp8Static, None),
             (kMxfp8Static, kMxfp8Dynamic),
@@ -280,6 +318,8 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
 
 
 class XPUExpertsBlockFp8(XPUExperts):
+    """XPU MoE experts for block-wise fp8 weight quantization."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -287,6 +327,7 @@ class XPUExpertsBlockFp8(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the block-fp8 expert module."""
         super().__init__(
             moe_config,
             quant_config,
@@ -299,6 +340,7 @@ class XPUExpertsBlockFp8(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         SUPPORTED_W_A = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
         ]
@@ -325,6 +367,7 @@ class XPUExpertsWNA16(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the INT4-symmetric expert module."""
         super().__init__(
             moe_config,
             quant_config,
@@ -337,6 +380,7 @@ class XPUExpertsWNA16(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         return (weight_key, activation_key) in (
             (kInt4Static, None),
             (kInt4Static32, None),
@@ -344,6 +388,8 @@ class XPUExpertsWNA16(XPUExperts):
 
 
 class XPUExpertsMxFp4(XPUExperts):
+    """XPU MoE experts for static mxfp4 weight quantization."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -351,6 +397,7 @@ class XPUExpertsMxFp4(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        """Initialize the mxfp4 expert module."""
         super().__init__(
             moe_config,
             quant_config,
@@ -369,6 +416,7 @@ class XPUExpertsMxFp4(XPUExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        """Return workspace and output shapes, accounting for mxfp4 packing."""
         # K = a1q.size(-1). When activations are pre-quantized packed mxfp4,
         # K is the packed hidden_size (= logical / 2); the kernel output is at
         # logical hidden_size (2 * K). When unquantized (bf16), K is already
@@ -381,6 +429,7 @@ class XPUExpertsMxFp4(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        """Return whether the given weight/activation quantization is supported."""
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
             (kMxfp4Static, kMxfp4Dynamic),

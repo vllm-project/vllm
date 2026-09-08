@@ -31,6 +31,13 @@ def _attn_res_kernel(
     BLOCK_L: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
+    """Triton kernel computing one row of the fused attention-residual op.
+
+    Updates ``prefix`` in place with ``delta`` (if provided), optionally
+    stashes the result into ``blocks``, and writes a softmax-weighted
+    RMSNorm-style mixture over ``blocks`` and the updated prefix to
+    ``output_ptr`` (with an optional output RMSNorm applied).
+    """
     row_idx = tl.program_id(0).to(tl.int64)
     d_offsets = tl.max_contiguous(tl.arange(0, BLOCK_D), BLOCK_D)
     d_mask = d_offsets < hidden_size
@@ -142,6 +149,32 @@ def attn_res(
     eps: float,
     output_norm_eps: float,
 ) -> torch.Tensor:
+    """Fuse residual accumulation with a softmax-weighted block mixture.
+
+    Adds ``delta`` (if given) to ``prefix``, optionally records the updated
+    prefix into ``blocks`` at ``block_write_idx``, then returns a
+    RMSNorm-attention-weighted combination of ``blocks[:, :num_blocks]`` and
+    the updated prefix, with an optional output RMSNorm applied.
+
+    Args:
+        prefix: Running residual state, shape ``(num_tokens, hidden_size)``.
+        delta: Optional increment to add to ``prefix`` in place.
+        blocks: Per-token history buffer, shape
+            ``(num_tokens, max_blocks, hidden_size)``.
+        norm_weight: RMSNorm weight applied before computing scores.
+        qk_weight: Elementwise weight combined with ``norm_weight`` to form
+            the query/key projection used for scoring.
+        output_norm_weight: Optional RMSNorm weight applied to the output.
+        num_blocks: Number of valid entries in ``blocks`` to mix over.
+        block_write_idx: Index in ``blocks`` to write the updated prefix to,
+            or a negative value to skip writing.
+        eps: Epsilon used in the scoring RMSNorm.
+        output_norm_eps: Epsilon used in the output RMSNorm.
+
+    Returns:
+        The mixed (and optionally normalized) output tensor, shape
+        ``(num_tokens, hidden_size)``.
+    """
     num_tokens, hidden_size = prefix.shape
     assert 0 <= num_blocks <= blocks.shape[1]
     assert blocks.shape[0] == num_tokens

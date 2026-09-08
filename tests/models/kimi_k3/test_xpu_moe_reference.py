@@ -27,6 +27,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def _make_config() -> KimiLinearConfig:
+    """Build a minimal ``FusedMoEConfig``/``FusedMoEQuantConfig`` pair for the reference
+    MoE test.
+    """
     return KimiLinearConfig(
         hidden_size=64,
         num_attention_heads=1,
@@ -44,6 +47,9 @@ def _make_config() -> KimiLinearConfig:
 
 
 def test_xpu_kimi_moe_matches_independent_stage_reference() -> None:
+    """Verify the fused XPU MoE expert forward matches an independent-stage (unfused)
+    reference implementation.
+    """
     torch.xpu.set_device(0)
     device = torch.device("xpu", 0)
     file_descriptor, init_path = tempfile.mkstemp(prefix="kimi_moe_test_")

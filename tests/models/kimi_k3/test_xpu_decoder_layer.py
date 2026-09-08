@@ -27,6 +27,7 @@ class _ResidualNorm(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Compute the forward pass of this test double."""
         if residual is None:
             return hidden_states + 1
         return hidden_states + residual + 1, residual + hidden_states
@@ -34,11 +35,13 @@ class _ResidualNorm(nn.Module):
 
 class _Scale(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Compute the forward pass of this test double."""
         return hidden_states * 2
 
 
 class _WeightedNorm(nn.Module):
     def __init__(self, hidden_size: int) -> None:
+        """Initialize the ``_WeightedNorm`` test double."""
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = 1e-5
@@ -46,31 +49,37 @@ class _WeightedNorm(nn.Module):
 
 class _Projection(nn.Module):
     def __init__(self, hidden_size: int) -> None:
+        """Initialize the ``_Projection`` test double."""
         super().__init__()
         self.weight = nn.Parameter(torch.ones(1, hidden_size))
 
 
 class _TupleIdentity(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        """Compute the forward pass of this test double."""
         return hidden_states, None
 
 
 class _GatedAdd(nn.Module):
     def forward(self, hidden_states: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        """Compute the forward pass of this test double."""
         return hidden_states + gate.unsqueeze(0)
 
 
 class _ConstantProjection(nn.Module):
     def __init__(self, output: torch.Tensor) -> None:
+        """Initialize the ``_ConstantProjection`` test double."""
         super().__init__()
         self.output = output
 
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        """Compute the forward pass of this test double."""
         return self.output, None
 
 
 class _FakeMLA(nn.Module):
     def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
+        """Compute the forward pass of this test double."""
         return torch.full((1, 1), 4.0)
 
 
@@ -97,6 +106,7 @@ class _StandardModelLayer(nn.Module):
         residual: torch.Tensor | None,
         prefix_sum: torch.Tensor | None,
     ) -> tuple[torch.Tensor, None, torch.Tensor]:
+        """Compute the forward pass of this test double."""
         del positions
         if residual is None:
             residual = hidden_states * 10
@@ -105,6 +115,7 @@ class _StandardModelLayer(nn.Module):
 
 class _AttnResModelLayer(nn.Module):
     def __init__(self, expected_delta: torch.Tensor | None, increment: float) -> None:
+        """Initialize the ``_AttnResModelLayer`` test double."""
         super().__init__()
         self.expected_delta = expected_delta
         self.increment = increment
@@ -116,6 +127,7 @@ class _AttnResModelLayer(nn.Module):
         residual: torch.Tensor,
         prefix_sum: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute the forward pass of this test double."""
         del positions
         if self.expected_delta is None:
             assert hidden_states is None
@@ -127,6 +139,7 @@ class _AttnResModelLayer(nn.Module):
 
 class _FusedWeightModule(nn.Module):
     def __init__(self, calls: list[tuple[torch.Tensor, int]]) -> None:
+        """Initialize the ``_FusedWeightModule`` test double."""
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(4, 2))
 
@@ -135,6 +148,7 @@ class _FusedWeightModule(nn.Module):
             loaded_weight: torch.Tensor,
             shard_id: int,
         ) -> None:
+            """Record the loaded weight and shard id for this test double."""
             assert param is self.weight
             calls.append((loaded_weight, shard_id))
 
@@ -143,6 +157,7 @@ class _FusedWeightModule(nn.Module):
 
 class _WeightLoaderLayer(nn.Module):
     def __init__(self, calls: list[tuple[torch.Tensor, int]]) -> None:
+        """Initialize the ``_WeightLoaderLayer`` test double."""
         super().__init__()
         self.mlp = nn.Module()
         self.mlp.gate_up_proj = _FusedWeightModule(calls)
@@ -154,6 +169,7 @@ class _KDAWeightLoaderLayer(nn.Module):
         projection_calls: list[tuple[torch.Tensor, int]],
         conv_calls: list[tuple[torch.Tensor, int]],
     ) -> None:
+        """Initialize the ``_KDAWeightLoaderLayer`` test double."""
         super().__init__()
         self.self_attn = nn.Module()
         self.self_attn.in_proj_qkvgfab = _FusedWeightModule(projection_calls)
@@ -162,12 +178,14 @@ class _KDAWeightLoaderLayer(nn.Module):
 
 class _WrapperModel(nn.Module):
     def __init__(self, *, vllm_config: object, prefix: str) -> None:
+        """Initialize the ``_WrapperModel`` test double."""
         super().__init__()
         self.vllm_config = vllm_config
         self.prefix = prefix
         self.norm = _ResidualNorm()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Fake token embedding lookup for this test double."""
         return input_ids + 1
 
     def make_empty_intermediate_tensors(
@@ -176,6 +194,7 @@ class _WrapperModel(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        """Fake intermediate tensor allocation for this test double."""
         return IntermediateTensors(
             {"hidden_states": torch.zeros(batch_size, 2, dtype=dtype, device=device)}
         )
@@ -188,6 +207,7 @@ class _WrapperModel(nn.Module):
         inputs_embeds: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor:
+        """Compute the forward pass of this test double."""
         del positions, intermediate_tensors, kwargs
         assert inputs_embeds is not None or input_ids is not None
         return inputs_embeds if inputs_embeds is not None else input_ids
@@ -201,36 +221,43 @@ class _WrapperLMHead(nn.Module):
         quant_config: object,
         prefix: str,
     ) -> None:
+        """Initialize the ``_WrapperLMHead`` test double."""
         super().__init__()
         self.args = (vocab_size, hidden_size, quant_config, prefix)
 
 
 class _WrapperLogitsProcessor:
     def __init__(self, vocab_size: int, scale: float) -> None:
+        """Initialize the ``_WrapperLogitsProcessor`` test double."""
         self.args = (vocab_size, scale)
 
     def __call__(self, lm_head: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Invoke this test double as a callable."""
         del lm_head
         return hidden_states * self.args[1]
 
 
 class _FakeMambaCache:
     def __init__(self) -> None:
+        """Initialize the ``_FakeMambaCache`` test double."""
         self.copied_inputs: tuple[object, dict[str, object]] | None = None
 
     def copy_inputs_before_cuda_graphs(
         self, input_buffers: object, **kwargs: object
     ) -> None:
+        """Record the CUDA graph input buffers passed to this fake."""
         self.copied_inputs = (input_buffers, kwargs)
 
     def get_seqlen_agnostic_capture_inputs(
         self, batch_size: int
     ) -> dict[str, torch.Tensor]:
+        """Fake seqlen-agnostic capture input construction for this test double."""
         return {"state": torch.full((batch_size,), 7)}
 
 
 class _TopLevelLanguageModel(nn.Module):
     def __init__(self) -> None:
+        """Initialize the ``_TopLevelLanguageModel`` test double."""
         super().__init__()
         self.mamba_cache = _FakeMambaCache()
         self.forward_args: tuple[object, ...] | None = None
@@ -241,6 +268,7 @@ class _TopLevelLanguageModel(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        """Fake intermediate tensor allocation for this test double."""
         return IntermediateTensors(
             {"hidden_states": torch.zeros(batch_size, 2, dtype=dtype, device=device)}
         )
@@ -253,6 +281,7 @@ class _TopLevelLanguageModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None,
     ) -> torch.Tensor:
+        """Compute the forward pass of this test double."""
         self.forward_args = (
             input_ids,
             positions,
@@ -262,6 +291,7 @@ class _TopLevelLanguageModel(nn.Module):
         return torch.full((1, 2), 9.0)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Fake logits computation for this test double."""
         return hidden_states + 1
 
 
@@ -275,6 +305,9 @@ class _TopLevelLanguageModel(nn.Module):
 def test_xpu_kda_adapter_dispatches_native_op(
     monkeypatch, attention_cls, gate_lower_bound
 ) -> None:
+    """Verify ``_forward`` reshapes QKV, forwards GDN metadata, and invokes the native
+    ``kda_attention`` op with the expected args.
+    """
     attention = object.__new__(attention_cls)
     nn.Module.__init__(attention)
     attention.prefix = "model.layers.0.self_attn"
@@ -313,6 +346,9 @@ def test_xpu_kda_adapter_dispatches_native_op(
     captured: dict[str, object] = {}
 
     def fake_kda_attention(*args: object) -> None:
+        """Fake ``torch.ops._xpu_C.kda_attention`` that records its args and fills the
+        output tensor with a constant.
+        """
         captured["args"] = args
         output = args[0]
         assert isinstance(output, torch.Tensor)
@@ -350,8 +386,13 @@ def test_xpu_kda_adapter_dispatches_native_op(
 
 
 def test_xpu_decoder_layer_selects_full_rank_kda(monkeypatch) -> None:
+    """Verify the decoder layer picks ``KimiK3DeltaAttention`` for a full-rank-gate KDA
+    layer.
+    """
+
     class _FakeLayer(nn.Module):
         def __init__(self, *args: object, **kwargs: object) -> None:
+            """Initialize the ``_FakeLayer`` test double."""
             super().__init__()
 
     class _FakeKDA(nn.Module):
@@ -361,6 +402,7 @@ def test_xpu_decoder_layer_selects_full_rank_kda(monkeypatch) -> None:
             vllm_config: object,
             prefix: str,
         ) -> None:
+            """Initialize the ``_FakeKDA`` test double."""
             super().__init__()
             self.config = config
             self.vllm_config = vllm_config
@@ -393,8 +435,13 @@ def test_xpu_decoder_layer_selects_full_rank_kda(monkeypatch) -> None:
 
 
 def test_xpu_decoder_layer_selects_low_rank_kimi_linear_kda(monkeypatch) -> None:
+    """Verify the decoder layer picks ``KimiLinearDeltaAttention`` for a low-rank-gate
+    KDA layer.
+    """
+
     class _FakeLayer(nn.Module):
         def __init__(self, *args: object, **kwargs: object) -> None:
+            """Initialize the ``_FakeLayer`` test double."""
             super().__init__()
 
     class _FakeKDA(nn.Module):
@@ -404,6 +451,7 @@ def test_xpu_decoder_layer_selects_low_rank_kimi_linear_kda(monkeypatch) -> None
             vllm_config: object,
             prefix: str,
         ) -> None:
+            """Initialize the ``_FakeKDA`` test double."""
             super().__init__()
             self.config = config
             self.vllm_config = vllm_config
@@ -437,6 +485,9 @@ def test_xpu_decoder_layer_selects_low_rank_kimi_linear_kda(monkeypatch) -> None
 
 
 def test_mla_output_gate_is_applied_before_output_projection() -> None:
+    """Verify the MLA output gate multiplies attention output before the final output
+    projection.
+    """
     wrapper = object.__new__(MultiHeadLatentAttentionWrapper)
     nn.Module.__init__(wrapper)
     wrapper.q_lora_rank = None
@@ -464,6 +515,9 @@ def test_mla_output_gate_is_applied_before_output_projection() -> None:
 
 
 def test_xpu_decoder_layer_runs_attention_then_mlp() -> None:
+    """Verify the decoder layer runs self-attention, post-attention norm, then MLP in
+    order.
+    """
     layer = object.__new__(kimi_xpu.KimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_attn_res = False
@@ -488,19 +542,25 @@ def test_xpu_decoder_layer_runs_attention_then_mlp() -> None:
 
 
 def test_xpu_kimi_linear_model_layer_factory_accepts_prefix(monkeypatch) -> None:
+    """Verify ``KimiLinearModel`` builds decoder layers via ``make_layers`` with the
+    correct prefix.
+    """
     captured: dict[str, object] = {}
 
     class _FakeDecoder(nn.Module):
         def __init__(self, *args: object, **kwargs: object) -> None:
+            """Initialize the ``_FakeDecoder`` test double."""
             super().__init__()
             captured["layer_args"] = args
             captured["layer_kwargs"] = kwargs
 
     class _FakeLayer(nn.Module):
         def __init__(self, *args: object, **kwargs: object) -> None:
+            """Initialize the ``_FakeLayer`` test double."""
             super().__init__()
 
     def fake_make_layers(num_layers, layer_fn, prefix):
+        """Fake ``make_layers`` that builds a single layer for testing."""
         layer = layer_fn(prefix=f"{prefix}.0")
         return 0, num_layers, nn.ModuleList([layer])
 
@@ -533,6 +593,9 @@ def test_xpu_kimi_linear_model_layer_factory_accepts_prefix(monkeypatch) -> None
 
 
 def test_xpu_kimi_linear_model_combines_standard_residual(monkeypatch) -> None:
+    """Verify the model adds the residual stream to the final hidden states when attn-
+    res is disabled.
+    """
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
@@ -557,6 +620,9 @@ def test_xpu_kimi_linear_model_combines_standard_residual(monkeypatch) -> None:
 
 
 def test_xpu_kimi_linear_model_preserves_attn_res_states(monkeypatch) -> None:
+    """Verify the model threads the attn-res prefix-sum and block history across layers
+    and the output mixture.
+    """
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
@@ -584,6 +650,7 @@ def test_xpu_kimi_linear_model_preserves_attn_res_states(monkeypatch) -> None:
         *args: object,
         **kwargs: object,
     ) -> torch.Tensor:
+        """Fake ``attn_res`` that records its call args for assertions."""
         del args, kwargs
         calls.append((prefix, delta, blocks.shape))
         assert delta is not None
@@ -608,6 +675,9 @@ def test_xpu_kimi_linear_model_preserves_attn_res_states(monkeypatch) -> None:
 
 
 def test_xpu_kimi_linear_model_allocates_attn_res_intermediates() -> None:
+    """Verify ``make_empty_intermediate_tensors`` sizes the residual buffer to the attn-
+    res block history at ``start_layer``.
+    """
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=2, hidden_size=4)
@@ -630,6 +700,9 @@ def test_xpu_kimi_linear_model_allocates_attn_res_intermediates() -> None:
 
 
 def test_xpu_kimi_linear_model_attn_res_crosses_pp_boundary(monkeypatch) -> None:
+    """Verify attn-res state is carried correctly across a pipeline parallel rank
+    boundary.
+    """
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=2)
@@ -679,6 +752,9 @@ def test_xpu_kimi_linear_model_attn_res_crosses_pp_boundary(monkeypatch) -> None
 
 
 def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
+    """Verify ``load_weights`` maps gate/up projection checkpoint weights onto the fused
+    ``gate_up_proj`` parameter.
+    """
     calls: list[tuple[torch.Tensor, int]] = []
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
@@ -706,6 +782,9 @@ def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
 
 
 def test_xpu_kimi_linear_model_declares_kimi_k3_packed_modules() -> None:
+    """Verify ``packed_modules_mapping`` matches the expected Kimi-K3 fused parameter
+    layout.
+    """
     assert kimi_xpu.KimiLinearModel.packed_modules_mapping == {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvgfab": [
@@ -721,6 +800,9 @@ def test_xpu_kimi_linear_model_declares_kimi_k3_packed_modules() -> None:
 
 
 def test_xpu_kimi_linear_model_loads_full_rank_kda_shards() -> None:
+    """Verify ``load_weights`` maps full-rank-gate KDA checkpoint weights onto the fused
+    in/out projection parameters.
+    """
     projection_calls: list[tuple[torch.Tensor, int]] = []
     conv_calls: list[tuple[torch.Tensor, int]] = []
     model = object.__new__(kimi_xpu.KimiLinearModel)
@@ -764,6 +846,9 @@ def test_xpu_kimi_linear_model_loads_full_rank_kda_shards() -> None:
 
 
 def test_xpu_kimi_linear_for_causal_lm_wraps_model(monkeypatch) -> None:
+    """Verify ``KimiLinearForCausalLM`` wraps the inner model and lm_head and delegates
+    forward/logits calls.
+    """
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
     monkeypatch.setattr(kimi_xpu, "KimiLinearModel", _WrapperModel)
     monkeypatch.setattr(kimi_xpu, "ParallelLMHead", _WrapperLMHead)
@@ -801,15 +886,20 @@ def test_xpu_kimi_linear_for_causal_lm_wraps_model(monkeypatch) -> None:
 
 
 def test_xpu_kimi_linear_for_causal_lm_kda_state_contract(monkeypatch) -> None:
+    """Verify the mamba state dtype/shape/copy-func class methods delegate to the KDA
+    state calculators with the right args.
+    """
     dtype_args: list[object] = []
     shape_args: list[object] = []
     copy_funcs = (lambda: None, lambda: None)
 
     def _record_dtype_args(dtype, cache_dtype):
+        """Fake mamba-state-dtype calculator that records its call args."""
         dtype_args.append((dtype, cache_dtype))
         return (torch.float32, torch.bfloat16)
 
     def _record_shape_args(*args, **kwargs):
+        """Fake mamba-state-shape calculator that records its call args."""
         shape_args.append((args, kwargs))
         return ((12, 4), (3, 4, 4))
 
@@ -856,13 +946,18 @@ def test_xpu_kimi_linear_for_causal_lm_kda_state_contract(monkeypatch) -> None:
 
 
 def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
+    """Verify ``load_weights`` delegates to ``AutoWeightsLoader`` with the HF-to-vLLM
+    weight mapper.
+    """
     captured: dict[str, object] = {}
 
     class _Loader:
         def __init__(self, model: nn.Module) -> None:
+            """Initialize the ``_Loader`` test double."""
             captured["model"] = model
 
         def load_weights(self, weights, *, mapper) -> set[str]:
+            """Fake weight loading for this test double."""
             mapped_weights = list(mapper.apply(weights))
             captured["weights"] = mapped_weights
             captured["mapper"] = mapper
@@ -906,10 +1001,16 @@ def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
 
 
 def test_xpu_kimi_k3_text_only_wrapper_delegates_serving(monkeypatch) -> None:
+    """Verify ``KimiK3ForConditionalGeneration`` delegates forward, logits, and mamba-
+    cache calls to the wrapped language model.
+    """
     language_model = _TopLevelLanguageModel()
     captured: dict[str, object] = {}
 
     def fake_init_registered_model(**kwargs: object) -> nn.Module:
+        """Fake ``init_vllm_registered_model`` that records its args and returns a stub
+        language model.
+        """
         captured.update(kwargs)
         return language_model
 
@@ -971,13 +1072,18 @@ def test_xpu_kimi_k3_text_only_wrapper_delegates_serving(monkeypatch) -> None:
 
 
 def test_xpu_kimi_k3_text_only_weight_mapping(monkeypatch) -> None:
+    """Verify the text-only wrapper's HF-to-vLLM weight mapper strips vision tower
+    prefixes and remaps the language model prefix.
+    """
     captured: dict[str, object] = {}
 
     class _Loader:
         def __init__(self, model: nn.Module) -> None:
+            """Initialize the ``_Loader`` test double."""
             captured["model"] = model
 
         def load_weights(self, weights, *, mapper) -> set[str]:
+            """Fake weight loading for this test double."""
             mapped = list(mapper.apply(weights))
             captured["mapped"] = mapped
             return {name for name, _ in mapped}
@@ -1008,6 +1114,9 @@ def test_xpu_kimi_k3_text_only_weight_mapping(monkeypatch) -> None:
 
 
 def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:
+    """Verify a three-block attn-res configuration threads prefix-sum and residual state
+    through all layers as expected.
+    """
     layer = object.__new__(kimi_xpu.KimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_attn_res = True
@@ -1036,6 +1145,7 @@ def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:
         block_write_idx: int,
         **kwargs: object,
     ) -> torch.Tensor:
+        """Fake ``attn_res`` that records its call args for assertions."""
         del args, kwargs
         calls.append((prefix, delta, num_blocks, block_write_idx))
         if delta is not None:
@@ -1065,6 +1175,9 @@ def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:
 
 
 def test_xpu_decoder_layer_resets_prefix_after_block_write(monkeypatch) -> None:
+    """Verify the running prefix-sum resets to the freshly written block on a block-
+    write layer.
+    """
     layer = object.__new__(kimi_xpu.KimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_attn_res = True
@@ -1084,6 +1197,7 @@ def test_xpu_decoder_layer_resets_prefix_after_block_write(monkeypatch) -> None:
         block_write_idx: int,
         **kwargs: object,
     ) -> torch.Tensor:
+        """Fake ``attn_res`` that records its call args for assertions."""
         del args, kwargs
         call.update(
             prefix=prefix,
@@ -1124,6 +1238,9 @@ def _reference_attn_res(
     eps: float,
     output_norm_eps: float,
 ) -> torch.Tensor:
+    """Pure-PyTorch reference implementation of the fused attn-res op, used to validate
+    the Triton kernel's numerics.
+    """
     hidden_size = prefix.shape[-1]
     if delta is not None:
         prefix.add_(delta)
@@ -1156,6 +1273,9 @@ def test_xpu_attn_res_matches_reference(
     block_capacity: int,
     hidden_size: int,
 ) -> None:
+    """Verify the fused ``attn_res`` Triton op matches a pure-PyTorch reference
+    implementation.
+    """
     eps = 1e-5
     device = torch.device("xpu")
     prefix = torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16)

@@ -50,6 +50,7 @@ class KimiK3ForConditionalGeneration(
     )
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        """Initialize the text-only wrapper around ``KimiLinearForCausalLM``."""
         super().__init__()
         self.model_config = vllm_config.model_config
         config: KimiK3Config = self.model_config.hf_config
@@ -69,12 +70,14 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        """Return the multimodal placeholder token for image modality."""
         del i
         if modality == "image":
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        """Return None for text-only input; raise if image pixels are given."""
         if kwargs.get("pixel_values") is None:
             return None
         raise NotImplementedError(
@@ -90,6 +93,7 @@ class KimiK3ForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Delegate the forward pass to the wrapped language model."""
         del kwargs
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -105,6 +109,7 @@ class KimiK3ForConditionalGeneration(
         hidden_states: torch.Tensor,
         **kwargs: object,
     ) -> torch.Tensor | None:
+        """Delegate logits computation to the wrapped language model."""
         del kwargs
         return self.language_model.compute_logits(hidden_states)
 
@@ -113,6 +118,7 @@ class KimiK3ForConditionalGeneration(
         input_buffers: dict[str, torch.Tensor],
         **kwargs: object,
     ) -> None:
+        """Delegate CUDA graph input buffer preparation to the mamba cache."""
         self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(
             input_buffers, **kwargs
         )
@@ -121,6 +127,7 @@ class KimiK3ForConditionalGeneration(
         self,
         batch_size: int,
     ) -> dict[str, torch.Tensor]:
+        """Delegate seqlen-agnostic capture input creation to the mamba cache."""
         return self.language_model.mamba_cache.get_seqlen_agnostic_capture_inputs(
             batch_size
         )
@@ -130,6 +137,7 @@ class KimiK3ForConditionalGeneration(
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[torch.dtype, torch.dtype]:
+        """Return the mamba state dtypes derived from the text-only config."""
         text_config = vllm_config.model_config.hf_config.text_config
         return KimiLinearForCausalLM.get_mamba_state_dtype_from_config(
             vllm_config.with_hf_config(text_config)
@@ -140,6 +148,7 @@ class KimiK3ForConditionalGeneration(
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Return the mamba state shapes derived from the text-only config."""
         text_config = vllm_config.model_config.hf_config.text_config
         return KimiLinearForCausalLM.get_mamba_state_shape_from_config(
             vllm_config.with_hf_config(text_config)
@@ -147,12 +156,14 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_mamba_state_copy_func(cls):
+        """Return the mamba state copy function used during CUDA graph capture."""
         return KimiLinearForCausalLM.get_mamba_state_copy_func()
 
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
+        """Load weights into this module, remapping HF prefixes to vLLM ones."""
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
