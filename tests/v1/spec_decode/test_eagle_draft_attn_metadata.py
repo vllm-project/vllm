@@ -14,18 +14,11 @@ backends (e.g. ``ROCM_AITER_FA`` with eagle/eagle3 spec decode):
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-import pytest
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 
