@@ -539,6 +539,26 @@ def has_triton_kernels() -> bool:
 
 
 @cache
+def get_triton_kernels_version() -> str | None:
+    """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
+
+    Inferred by capability since the package exposes no usable version: 3.8
+    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    """
+    if not has_triton_kernels():
+        return None
+    try:
+        import triton_kernels.matmul_ogs  # noqa: F401
+    except ImportError:
+        return "3.8"
+    try:
+        from triton_kernels.tensor import SparseMatrix  # noqa: F401
+    except ImportError:
+        return "3.5.1"
+    return "3.6"
+
+
+@cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available.
 
