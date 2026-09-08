@@ -1100,7 +1100,8 @@ class WorkerProc:
                 # Notes have been introduced in python 3.11
                 self.worker.fault_occur = True
                 if hasattr(e, "add_note"):
-                    e.add_note(traceback.format_exc())
+                    pass
+                    #e.add_note(traceback.format_exc())
                 logger.exception("WorkerProc hit an exception.")
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
