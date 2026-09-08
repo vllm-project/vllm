@@ -739,13 +739,14 @@ class RDNA4AllReduce:
             return False
         if graph:
             return True
-        if self.world_size == 2:
+        if self.world_size in (2, 4):
             # The direct-input transport wins isolated benchmarks, but long
             # multi-process model forwards can leave one HIP stream spinning
-            # on peer progress.  Keep TP2 eager execution on PyNCCL until the
-            # cross-process progress protocol is safe under sustained load.
+            # on peer progress.  Keep TP2/TP4 eager P2P execution on PyNCCL
+            # until the cross-process progress protocol is safe under
+            # sustained load.  TP4 mapped-memory eager routes are unaffected.
             return False
-        return self.world_size == 4 and inp.nbytes >= TP4_P2P_FOUR_BLOCK_MIN_SIZE
+        return False
 
     def _p2p_tensor_supported(self, inp: torch.Tensor) -> bool:
         if not self._p2p_ready:

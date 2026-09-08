@@ -94,7 +94,7 @@ def test_p2p_policy_boundaries(world_size, nbytes, expected):
     tensor = _bf16_tensor(nbytes)
     assert communicator._p2p_tensor_supported(tensor) is expected
     assert communicator.should_use_graph(tensor) is expected
-    assert communicator.should_use(tensor) is (world_size == 4 and expected)
+    assert not communicator.should_use(tensor)
 
 
 @pytest.mark.parametrize("world_size", [4, 8])
@@ -154,7 +154,7 @@ def test_measured_pynccl_routing_exclusions():
 
     tp4._mapped = _Delegate(False, "mapped")
     graph_boundary = _bf16_tensor(32 * 1024 * 1024 - 64)
-    assert tp4.should_use(graph_boundary)
+    assert not tp4.should_use(graph_boundary)
     assert tp4.should_use_graph(graph_boundary)
 
 
