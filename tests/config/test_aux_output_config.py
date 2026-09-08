@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from vllm.config import ArtifactConfig, VllmConfig
+from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -39,7 +39,7 @@ def _config(
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
         ),
-        artifact_config=ArtifactConfig(enable_return_routed_experts=True),
+        aux_output_config=AuxOutputConfig(enable_return_routed_experts=True),
         cache_config=SimpleNamespace(
             enable_prefix_caching=enable_prefix_caching,
         ),
@@ -59,26 +59,26 @@ def _config(
     )
 
 
-def test_artifact_config_defaults():
-    config = ArtifactConfig()
+def test_aux_output_config_defaults():
+    config = AuxOutputConfig()
 
     assert not config.enabled
     assert not config.enable_return_routed_experts
     assert config.max_bytes is None
 
 
-def test_artifact_capture_changes_compilation_hash():
-    disabled = ArtifactConfig()
-    enabled = ArtifactConfig(enable_return_routed_experts=True)
+def test_aux_output_capture_changes_compilation_hash():
+    disabled = AuxOutputConfig()
+    enabled = AuxOutputConfig(enable_return_routed_experts=True)
 
     assert disabled.compute_hash() != enabled.compute_hash()
 
 
-def test_legacy_routed_experts_flag_updates_artifact_config():
+def test_legacy_routed_experts_flag_updates_aux_output_config():
     args = EngineArgs(enable_return_routed_experts=True)
 
-    assert args.artifact_config.enabled
-    assert args.artifact_config.enable_return_routed_experts
+    assert args.aux_output_config.enabled
+    assert args.aux_output_config.enable_return_routed_experts
 
 
 @pytest.mark.parametrize(
@@ -98,22 +98,22 @@ def test_legacy_routed_experts_flag_updates_artifact_config():
         ({"connector": "MooncakeConnector"}, "incompatible with KV connectors"),
     ],
 )
-def test_artifact_connector_rejects_unsupported_configuration(kwargs, error):
+def test_aux_output_connector_rejects_unsupported_configuration(kwargs, error):
     with pytest.raises(ValueError, match=error):
-        VllmConfig._verify_artifact_compatibility(_config(**kwargs))
+        VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [{"sliding_window": 4096}, {"attention_chunk_size": 4096}],
 )
-def test_artifact_config_defers_attention_layout_to_kv_config(kwargs):
-    VllmConfig._verify_artifact_compatibility(_config(**kwargs))
+def test_aux_output_config_defers_attention_layout_to_kv_config(kwargs):
+    VllmConfig._verify_aux_output_compatibility(_config(**kwargs))
 
 
-def test_artifact_guards_are_inactive_when_capture_is_disabled():
+def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config: Any = VllmConfig.__new__(VllmConfig)
     config.model_config = SimpleNamespace()
-    config.artifact_config = ArtifactConfig()
+    config.aux_output_config = AuxOutputConfig()
 
-    config._verify_artifact_compatibility()
+    config._verify_aux_output_compatibility()

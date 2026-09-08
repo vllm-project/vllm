@@ -127,7 +127,7 @@ def test_add_requests():
 
 def test_finish_request():
     scheduler = create_scheduler()
-    scheduler.artifact_connector = Mock()
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -136,7 +136,7 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
-        scheduler.artifact_connector.request_finished.assert_called_with(request)
+        scheduler.aux_output_connector.request_finished.assert_called_with(request)
 
 
 def test_get_num_unfinished_requests():
@@ -1247,15 +1247,15 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
-def test_preemption_processes_stale_artifact_output():
+def test_preemption_processes_stale_aux_output():
     scheduler = create_scheduler(enable_prefix_caching=True)
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     scheduler.running.remove(request)
-    scheduler.artifact_connector = Mock()
+    scheduler.aux_output_connector = Mock()
     scheduler._preempt_request(request, 0.0)
-    scheduler.artifact_connector.request_finished.assert_called_once_with(request)
+    scheduler.aux_output_connector.request_finished.assert_called_once_with(request)
 
     scheduler.update_from_output(
         scheduler_output,
@@ -1269,7 +1269,7 @@ def test_preemption_processes_stale_artifact_output():
         ),
     )
 
-    scheduler.artifact_connector.take_output.assert_called_once_with(request, None)
+    scheduler.aux_output_connector.take_output.assert_called_once_with(request, None)
 
 
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
@@ -1360,7 +1360,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.artifact_connector = Mock()
+    scheduler.aux_output_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1377,7 +1377,7 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
-    scheduler.artifact_connector.reset.assert_not_called()
+    scheduler.aux_output_connector.reset.assert_not_called()
 
     with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
         scheduler.reset_prefix_cache(reset_running_requests=True)
@@ -1390,7 +1390,7 @@ def test_scheduler_reset_prefix_cache():
         request.num_in_flight_tokens = 0
 
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
-    scheduler.artifact_connector.reset.assert_called_once_with()
+    scheduler.aux_output_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -1401,13 +1401,13 @@ def test_scheduler_reset_prefix_cache():
 
 
 @pytest.mark.parametrize("reset_successful", [False, True])
-def test_artifact_reset_follows_kv_reset_result(reset_successful: bool):
+def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.artifact_connector = Mock()
+    scheduler.aux_output_connector = Mock()
     scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=reset_successful)
 
     assert scheduler.reset_prefix_cache() is reset_successful
-    assert scheduler.artifact_connector.reset.call_count == int(reset_successful)
+    assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
@@ -3635,7 +3635,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
-    scheduler.artifact_connector = None
+    scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False

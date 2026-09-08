@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Routed-experts artifact keys, publication, and materialization."""
+"""Routed-experts auxiliary output keys, publication, and materialization."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from typing import Any
 
 import numpy as np
 
-from vllm.distributed.artifact_connector.store import (
-    ArtifactObject,
-    BackgroundArtifactStore,
-    InProcessArtifactStore,
+from vllm.distributed.aux_output_connector.store import (
+    BackgroundBlockObjectStore,
+    BlockObject,
+    BlockObjectStore,
 )
 
 
@@ -24,7 +24,7 @@ class _RequestTail:
     length: int = 0
 
 
-class RoutedExpertsArtifactBuffer:
+class RoutedExpertsBuffer:
     """Own incomplete and unkeyed full routed-experts blocks."""
 
     def __init__(
@@ -55,12 +55,12 @@ class RoutedExpertsArtifactBuffer:
         tail = self._requests.get(request_id)
         if tail is not None:
             assert tail.block_start == block_start, (
-                "artifact capture skipped an incomplete block: "
+                "auxiliary output capture skipped an incomplete block: "
                 f"request={request_id}, expected={tail.block_start}, "
                 f"actual={block_start}"
             )
             return tail
-        assert self._free_slots, "artifact block pool is exhausted"
+        assert self._free_slots, "auxiliary output block pool is exhausted"
         tail = _RequestTail(self._free_slots.pop(), block_start)
         self._requests[request_id] = tail
         return tail
@@ -74,7 +74,7 @@ class RoutedExpertsArtifactBuffer:
             "routed-experts capture profile changed"
         )
         if token_start < 0:
-            raise ValueError("artifact token start must be non-negative")
+            raise ValueError("auxiliary output token start must be non-negative")
 
         completed: list[tuple[int, np.ndarray]] = []
         offset = 0
@@ -95,7 +95,7 @@ class RoutedExpertsArtifactBuffer:
 
             tail = self._tail(request_id, block_start)
             assert local_start == tail.length, (
-                "artifact capture is not contiguous: "
+                "auxiliary output capture is not contiguous: "
                 f"request={request_id}, expected={block_start + tail.length}, "
                 f"actual={position}"
             )
@@ -120,11 +120,13 @@ class RoutedExpertsArtifactBuffer:
         self, request_id: Hashable, token_start: int, token_end: int
     ) -> np.ndarray:
         tail = self._requests.get(request_id)
-        assert tail is not None, f"artifact buffer is missing request {request_id}"
+        assert tail is not None, (
+            f"auxiliary output buffer is missing request {request_id}"
+        )
         local_start = token_start - tail.block_start
         local_end = token_end - tail.block_start
         assert 0 <= local_start < local_end <= tail.length, (
-            "artifact range is unavailable: "
+            "auxiliary output range is unavailable: "
             f"request={request_id}, range=[{token_start}, {token_end}), "
             f"available=[{tail.block_start}, {tail.block_start + tail.length})"
         )
@@ -134,7 +136,7 @@ class RoutedExpertsArtifactBuffer:
         """Retain one unkeyed block after the current capture call."""
         if id(rows) in self._owned_slots:
             return rows
-        assert self._free_slots, "artifact block pool is exhausted"
+        assert self._free_slots, "auxiliary output block pool is exhausted"
         slot = self._free_slots.pop()
         retained = self._rows[slot]
         retained[...] = rows
@@ -158,27 +160,27 @@ class RoutedExpertsArtifactBuffer:
 
 
 def routed_experts_keys(
-    block_hashes: Iterable[bytes], artifact_namespace: str
+    block_hashes: Iterable[bytes], aux_output_namespace: str
 ) -> list[str]:
-    prefix = f"vllm-artifact/{artifact_namespace}/"
+    prefix = f"vllm-artifact/{aux_output_namespace}/"
     return [prefix + block_hash.hex() for block_hash in block_hashes]
 
 
 def materialize_routed_experts(
-    store: BackgroundArtifactStore | InProcessArtifactStore,
-    artifact_keys: list[str],
+    store: BackgroundBlockObjectStore | BlockObjectStore,
+    aux_output_keys: list[str],
     *,
     shape_per_token: tuple[int, ...],
     dtype: np.dtype[Any],
 ) -> np.ndarray:
-    if not artifact_keys:
-        raise ValueError("routed-experts artifact key list must not be empty")
-    payload = store.get_concatenated(artifact_keys)
+    if not aux_output_keys:
+        raise ValueError("routed-experts auxiliary output key list must not be empty")
+    payload = store.get_concatenated(aux_output_keys)
     return np.frombuffer(payload, dtype=dtype).reshape((-1, *shape_per_token))
 
 
 def publish_routed_experts(
-    store: BackgroundArtifactStore | InProcessArtifactStore,
+    store: BackgroundBlockObjectStore | BlockObjectStore,
     *,
     batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,
@@ -187,22 +189,26 @@ def publish_routed_experts(
 ) -> None:
     """Publish immutable full R3 blocks."""
     objects = []
-    for artifact_keys, blocks in batches:
+    for aux_output_keys, blocks in batches:
         for block_start, array in blocks:
             if block_start < 0 or block_start % block_size:
-                raise ValueError("artifact block start is not hash-block aligned")
-            block_index = block_start // block_size
-            if block_index >= len(artifact_keys):
                 raise ValueError(
-                    "artifact block has no corresponding key: "
+                    "auxiliary output block start is not hash-block aligned"
+                )
+            block_index = block_start // block_size
+            if block_index >= len(aux_output_keys):
+                raise ValueError(
+                    "auxiliary output block has no corresponding key: "
                     f"start={block_start}, index={block_index}, "
-                    f"keys={len(artifact_keys)}, block_size={block_size}"
+                    f"keys={len(aux_output_keys)}, block_size={block_size}"
                 )
             if len(array) != block_size:
-                raise ValueError("artifact block length does not match hash block size")
+                raise ValueError(
+                    "auxiliary output block length does not match hash block size"
+                )
             objects.append(
-                ArtifactObject(
-                    key=artifact_keys[block_index],
+                BlockObject(
+                    key=aux_output_keys[block_index],
                     payload=array.tobytes(order="C"),
                 )
             )

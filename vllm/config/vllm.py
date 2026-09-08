@@ -27,8 +27,8 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
-from .artifact import ArtifactConfig
 from .attention import AttentionConfig
+from .aux_output import AuxOutputConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -371,8 +371,8 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
-    artifact_config: ArtifactConfig = Field(default_factory=ArtifactConfig)
-    """Execution artifact configuration."""
+    aux_output_config: AuxOutputConfig = Field(default_factory=AuxOutputConfig)
+    """Execution auxiliary output configuration."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -542,7 +542,7 @@ class VllmConfig:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
-        vllm_factors.append(self.artifact_config.compute_hash())
+        vllm_factors.append(self.aux_output_config.compute_hash())
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = safe_hash(
@@ -1012,21 +1012,21 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
-    def _verify_artifact_compatibility(self) -> None:
-        """Reject configurations unsupported by enabled artifacts."""
-        if not self.artifact_config.enabled:
+    def _verify_aux_output_compatibility(self) -> None:
+        """Reject configurations unsupported by enabled auxiliary outputs."""
+        if not self.aux_output_config.enabled:
             return
         if not self.use_v2_model_runner:
             raise ValueError(
-                "Artifact Connector requires Model Runner V2; set "
+                "AuxOutput Connector requires Model Runner V2; set "
                 "VLLM_USE_V2_MODEL_RUNNER=1."
             )
         if self.model_config.runner_type != "generate":
-            raise ValueError("Artifact Connector only supports generate runners.")
+            raise ValueError("AuxOutput Connector only supports generate runners.")
         if not self.model_config.is_moe:
-            raise ValueError("Artifact Connector only supports MoE models.")
+            raise ValueError("AuxOutput Connector only supports MoE models.")
         if not self.cache_config.enable_prefix_caching:
-            raise ValueError("Artifact Connector requires prefix caching.")
+            raise ValueError("AuxOutput Connector requires prefix caching.")
         if (
             self.speculative_config is not None
             and self.speculative_config.enable_adaptive_verification
@@ -1792,7 +1792,7 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
-        self._verify_artifact_compatibility()
+        self._verify_aux_output_compatibility()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
@@ -2442,7 +2442,7 @@ class VllmConfig:
             f"quantization={self.model_config.quantization}, "
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
-            f"artifact_config={self.artifact_config!r}, "
+            f"aux_output_config={self.aux_output_config!r}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "

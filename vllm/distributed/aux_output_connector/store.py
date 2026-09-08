@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""In-process execution-artifact storage."""
+"""In-process auxiliary-output storage."""
 
 from __future__ import annotations
 
@@ -13,33 +13,31 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class ArtifactObject:
-    """One immutable artifact object."""
+class BlockObject:
+    """One immutable auxiliary output object."""
 
     key: str
     payload: bytes
 
 
-class ArtifactStoreError(RuntimeError):
-    """Artifact storage or retrieval failed."""
+class BlockObjectStoreError(RuntimeError):
+    """AuxOutput storage or retrieval failed."""
 
 
-class BackgroundArtifactStore:
+class BackgroundBlockObjectStore:
     """Serialize store mutations on a background thread."""
 
-    def __init__(
-        self, store: InProcessArtifactStore, *, max_pending_batches: int
-    ) -> None:
+    def __init__(self, store: BlockObjectStore, *, max_pending_batches: int) -> None:
         self._store = store
         self._queue: queue.Queue[
-            tuple[list[ArtifactObject], tuple[str, ...], tuple[str, ...]] | None
+            tuple[list[BlockObject], tuple[str, ...], tuple[str, ...]] | None
         ] = queue.Queue(maxsize=max_pending_batches)
         self._error: BaseException | None = None
         self._closed = False
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
-            name="vllm-artifact-writer",
+            name="vllm-aux-output-writer",
         )
         self._thread.start()
 
@@ -63,11 +61,13 @@ class BackgroundArtifactStore:
 
     def _raise_if_failed(self) -> None:
         if self._error is not None:
-            raise ArtifactStoreError("artifact publication failed") from self._error
+            raise BlockObjectStoreError(
+                "auxiliary output publication failed"
+            ) from self._error
 
     def put(
         self,
-        objects: list[ArtifactObject],
+        objects: list[BlockObject],
         *,
         retain_keys: Iterable[str] = (),
         release_keys: Iterable[str] = (),
@@ -77,7 +77,7 @@ class BackgroundArtifactStore:
         if not objects and not retains and not releases:
             return
         if self._closed:
-            raise RuntimeError("artifact store is closed")
+            raise RuntimeError("auxiliary output store is closed")
         self._queue.put((objects, retains, releases))
         self._raise_if_failed()
 
@@ -97,7 +97,7 @@ class BackgroundArtifactStore:
         self._raise_if_failed()
 
 
-class InProcessArtifactStore:
+class BlockObjectStore:
     """Single-owner bounded store that fails closed after an eviction."""
 
     _UNALLOCATED_SLOT = -1
@@ -109,9 +109,9 @@ class InProcessArtifactStore:
         object_nbytes: int,
     ) -> None:
         if object_nbytes <= 0:
-            raise ValueError("artifact object size must be positive")
+            raise ValueError("auxiliary output object size must be positive")
         if max_bytes < object_nbytes:
-            raise ValueError("artifact store must fit at least one object")
+            raise ValueError("auxiliary output store must fit at least one object")
         self.object_nbytes = object_nbytes
         self.num_slots = max_bytes // object_nbytes
         self._lru: OrderedDict[str, int] = OrderedDict()
@@ -133,8 +133,8 @@ class InProcessArtifactStore:
                 if len(victims) == excess:
                     break
         if len(victims) != excess:
-            raise ArtifactStoreError(
-                "artifact store cannot retain the requested batch: "
+            raise BlockObjectStoreError(
+                "auxiliary output store cannot retain the requested batch: "
                 f"limit={self.num_slots} objects"
             )
         for victim in victims:
@@ -151,14 +151,14 @@ class InProcessArtifactStore:
 
     def put(
         self,
-        objects: list[ArtifactObject],
+        objects: list[BlockObject],
         *,
         retain_keys: Iterable[str] = (),
         release_keys: Iterable[str] = (),
     ) -> None:
         arena = self._arena
         if arena is None:
-            raise RuntimeError("artifact store is closed")
+            raise RuntimeError("auxiliary output store is closed")
         unique = {obj.key: obj for obj in objects}
         self._retain(retain_keys)
         terminal_order = self._release(release_keys)
@@ -170,7 +170,7 @@ class InProcessArtifactStore:
                 self._lru.move_to_end(key)
         try:
             self._evict_to_fit(set(unique) - set(terminal_order))
-        except ArtifactStoreError:
+        except BlockObjectStoreError:
             for key in unique:
                 if self._lru.get(key) == self._UNALLOCATED_SLOT:
                     del self._lru[key]
@@ -205,15 +205,15 @@ class InProcessArtifactStore:
     def get_concatenated(self, keys: list[str]) -> bytes:
         arena_obj = self._arena
         if arena_obj is None:
-            raise RuntimeError("artifact store is closed")
+            raise RuntimeError("auxiliary output store is closed")
         try:
             entries = [self._lru[key] for key in keys]
         except KeyError as error:
-            raise ArtifactStoreError(
-                "artifact object does not exist; the object may have been "
+            raise BlockObjectStoreError(
+                "auxiliary output object does not exist; the object may have been "
                 f"evicted (used={len(self._lru)}, "
                 f"limit={self.num_slots} objects). Increase "
-                "artifact_config.max_bytes when a KV cache hit requires it."
+                "aux_output_config.max_bytes when a KV cache hit requires it."
             ) from error
         arena = memoryview(arena_obj)
         try:

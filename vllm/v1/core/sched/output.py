@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.distributed.artifact_connector.connector import (
-        ArtifactConnectorMetadata,
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
-    ArtifactConnectorMetadata = object
+    AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
@@ -280,8 +280,8 @@ class SchedulerOutput:
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
-    # Execution-artifact control metadata consumed by the worker connector.
-    artifact_connector_metadata: ArtifactConnectorMetadata | None = None
+    # Execution-auxiliary output control metadata consumed by the worker connector.
+    aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None

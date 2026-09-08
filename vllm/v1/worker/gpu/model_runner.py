@@ -33,7 +33,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -347,8 +347,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The Artifact Connector owns R3 capture, copying, and storage.
-        self.artifact_connector: ArtifactWorkerConnector | None = None
+        # The AuxOutput Connector owns R3 capture, copying, and storage.
+        self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -356,9 +356,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
 
-    def init_artifact_connector(self, kv_cache_config: KVCacheConfig) -> None:
+    def init_aux_output_connector(self, kv_cache_config: KVCacheConfig) -> None:
         # KV cache initialization determines the block granularity shared by R3.
-        self.artifact_connector = ArtifactWorkerConnector(
+        self.aux_output_connector = AuxOutputWorkerConnector(
             model=self.model,
             kv_cache_config=kv_cache_config,
             max_num_batched_tokens=self.max_num_tokens,
@@ -1575,10 +1575,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
-            if self.artifact_connector is not None:
+            if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
-                self.artifact_connector.begin_step(
-                    scheduler_output.artifact_connector_metadata
+                self.aux_output_connector.begin_step(
+                    scheduler_output.aux_output_connector_metadata
                 )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
@@ -1965,9 +1965,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
         )
-        pending_artifact_output = None
-        if self.artifact_connector is not None:
-            pending_artifact_output = self.artifact_connector.prepare_output(
+        pending_aux_output = None
+        if self.aux_output_connector is not None:
+            pending_aux_output = self.aux_output_connector.prepare_output(
                 model_runner_output.req_ids,
                 input_batch.num_computed_tokens_np,
                 input_batch.query_start_loc_np,
@@ -1980,7 +1980,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
-            pending_artifact_output=pending_artifact_output,
+            pending_aux_output=pending_aux_output,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -2118,8 +2118,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if self.artifact_connector is not None:
-            self.artifact_connector.close()
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()

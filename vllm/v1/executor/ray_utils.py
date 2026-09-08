@@ -237,9 +237,9 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
 
-    artifact_output = output.artifact_connector_output
-    if artifact_output is not None:
-        for request_output in artifact_output.values():
+    aux_output = output.aux_output_connector_output
+    if aux_output is not None:
+        for request_output in aux_output.values():
             request_output.rows = _copy_if_readonly(request_output.rows)
 
 

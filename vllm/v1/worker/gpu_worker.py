@@ -747,8 +747,8 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.vllm_config.artifact_config.enabled:
-            self.model_runner.init_artifact_connector(  # type: ignore[attr-defined]
+        if self.vllm_config.aux_output_config.enabled:
+            self.model_runner.init_aux_output_connector(  # type: ignore[attr-defined]
                 kv_cache_config
             )
 

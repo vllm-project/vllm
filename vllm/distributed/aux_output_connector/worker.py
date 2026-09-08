@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side execution-artifact data plane."""
+"""Worker-side auxiliary-output data plane."""
 
 from __future__ import annotations
 
@@ -13,19 +13,19 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.artifact_connector.connector import (
-    ArtifactConnectorMetadata,
-    ArtifactRequestOutput,
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputConnectorMetadata,
+    AuxOutputRequestOutput,
 )
-from vllm.distributed.artifact_connector.routed_experts import (
-    RoutedExpertsArtifactBuffer,
+from vllm.distributed.aux_output_connector.routed_experts import (
+    RoutedExpertsBuffer,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
-from vllm.distributed.artifact_connector.store import (
-    BackgroundArtifactStore,
-    InProcessArtifactStore,
+from vllm.distributed.aux_output_connector.store import (
+    BackgroundBlockObjectStore,
+    BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class _WorkerRequestState:
-    artifact_keys: list[str] = field(default_factory=list)
+    aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
@@ -48,10 +48,10 @@ class _WorkerRequestState:
 
 
 @dataclass
-class PendingArtifactOutput:
+class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
-    connector: ArtifactWorkerConnector
+    connector: AuxOutputWorkerConnector
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     routed_experts: torch.Tensor
@@ -62,7 +62,7 @@ class PendingArtifactOutput:
         self.finished.set()
 
 
-class ArtifactWorkerConnector:
+class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
     def __init__(
@@ -79,14 +79,14 @@ class ArtifactWorkerConnector:
         )
         bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
-        self._store: BackgroundArtifactStore | None = None
-        self._buffer: RoutedExpertsArtifactBuffer | None = None
+        self._store: BackgroundBlockObjectStore | None = None
+        self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
-        self._step_metadata: ArtifactConnectorMetadata | None = None
-        self._pending_output: PendingArtifactOutput | None = None
+        self._step_metadata: AuxOutputConnectorMetadata | None = None
+        self._pending_output: PendingAuxOutput | None = None
         # Every TP rank participates in capture collectives, but only the
-        # executor output rank owns the artifact data plane.
+        # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
             return
 
@@ -97,17 +97,17 @@ class ArtifactWorkerConnector:
         )
         hashes_per_kv_block = scheduler_block_size // hash_block_size
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.artifact_config.max_bytes
+        max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
             max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
-        self._store = BackgroundArtifactStore(
-            InProcessArtifactStore(
+        self._store = BackgroundBlockObjectStore(
+            BlockObjectStore(
                 max_bytes=max_bytes,
                 object_nbytes=block_nbytes,
             ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        self._buffer = RoutedExpertsArtifactBuffer(
+        self._buffer = RoutedExpertsBuffer(
             dtype,
             shape_per_token,
             hash_block_size,
@@ -121,7 +121,7 @@ class ArtifactWorkerConnector:
         request_ids: list[str],
         token_starts: np.ndarray,
         query_start_loc: np.ndarray,
-    ) -> PendingArtifactOutput | None:
+    ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         buffer = self._buffer
         if buffer is None or self._step_metadata is None:
@@ -130,7 +130,7 @@ class ArtifactWorkerConnector:
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
-        pending_output = PendingArtifactOutput(
+        pending_output = PendingAuxOutput(
             self,
             token_starts,
             query_start_loc,
@@ -147,7 +147,7 @@ class ArtifactWorkerConnector:
         routed_experts: np.ndarray,
         num_sampled: np.ndarray,
         num_rejected: np.ndarray,
-    ) -> dict[str, ArtifactRequestOutput]:
+    ) -> dict[str, AuxOutputRequestOutput]:
         """Commit one completed R3 snapshot and build request outputs."""
         buffer = self._buffer
         store = self._store
@@ -157,7 +157,7 @@ class ArtifactWorkerConnector:
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
-        outputs: dict[str, ArtifactRequestOutput] = {}
+        outputs: dict[str, AuxOutputRequestOutput] = {}
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -171,7 +171,7 @@ class ArtifactWorkerConnector:
         ):
             request_num_tokens = end - start
             assert request_num_tokens > 0, (
-                "artifact request token count must be positive"
+                "auxiliary output request token count must be positive"
             )
             state = self._requests[request_id]
 
@@ -179,7 +179,7 @@ class ArtifactWorkerConnector:
             # suffix. Batch boundaries still span the full executed range.
             rejected = int(rejected)
             assert 0 <= rejected <= request_num_tokens, (
-                "artifact rejected-token count is invalid"
+                "auxiliary output rejected-token count is invalid"
             )
             rows = routed_experts[start : end - rejected]
 
@@ -188,11 +188,13 @@ class ArtifactWorkerConnector:
             if capture_cursor is None:
                 capture_cursor = capture_start
 
-            assert capture_start >= capture_cursor, "artifact capture moved backwards"
+            assert capture_start >= capture_cursor, (
+                "auxiliary output capture moved backwards"
+            )
             if capture_start > capture_cursor:
                 # Reattach after an optimistically scheduled suffix was rejected.
                 assert capture_cursor < state.scheduled_cursor, (
-                    "artifact capture has an unbacked token gap"
+                    "auxiliary output capture has an unbacked token gap"
                 )
                 capture_start = capture_cursor
 
@@ -206,7 +208,7 @@ class ArtifactWorkerConnector:
             token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = ArtifactRequestOutput(
+                    outputs[request_id] = AuxOutputRequestOutput(
                         emit_start,
                         rows[emit_start - capture_start :],
                     )
@@ -220,13 +222,13 @@ class ArtifactWorkerConnector:
         for request_id, emit_start, token_end in materialize_outputs:
             state = self._requests[request_id]
             stored_end = (
-                min(token_end // block_size, len(state.artifact_keys)) * block_size
+                min(token_end // block_size, len(state.aux_output_keys)) * block_size
             )
             if emit_start < stored_end:
                 first_block = emit_start // block_size
                 stored = materialize_routed_experts(
                     store,
-                    state.artifact_keys[first_block : stored_end // block_size],
+                    state.aux_output_keys[first_block : stored_end // block_size],
                     shape_per_token=buffer.shape_per_token,
                     dtype=buffer.dtype,
                 )
@@ -238,7 +240,7 @@ class ArtifactWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = ArtifactRequestOutput(emit_start, rows)
+            outputs[request_id] = AuxOutputRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
 
@@ -254,7 +256,7 @@ class ArtifactWorkerConnector:
         ready_batches = []
         for state, completed in batches:
             blocks = state.pending_blocks + completed
-            keyed_end = len(state.artifact_keys) * buffer.block_size
+            keyed_end = len(state.aux_output_keys) * buffer.block_size
             ready = [(start, rows) for start, rows in blocks if start < keyed_end]
             state.pending_blocks = [
                 (start, buffer.retain_block(rows))
@@ -262,7 +264,7 @@ class ArtifactWorkerConnector:
                 if start >= keyed_end
             ]
             if ready:
-                ready_batches.append((state.artifact_keys, ready))
+                ready_batches.append((state.aux_output_keys, ready))
         if ready_batches or retain_keys or release_keys:
             publish_routed_experts(
                 store,
@@ -275,7 +277,7 @@ class ArtifactWorkerConnector:
             for _, rows in blocks:
                 buffer.release_block(rows)
 
-    def begin_step(self, metadata: ArtifactConnectorMetadata | None) -> None:
+    def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
         if pending_output := self._pending_output:
             pending_output.finished.wait()
@@ -283,17 +285,17 @@ class ArtifactWorkerConnector:
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
-            "artifact request cannot run and finish in one step"
+            "auxiliary output request cannot run and finish in one step"
         )
         assert metadata.generation >= self._generation, (
-            "artifact metadata generation moved backwards"
+            "auxiliary output metadata generation moved backwards"
         )
         release_keys: list[str] = []
         if metadata.generation > self._generation:
             release_keys.extend(
                 key
                 for state in self._requests.values()
-                for key in reversed(state.artifact_keys)
+                for key in reversed(state.aux_output_keys)
             )
             self._buffer.reset()
             self._requests.clear()
@@ -303,7 +305,7 @@ class ArtifactWorkerConnector:
                 request_id, _WorkerRequestState(emit_cursor=emit_start)
             )
             assert emit_start <= state.emit_cursor, (
-                "artifact Scheduler emit cursor moved ahead"
+                "auxiliary output Scheduler emit cursor moved ahead"
             )
         block_batches: list[
             tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
@@ -312,13 +314,13 @@ class ArtifactWorkerConnector:
         for request_id, block_hashes in metadata.block_hashes.items():
             state = self._requests[request_id]
             keys = routed_experts_keys(block_hashes, str(self._generation))
-            state.artifact_keys.extend(keys)
+            state.aux_output_keys.extend(keys)
             retained_keys.extend(keys)
             block_batches.append((state, []))
         release_keys.extend(
             key
             for request_id in metadata.finished_requests
-            for key in reversed(self._requests[request_id].artifact_keys)
+            for key in reversed(self._requests[request_id].aux_output_keys)
         )
         self._publish_blocks(block_batches, retained_keys, release_keys)
         for request_id in metadata.finished_requests:

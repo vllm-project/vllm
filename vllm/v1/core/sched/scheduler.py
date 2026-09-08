@@ -9,7 +9,7 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
-from vllm.distributed.artifact_connector.connector import ArtifactSchedulerConnector
+from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -373,9 +373,9 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        self.artifact_connector = (
-            ArtifactSchedulerConnector()
-            if vllm_config.artifact_config.enabled
+        self.aux_output_connector = (
+            AuxOutputSchedulerConnector()
+            if vllm_config.aux_output_config.enabled
             else None
         )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
@@ -1396,9 +1396,9 @@ class Scheduler(SchedulerInterface):
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
-        if self.artifact_connector is not None:
-            scheduler_output.artifact_connector_metadata = (
-                self.artifact_connector.build_connector_meta(
+        if self.aux_output_connector is not None:
+            scheduler_output.aux_output_connector_metadata = (
+                self.aux_output_connector.build_connector_meta(
                     scheduler_output, self.requests
                 )
             )
@@ -1457,8 +1457,8 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        if self.artifact_connector is not None:
-            self.artifact_connector.request_finished(request)
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -2007,9 +2007,9 @@ class Scheduler(SchedulerInterface):
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.artifact_connector is not None and should_emit_output:
-                routed_experts = self.artifact_connector.take_output(
-                    request, model_runner_output.artifact_connector_output
+            if self.aux_output_connector is not None and should_emit_output:
+                routed_experts = self.aux_output_connector.take_output(
+                    request, model_runner_output.aux_output_connector_output
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
@@ -2468,8 +2468,8 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
-        if self.artifact_connector is not None:
-            self.artifact_connector.request_finished(request)
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -2599,15 +2599,15 @@ class Scheduler(SchedulerInterface):
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
-        if reset_running_requests and self.artifact_connector is not None:
+        if reset_running_requests and self.aux_output_connector is not None:
             if self._pause_state != PauseState.PAUSED_ALL:
                 raise RuntimeError(
-                    "Artifact Connector only supports resetting running requests "
+                    "AuxOutput Connector only supports resetting running requests "
                     "after pause(mode='keep')."
                 )
             if any(request.num_in_flight_tokens for request in self.requests.values()):
                 raise RuntimeError(
-                    "Artifact Connector cannot reset while model output is in flight."
+                    "AuxOutput Connector cannot reset while model output is in flight."
                 )
         if reset_running_requests:
             # For logging.
@@ -2639,8 +2639,8 @@ class Scheduler(SchedulerInterface):
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
 
-        if reset_successful and self.artifact_connector is not None:
-            self.artifact_connector.reset()
+        if reset_successful and self.aux_output_connector is not None:
+            self.aux_output_connector.reset()
 
         return reset_successful
 

@@ -10,25 +10,25 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.artifact_connector.connector import (
-    ArtifactConnectorMetadata,
-    ArtifactRequestOutput,
-    ArtifactSchedulerConnector,
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputConnectorMetadata,
+    AuxOutputRequestOutput,
+    AuxOutputSchedulerConnector,
     PackedBlockHashes,
 )
-from vllm.distributed.artifact_connector.routed_experts import (
-    RoutedExpertsArtifactBuffer,
+from vllm.distributed.aux_output_connector.routed_experts import (
+    RoutedExpertsBuffer,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
-from vllm.distributed.artifact_connector.store import (
-    ArtifactObject,
-    ArtifactStoreError,
-    BackgroundArtifactStore,
-    InProcessArtifactStore,
+from vllm.distributed.aux_output_connector.store import (
+    BackgroundBlockObjectStore,
+    BlockObject,
+    BlockObjectStore,
+    BlockObjectStoreError,
 )
-from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -48,9 +48,9 @@ def test_background_store_publishes_without_blocking_caller():
         release.wait()
 
     underlying.put.side_effect = put
-    store = BackgroundArtifactStore(underlying, max_pending_batches=1)
+    store = BackgroundBlockObjectStore(underlying, max_pending_batches=1)
 
-    store.put([ArtifactObject("key", b"value")])
+    store.put([BlockObject("key", b"value")])
     assert started.wait(timeout=1)
     release.set()
     store.close()
@@ -59,7 +59,7 @@ def test_background_store_publishes_without_blocking_caller():
 
 
 def _make_connector():
-    return ArtifactSchedulerConnector()
+    return AuxOutputSchedulerConnector()
 
 
 @dataclass
@@ -73,7 +73,7 @@ class _Execution:
 
 @dataclass
 class _WorkerStep:
-    metadata: ArtifactConnectorMetadata
+    metadata: AuxOutputConnectorMetadata
     executions: list[_Execution]
 
 
@@ -127,7 +127,7 @@ def _metadata(
         if hashes
     )
     return _WorkerStep(
-        ArtifactConnectorMetadata(
+        AuxOutputConnectorMetadata(
             generation,
             {request.request_id: request.emit_start for request in requests},
             block_hashes,
@@ -146,7 +146,7 @@ def _execution_ranges(metadata, request_ids):
     return token_starts, num_tokens
 
 
-def _begin_step(worker: ArtifactWorkerConnector, step: _WorkerStep) -> None:
+def _begin_step(worker: AuxOutputWorkerConnector, step: _WorkerStep) -> None:
     worker.begin_step(step.metadata)
 
 
@@ -155,7 +155,7 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
-) -> ArtifactWorkerConnector:
+) -> AuxOutputWorkerConnector:
     object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
     store = _make_store(
         max_bytes=(
@@ -163,9 +163,9 @@ def _make_worker(
         ),
         object_nbytes=object_nbytes,
     )
-    worker = object.__new__(ArtifactWorkerConnector)
+    worker = object.__new__(AuxOutputWorkerConnector)
     worker._store = store
-    worker._buffer = RoutedExpertsArtifactBuffer(
+    worker._buffer = RoutedExpertsBuffer(
         _DTYPE,
         _SHAPE,
         _BLOCK_SIZE,
@@ -205,7 +205,7 @@ def test_worker_rejects_run_and_finish_in_one_step():
 
 
 def test_non_output_rank_skips_capture_snapshot():
-    worker = object.__new__(ArtifactWorkerConnector)
+    worker = object.__new__(AuxOutputWorkerConnector)
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
@@ -214,7 +214,7 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._capturer.snapshot_routing_data.assert_not_called()
 
 
-def test_worker_skips_artifacts_for_internal_warmup_step():
+def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker = _make_worker(1)
     worker._capturer = Mock()
 
@@ -225,7 +225,7 @@ def test_worker_skips_artifacts_for_internal_warmup_step():
     worker.close()
 
 
-def test_worker_waits_for_previous_artifact_output_before_next_step():
+def test_worker_waits_for_previous_aux_output_before_next_step():
     worker = _make_worker(1)
     finished = threading.Event()
     worker._pending_output = SimpleNamespace(finished=finished)
@@ -403,7 +403,7 @@ def test_worker_rejects_mismatched_capture_profile(routing):
 def test_logical_buffer_rejects_noncontiguous_capture(
     initial_start, initial_rows, invalid_start
 ):
-    buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
+    buffer = RoutedExpertsBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
     if initial_start is not None:
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
         assert buffer.capture("request", initial_start, rows) == []
@@ -415,7 +415,7 @@ def test_logical_buffer_rejects_noncontiguous_capture(
 
 
 def test_logical_buffer_captures_one_row_per_decode_step():
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, 3, 2)
 
     completed = []
@@ -427,7 +427,7 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
 
 def test_logical_buffer_copies_borrowed_block_when_retained():
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
+    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
 
     expected = logical.copy()
@@ -445,7 +445,7 @@ def _make_store(
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
 ):
-    return InProcessArtifactStore(
+    return BlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
     )
@@ -453,7 +453,7 @@ def _make_store(
 
 def test_publish_routed_experts_publishes_full_blocks():
     store = _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)))
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
     keys = routed_experts_keys(hashes, "0")
@@ -543,7 +543,7 @@ def test_worker_matches_kv_eviction_order_after_requests_finish():
         ),
         np.concatenate([blocks[1], blocks[3], blocks[4]]),
     )
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         materialize_routed_experts(
             worker._store,
             routed_experts_keys([hashes[2]], "0"),
@@ -1067,7 +1067,7 @@ def test_worker_merges_block_hash_deltas():
         ),
     )
 
-    assert worker._requests["request"].artifact_keys == [
+    assert worker._requests["request"].aux_output_keys == [
         "vllm-artifact/0/" + (b"a" * 32).hex(),
         "vllm-artifact/0/" + (b"b" * 32).hex(),
         "vllm-artifact/0/" + (b"c" * 32).hex(),
@@ -1120,7 +1120,7 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     worker.close()
 
 
-def test_worker_fails_when_cached_artifact_is_missing():
+def test_worker_fails_when_cached_aux_output_is_missing():
     worker = _make_worker(1)
     worker._generation = 0
     metadata = _metadata(
@@ -1137,7 +1137,7 @@ def test_worker_fails_when_cached_artifact_is_missing():
         {},
     )
 
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         _process_output(
             worker,
             metadata,
@@ -1150,46 +1150,46 @@ def test_worker_fails_when_cached_artifact_is_missing():
 
 def test_store_rejects_oversized_batch_without_partial_write():
     store = _make_store(max_bytes=6, object_nbytes=3)
-    store.put([ArtifactObject("retained", b"rrr")])
+    store.put([BlockObject("retained", b"rrr")])
 
-    with pytest.raises(ArtifactStoreError, match="cannot retain"):
+    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
         store.put(
             [
-                ArtifactObject("first", b"111"),
-                ArtifactObject("second", b"222"),
-                ArtifactObject("third", b"333"),
+                BlockObject("first", b"111"),
+                BlockObject("second", b"222"),
+                BlockObject("third", b"333"),
             ]
         )
 
     assert store.get_concatenated(["retained"]) == b"rrr"
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["first"])
     store.close()
 
 
 def test_store_lru_and_immutable_put():
     store = _make_store(max_bytes=8)
-    store.put([ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")])
+    store.put([BlockObject("first", b"1111"), BlockObject("second", b"2222")])
     assert store.get_concatenated(["first"]) == b"1111"
 
-    store.put([ArtifactObject("first", b"1111"), ArtifactObject("third", b"3333")])
+    store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(ArtifactStoreError, match="Increase artifact_config"):
+    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
         store.get_concatenated(["second"])
     store.close()
 
 
-def test_store_does_not_evict_referenced_artifacts():
+def test_store_does_not_evict_referenced_aux_outputs():
     store = _make_store(max_bytes=8)
-    store.put([ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")])
+    store.put([BlockObject("first", b"1111"), BlockObject("second", b"2222")])
     store.put([], retain_keys=["first"])
     store.put([], retain_keys=["first"], release_keys=["first"])
 
-    store.put([ArtifactObject("third", b"3333")])
+    store.put([BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.put([], release_keys=["first"])
     store.close()
@@ -1199,17 +1199,17 @@ def test_store_terminal_put_preserves_tail_first_eviction_order():
     store = _make_store(max_bytes=8)
     keys = ["first", "second", "third"]
     store.put(
-        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        [BlockObject("first", b"1111"), BlockObject("second", b"2222")],
         retain_keys=keys,
     )
 
     store.put(
-        [ArtifactObject("third", b"3333")],
+        [BlockObject("third", b"3333")],
         release_keys=reversed(keys),
     )
 
     assert store.get_concatenated(keys[:2]) == b"11112222"
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["third"])
     store.close()
 
@@ -1218,18 +1218,18 @@ def test_store_terminal_put_orders_survivors_for_later_eviction():
     store = _make_store(max_bytes=12)
     keys = ["first", "second", "third"]
     store.put(
-        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        [BlockObject("first", b"1111"), BlockObject("second", b"2222")],
         retain_keys=keys,
     )
 
     store.put(
-        [ArtifactObject("third", b"3333")],
+        [BlockObject("third", b"3333")],
         release_keys=reversed(keys),
     )
-    store.put([ArtifactObject("fourth", b"4444")])
+    store.put([BlockObject("fourth", b"4444")])
 
     assert store.get_concatenated(["first", "second", "fourth"]) == b"111122224444"
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["third"])
     store.close()
 
@@ -1238,17 +1238,17 @@ def test_store_terminal_put_keeps_a_shared_incoming_key():
     store = _make_store(max_bytes=8)
     keys = ["first", "second", "third"]
     store.put(
-        [ArtifactObject("first", b"1111"), ArtifactObject("second", b"2222")],
+        [BlockObject("first", b"1111"), BlockObject("second", b"2222")],
         retain_keys=(*keys, "third"),
     )
 
     store.put(
-        [ArtifactObject("third", b"3333")],
+        [BlockObject("third", b"3333")],
         release_keys=reversed(keys),
     )
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.put([], release_keys=["third"])
     store.close()
@@ -1259,7 +1259,7 @@ def test_store_rejects_access_after_close():
     store.close()
 
     with pytest.raises(RuntimeError, match="closed"):
-        store.put([ArtifactObject("first", b"1111")])
+        store.put([BlockObject("first", b"1111")])
     with pytest.raises(RuntimeError, match="closed"):
         store.get_concatenated(["first"])
 
@@ -1268,13 +1268,13 @@ def test_store_reuses_evicted_slot_without_moving_live_objects():
     store = _make_store(max_bytes=12)
     store.put(
         [
-            ArtifactObject("first", b"1111"),
-            ArtifactObject("second", b"2222"),
-            ArtifactObject("third", b"3333"),
+            BlockObject("first", b"1111"),
+            BlockObject("second", b"2222"),
+            BlockObject("third", b"3333"),
         ]
     )
     assert store.get_concatenated(["second"]) == b"2222"
-    store.put([ArtifactObject("fourth", b"4444")])
+    store.put([BlockObject("fourth", b"4444")])
 
     assert store.get_concatenated(["second", "third", "fourth"]) == b"222233334444"
     store.close()
@@ -1331,7 +1331,7 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-    output = {"request": ArtifactRequestOutput(0, routing)}
+    output = {"request": AuxOutputRequestOutput(0, routing)}
     request.num_computed_tokens = 4
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
 
@@ -1494,7 +1494,7 @@ def test_worker_releases_terminal_pins_before_same_step_publish():
         ),
         producer_rows,
     )
-    with pytest.raises(ArtifactStoreError, match="does not exist"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         worker._store.get_concatenated(routed_experts_keys([victim_hash], "0"))
     worker.close()
 
@@ -1564,7 +1564,7 @@ def test_scheduler_connector_recreates_preempted_request_state():
     assert list(resumed.block_hashes[request.request_id]) == [b"a" * 32]
 
 
-def test_scheduler_consumes_ordered_stale_artifact_outputs():
+def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=6)
     connector.build_connector_meta(
@@ -1573,8 +1573,8 @@ def test_scheduler_consumes_ordered_stale_artifact_outputs():
     )
     first_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     second_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2) + 40
-    first = {"request": ArtifactRequestOutput(0, first_rows)}
-    second = {"request": ArtifactRequestOutput(4, second_rows)}
+    first = {"request": AuxOutputRequestOutput(0, first_rows)}
+    second = {"request": AuxOutputRequestOutput(4, second_rows)}
     connector.request_finished(request)
 
     request.num_tokens = 5
@@ -1585,7 +1585,7 @@ def test_scheduler_consumes_ordered_stale_artifact_outputs():
     )
 
 
-def test_scheduler_rejects_stale_output_without_artifacts():
+def test_scheduler_rejects_stale_output_without_aux_outputs():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=1)
     connector.build_connector_meta(
@@ -1593,14 +1593,16 @@ def test_scheduler_rejects_stale_output_without_artifacts():
         {request.request_id: request},
     )
 
-    with pytest.raises(AssertionError, match="artifact worker output is missing"):
+    with pytest.raises(
+        AssertionError, match="auxiliary output worker output is missing"
+    ):
         connector.take_output(
             request,
             {},
         )
 
 
-def test_scheduler_rejects_missing_accepted_artifact_rows():
+def test_scheduler_rejects_missing_accepted_aux_output_rows():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=2)
     connector.build_connector_meta(
@@ -1608,7 +1610,7 @@ def test_scheduler_rejects_missing_accepted_artifact_rows():
         {request.request_id: request},
     )
     output = {
-        "request": ArtifactRequestOutput(
+        "request": AuxOutputRequestOutput(
             0,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
@@ -1618,7 +1620,7 @@ def test_scheduler_rejects_missing_accepted_artifact_rows():
         connector.take_output(request, output)
 
 
-def test_scheduler_rejects_empty_artifact_output_when_request_is_finished():
+def test_scheduler_rejects_empty_aux_output_when_request_is_finished():
     connector = _make_connector()
     request = _scheduler_request("request", [], num_tokens=1)
     request.finished = True
@@ -1627,14 +1629,14 @@ def test_scheduler_rejects_empty_artifact_output_when_request_is_finished():
         {request.request_id: request},
     )
     output = {
-        "request": ArtifactRequestOutput(
+        "request": AuxOutputRequestOutput(
             0,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
     }
 
     with pytest.raises(
-        AssertionError, match="finished artifact output has no accepted"
+        AssertionError, match="finished auxiliary output output has no accepted"
     ):
         connector.take_output(request, output)
 

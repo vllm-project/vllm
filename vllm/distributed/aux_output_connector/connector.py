@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scheduler-side control plane for execution artifacts."""
+"""Scheduler-side control plane for execution auxiliary outputs."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class PackedBlockHashes:
 
 
 @dataclass
-class ArtifactConnectorMetadata:
+class AuxOutputConnectorMetadata:
     generation: int
     requests: dict[str, int]
     block_hashes: dict[str, PackedBlockHashes]
@@ -36,13 +36,13 @@ class ArtifactConnectorMetadata:
 
 
 @dataclass
-class ArtifactRequestOutput:
+class AuxOutputRequestOutput:
     token_start: int
     rows: np.ndarray
 
 
-class ArtifactSchedulerConnector:
-    """Build worker metadata without owning artifact payloads or stores."""
+class AuxOutputSchedulerConnector:
+    """Build worker metadata without owning auxiliary output payloads or stores."""
 
     def __init__(self) -> None:
         # Number of hashes already sent to the worker for each active request.
@@ -55,7 +55,7 @@ class ArtifactSchedulerConnector:
         self,
         scheduler_output: SchedulerOutput,
         requests: dict[str, Request],
-    ) -> ArtifactConnectorMetadata:
+    ) -> AuxOutputConnectorMetadata:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
@@ -91,7 +91,7 @@ class ArtifactSchedulerConnector:
             if block_hashes is not None
         )
         self._finished_requests = {}
-        return ArtifactConnectorMetadata(
+        return AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
             block_hashes_by_request,
@@ -101,19 +101,19 @@ class ArtifactSchedulerConnector:
     def take_output(
         self,
         request: Request,
-        output: dict[str, ArtifactRequestOutput] | None,
+        output: dict[str, AuxOutputRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
         assert output is not None and request_id in output, (
-            f"artifact worker output is missing {request_id}"
+            f"auxiliary output worker output is missing {request_id}"
         )
         request_output = output[request_id]
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end <= 0:
             assert not request.is_finished(), (
-                "finished artifact output has no accepted token range: "
+                "finished auxiliary output output has no accepted token range: "
                 f"request={request_id}, token_end={token_end}, "
                 f"output_start={request_output.token_start}, "
                 "output_end="
@@ -121,7 +121,7 @@ class ArtifactSchedulerConnector:
             )
             return None
         assert local_end <= len(request_output.rows), (
-            "artifact worker output has an invalid token range: "
+            "auxiliary output worker output has an invalid token range: "
             f"request={request_id}, token_end={token_end}, "
             f"output_start={request_output.token_start}, "
             f"output_end={request_output.token_start + len(request_output.rows)}"
@@ -150,7 +150,7 @@ class ArtifactSchedulerConnector:
         return PackedBlockHashes(b"".join(new_hashes), len(new_hashes[0]))
 
     def reset(self) -> None:
-        """Start a new artifact namespace after a prefix-cache reset."""
+        """Start a new auxiliary output namespace after a prefix-cache reset."""
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
         self._finished_requests.clear()

@@ -34,8 +34,8 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (
-    ArtifactConfig,
     AttentionConfig,
+    AuxOutputConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -428,7 +428,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     # Public compatibility argument. Canonical runtime state lives in
-    # ArtifactConfig.
+    # AuxOutputConfig.
     enable_return_routed_experts: bool = False
     return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
@@ -651,7 +651,7 @@ class EngineArgs:
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
     )
-    artifact_config: ArtifactConfig = get_field(VllmConfig, "artifact_config")
+    aux_output_config: AuxOutputConfig = get_field(VllmConfig, "aux_output_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
@@ -786,10 +786,10 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
-        if isinstance(self.artifact_config, dict):
-            self.artifact_config = ArtifactConfig(**self.artifact_config)
+        if isinstance(self.aux_output_config, dict):
+            self.aux_output_config = AuxOutputConfig(**self.aux_output_config)
         if self.enable_return_routed_experts:
-            self.artifact_config.enable_return_routed_experts = True
+            self.aux_output_config.enable_return_routed_experts = True
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -857,7 +857,7 @@ class EngineArgs:
 
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
-        artifact_kwargs = get_kwargs(ArtifactConfig)
+        aux_output_kwargs = get_kwargs(AuxOutputConfig)
         model_group = parser.add_argument_group(
             title="ModelConfig",
             description=ModelConfig.__doc__,
@@ -897,7 +897,7 @@ class EngineArgs:
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument(
             "--enable-return-routed-experts",
-            **artifact_kwargs["enable_return_routed_experts"],
+            **aux_output_kwargs["enable_return_routed_experts"],
         )
         model_group.add_argument(
             "--return-sampling-mask",
@@ -1708,7 +1708,9 @@ class EngineArgs:
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
-        vllm_group.add_argument("--artifact-config", **vllm_kwargs["artifact_config"])
+        vllm_group.add_argument(
+            "--aux-output-config", **vllm_kwargs["aux_output_config"]
+        )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
@@ -2586,7 +2588,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
-            artifact_config=self.artifact_config,
+            aux_output_config=self.aux_output_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
