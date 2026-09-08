@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -20,6 +22,9 @@ from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     VideoLoader,
+)
+from vllm.multimodal.video_decoders.pynvvideocodec import (
+    PyNvVideoCodecVideoBackendMixin,
     _pynvvc_frames_to_nhwc,
 )
 
@@ -364,6 +369,33 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
         videoio.load_base64("video/jpeg", data)
 
 
+def test_pynvvideocodec_unrelated_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakePyNvVCException(Exception):
+        pass
+
+    fake_nvc = SimpleNamespace(PyNvVCException=FakePyNvVCException)
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
+    original_error = RuntimeError("GPU decoder unavailable")
+
+    def raise_unrelated_error(cls, file_path, nvc):
+        raise original_error
+
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_read_source_metadata",
+        classmethod(raise_unrelated_error),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
+            None, b"video", None
+        )
+
+    assert exc_info.value is original_error
+
+
 # ---------------------------------------------------------------------------
 # GPU video backend policy tests
 # ---------------------------------------------------------------------------
@@ -422,7 +454,7 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["hw_decoders"] == 2
 
-    @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
+    @pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs=None,
@@ -430,7 +462,7 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["video_backend"] == backend
 
-    @pytest.mark.parametrize("backend", ["opencv", "pyav"])
+    @pytest.mark.parametrize("backend", ["opencv"])
     def test_software_codec_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs=None,

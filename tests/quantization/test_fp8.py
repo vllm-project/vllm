@@ -6,17 +6,26 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import regex as re
 import torch
 
-from tests.quantization.utils import is_quant_method_supported
+from tests.quantization.utils import (
+    is_quant_method_supported,
+    load_model_without_vllm_runner,
+)
 from vllm import _custom_ops as ops
+from vllm.config import set_current_vllm_config
+from vllm.config.cache import CacheConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -30,6 +39,13 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils import flashinfer_utils
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    prepare_fp8_moe_layer_for_fi,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_input_tensor_strategy_moe,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -47,6 +63,55 @@ MODELS = [
 ]
 
 
+def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
+    monkeypatch.setattr(
+        flashinfer_utils,
+        "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",
+        lambda *args: None,
+    )
+    intermediate = 17
+    padded_intermediate = 32
+    hidden_size = 4
+    gate = torch.ones((1, intermediate, hidden_size), dtype=torch.float8_e4m3fn)
+    up = torch.full_like(gate, 2)
+    w13 = torch.cat((gate, up), dim=1)
+    w2 = torch.ones((1, hidden_size, intermediate), dtype=torch.float8_e4m3fn)
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+
+    padded_w31, _, _, _ = prepare_fp8_moe_layer_for_fi(
+        layer,
+        w13,
+        w2,
+        w13_scale=torch.ones(1),
+        w13_input_scale=torch.ones(1),
+        w2_scale=torch.ones(1),
+        w2_input_scale=torch.ones(1),
+        is_trtllm=True,
+    )
+
+    expected = w13.new_zeros((1, 2 * padded_intermediate, hidden_size))
+    expected[:, :intermediate] = up
+    expected[:, padded_intermediate : padded_intermediate + intermediate] = gate
+    assert layer.moe_config.intermediate_size_per_partition == padded_intermediate
+    assert torch.equal(padded_w31, expected)
+
+
+def test_static_fp8_moe_input_scales_remain_scalar() -> None:
+    a1_scale, a2_scale = process_fp8_input_tensor_strategy_moe(
+        torch.tensor([0.25, 0.5]),
+        torch.tensor([0.75, 0.6]),
+        enable_eplb=False,
+    )
+
+    assert a1_scale.ndim == a2_scale.ndim == 0
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
@@ -59,19 +124,33 @@ MODELS = [
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_model_load_and_run(
-    vllm_runner, model_id: str, force_marlin: bool, use_rocm_aiter: bool, monkeypatch
+    model_id: str,
+    force_marlin: bool,
+    use_rocm_aiter: bool,
+    monkeypatch,
+    dist_init,
+    workspace_init,
 ) -> None:
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
-
-    with vllm_runner(model_id, enforce_eager=True) as llm:
-        # note: this does not test accuracy, just that we can run through
-        # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
+    kernel_config = KernelConfig(
+        linear_backend="marlin" if force_marlin else "auto",
+        moe_backend="marlin" if force_marlin else "auto",
+    )
+    model, vllm_config = load_model_without_vllm_runner(
+        model_id,
+        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
+        vllm_config_kwargs={"kernel_config": kernel_config},
+    )
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        model(input_ids, positions, None)
 
 
 @pytest.mark.skipif(
@@ -98,8 +177,10 @@ def test_online_quantization(
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
     model_dtype = "auto"
     if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
@@ -112,6 +193,7 @@ def test_online_quantization(
         dtype=model_dtype,
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        **kwargs,
     ) as llm:
 
         def check_model(model):
@@ -340,7 +422,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 @pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
-@pytest.mark.parametrize("weight_block_size", [None, [1, 1]])
+@pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking
 # (excluding device sharding) must also be applied to the reloaded weights
 #
@@ -371,6 +453,8 @@ def test_fp8_reloading(
 
     # Set model config as model_config.dtype is required in Fp8LinearMethod.
     default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    layer_size = 128 if weight_block_size is not None else 1
     with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
@@ -378,14 +462,14 @@ def test_fp8_reloading(
         )
 
         if method_cls is Fp8LinearMethod:
-            layer = torch.nn.Linear(1, 1)
+            layer = torch.nn.Linear(layer_size, layer_size)
             method = method_cls(config)
             method.create_weights(
                 layer=layer,
-                input_size_per_partition=1,
-                output_partition_sizes=[1],
-                input_size=1,
-                output_size=1,
+                input_size_per_partition=layer_size,
+                output_partition_sizes=[layer_size],
+                input_size=layer_size,
+                output_size=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
@@ -395,16 +479,16 @@ def test_fp8_reloading(
             layer = FusedMoEFactory(
                 num_experts=1,
                 top_k=1,
-                hidden_size=1,
-                intermediate_size=1,
+                hidden_size=layer_size,
+                intermediate_size=layer_size,
             )
             layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
                 num_experts=1,
-                hidden_size=1,
-                intermediate_size_per_partition=1,
+                hidden_size=layer_size,
+                intermediate_size_per_partition=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
@@ -461,20 +545,18 @@ def test_kv_cache_scale_sync_to_host_copies():
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
+def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     """Test that kv_cache_dtype_skip_layers skips quantization for specified layers."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    with vllm_runner(
+    model, _ = load_model_without_vllm_runner(
         "facebook/opt-125m",
-        kv_cache_dtype="fp8",
-        kv_cache_dtype_skip_layers=["0", "2"],
-        enforce_eager=True,
-    ) as llm:
-
-        def check_layers(model):
-            for i, layer in enumerate(model.model.decoder.layers):
-                expected = "auto" if str(i) in ["0", "2"] else "fp8"
-                assert layer.self_attn.attn.kv_cache_dtype == expected
-
-        llm.apply_model(check_layers)
+        vllm_config_kwargs={
+            "cache_config": CacheConfig(
+                cache_dtype="fp8", kv_cache_dtype_skip_layers=["0", "2"]
+            )
+        },
+    )
+    for i, layer in enumerate(model.model.decoder.layers):
+        expected = "auto" if str(i) in ["0", "2"] else "fp8"
+        assert layer.self_attn.attn.kv_cache_dtype == expected
