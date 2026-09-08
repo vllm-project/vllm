@@ -551,6 +551,7 @@ class SingleDirectionOffloadingHandler:
             dev_ptr_offset += group_size * n_data_refs
 
         assert cpu_offset == num_cpu_blocks
+        assert dev_ptr_offset == len(device_ptrs.ptrs)
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
         assert op_idx <= num_copy_ops
@@ -706,13 +707,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             else None
         )
 
-        gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         for t_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
-                (-1, gpu_page_size_bytes)
-            )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
             if canonical_bytes_per_block is not None:
@@ -738,7 +735,6 @@ class CPUOffloadingWorker(OffloadingWorker):
                     time.monotonic() - t0,
                 )
 
-            gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
         self._store_handler = SingleDirectionOffloadingHandler(

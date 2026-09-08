@@ -593,14 +593,13 @@ def resolve_device_pointers(
         if group_size == 0:
             continue
         group_block_ids = block_ids[blk_offset : blk_offset + group_size]
+        group_block_ids_u64 = group_block_ids.astype(np.uint64)
         for data_ref in data_refs:
             tensor = kv_caches.tensors[data_ref.tensor_idx].tensor
             base_ptr = np.uint64(tensor.data_ptr())
             row_stride = np.uint64(tensor.stride(0))
             end_idx = op_idx + group_size
-            ptrs[op_idx:end_idx] = (
-                base_ptr + group_block_ids.astype(np.uint64) * row_stride
-            )
+            ptrs[op_idx:end_idx] = base_ptr + group_block_ids_u64 * row_stride
             sizes[op_idx:end_idx] = data_ref.page_size_bytes
             op_idx = end_idx
         blk_offset += group_size

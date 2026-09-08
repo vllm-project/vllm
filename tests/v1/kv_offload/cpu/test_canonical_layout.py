@@ -96,7 +96,7 @@ def _whole_page_mapping() -> CanonicalPageMapping:
     return CanonicalPageMapping(2048, 2048, (identity,), 1, 0, True)
 
 
-def _transfer(handler, kv_caches, num_blocks: int, gpu_to_cpu: bool) -> None:
+def _transfer(handler, kv_caches, num_blocks: int) -> None:
     block_ids = list(range(num_blocks))
     gpu_spec = GPULoadStoreSpec(
         block_ids, group_sizes=(num_blocks,), block_indices=(0,)
@@ -151,7 +151,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
         mapping = _tp2_rank_mapping(rank)
         kv_caches = _make_kv_caches(gpu_rank[rank], mapping)
         store = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=True)
-        _transfer(store, kv_caches, num_blocks, gpu_to_cpu=True)
+        _transfer(store, kv_caches, num_blocks)
     torch.accelerator.synchronize()
 
     # independent oracle: replay each rank's runs in numpy
@@ -172,7 +172,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     mapping = _tp2_rank_mapping(0)
     kv_caches = _make_kv_caches(gpu_back, mapping)
     load = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
-    _transfer(load, kv_caches, num_blocks, gpu_to_cpu=False)
+    _transfer(load, kv_caches, num_blocks)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_back, gpu_rank[0])
 
@@ -181,7 +181,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     mapping = _whole_page_mapping()
     kv_caches = _make_kv_caches(gpu_full, mapping)
     load_full = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
-    _transfer(load_full, kv_caches, num_blocks, gpu_to_cpu=False)
+    _transfer(load_full, kv_caches, num_blocks)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_full.cpu(), cpu_canonical)
 
@@ -265,7 +265,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
                 mapping,
                 gpu_to_cpu=True,
             )
-            _transfer(store, kv_caches, num_blocks, gpu_to_cpu=True)
+            _transfer(store, kv_caches, num_blocks)
         torch.accelerator.synchronize()
 
         for rank in range(reader_tp):
@@ -278,7 +278,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
                 mapping,
                 gpu_to_cpu=False,
             )
-            _transfer(load, kv_caches, num_blocks, gpu_to_cpu=False)
+            _transfer(load, kv_caches, num_blocks)
             torch.accelerator.synchronize()
             assert torch.equal(gpu_out.cpu(), expected), (
                 f"reader tp={reader_tp} rank={rank} bytes diverge from the "
