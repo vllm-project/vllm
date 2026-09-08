@@ -296,3 +296,11 @@ class EngineClient(ABC):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         raise NotImplementedError
+
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return the resolved KV-event publisher endpoint per DP rank.
+
+        Answers from the frontend's static table populated by the engine
+        ready responses; no engine round-trip.
+        """
+        raise NotImplementedError
