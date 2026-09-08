@@ -31,18 +31,17 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.models.deepseek_v32.common.kernels import (
+    _FUSED_NORM_ROPE_KERNEL,
+    fused_norm_rope,
+    fused_q,
+    register_fused_q_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
-)
-
-from vllm.models.deepseek_v32.common.kernels import (
-    _FUSED_NORM_ROPE_KERNEL,
-    _FUSED_Q_TRITON_KERNEL,
-    fused_norm_rope,
-    fused_q,
 )
 
 if TYPE_CHECKING:
@@ -306,8 +305,6 @@ class DeepseekV32Attention(MLAAttention):
         index_n_head = self.indexer.n_head if has_indexer else 1
         act_dtype = self.q_a_layernorm.weight.dtype
         cos_sin_dtype = self.rotary_emb.cos_sin_cache.dtype
-        use_pdl = current_platform.is_arch_support_pdl()
-
         _FUSED_NORM_ROPE_KERNEL.register_warmup(
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -317,64 +314,30 @@ class DeepseekV32Attention(MLAAttention):
             use_pcp=self.use_pcp,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            use_pdl=use_pdl,
+            use_pdl=current_platform.is_arch_support_pdl(),
             mla_kv_cache_dtype=self.kv_cache_dtype,
             block_size=cache_config.block_size,
             act_dtype=act_dtype,
             cos_sin_dtype=cos_sin_dtype,
             topk_dtype=self.topk_indices_buffer.dtype,
         )
-        # Match the runtime fused-Q backend without importing CuTeDSL off CUDA.
-        if current_platform.is_cuda():
-            from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
-                _FUSED_Q_CUTEDSL_KERNEL,
-                is_fused_q_cutedsl_geometry_supported,
-            )
-
-            use_cutedsl = is_fused_q_cutedsl_geometry_supported(
-                num_q_heads=self.num_local_heads,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                kv_lora_rank=self.kv_lora_rank,
-                index_n_head=index_n_head,
-                index_head_dim=index_head_dim,
-                has_indexer=has_indexer,
-                quantize_mqa=self._fp8_query,
-                act_dtype=act_dtype,
-            )
-            if use_cutedsl:
-                _FUSED_Q_CUTEDSL_KERNEL.register_warmup(
-                    num_q_heads=self.num_local_heads,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    kv_lora_rank=self.kv_lora_rank,
-                    index_n_head=index_n_head,
-                    index_head_dim=index_head_dim,
-                    has_indexer=has_indexer,
-                    index_rope_interleave=self._index_rope_interleave,
-                    rope_cache_dtype=cos_sin_dtype,
-                    idx_rope_cache_dtype=(
-                        self.indexer_rope_emb.cos_sin_cache.dtype
-                        if has_indexer
-                        else cos_sin_dtype
-                    ),
-                    idx_weights_dtype=act_dtype,
-                )
-        else:
-            use_cutedsl = False
-
-        if not use_cutedsl:
-            _FUSED_Q_TRITON_KERNEL.register_warmup(
-                num_q_heads=self.num_local_heads,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                kv_lora_rank=self.kv_lora_rank,
-                index_n_head=index_n_head,
-                index_head_dim=index_head_dim,
-                has_indexer=has_indexer,
-                index_rope_interleave=self._index_rope_interleave,
-                quantize_mqa=self._fp8_query,
-                use_pdl=use_pdl,
-                act_dtype=act_dtype,
-                cos_sin_dtype=cos_sin_dtype,
-            )
+        register_fused_q_warmup(
+            num_q_heads=self.num_local_heads,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            kv_lora_rank=self.kv_lora_rank,
+            index_n_head=index_n_head,
+            index_head_dim=index_head_dim,
+            has_indexer=has_indexer,
+            index_rope_interleave=self._index_rope_interleave,
+            quantize_mqa=self._fp8_query,
+            act_dtype=act_dtype,
+            rope_cache_dtype=cos_sin_dtype,
+            idx_rope_cache_dtype=(
+                self.indexer_rope_emb.cos_sin_cache.dtype
+                if has_indexer
+                else cos_sin_dtype
+            ),
+        )
 
     def forward(  # type: ignore[override]
         self,

@@ -1332,6 +1332,66 @@ class FusedQTritonKernel(VllmTritonJitKernel["FusedQTritonKernel.CompileKey"]):
         )
 
 
+def register_fused_q_warmup(
+    *,
+    num_q_heads: int,
+    qk_rope_head_dim: int,
+    kv_lora_rank: int,
+    index_n_head: int,
+    index_head_dim: int,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+    quantize_mqa: bool,
+    act_dtype: torch.dtype,
+    rope_cache_dtype: torch.dtype,
+    idx_rope_cache_dtype: torch.dtype,
+) -> None:
+    """Register the fused-Q owner selected by the runtime path."""
+    if current_platform.is_cuda():
+        from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
+            _FUSED_Q_CUTEDSL_KERNEL,
+            is_fused_q_cutedsl_geometry_supported,
+        )
+
+        if is_fused_q_cutedsl_geometry_supported(
+            num_q_heads=num_q_heads,
+            qk_rope_head_dim=qk_rope_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            index_n_head=index_n_head,
+            index_head_dim=index_head_dim,
+            has_indexer=has_indexer,
+            quantize_mqa=quantize_mqa,
+            act_dtype=act_dtype,
+        ):
+            _FUSED_Q_CUTEDSL_KERNEL.register_warmup(
+                num_q_heads=num_q_heads,
+                qk_rope_head_dim=qk_rope_head_dim,
+                kv_lora_rank=kv_lora_rank,
+                index_n_head=index_n_head,
+                index_head_dim=index_head_dim,
+                has_indexer=has_indexer,
+                index_rope_interleave=index_rope_interleave,
+                rope_cache_dtype=rope_cache_dtype,
+                idx_rope_cache_dtype=idx_rope_cache_dtype,
+                idx_weights_dtype=act_dtype,
+            )
+            return
+
+    _FUSED_Q_TRITON_KERNEL.register_warmup(
+        num_q_heads=num_q_heads,
+        qk_rope_head_dim=qk_rope_head_dim,
+        kv_lora_rank=kv_lora_rank,
+        index_n_head=index_n_head,
+        index_head_dim=index_head_dim,
+        has_indexer=has_indexer,
+        index_rope_interleave=index_rope_interleave,
+        quantize_mqa=quantize_mqa,
+        use_pdl=current_platform.is_arch_support_pdl(),
+        act_dtype=act_dtype,
+        cos_sin_dtype=rope_cache_dtype,
+    )
+
+
 def fused_q(
     positions: torch.Tensor,
     q_pe: torch.Tensor,
