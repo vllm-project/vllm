@@ -8,7 +8,7 @@ GPU copy plumbing. An ec_both instance reuses encoder outputs it has already
 offloaded to CPU instead of recomputing them.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -36,6 +36,12 @@ class ECCPUConnector(ECConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
         super().__init__(vllm_config=vllm_config, role=role)
+
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "ECCPUConnector requires the V2 model runner. "
+                "Set VLLM_USE_V2_MODEL_RUNNER=1."
+            )
 
         self.connector_worker = None
         self.connector_scheduler = None
@@ -107,6 +113,12 @@ class ECCPUConnector(ECConnectorBase):
     ) -> ECCPUConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def request_finished(
+        self, request: "Request"
+    ) -> tuple[bool, "dict[str, Any] | None"]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request)
 
     def get_finished(
         self, finished_req_ids: set[str]

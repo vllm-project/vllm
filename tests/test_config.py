@@ -338,9 +338,15 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("DeepseekV32MTPModel", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
         ("GlmMoeDsaForCausalLM", True, False),
+        ("Qwen4ExpForCausalLM", False, True),
+        ("Qwen4ExpForCausalLM", True, False),
+        ("Qwen4ExpForConditionalGeneration", False, True),
+        ("Qwen4ExpForConditionalGeneration", True, False),
+        ("Qwen4ExpMTP", False, True),
+        ("Qwen4ExpMTP", True, False),
     ],
 )
-def test_dsa_breakable_cudagraph_platform_default(
+def test_breakable_cudagraph_platform_default(
     monkeypatch, architecture, is_rocm, expected
 ):
     from vllm.config.vllm import default_breakable_cudagraph_architectures
@@ -751,6 +757,22 @@ def test_v1_model_runner_rejects_v2_only_features():
 
     with pytest.raises(ValueError, match="prefill context parallel"):
         VllmConfig._validate_v1_model_runner(config)
+
+
+def test_batch_sharded_sampling_rejects_return_sampling_mask():
+    """The batch-sharded gather drops sampling masks, so the combination must
+    fail loudly instead of returning ``sampling_mask=None``."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
+        speculative_config=None,
+    )
+
+    with pytest.raises(ValueError, match="sampling masks"):
+        VllmConfig._validate_batch_sharded_sampling(config)
 
 
 @pytest.mark.skip_global_cleanup

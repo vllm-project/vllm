@@ -50,6 +50,21 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
+def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the block-FP8 weight scale for supported quant methods."""
+    # Local import avoids a circular import: quark_w8a8_fp8 imports this module.
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
+        QuarkW8A8Fp8PerBlock,
+    )
+
+    if isinstance(
+        getattr(layer, "scheme", None),
+        QuarkW8A8Fp8PerBlock,
+    ):
+        return getattr(layer, "weight_scale", None)
+    return getattr(layer, "weight_scale_inv", None)
+
+
 def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
