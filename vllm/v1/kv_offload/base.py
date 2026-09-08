@@ -18,6 +18,12 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    CounterMetadata,
+    GaugeMetadata,
+    HistogramMetadata,
+    MetricMetadata,
+)
 from vllm.v1.kv_offload.config import OffloadingConfig
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -189,25 +195,12 @@ The class provides the following primitives:
 """
 
 
-@dataclass(frozen=True)
-class OffloadingMetricMetadata:
-    documentation: str
-    labelnames: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class OffloadingCounterMetadata(OffloadingMetricMetadata):
-    pass
-
-
-@dataclass(frozen=True)
-class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
-
-
-@dataclass(frozen=True)
-class OffloadingHistogramMetadata(OffloadingMetricMetadata):
-    buckets: tuple[float, ...] | None = None
+# Metric declarations are shared with the KV connector metrics layer; the
+# Offloading* names are kept for the specs and managers that declare metrics.
+OffloadingMetricMetadata = MetricMetadata
+OffloadingCounterMetadata = CounterMetadata
+OffloadingGaugeMetadata = GaugeMetadata
+OffloadingHistogramMetadata = HistogramMetadata
 
 
 @dataclass(frozen=True)
