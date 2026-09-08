@@ -40,6 +40,29 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 if TYPE_CHECKING:
     import torch
 
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+
+def check_sinks(
+    module: "torch.nn.Module",
+    self_attn: "Attention | MLAAttention",
+    s_aux: "torch.Tensor | None",
+):
+    """Fail loudly if the model applies a sink the attention layer will not.
+
+    Only the attention impl can fold a sink into the softmax denominator, so a sink
+    that never reached `Attention` is dropped and every softmax is subtly wrong.
+    """
+    if s_aux is None or getattr(self_attn, "has_sink", False):
+        return
+    raise ValueError(
+        f"{type(module).__name__} applies attention sinks, but they were not passed "
+        f"to {type(self_attn).__name__}, so the output would be wrong. Either the "
+        "Transformers modeling backend could not find the parameter holding them, or "
+        "vLLM does not support sinks for this kind of attention. Please open an issue "
+        "at https://github.com/vllm-project/vllm/issues/new"
+    )
+
 
 def vllm_attention_forward(
     # Transformers args
@@ -51,6 +74,7 @@ def vllm_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
@@ -80,6 +104,7 @@ def vllm_mla_attention_forward(
     **kwargs,
 ):
     self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
     num_tokens, num_heads = query.shape[:2]
