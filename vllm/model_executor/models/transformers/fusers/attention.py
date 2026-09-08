@@ -85,9 +85,9 @@ class AttentionFuser(BaseFuser):
 
     source_cls: str
     """Class of the HF module that dispatches (for logging)."""
-    scale_expr: ast.expr | None
+    scale_expr: ast.expr | None = None
     """Source of the `scaling=` the module hands the interface, if it hands one."""
-    s_aux_expr: ast.expr | None
+    s_aux_expr: ast.expr | None = None
     """Source of the `s_aux=` the module hands the interface, if it hands one."""
 
     def info(self, name: str) -> str:
