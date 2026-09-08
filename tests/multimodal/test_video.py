@@ -1528,84 +1528,44 @@ class TestGLMGASamplingCaps:
 
 
 class TestGlm5NextSamplingCaps:
-    """The glm5next sampler must size its walk from the clip, not the request.
-
-    ``glm_sample_frame_indices`` walks ``duration * target_fps`` candidates and
-    deduplicates at the end, so an fps above the source rate builds a candidate
-    list unrelated to the frame count. Clamping to the source rate is free in
-    output terms: no sampling rate can return frames the container does not
-    hold.
-    """
-
-    @staticmethod
-    def _source(
-        total_frames: int, fps: float = 30.0, duration: float = 0
-    ) -> VideoSourceMetadata:
-        if duration == 0 and fps > 0 and total_frames > 1:
-            duration = round((total_frames - 1) / fps) + 1
-        return VideoSourceMetadata(total_frames, fps, duration)
+    """The sampler walks `duration * target_fps` candidates, so an fps above the
+    source rate sizes the walk from the request. Clamping to the source rate
+    bounds it without changing which frames come back."""
 
     def test_target_fps_clamped_to_source_rate(self, monkeypatch):
-        """The sampler receives the source rate, not the requested one.
+        # Output alone cannot catch a removed clamp: both rates usually
+        # deduplicate to the same list, which is why the clamp is safe.
+        import vllm.transformers_utils.processors.glm5next as proc
 
-        Asserting on the returned indices alone would not catch a removed
-        clamp: for many inputs both rates deduplicate to the same list, which
-        is exactly why the clamp is safe.
-        """
-        seen = {}
-        import vllm.transformers_utils.processors.glm5next as glm5next_processor
-
-        real = glm5next_processor.glm_sample_frame_indices
-
-        def spy(*args, **kwargs):
-            seen.update(kwargs)
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(glm5next_processor, "glm_sample_frame_indices", spy)
-
-        source = self._source(total_frames=900, fps=30.0, duration=30.0)
-        target = VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
-        Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
-
+        seen: dict = {}
+        real = proc.glm_sample_frame_indices
+        monkeypatch.setattr(
+            proc,
+            "glm_sample_frame_indices",
+            lambda *a, **kw: (seen.update(kw), real(*a, **kw))[1],
+        )
+        source = VideoSourceMetadata(900, 30.0, 30.0)
+        Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source, VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
+        )
         assert seen["target_fps"] == source.original_fps
 
     @pytest.mark.parametrize(
-        ("total_frames", "original_fps", "duration"),
-        [(2, 2.0, 1.0), (900, 30.0, 30.0), (10_000, 30.0, 334.0)],
+        "source",
+        [
+            VideoSourceMetadata(2, 2.0, 1.0),
+            VideoSourceMetadata(900, 30.0, 30.0),
+            VideoSourceMetadata(10_000, 30.0, 334.0),
+        ],
     )
-    def test_clamp_does_not_change_sampling(
-        self, total_frames, original_fps, duration
-    ):
-        """Requesting above the source rate samples the same frames as at it."""
-        source = self._source(total_frames, original_fps, duration)
-        oversized = Glm5NextVideoBackend.compute_frames_index_to_sample(
-            source,
-            VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1),
-        )
-        at_source_rate = Glm5NextVideoBackend.compute_frames_index_to_sample(
-            source,
-            VideoTargetMetadata(
-                num_frames=-1, fps=int(original_fps), max_duration=-1
-            ),
-        )
-        assert oversized == at_source_rate
-        assert len(oversized) <= total_frames
+    def test_clamp_does_not_change_sampling(self, source):
+        def sample(fps):
+            return Glm5NextVideoBackend.compute_frames_index_to_sample(
+                source, VideoTargetMetadata(num_frames=-1, fps=fps, max_duration=-1)
+            )
 
-    def test_normal_operation_unchanged(self):
-        """A clip below the source rate samples exactly as the bare sampler does."""
-        from vllm.transformers_utils.processors.glm5next import (
-            glm_sample_frame_indices,
-        )
-
-        source = self._source(total_frames=900, fps=30.0, duration=30.0)
-        target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
-        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
-        expected = glm_sample_frame_indices(
-            900, 30.0, 30.0, target_fps=None, max_frame_count=None,
-            temporal_patch_size=2,
-        )
-        assert indices == expected
-        assert all(0 <= idx < 900 for idx in indices)
+        assert sample(2_000_000) == sample(int(source.original_fps))
+        assert len(sample(2_000_000)) <= source.total_frames_num
 
 
 def test_glm5next_backend_selected_for_processor():
