@@ -1399,8 +1399,7 @@ class Scheduler(SchedulerInterface):
         if self.artifact_connector is not None:
             scheduler_output.artifact_connector_metadata = (
                 self.artifact_connector.build_connector_meta(
-                    scheduler_output,
-                    self.requests,
+                    scheduler_output, self.requests
                 )
             )
 
@@ -2010,8 +2009,7 @@ class Scheduler(SchedulerInterface):
             )
             if self.artifact_connector is not None and should_emit_output:
                 routed_experts = self.artifact_connector.take_output(
-                    request,
-                    model_runner_output.artifact_connector_output,
+                    request, model_runner_output.artifact_connector_output
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()

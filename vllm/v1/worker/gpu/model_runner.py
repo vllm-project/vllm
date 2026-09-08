@@ -1965,15 +1965,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
         )
-        pending_artifact_output = (
-            self.artifact_connector.prepare_output(
+        pending_artifact_output = None
+        if self.artifact_connector is not None:
+            pending_artifact_output = self.artifact_connector.prepare_output(
                 model_runner_output.req_ids,
                 input_batch.num_computed_tokens_np,
                 input_batch.query_start_loc_np,
             )
-            if self.artifact_connector is not None
-            else None
-        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
