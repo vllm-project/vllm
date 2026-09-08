@@ -143,3 +143,5 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Gumbel-max does not support speculative decoding.
+- Beam search expands candidates from model log probabilities and does not apply
+  Gumbel-max watermarking.

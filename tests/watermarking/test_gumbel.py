@@ -64,3 +64,21 @@ def test_fused_watermarker_handles_nan_logits():
     token_ids = watermarker.sample(logits, contexts, lambda values: None).token_ids
 
     assert torch.all((token_ids >= 0) & (token_ids < logits.shape[-1]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_fused_watermarker_handles_noncontiguous_inputs():
+    contexts = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device="cuda")[
+        :, ::2
+    ]
+    logits = torch.randn(8, 2050, device="cuda")[:, ::2]
+    watermarker = GumbelWatermarker(key=42, context_width=4)
+
+    expected = watermarker.sample(
+        logits.contiguous(), contexts.contiguous(), lambda values: None
+    ).token_ids
+    actual = watermarker.sample(logits, contexts, lambda values: None).token_ids
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

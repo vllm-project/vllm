@@ -186,6 +186,10 @@ def _philox_gumbel_kernel(
 def philox_gumbel_sample(
     logits: torch.Tensor, contexts: torch.Tensor, key: int
 ) -> torch.Tensor:
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
     num_tokens, vocab_size = logits.shape
     block_size = 1024
     num_blocks = triton.cdiv(vocab_size, block_size)
