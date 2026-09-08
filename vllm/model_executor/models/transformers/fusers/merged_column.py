@@ -95,6 +95,7 @@ class MergedColumnParallelFuser(StackedFuser):
 
         block = blocks[0][0]
         index = min(index for _, index in blocks)
+        calls_have_name_arg = all(isinstance(call.args[0], ast.Name) for call in calls)
         # Moving projections must not cross operations that can change their input.
         for statement in block[index : max(index for _, index in blocks) + 1]:
             if not isinstance(statement, (ast.Assign, ast.Return)):
@@ -105,9 +106,7 @@ class MergedColumnParallelFuser(StackedFuser):
                 raise ValueError("parallel projection assignment has side effects")
             value = statement.value
             values = value.elts if isinstance(value, ast.Tuple) else [value]
-            if any(value not in calls for value in values) or any(
-                not isinstance(call.args[0], ast.Name) for call in calls
-            ):
+            if any(value not in calls for value in values) or not calls_have_name_arg:
                 raise ValueError("parallel projections cross other operations")
 
         # l1(x), l2(x), ... -> merged(x).split(merged.output_sizes / merged.tp_size, -1)
