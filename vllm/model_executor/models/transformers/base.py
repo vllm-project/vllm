@@ -139,11 +139,11 @@ class Base(
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
         self.fusers: dict[str, list[BaseFuser]] = {}
         """Module qualname -> the fusers applied to it, populated
-        by `recursive_replace` for `create_attention_instances`."""
+        by `recursive_replace` for `_create_attention_instances`."""
         self.attention_fusers: dict[int, tuple[str, AttentionFuser]] = {}
         """`layer_idx` -> the qualname and fuser of the module computing that
         layer's attention, populated by `recursive_replace` for
-        `create_attention_instances`."""
+        `_create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -179,7 +179,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self.attention_instances = self.create_attention_instances()
+        self._create_attention_instances()
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -197,7 +197,7 @@ class Base(
         Patch the config to ensure that the model is created correctly:
 
         - Sets the attention implementation to "vllm" so the attention instances from
-        `create_attention_instances` are used
+        `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
@@ -570,11 +570,8 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def create_attention_instances(self) -> dict[int, Attention]:
-        """
-        Create `Attention` instances to inform KV cache allocation.
-        """
-        attention_instances = {}
+    def _create_attention_instances(self):
+        """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
@@ -614,13 +611,9 @@ class Base(
                 self.parallel_config, arch_config
             )
             head_size = arch_config.head_size
-            scale = attn_fuser.scale(attn_module)
-            # Default to Llama scale if AttentionFuser couldn't identify it
-            if scale is None:
+            if (scale := attn_fuser.scale(attn_module)) is None:
+                # Default to Llama scale if AttentionFuser couldn't identify it
                 scale = head_size**-0.5
-            num_kv_heads = self.model_config.get_num_kv_heads(
-                self.parallel_config, arch_config
-            )
 
             kwargs = dict(
                 num_heads=num_heads,
@@ -651,13 +644,18 @@ class Base(
             else:
                 kwargs.update(
                     head_size=head_size,
-                    num_kv_heads=num_kv_heads,
+                    num_kv_heads=self.model_config.get_num_kv_heads(
+                        self.parallel_config, arch_config
+                    ),
                     logits_soft_cap=logits_soft_cap,
                 )
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                # Handle attention sinks
+                if (sinks := attn_fuser.sinks(attn_module)) is not None:
+                    kwargs["sinks"] = sinks
 
             attn_instance = attn_cls(**kwargs)
 
@@ -670,8 +668,6 @@ class Base(
             # layer identity into the traced graph and so costs one compiled
             # artifact per layer.
             setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
-            attention_instances[i] = attn_instance
-        return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""
