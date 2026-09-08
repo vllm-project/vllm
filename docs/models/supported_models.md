@@ -600,6 +600,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | T + A | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
+| `NemotronH_Nano_VL_V2`, `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Super_Omni_Reasoning_V3`, `NemotronH_Omni_Reasoning_V3` | Nemotron Nano VL V2 / Nano Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + (A<sup>+</sup>) | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`, `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
 | `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
