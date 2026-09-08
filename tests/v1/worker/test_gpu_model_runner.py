@@ -916,6 +916,7 @@ def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     runner.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None)
     )
+    runner.model_config = SimpleNamespace(dtype=torch.float32)
     runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
     runner.sampler = Mock(return_value="sampler_output")
     runner.sampler.logprobs_mode = "processed_logprobs"
@@ -1823,3 +1824,46 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_dummy_sampler_run_warms_seeded_and_greedy_paths(monkeypatch):
+    """Verifies that the dummy sampler run exercises both seeded
+    and greedy paths to pre-compile kernels."""
+    runner = object.__new__(gpu_model_runner_module.GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model_config = SimpleNamespace(dtype=torch.float32)
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "none"
+    runner.speculative_config = None
+    runner.rejection_sampler = Mock()
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    output = gpu_model_runner_module.GPUModelRunner._dummy_sampler_run(
+        runner, torch.randn(3, 4)
+    )
+
+    assert output == "sampler_output"
+    # Unseeded + greedy + seeded = 3
+    assert runner.sampler.call_count == 3
+
+    # 0: Default (FlashInfer stochastic unseeded + logitsprocs)
+    default_meta = runner.sampler.call_args_list[0].kwargs["sampling_metadata"]
+    assert torch.all(default_meta.temperature == 0.5)
+    assert not default_meta.all_greedy
+    assert not default_meta.generators
+
+    # 1: Greedy (temperature = None, all_greedy=True)
+    greedy_meta = runner.sampler.call_args_list[1].kwargs["sampling_metadata"]
+    assert greedy_meta.temperature is None
+    assert greedy_meta.all_greedy is True
+
+    # 2: Seeded (temperature = 0.9, seed = 42)
+    seeded_meta = runner.sampler.call_args_list[2].kwargs["sampling_metadata"]
+    assert torch.all(seeded_meta.temperature == 0.9)
+    assert 0 in seeded_meta.generators
+    assert seeded_meta.generators[0].initial_seed() == 42

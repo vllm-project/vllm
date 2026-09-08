@@ -91,11 +91,8 @@ def test_logits_processing_cache_only_checks_active_requests():
 
 
 def test_all_sampler_warmup_configs():
-    """Test that for_all_sampler_warmup_configs returns a list of configurations
-    covering:
-    - FlashInfer (unseeded stochastic),
-    - native top-k/top-p + Gumbel (seeded), and
-    - greedy (model dtype) paths."""
+    """Ensures our warmup configurations hit all the necessary
+    backend paths (FlashInfer, seeded, and greedy)."""
     configs = SamplingParams.for_all_sampler_warmup_configs()
     assert len(configs) >= 3
 
@@ -116,3 +113,26 @@ def test_all_sampler_warmup_configs():
 
     assert sampler.needs_logits_processing[0]
     assert not sampler.needs_logits_processing[2]
+
+
+def test_sampler_update_request_for_warmup_configs():
+    """Verifies that reusing a request slot across different warmup configs
+    properly invalidates the internal sampler caches."""
+    sampler = _make_sampler()
+    configs = SamplingParams.for_all_sampler_warmup_configs()
+
+    # Slot 0 starts unseeded
+    sampler.add_request(0, 1, configs[0])
+    assert not sampler.sampling_states.any_explicit_seed(np.array([0]))
+    assert not sampler.sampling_states.any_greedy(np.array([0]))
+
+    # Slot 0 updated to seeded
+    sampler.add_request(0, 1, configs[1])
+    assert sampler.sampling_states.any_explicit_seed(np.array([0]))
+    assert not sampler.sampling_states.any_greedy(np.array([0]))
+
+    # Slot 0 updated to greedy
+    sampler.add_request(0, 1, configs[2])
+    assert not sampler.sampling_states.any_explicit_seed(np.array([0]))
+    assert sampler.sampling_states.any_greedy(np.array([0]))
+    assert not sampler.needs_logits_processing[0]
