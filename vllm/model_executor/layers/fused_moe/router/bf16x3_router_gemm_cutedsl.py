@@ -391,20 +391,19 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         BN = 8 if raw_BN < 8 else 128 if raw_BN > 128 else raw_BN
         return self.CompileKey(bn=BN, k=K, use_pdl=use_pdl)
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if not vllm_config.kernel_config.enable_bf16x3_router_gemm:
-            return []
-        K = vllm_config.model_config.hf_config.hidden_size
-        max_tokens = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            128,
-        )
+    def get_warmup_keys(
+        self,
+        *,
+        K: int,
+        max_tokens: int,
+    ) -> list[CompileKey]:
+        max_tokens = min(max_tokens, 128)
         if K <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             K=K,
-            use_pdl=(False, True),
+            use_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
@@ -541,20 +540,22 @@ class BF16x3SplitKReduceKernel(
             launch_pdl=launch_pdl,
         )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if not vllm_config.kernel_config.enable_bf16x3_router_gemm:
-            return []
-        M = vllm_config.model_config.hf_config.n_routed_experts
-        K = vllm_config.model_config.hf_config.hidden_size
+    def get_warmup_keys(
+        self,
+        *,
+        M: int,
+        K: int,
+        max_tokens: int,
+    ) -> list[CompileKey]:
         max_split_k = math_utils.cdiv(K, 64)
-        max_tokens = min(vllm_config.scheduler_config.max_num_batched_tokens, 16)
+        max_tokens = min(max_tokens, 16)
         if M <= 0 or max_split_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
             N=WarmupIntRange(1, max_tokens + 1),
             M=M,
             split_k=WarmupIntRange(1, max_split_k + 1),
-            launch_pdl=(False, True),
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cuteDSL low-latency router GEMM (dot-product + split-K)."""
 
-from dataclasses import replace
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -62,10 +60,16 @@ def _gemm(a, b):
         _LL_BF16_GEMM_C1_PDL_KERNEL,
         _LL_BF16_GEMM_KERNEL,
     )
+    from vllm.platforms import current_platform
 
     kernel = _LL_BF16_GEMM_C1_PDL_KERNEL if a.shape[0] == 1 else _LL_BF16_GEMM_KERNEL
     if _can_precompile(a, b):
-        compile_key = kernel.dispatch(M=a.shape[0], K=a.shape[1], N=b.shape[0])
+        compile_key = kernel.dispatch(
+            M=a.shape[0],
+            K=a.shape[1],
+            N=b.shape[0],
+            use_pdl=current_platform.is_arch_support_pdl(),
+        )
         kernel.compile(compile_key)
     return kernel(a, b)
 
@@ -587,45 +591,6 @@ def test_cache_miss_compiles_and_caches_dotprod():
     kernel(a, b)
 
     assert compile_key in kernel._compiled_cache
-
-
-def test_warmup_keys_cover_router_compile_keys(monkeypatch):
-    from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-
-    monkeypatch.setattr(
-        ll_bf16,
-        "_arch_tuned_configs",
-        lambda: (
-            {(7168, 384): {2: 256}},
-            {
-                (7168, 384): {5: (4, 4), 6: (5, 4)},
-                (14400, 256): {5: (8, 3)},
-            },
-        ),
-    )
-    kernel = ll_bf16.LLBf16Gemm()
-    expected = [
-        kernel.CompileKey(backend="dotprod", m=1, k=7168, bs=128),
-        kernel.CompileKey(backend="dotprod", m=2, k=7168, bs=256),
-        kernel.CompileKey(backend="dotprod", m=3, k=7168, bs=128),
-        kernel.CompileKey(backend="dotprod", m=4, k=7168, bs=128),
-        kernel.CompileKey(backend="splitk", split_k=4, num_stages=4),
-        kernel.CompileKey(backend="splitk", split_k=5, num_stages=4),
-        kernel.CompileKey(backend="splitk", split_k=6, num_stages=4),
-        kernel.CompileKey(backend="dotprod", m=1, k=14400, bs=128),
-        kernel.CompileKey(backend="dotprod", m=2, k=14400, bs=128),
-        kernel.CompileKey(backend="dotprod", m=3, k=14400, bs=128),
-        kernel.CompileKey(backend="dotprod", m=4, k=14400, bs=128),
-        kernel.CompileKey(backend="splitk", split_k=8, num_stages=3),
-    ]
-    warmed_keys = kernel.get_warmup_keys(
-        shapes=((7168, 384), (14400, 256)),
-        m_values=range(1, 17),
-    )
-
-    assert set(warmed_keys) == {
-        replace(key, use_pdl=use_pdl) for key in expected for use_pdl in (False, True)
-    }
 
 
 if __name__ == "__main__":

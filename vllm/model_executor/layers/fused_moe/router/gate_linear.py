@@ -134,13 +134,22 @@ class GateLinear(ReplicatedLinear):
             )
 
         if self.allow_bf16x3_router_gemm:
+            assert vllm_config is not None
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
                 _BF16X3_ROUTER_GEMM_KERNEL,
                 _BF16X3_SPLITK_REDUCE_KERNEL,
             )
 
-            _BF16X3_ROUTER_GEMM_KERNEL.register_warmup()
-            _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup()
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            _BF16X3_ROUTER_GEMM_KERNEL.register_warmup(
+                K=input_size,
+                max_tokens=max_tokens,
+            )
+            _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup(
+                M=output_size,
+                K=input_size,
+                max_tokens=max_tokens,
+            )
 
         if self.allow_ll_bf16_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
