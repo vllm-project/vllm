@@ -157,24 +157,11 @@ def deepencoder_rel_pos_attention(
     v: torch.Tensor,
     rel_h: torch.Tensor,
     rel_w: torch.Tensor,
-    height: int,
     width: int,
     scale: float,
 ) -> torch.Tensor:
     """Run DeepEncoder global attention with fused relative-position bias."""
-    assert all(
-        tensor.is_cuda and tensor.device == q.device
-        for tensor in (q, k, v, rel_h, rel_w)
-    )
-    assert q.dtype in (torch.float16, torch.bfloat16)
-    assert q.dtype == k.dtype == v.dtype == rel_h.dtype == rel_w.dtype
-    assert q.ndim == k.ndim == v.ndim == 4
-    assert q.shape == k.shape == v.shape
     batch, heads, num_tokens, head_dim = q.shape
-    assert head_dim == 64
-    assert num_tokens == height * width
-    assert rel_h.shape == (batch, heads, num_tokens, height)
-    assert rel_w.shape == (batch, heads, num_tokens, width)
 
     output = torch.empty_like(q)
     block_m = 64
@@ -199,7 +186,7 @@ def deepencoder_rel_pos_attention(
         key_width=width,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        BLOCK_D=64,
+        BLOCK_D=head_dim,
         num_warps=4,
         num_stages=2,
     )
@@ -467,7 +454,7 @@ class RelPosAttention(PluggableLayer):
             num_heads (int): Number of attention heads.
             qkv_bias (bool):  If True, add a learnable bias to query, key, value.
             use_triton_attention (bool): If True, fuse relative position bias in
-                a Triton attention kernel on supported CUDA inputs.
+                a Triton attention kernel on CUDA-alike platforms.
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
@@ -517,13 +504,7 @@ class RelPosAttention(PluggableLayer):
             rel_w = rel_w.view(
                 B, self.num_heads, rel_w.size(1), rel_w.size(2), rel_w.size(3)
             )
-            use_triton = (
-                self.use_triton_attention
-                and current_platform.is_cuda()
-                and q.is_cuda
-                and q.dtype in (torch.float16, torch.bfloat16)
-                and q.size(-1) == 64
-            )
+            use_triton = self.use_triton_attention and current_platform.is_cuda_alike()
             if use_triton:
                 x = deepencoder_rel_pos_attention(
                     q,
@@ -531,7 +512,6 @@ class RelPosAttention(PluggableLayer):
                     v,
                     rel_h.squeeze(-1),
                     rel_w.squeeze(-2),
-                    H,
                     W,
                     self.scale,
                 )
