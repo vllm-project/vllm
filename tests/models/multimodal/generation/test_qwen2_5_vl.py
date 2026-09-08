@@ -92,10 +92,10 @@ def test_qwen2_5_vl_encoder_cudagraph_normalizes_pixels() -> None:
         _get_grid_thw_by_modality=lambda kwargs: kwargs["image_grid_thw"],
         _get_pixel_values_by_modality=lambda kwargs: kwargs["pixel_values"],
     )
-    pixel_values = torch.zeros(2, 12)
+    pixel_values = torch.zeros(4, 12)
     mm_kwargs = {
         "pixel_values": pixel_values,
-        "image_grid_thw": [[1, 1, 2]],
+        "image_grid_thw": [[1, 2, 2]],
     }
 
     replay = (
@@ -111,7 +111,7 @@ def test_qwen2_5_vl_encoder_cudagraph_normalizes_pixels() -> None:
     )
     torch.testing.assert_close(output, expected)
     torch.testing.assert_close(visual.pixel_values, expected)
-    assert visual.grid_thw == [[1, 1, 2]]
+    assert visual.grid_thw == [[1, 2, 2]]
     assert input_norm.dtypes == [visual.dtype, visual.dtype]
 
 
