@@ -1423,6 +1423,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
             if envs.VLLM_BATCH_INVARIANT:
+                assert non_spec_query_start_loc is not None
+                assert non_spec_state_indices_tensor is not None
                 device = mixed_qkv_non_spec_T.device
                 cu_list = non_spec_query_start_loc.tolist()
                 num_non_spec_seqs = non_spec_query_start_loc.numel() - 1
@@ -1437,9 +1439,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         else None
                     )
                     _cache_idx = non_spec_state_indices_tensor[_pi : _pi + 1]
-                    _cu = torch.tensor(
-                        [0, _pe - _ps], dtype=torch.int32, device=device
-                    )
+                    _cu = torch.tensor([0, _pe - _ps], dtype=torch.int32, device=device)
                     _conv_out = causal_conv1d_fn(
                         _chunk_T,
                         conv_weights,

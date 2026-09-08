@@ -39,7 +39,7 @@ pytestmark = [
 def _extract(request_output):
     out = request_output.outputs[0]
     token_ids = list(out.token_ids)
-    step_logprobs = []
+    step_logprobs: list[float] = []
     if not out.logprobs:
         return token_ids, None
     for step in out.logprobs:
@@ -111,10 +111,9 @@ def _run_same_path(
     if cold_tokens == hit_bs1_tokens and cold_lps == hit_bs1_lps:
         print(f"INFO {label}: cold vs hit also bitwise (fp32-cache-like)")
     else:
-        print(
-            f"INFO {label}: cold vs hit diverged "
-            "(expected with default bf16 SSM cache)"
-        )
+            print(
+                f"INFO {label}: cold vs hit diverged (expected with default bf16 SSM cache)"
+            )
 
 
 def test_gdn_prefix_cache_same_path_bitwise(monkeypatch: pytest.MonkeyPatch):
