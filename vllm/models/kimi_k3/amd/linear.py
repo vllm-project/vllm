@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
+from weakref import WeakValueDictionary
 
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -70,6 +73,54 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+_KIMI_K3_LARGE_FRONT_MIN_TOKENS = 512
+_KIMI_K3_LARGE_FRONT_MAX_TOKENS = 8192
+
+
+@dataclass
+class _KimiK3LargeFrontWorkspace:
+    front: torch.Tensor
+    shared: torch.Tensor
+    router: torch.Tensor
+    routed: torch.Tensor
+
+
+_KIMI_K3_LARGE_FRONT_WORKSPACE_CACHE: WeakValueDictionary[
+    tuple[str, int | None], _KimiK3LargeFrontWorkspace
+] = WeakValueDictionary()
+
+
+def _get_kimi_k3_large_front_workspace(
+    device: torch.device,
+) -> _KimiK3LargeFrontWorkspace:
+    key = (device.type, device.index)
+    workspace = _KIMI_K3_LARGE_FRONT_WORKSPACE_CACHE.get(key)
+    if workspace is None:
+        workspace = _KimiK3LargeFrontWorkspace(
+            front=torch.empty(
+                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 6016),
+                dtype=torch.float32,
+                device=device,
+            ),
+            shared=torch.empty(
+                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 768),
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            router=torch.empty(
+                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 896),
+                dtype=torch.float32,
+                device=device,
+            ),
+            routed=torch.empty(
+                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 3584),
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+        )
+        _KIMI_K3_LARGE_FRONT_WORKSPACE_CACHE[key] = workspace
+    return workspace
 
 
 class KimiMLP(nn.Module):
@@ -293,6 +344,14 @@ class KimiMoE(nn.Module):
             routed_output_transform=self.routed_output_transform,
             runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
+        self._kimi_k3_large_front_initialized = False
+        self._kimi_k3_large_front_available = False
+        self._kimi_k3_large_front_weight: torch.Tensor | None = None
+        self._kimi_k3_large_front_op = None
+        self._kimi_k3_large_front_workspace: _KimiK3LargeFrontWorkspace | None = None
+        self._logged_kimi_k3_large_front = False
+        if isinstance(self.experts, ROCmLatentMoERunner):
+            self.experts.set_kimi_k3_large_moe_core_callback(self._run_kimi_k3_moe_core)
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
             if w13_weight is None:
@@ -306,13 +365,193 @@ class KimiMoE(nn.Module):
                 moe_intermediate_size // self.tp_size
             )
 
+    def _initialize_kimi_k3_large_front(self) -> bool:
+        if self._kimi_k3_large_front_initialized:
+            return self._kimi_k3_large_front_available
+        self._kimi_k3_large_front_initialized = True
+
+        if (
+            not envs.VLLM_ROCM_KIMI_K3_LARGE_M_FRONT
+            or not isinstance(self.experts, ROCmLatentMoERunner)
+            or self.shared_experts is None
+            or self.routed_expert_down_proj is None
+        ):
+            return False
+
+        shared_weight = getattr(
+            self.shared_experts.gate_up_proj,
+            "weight",
+            None,
+        )
+        router_weight = getattr(self.gate, "weight", None)
+        routed_weight = getattr(self.routed_expert_down_proj, "weight", None)
+        if not all(
+            isinstance(weight, torch.Tensor)
+            for weight in (shared_weight, router_weight, routed_weight)
+        ):
+            return False
+        assert isinstance(shared_weight, torch.Tensor)
+        assert isinstance(router_weight, torch.Tensor)
+        assert isinstance(routed_weight, torch.Tensor)
+
+        try:
+            from aiter.ops.triton.kimi_k3_moe_front import (
+                kimi_k3_moe_front_large_m_bf16,
+                merge_kimi_k3_moe_front_weights,
+            )
+        except ImportError:
+            logger.warning_once(
+                "Kimi-K3 large-M front was requested, but this AITER build "
+                "does not provide it. Falling back.",
+                scope="global",
+            )
+            return False
+
+        try:
+            merged = merge_kimi_k3_moe_front_weights(
+                shared_weight.detach(),
+                router_weight.detach(),
+                routed_weight.detach(),
+            )
+        except ValueError:
+            return False
+
+        shared_rows = shared_weight.shape[0]
+        router_rows = router_weight.shape[0]
+        with torch.no_grad():
+            self.shared_experts.gate_up_proj.weight.data = merged.narrow(
+                0,
+                0,
+                shared_rows,
+            )
+            self.gate.weight.data = merged.narrow(
+                0,
+                shared_rows,
+                router_rows,
+            )
+            self.routed_expert_down_proj.weight.data = merged.narrow(
+                0,
+                shared_rows + router_rows,
+                routed_weight.shape[0],
+            )
+
+        self._kimi_k3_large_front_weight = merged
+        self._kimi_k3_large_front_op = kimi_k3_moe_front_large_m_bf16
+        self._kimi_k3_large_front_workspace = _get_kimi_k3_large_front_workspace(
+            shared_weight.device
+        )
+        self._kimi_k3_large_front_available = True
+        return True
+
+    def _forward_native(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        router_logits, _ = self.gate(hidden_states)
+        return self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
+
+    def _supports_kimi_k3_large_front(self, num_tokens: int) -> bool:
+        return (
+            self._kimi_k3_large_front_available
+            and _KIMI_K3_LARGE_FRONT_MIN_TOKENS
+            <= num_tokens
+            <= _KIMI_K3_LARGE_FRONT_MAX_TOKENS
+        )
+
+    def _project_kimi_k3_large_front(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_tokens = hidden_states.shape[0]
+        assert self._kimi_k3_large_front_weight is not None
+        assert self._kimi_k3_large_front_op is not None
+        assert self._kimi_k3_large_front_workspace is not None
+        workspace = self._kimi_k3_large_front_workspace
+        shared_intermediate, router_logits, routed_input = self._kimi_k3_large_front_op(
+            hidden_states,
+            self._kimi_k3_large_front_weight,
+            front_out=workspace.front[:num_tokens],
+            shared_out=workspace.shared[:num_tokens],
+            router_out=workspace.router[:num_tokens],
+            routed_out=workspace.routed[:num_tokens],
+            situ_beta=4.0,
+            situ_linear_beta=25.0,
+        )
+        return routed_input, router_logits, shared_intermediate
+
+    def _run_kimi_k3_moe_core(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(self.experts, ROCmLatentMoERunner)
+        if self._supports_kimi_k3_large_front(hidden_states.shape[0]):
+            routed_input, router_logits, shared_intermediate = (
+                self._project_kimi_k3_large_front(hidden_states)
+            )
+            return self.experts.run_kimi_k3_large_moe_core(
+                routed_input,
+                router_logits,
+                shared_intermediate,
+            )
+
+        router_logits, _ = self.gate(hidden_states)
+        routed_input, shared_experts_input = self.experts.apply_routed_input_transform(
+            hidden_states
+        )
+        assert shared_experts_input is not None
+        return self.experts.run_kimi_k3_native_moe_core(
+            routed_input,
+            router_logits,
+            shared_experts_input,
+        )
+
+    def _forward_kimi_k3_large_front(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        assert isinstance(self.experts, ROCmLatentMoERunner)
+        routed_input, router_logits, shared_intermediate = (
+            self._project_kimi_k3_large_front(hidden_states)
+        )
+        shared_output, fused_output = self.experts.run_kimi_k3_large_moe_core(
+            routed_input,
+            router_logits,
+            shared_intermediate,
+        )
+        result = self.experts.finish_kimi_k3_large_moe_core(
+            shared_output,
+            fused_output,
+        )
+        if not self._logged_kimi_k3_large_front:
+            self._logged_kimi_k3_large_front = True
+            logger.info_once(
+                "Using Kimi-K3 large-M merged FP32 MoE front with fused "
+                "SiTU epilogue and native routed experts.",
+                scope="global",
+            )
+        return result
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if torch.compiler.is_compiling():
+            if self._kimi_k3_large_front_available:
+                shared_output, fused_output = self.experts.kimi_k3_large_moe_core(
+                    hidden_states
+                )
+                final_hidden_states = self.experts.finish_kimi_k3_large_moe_core(
+                    shared_output,
+                    fused_output,
+                )
+            else:
+                final_hidden_states = self._forward_native(hidden_states)
+        elif (
+            self._initialize_kimi_k3_large_front()
+            and self._supports_kimi_k3_large_front(num_tokens)
+        ):
+            final_hidden_states = self._forward_kimi_k3_large_front(hidden_states)
+        else:
+            final_hidden_states = self._forward_native(hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -1081,6 +1320,11 @@ class KimiLinearForCausalLM(
         # that the pre-norm hidden states can be fed to the MTP draft model.
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def process_weights_after_loading(self) -> None:
+        for module in self.model.modules():
+            if isinstance(module, KimiMoE):
+                module._initialize_kimi_k3_large_front()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
