@@ -250,10 +250,7 @@ def test_interleaved_lifecycle():
 
 def test_async_load_admitted_after_token_budget_exhausted():
     batch_size = 16
-    vllm_config = create_vllm_config(
-        max_num_batched_tokens=batch_size,
-        kv_role="kv_producer",
-    )
+    vllm_config = create_vllm_config(max_num_batched_tokens=batch_size)
     scheduler = create_scheduler(vllm_config)
 
     local_request = create_request(request_id=1, num_tokens=batch_size)

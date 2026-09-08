@@ -149,11 +149,6 @@ class Scheduler(SchedulerInterface):
         # KVConnectorBase_V1.requires_kv_delivery.
         self.requires_kv_delivery = False
         kv_transfer_config = self.vllm_config.kv_transfer_config
-        self._allow_zero_budget_async_kv_loads = (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_producer
-            and not kv_transfer_config.is_kv_consumer
-        )
         if kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -826,10 +821,12 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while self.waiting or self.skipped_waiting:
-                async_load_only = token_budget <= 0 or input_budget <= draft_slots
+                compute_budget_exhausted = (
+                    token_budget <= 0 or input_budget <= draft_slots
+                )
                 if (
-                    async_load_only
-                    and not self._has_pending_waiting_async_load_candidate()
+                    compute_budget_exhausted
+                    and self.vllm_config.kv_transfer_config is None
                 ):
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
@@ -1001,7 +998,7 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif async_load_only:
+                elif compute_budget_exhausted:
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
@@ -2322,15 +2319,6 @@ class Scheduler(SchedulerInterface):
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
-
-    def _has_pending_waiting_async_load_candidate(self) -> bool:
-        if not self._allow_zero_budget_async_kv_loads or self.connector is None:
-            return False
-        return any(
-            request.status == RequestStatus.WAITING for request in self.waiting
-        ) or any(
-            request.status == RequestStatus.WAITING for request in self.skipped_waiting
-        )
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
