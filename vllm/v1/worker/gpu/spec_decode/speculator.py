@@ -265,6 +265,7 @@ class DraftModelSpeculator(BaseSpeculator):
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
+        num_actual_tokens = num_tokens_padded
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
             # prefill/decode queries); num_query_per_req is ignored.
@@ -273,6 +274,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 query_start_loc_np[: num_reqs + 1]
             )
             query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
+            num_actual_tokens = int(query_start_loc_np[num_reqs])
             max_query_len = int(
                 (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max()
             )
@@ -313,7 +315,7 @@ class DraftModelSpeculator(BaseSpeculator):
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
-            num_tokens=num_tokens_padded,
+            num_tokens=num_actual_tokens,
             query_start_loc_gpu=self.input_buffers.query_start_loc[
                 : num_reqs_padded + 1
             ],

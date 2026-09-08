@@ -308,6 +308,76 @@ def test_prefill_graph_respects_backend_query_width(
     assert speculator.decode_cudagraph_manager.query_len == 1
 
 
+@pytest.mark.parametrize(
+    ("query_starts", "num_reqs", "num_reqs_padded", "leading_padding", "expected"),
+    [
+        pytest.param([0, 3, 6], 2, 2, 0, 6, id="six-queries-eight-model-tokens"),
+        pytest.param([0, 5], 1, 1, 2, 5, id="leading-query-padding-counts"),
+        pytest.param([0, 2, 4, 6], 3, 4, 0, 6, id="padded-request-empty-query"),
+        pytest.param([0, 3, 6, 99], 2, 2, 0, 6, id="ignore-unused-boundary-tail"),
+        pytest.param(None, 3, 4, 0, 8, id="uniform-path-keeps-padded-count"),
+    ],
+)
+def test_draft_metadata_excludes_only_graph_token_padding(
+    query_starts, num_reqs, num_reqs_padded, leading_padding, expected
+):
+    """Attention counts query rows, including in-query PAD, but not graph tails."""
+
+    class RecordingBuilder:
+        def build(self, common_prefix_len, common_attn_metadata):
+            return common_attn_metadata
+
+    boundaries = (
+        list(range(num_reqs + 1))
+        if query_starts is None
+        else query_starts[: num_reqs + 1]
+    )
+    boundaries += [boundaries[-1]] * (num_reqs_padded - num_reqs)
+    slots = torch.arange(8, dtype=torch.int64).reshape(1, 8)
+    slots[:, :leading_padding] = -1
+    slots[:, boundaries[-1] :] = -1
+    speculator = object.__new__(_TestSpeculator)
+    speculator.arange = torch.arange(num_reqs_padded + 1, dtype=torch.int32)
+    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.tensor(boundaries, dtype=torch.int32),
+        seq_lens=torch.full((num_reqs_padded,), 16, dtype=torch.int32),
+    )
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.zeros((num_reqs_padded, 2), dtype=torch.int32)],
+        slot_mappings=slots,
+        cp_size=1,
+    )
+    speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[None])
+    speculator.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=["draft"],
+                get_metadata_builder=lambda _: RecordingBuilder(),
+            )
+        ]
+    ]
+
+    metadata = speculator._build_draft_attn_metadata(
+        num_reqs=num_reqs,
+        num_reqs_padded=num_reqs_padded,
+        num_tokens_padded=8,
+        seq_lens_cpu_upper_bound=torch.full((num_reqs,), 16, dtype=torch.int32),
+        step=0,
+        query_start_loc_np=(
+            None
+            if query_starts is None
+            else torch.tensor(query_starts, dtype=torch.int32).numpy()
+        ),
+    )["draft"]
+    assert metadata.num_actual_tokens == expected
+    assert metadata.num_reqs == num_reqs_padded
+    assert metadata.query_start_loc_cpu.tolist() == boundaries
+    assert metadata.query_start_loc.tolist() == boundaries
+    assert metadata.slot_mapping.numel() == 8
+    assert metadata.slot_mapping.data_ptr() == slots.data_ptr()
+
+
 def test_mm_support_configured_after_model_load(monkeypatch):
     target_model_config = object()
     draft_model_config = object()
