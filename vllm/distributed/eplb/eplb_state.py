@@ -37,6 +37,7 @@ from torch.distributed import ProcessGroup, all_reduce
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
     get_ep_group,
     get_eplb_group,
     get_node_count,
@@ -48,6 +49,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
@@ -289,14 +291,6 @@ class EplbState:
         """
         CUDA device index for the async EPLB worker thread.
         """
-        self.num_valid_physical_experts: int = 0
-        """
-        Number of valid physical experts.
-        This is the number of physical experts that are
-        actually mapped to logical experts. In elastic EP,
-        newly started EP ranks may not have physical experts
-        mapped yet.
-        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -499,7 +493,6 @@ class EplbState:
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
-        self.num_valid_physical_experts = model.num_physical_experts
 
     def prepare_forward(
         self,
@@ -766,28 +759,28 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            expert_load_window = eplb_model_state.expert_load_window
+            physical_to_logical = eplb_model_state.physical_to_logical_map
+            invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
-                eplb_model_state.model.num_logical_experts,
+                invalid_idx + 1,
                 dtype=eplb_model_state.expert_load_window.dtype,
                 device=eplb_model_state.expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=physical_to_logical.masked_fill(
+                    physical_to_logical < 0, invalid_idx
+                )
                 .unsqueeze(0)
                 .expand_as(expert_load_window)
                 .long(),
                 src=expert_load_window,
             )
 
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            global_expert_load_window = logical_expert_load_window[..., :-1].sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
@@ -960,7 +953,7 @@ class EplbState:
 
         Each pending result is acknowledged (consumed_event recorded) so the
         async worker can proceed, but the transferred weights are intentionally
-        NOT applied — a full synchronous rearrange is expected to follow.
+        NOT applied — a full rearrange is expected to follow.
 
         Ranks are kept in lockstep via _all_ranks_result_ready (all_reduce
         on the EP CPU group).  The async worker's coordinated-stop collectives
@@ -1060,7 +1053,6 @@ class EplbState:
         device: torch.device,
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
-        num_valid_physical_experts: int,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
@@ -1070,12 +1062,24 @@ class EplbState:
             model=model,
             model_config=model_config,
         )
-        eplb_state.num_valid_physical_experts = num_valid_physical_experts
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_state.update_mapping(
+            model_config,
+            expanded_physical_to_logical,
+        )
+
+        return eplb_state
+
+    def update_mapping(
+        self,
+        model_config: ModelConfig,
+        expanded_physical_to_logical: torch.Tensor,
+    ) -> None:
+        eplb_model_state = self.model_states[model_config.compute_hash()]
         eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
-            expanded_physical_to_logical.cpu(), model.num_logical_experts
+            expanded_physical_to_logical.cpu(),
+            eplb_model_state.model.num_logical_experts,
         )
 
         max_num_replicas = eplb_model_state.logical_to_physical_map.shape[-1]
@@ -1087,13 +1091,31 @@ class EplbState:
                 max_num_replicas - num_replicas,
             ),
             value=-1,
-        ).to(device)
-        logical_replica_count = logical_replica_count_cpu.to(device)
+        ).to(self.device)
+        logical_replica_count = logical_replica_count_cpu.to(self.device)
 
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
 
-        return eplb_state
+    def create_communicator(
+        self, model_config: ModelConfig, group_coordinator: GroupCoordinator
+    ) -> EplbCommunicator:
+        model_state = self.model_states[model_config.compute_hash()]
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None
+        return create_eplb_communicator(
+            group_coordinator,
+            backend,
+            model_state.model.expert_weights,
+            model_state.expert_buffer,
+        )
+
+    def update_communicator(
+        self,
+        model_config: ModelConfig,
+        communicator: EplbCommunicator,
+    ) -> None:
+        self.model_states[model_config.compute_hash()].communicator = communicator
 
 
 @dataclass
@@ -1277,6 +1299,8 @@ def _commit_eplb_maps_for_layer(
         f"Current number of physical experts: {dst.shape[0]}. New number of physical "
         f"experts {src.shape[0]}."
     )
+    if PIN_MEMORY and src.is_cpu:
+        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
     dst.copy_(src, non_blocking=True)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
@@ -1288,6 +1312,8 @@ def _commit_eplb_maps_for_layer(
     src = new_replica_count
     dst = model_state.logical_replica_count[layer]
     assert src.shape == dst.shape
+    if PIN_MEMORY:
+        src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
 
 
@@ -1305,12 +1331,14 @@ def _commit_eplb_maps(
     src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map
 
+    if PIN_MEMORY and src.is_cpu:
+        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
     # Rare Case: When the number of physical experts has changed, discard the old
     # physical to logical expert map and use the new one. This only happens when the
     # number of GPUs available to vLLM changes while vLLM is running. Otherwise copy the
     # new map into the old one.
     if src.shape[1] != dst.shape[1]:
-        model_state.physical_to_logical_map = src.to(dst.device)
+        model_state.physical_to_logical_map = src.to(dst.device, non_blocking=True)
     else:
         dst.copy_(src, non_blocking=True)
 
@@ -1325,6 +1353,8 @@ def _commit_eplb_maps(
     # Commit logical_replica_count
     src = new_replica_count
     dst = model_state.logical_replica_count
+    if PIN_MEMORY:
+        src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
 
 

@@ -8,10 +8,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import (
-    CacheConfig,
-    get_current_vllm_config,
-)
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -22,7 +19,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -97,7 +97,6 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
-    vllm_config: VllmConfig,
     per_token_bytes: int,
     page_budget: int | None,
     fallback: int,
@@ -112,7 +111,7 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes_for_config(vllm_config)
+    sizes = attn_backend.get_supported_kernel_block_sizes()
     candidates = [s for s in sizes if isinstance(s, int)]
     if not candidates:
         candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
@@ -187,7 +186,9 @@ def _init_kv_cache_quant(
     layer._o_scale_float = None
 
     quant_method = (
-        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+        resolve_quant_method(quant_config, layer, prefix=prefix)
+        if quant_config
+        else None
     )
 
     # See [Note: Register q/k/v/prob scales in state dict]
@@ -588,7 +589,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
             if self.quant_config
             else None
         )
@@ -636,11 +637,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             ).real_page_size_bytes
             sw_block_size = _largest_kernel_block_within(
-                self.attn_backend,
-                vllm_config,
-                sw_per_token,
-                shared_page,
-                block_size,
+                self.attn_backend, sw_per_token, shared_page, block_size
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
