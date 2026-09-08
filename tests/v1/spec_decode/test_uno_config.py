@@ -67,6 +67,15 @@ def test_uno_shares_target_and_retains_dense_draft_probabilities(uno_config_fact
     assert config.uno_mask_token_id == 128
 
 
+def test_uno_draft_width_matches_rejection_sampler_limit(uno_config_factory):
+    from vllm.v1.sample.rejection_sampler import MAX_SPEC_LEN
+
+    config = uno_config_factory(num_speculative_tokens=MAX_SPEC_LEN)
+    assert config.num_speculative_tokens == MAX_SPEC_LEN
+    with pytest.raises(ValueError, match=f"num_speculative_tokens <= {MAX_SPEC_LEN}"):
+        uno_config_factory(num_speculative_tokens=MAX_SPEC_LEN + 1)
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

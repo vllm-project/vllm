@@ -1559,6 +1559,10 @@ class SpeculativeConfig:
             )
         if self.num_speculative_tokens is None:
             raise ValueError("Uno requires num_speculative_tokens")
+        from vllm.v1.sample.rejection_sampler import MAX_SPEC_LEN
+
+        if self.num_speculative_tokens > MAX_SPEC_LEN:
+            raise ValueError(f"Uno requires num_speculative_tokens <= {MAX_SPEC_LEN}")
         if self.num_speculative_tokens_per_batch_size is not None:
             raise ValueError("Uno requires a fixed num_speculative_tokens")
         if self.rejection_sample_method != "standard":
