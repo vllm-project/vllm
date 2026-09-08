@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 from torch.nn import Module
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import (
@@ -21,7 +23,7 @@ from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.linear_base import (
+from vllm.model_executor.layers.quantization.online.fp8 import (
     OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
@@ -119,10 +121,10 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kMxfp8Dynamic,
     ):
-        super().__init__(layer=layer, activation_quant_key=activation_quant_key)
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
         # TODO: remove once `select_mxfp8_moe_backend` truly supports None

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.config.quantization import _UNSET
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
@@ -23,11 +24,12 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.linear_base import (
-    OnlineLinearBase,
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
@@ -49,6 +51,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
 )
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
+)
+from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
@@ -105,6 +111,52 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
     is_row_parallel = layer.input_size != layer.input_size_per_partition
     is_column_parallel = layer.output_size != layer.output_size_per_partition
     return is_row_parallel or (reduces_output_dim and is_column_parallel)
+
+
+class OnlineLinearBase(LinearMethodBase):
+    """Shared base for online linear methods. Loads fp16/bf16 checkpoint
+    weights onto meta device and materializes them just-in-time."""
+
+    uses_meta_device: bool = True
+    default_activation_quant_key: QuantKey | None
+
+    def __init__(self, activation_quant_key: QuantKey | None):
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
+        self.activation_quant_key = activation_quant_key
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                device="meta",  # materialized and processed during loading
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        initialize_online_processing(layer)
 
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
@@ -432,12 +484,12 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     def __init__(
         self,
         weight_block_size: list[int] | None,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         weight_key: "QuantKey",
         activation_key: "QuantKey | None",
         allow_vllm_cutlass: bool = False,
     ):
-        super().__init__(layer=layer, activation_quant_key=activation_key)
+        super().__init__(moe, activation_quant_key=activation_key)
         self.weight_block_size = weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = (
@@ -534,12 +586,12 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kFp8DynamicTensorSym,
     ):
         super().__init__(
             weight_block_size=None,
-            layer=layer,
+            moe=moe,
             weight_key=kFp8StaticTensorSym,
             activation_key=activation_quant_key,
         )
@@ -595,12 +647,12 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kFp8Dynamic128Sym,
     ):
         super().__init__(
             weight_block_size=[128, 128],
-            layer=layer,
+            moe=moe,
             weight_key=kFp8Static128BlockSym,
             activation_key=activation_quant_key,
         )
@@ -702,14 +754,14 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kFp8DynamicTokenSym,
     ):
         from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
         super().__init__(
             weight_block_size=None,
-            layer=layer,
+            moe=moe,
             weight_key=kFp8StaticChannelSym,
             activation_key=activation_quant_key,
             allow_vllm_cutlass=True,

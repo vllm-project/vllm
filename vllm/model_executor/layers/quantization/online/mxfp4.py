@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -27,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.linear_base import (
+from vllm.model_executor.layers.quantization.online.fp8 import (
     OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
@@ -150,10 +151,10 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
     ):
-        super().__init__(layer=layer, activation_quant_key=activation_quant_key)
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 

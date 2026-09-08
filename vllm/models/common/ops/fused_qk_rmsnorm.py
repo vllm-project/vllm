@@ -43,19 +43,23 @@ def _fused_q_kv_rmsnorm_kernel(
         weight_ptr = kv_weight_ptr
         row_out = kv_out_ptr + token_idx * kv_out_stride
 
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
     # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
     # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
     # keep x, rrms, and w all in fp32 and perform a single cast at store.
     block = tl.arange(0, BLOCK_SIZE)
     mask = block < SIZE
+    # The weight load does not depend on the producer's output, so issue it
+    # before the PDL wait: gamma streams in while the producer finishes,
+    # leaving a single dependent global round trip (x) after the wait.
+    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
     x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(x * x, axis=0) / SIZE
     rrms = tl.rsqrt(variance + eps)
-    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
     y = x * rrms * w
     tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
@@ -106,5 +110,8 @@ def fused_q_kv_rmsnorm(
         KV_SIZE=kv_size,
         BLOCK_SIZE=block_size,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        # One vectorized 128-bit access per thread for K3/DSv4-sized rows,
+        # instead of a serial per-thread chain at the default 4 warps.
+        num_warps=8 if block_size >= 2048 else 4,
     )
     return qr_out, kv_out
