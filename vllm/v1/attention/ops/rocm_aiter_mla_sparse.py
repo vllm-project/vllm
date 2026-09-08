@@ -961,6 +961,15 @@ def rocm_fp8_paged_mqa_logits(
     # and reads that layout) for a non-contiguous cache. V3.2/GLM caches are
     # contiguous and keep the native fast path.
     force_triton_v4 = not kv_cache_fp8.is_contiguous()
+    # Speculative decode (MTP) verifies next_n > 1 positions per step and hands
+    # the kernel per-query context lengths -- seq_lens is [B, next_n], one row
+    # per query. aiter's native decode does not consume that form: it silently
+    # scores every row against a single context length, so the top-k is wrong
+    # and the model confabulates. The Triton kernel below reads both the 1-D and
+    # 2-D forms, so route speculative decode to it. Batch-1 decode costs nothing
+    # (the two kernels are within noise there); larger batches trade some speed
+    # for correctness, which is the only option until aiter handles 2-D seq_lens.
+    force_triton_spec = q_fp8.shape[1] > 1
 
     def triton_fallback(reason: str) -> torch.Tensor:
         logger.info_once(
@@ -985,6 +994,8 @@ def rocm_fp8_paged_mqa_logits(
 
     if force_triton_v4:
         return triton_fallback("non-contiguous V4 cache")
+    if force_triton_spec:
+        return triton_fallback("speculative decode (next_n > 1)")
     # Otherwise prefer aiter's native deepgemm decode whenever aiter exposes it;
     # the in-tree Triton kernel is correct at all block sizes but slower. Both
     # consume the SHUFFLE cache produced by the Triton writer.
