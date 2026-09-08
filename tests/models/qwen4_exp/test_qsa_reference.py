@@ -1045,8 +1045,8 @@ def test_qsa_sparse_paged_attention_correctness(
         # and catches a k/v swap; scales are host floats, as the layer exposes
         # them. Stored values are the scaled ones, as reshape_and_cache does.
         k_scale, v_scale = 0.5, 2.0
-        k_cache = (k_cache.float() / k_scale).to(torch.float8_e4m3fn)
-        v_cache = (v_cache.float() / v_scale).to(torch.float8_e4m3fn)
+        k_cache = (k_cache / k_scale).to(torch.float8_e4m3fn)
+        v_cache = (v_cache / v_scale).to(torch.float8_e4m3fn)
     else:
         k_scale, v_scale = 1.0, 1.0
 
