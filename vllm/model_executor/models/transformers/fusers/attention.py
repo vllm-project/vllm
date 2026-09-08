@@ -89,8 +89,6 @@ class AttentionFuser(BaseFuser):
     """Source of the `scaling=` the module hands the interface, if it hands one."""
     s_aux_expr: ast.expr | None = None
     """Source of the `s_aux=` the module hands the interface, if it hands one."""
-    sinks_param: nn.Parameter | None = None
-    """The TP-sharded sink parameter `fuse` installed on the module, if any."""
 
     def info(self, name: str) -> str:
         return f"Found: {name} ({self.source_cls}) -> attention interface"
@@ -125,10 +123,10 @@ class AttentionFuser(BaseFuser):
             size = sinks.numel() // vllm_config.parallel_config.tensor_parallel_size
             device = vllm_config.device_config.device
             data = torch.empty(size, dtype=sinks.dtype, device=device)
-            self.sinks_param = nn.Parameter(data, requires_grad=False)
+            sinks_param = nn.Parameter(data, requires_grad=False)
             weight_attrs = {"weight_loader": sharded_weight_loader(0)}
-            set_weight_attrs(self.sinks_param, weight_attrs)
-            setattr(module, self.s_aux_expr.attr, self.sinks_param)
+            set_weight_attrs(sinks_param, weight_attrs)
+            setattr(module, self.s_aux_expr.attr, sinks_param)
         return module
 
     def layer_index(self, module: nn.Module) -> int | None:
