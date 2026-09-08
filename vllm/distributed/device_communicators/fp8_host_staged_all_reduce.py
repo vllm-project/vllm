@@ -4,14 +4,18 @@
 """Host-staged FP8 (E4M3) allreduce for TP2 on PCIe fabrics without P2P.
 
 Quantizes the local input (per-128-element E4M3 payload + FP32 scale,
-following the measured b12x codec), exchanges the two payloads over
-NCCL send/recv (which the NCCL SHM transport stages through host
-memory when P2P is unavailable), and dequantizes and reduces locally.
-Both ranks materialize the result from the same two wire payloads so
-the replicated activations stay bit-identical.
+following the measured b12x codec) and exchanges the two payloads over
+NCCL send/recv in two one-way phases separated by a CPU barrier:
+interleaved bidirectional P2P faults in the NCCL SHM transport on
+P2P-dead platforms (Xid 31), while one-way exchanges are stable at all
+sizes. The NCCL SHM transport stages the payloads through host memory
+when P2P is unavailable. Both ranks materialize the result from the
+same two wire payloads, and each dequantized side is rounded to BF16
+before the add, so the replicated activations stay bit-identical.
 """
 
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -52,7 +56,13 @@ def _dequant_add_kernel(
     q1 = tl.load(p1_ptr + offs).to(tl.float32)
     s0 = tl.load(s0_ptr + pid)
     s1 = tl.load(s1_ptr + pid)
-    out = (q0 * s0 + q1 * s1).to(tl.bfloat16)
+    # Round each dequantized side to BF16 before the add. The cvt breaks
+    # the compiler's fma contraction of q0*s0 + q1*s1 (fma(q0, s0, q1*s1)
+    # is not bitwise commutative: the ranks swap the operand roles and
+    # would differ by 1 FP32 ulp). Cost: one extra rounding per side.
+    v0 = (q0 * s0).to(tl.bfloat16).to(tl.float32)
+    v1 = (q1 * s1).to(tl.bfloat16).to(tl.float32)
+    out = (v0 + v1).to(tl.bfloat16)
     tl.store(out_ptr + offs, out)
 
 
@@ -69,12 +79,14 @@ class Fp8HostStagedAllReduce:
         pynccl_comm: PyNcclCommunicator,
         rank: int,
         device: torch.device,
+        cpu_group: dist.ProcessGroup,
     ) -> None:
         assert pynccl_comm.world_size == 2
         self._comm = pynccl_comm
         self.rank = rank
         self.peer = (rank + 1) % 2
         self.device = device
+        self._cpu_group = cpu_group
         self._cap = 0
         self._payload: torch.Tensor | None = None
         self._scale: torch.Tensor | None = None
@@ -144,10 +156,21 @@ class Fp8HostStagedAllReduce:
         _quant_fp8_kernel[(n // QUANT_BLOCK,)](
             input_, own, s_own, BLOCK=QUANT_BLOCK, num_warps=4
         )
-        self._comm.send(own, self.peer)
-        self._comm.send(s_own, self.peer)
-        self._comm.recv(peer, self.peer)
-        self._comm.recv(s_peer, self.peer)
+        # Two one-way phases: rank 0 -> rank 1, CPU barrier, rank 1 -> rank
+        # 0. Each op is stream-ordered, so a phase's data is fully received
+        # on the destination before the reverse direction starts.
+        if self.rank == 0:
+            self._comm.send(own, 1)
+            self._comm.send(s_own, 1)
+            dist.barrier(group=self._cpu_group)
+            self._comm.recv(peer, 1)
+            self._comm.recv(s_peer, 1)
+        else:
+            self._comm.recv(peer, 0)
+            self._comm.recv(s_peer, 0)
+            dist.barrier(group=self._cpu_group)
+            self._comm.send(own, 0)
+            self._comm.send(s_own, 0)
         _dequant_add_kernel[(n // QUANT_BLOCK,)](
             own, s_own, peer, s_peer, out, BLOCK=QUANT_BLOCK, num_warps=4
         )

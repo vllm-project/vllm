@@ -1,13 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-import torch
+import os
 
+import pytest
+import ray
+import torch
+import torch.distributed as dist
+
+from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
     QUANT_BLOCK,
     Fp8HostStagedAllReduce,
     _quant_fp8_kernel,
+)
+from vllm.distributed.parallel_state import get_tp_group
+
+from ..utils import (
+    init_test_distributed_environment,
+    multi_process_parallel,
 )
 
 
@@ -34,6 +45,7 @@ def _uninitialized_comm(device: torch.device) -> Fp8HostStagedAllReduce:
     comm.rank = 0
     comm.peer = 1
     comm.device = device
+    comm._cpu_group = None
     comm._cap = 0
     comm._payload = None
     comm._scale = None
@@ -88,15 +100,15 @@ def test_quant_roundtrip_error_bound(dev):
     assert (err <= bound).all(), f"max err {err.max().item():.6f}"
 
 
-def test_dequant_add_within_one_bf16_ulp(dev):
-    """Kernel dequant-add vs the double-rounding torch reference.
+def test_dequant_add_bitexact(dev):
+    """Kernel dequant-add is bit-identical to the bf16-first torch reference.
 
-    The kernel fuses q0*s0 + q1*s1 into an fma.rn.f32 (single rounding of
-    the exact 4-bit-mantissa product); the reference rounds each product
-    first. The two sums differ by at most 1 fp32 ulp, so the bf16 outputs
-    must be within one bf16 ulp (with slack). Any codec-level deviation
-    (wrong scale convention, dropped scale, ...) is ~2^-4 relative and
-    far outside this bound.
+    The kernel rounds each dequantized side to BF16 (RN mul + RN cast, the
+    cvt breaking any fma contraction) and then adds the two BF16 values in
+    FP32 (exact) and casts to BF16. The reference applies the same three
+    roundings, so the outputs must be bitwise equal. Bitwise commutativity
+    across the operand roles is what makes the replicated TP outputs
+    bit-identical.
     """
     x0 = _make_input(dev, 4096 * 5120)
     x1 = _make_input(dev, 4096 * 5120)
@@ -119,14 +131,16 @@ def test_dequant_add_within_one_bf16_ulp(dev):
         out,
     )
     rep = lambda s: s.repeat_interleave(QUANT_BLOCK).view(x0.shape)  # noqa: E731
-    ref = (
+    side0 = (
         payload_buf[0, :n].view(torch.float8_e4m3fn).float() * rep(scale_buf[0])
-        + payload_buf[1, :n].view(torch.float8_e4m3fn).float() * rep(scale_buf[1])
     ).to(torch.bfloat16)
-    err = (out.float() - ref.float()).abs()
-    bound = ref.float().abs() * 2**-6 + 2e-30
-    assert (err <= bound).all(), (
-        f"dequant+add deviates beyond one bf16 ulp; max err {err.max().item()}"
+    side1 = (
+        payload_buf[1, :n].view(torch.float8_e4m3fn).float() * rep(scale_buf[1])
+    ).to(torch.bfloat16)
+    ref = (side0.float() + side1.float()).to(torch.bfloat16)
+    assert torch.equal(out, ref), (
+        f"dequant+add not bit-identical to the bf16-first reference; "
+        f"max err {(out.float() - ref.float()).abs().max().item()}"
     )
 
 
@@ -155,3 +169,94 @@ def test_should_use_rejects_graph_capture(dev, monkeypatch):
     comm = _uninitialized_comm(dev)
     x = torch.randn(1_000_064, dtype=torch.bfloat16, device=dev)
     assert comm.should_use(x) is False
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def fp8_hs_ar_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    # Ray workers must see all GPUs (the project never uses
+    # CUDA_VISIBLE_DEVICES).
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    # opt in before the TP group (and its CudaCommunicator) is constructed
+    os.environ["VLLM_FP8_HOST_STAGED_AR"] = "1"
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+    comm = get_tp_group().device_communicator
+    assert comm.fp8_hs_ar is not None, "FP8 host-staged AR was not constructed"
+    hs = comm.fp8_hs_ar
+    assert hs.disabled is False
+
+    # warmup (also grows the buffers to the size used below)
+    x = torch.randn(4096, 5120, dtype=torch.bfloat16, device=device)
+    hs.all_reduce(x)
+    torch.accelerator.synchronize()
+
+    # correctness vs FP32 reference + rank-identical outputs (D4 contract)
+    x = torch.randn(4096, 5120, dtype=torch.bfloat16, device=device)
+    ref = x.float()
+    group = get_tp_group().device_group
+    dist.all_reduce(ref, group=group)
+    torch.accelerator.synchronize()
+    out = hs.all_reduce(x)
+    torch.accelerator.synchronize()
+    outs = [torch.empty_like(out) for _ in range(tp_size)]
+    dist.all_gather(outs, out, group=group)
+    torch.accelerator.synchronize()
+    assert torch.equal(outs[0], outs[1]), (
+        "replicated outputs must be bit-identical across ranks"
+    )
+    gmax = x.abs().max().float()
+    dist.all_reduce(gmax, group=group, op=dist.ReduceOp.MAX)
+    torch.accelerator.synchronize()
+    # per-side E4M3 quantization (0.0625 * amax) + bf16-first dequant
+    # roundings (two side casts + one sum cast, each <= 2^-8 of its operand,
+    # operands <= 1.0625 gmax; the sum cast sees |out| <= 2.125 gmax)
+    # + NCCL bf16 reduction rounding of the reference (2^-7 of each input)
+    bound = (
+        0.0625 * 2 * gmax * 1.001
+        + 4.25 * gmax * 2**-8
+        + 2.0 * gmax * 2**-7
+    )
+    err = (out.float() - ref).abs().max().item()
+    assert err <= bound, f"max err {err} exceeds bound {bound.item()}"
+
+    # dispatch: admitted message => exactly 2 NCCL sends on this rank (one
+    # per phase of the one-way exchange), no ncclAllReduce; sub-MIN message
+    # => plain NCCL allreduce (0 sends), bit-exact result
+    counts = {"send": 0}
+    orig_send = comm.pynccl_comm.send
+
+    def spy_send(t, dst, stream=None):
+        counts["send"] += 1
+        return orig_send(t, dst, stream)
+
+    comm.pynccl_comm.send = spy_send
+    try:
+        big = torch.randn(4096, 5120, dtype=torch.bfloat16, device=device)
+        tensor_model_parallel_all_reduce(big)
+        torch.accelerator.synchronize()
+        assert counts["send"] == 2, f"expected 2 sends, got {counts['send']}"
+        counts["send"] = 0
+        small = torch.randn(5120, dtype=torch.bfloat16, device=device)
+        out_small = tensor_model_parallel_all_reduce(small)
+        torch.accelerator.synchronize()
+        assert counts["send"] == 0, "sub-MIN message must stay on NCCL"
+        ref_small = small.clone()
+        dist.all_reduce(ref_small, group=group)
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(out_small, ref_small, rtol=0, atol=0)
+    finally:
+        comm.pynccl_comm.send = orig_send
+
+
+@pytest.mark.parametrize("tp_size", [2])
+def test_fp8_hs_ar_2gpu(monkeypatch: pytest.MonkeyPatch, tp_size):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, fp8_hs_ar_target)
