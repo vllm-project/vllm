@@ -69,6 +69,16 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
     )
 
 
+class _TestAttentionBackend:
+    @staticmethod
+    def get_name() -> str:
+        return "TEST"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [16]
+
+
 class FakeMooncakeWrapper:
     """Mock Mooncake TransferEngine for unit testing environments."""
 
@@ -1384,7 +1394,7 @@ def test_register_kv_caches_starts_sender_only_on_canonical_pcp_rank(
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
             "mooncake_connector.get_current_attn_backends",
-            return_value=[FlashAttentionBackend],
+            return_value=[_TestAttentionBackend],
         ),
         patch("asyncio.run_coroutine_threadsafe") as mock_run_coroutine,
     ):
@@ -1398,14 +1408,14 @@ def test_register_kv_caches_starts_sender_only_on_canonical_pcp_rank(
         listener_token = object()
         mock_listener = MagicMock(return_value=listener_token)
 
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        spec = FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
         )
-        kv_caches = {
-            "model.layers.0.self_attn": torch.zeros(
-                *kv_cache_shape, dtype=torch.float16
-            )
-        }
+        raw = torch.zeros(2 * spec.page_size_bytes, dtype=torch.int8)
+        (cache,) = dense_kv_cache_views(
+            raw, spec, num_blocks=2, num_layers=1, layout=KVCacheLayout.LBHNC
+        )
+        kv_caches = {"model.layers.0.self_attn": cache}
 
         with (
             patch.object(worker.engine, "batch_register_memory", return_value=0),
