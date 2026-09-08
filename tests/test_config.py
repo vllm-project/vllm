@@ -794,16 +794,33 @@ def test_all2all_backend_default_needs_cuda_and_expert_parallel(
     else keeps the portable default (#53952)."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
     monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
+    monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
     config = ParallelConfig(enable_expert_parallel=enable_expert_parallel)
     assert config.all2all_backend == expected_backend
 
 
+def test_all2all_backend_falls_back_before_blackwell(monkeypatch):
+    """No unquantized MoE kernel accepts this backend below SM100, so the
+    backend oracle would raise while loading the model (L4, DP+EP)."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: False
+    )
+    config = ParallelConfig(enable_expert_parallel=True)
+    assert config.all2all_backend == "allgather_reducescatter"
+
+
 def test_all2all_backend_falls_back_without_flashinfer_one_sided(monkeypatch):
     """FlashInferNVLinkOneSidedManager asserts on this module, so a CUDA
     install without it must keep serving instead of failing at startup."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
     )

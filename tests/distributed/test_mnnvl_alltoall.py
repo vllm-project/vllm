@@ -88,6 +88,9 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
     monkeypatch.setattr(
         "vllm.platforms.current_platform.is_cuda", lambda: platform == "cuda"
     )
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
     monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
     monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
 
@@ -128,6 +131,9 @@ def test_engine_args_resolves_all2all_backend_default(
     therefore arrive as a resolved string; leaking a `FieldInfo` through makes
     every launch without `--all2all-backend` fail config validation."""
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
