@@ -512,22 +512,23 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
     assert torch.equal(actual_w2, expected_w2)
 
 
-def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(monkeypatch):
+def _make_unquantized_flashinfer_test_layer(
+    monkeypatch, intermediate, is_gated, *, device="cuda"
+):
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
     )
     from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
         UnquantizedFusedMoEMethod,
     )
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-        convert_moe_weights_to_flashinfer_trtllm_block_layout,
-    )
 
     moe_config = make_dummy_moe_config(
         num_experts=2,
         hidden_dim=256,
-        intermediate_size=256,
+        intermediate_size=intermediate,
+        activation=MoEActivation.SILU if is_gated else MoEActivation.RELU2_NO_MUL,
     )
+    moe_config.intermediate_size_per_partition = (intermediate + 127) // 128 * 128
     method = object.__new__(UnquantizedFusedMoEMethod)
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
@@ -540,47 +541,115 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(monkeypatch):
 
     layer = torch.nn.Module()
     layer.moe_config = moe_config
-    w13_shape = (2, 512, 256)
-    w2_shape = (2, 256, 256)
-    layer.register_parameter(
-        "w13_weight",
-        torch.nn.Parameter(
-            torch.randn(w13_shape, dtype=torch.bfloat16, device="cuda"),
-            requires_grad=False,
-        ),
+    with torch.device(device):
+        method.create_weights(
+            layer,
+            num_experts=2,
+            hidden_size=256,
+            intermediate_size_per_partition=moe_config.intermediate_size_per_partition,
+            params_dtype=torch.bfloat16,
+        )
+    return method, layer
+
+
+@pytest.mark.parametrize("intermediate", [192, 256])
+@pytest.mark.parametrize("is_gated", [True, False])
+def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
+    monkeypatch, intermediate, is_gated
+):
+    """Each raw reload clears padding left dirty by prior in-place conversion."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
-    layer.register_parameter(
-        "w2_weight",
-        torch.nn.Parameter(
-            torch.randn(w2_shape, dtype=torch.bfloat16, device="cuda"),
-            requires_grad=False,
-        ),
+
+    method, layer = _make_unquantized_flashinfer_test_layer(
+        monkeypatch, intermediate, is_gated
     )
+    w13_shape, w2_shape = layer.w13_weight.shape, layer.w2_weight.shape
+    padded = w2_shape[-1]
     w13_ptr = layer.w13_weight.data_ptr()
     w2_ptr = layer.w2_weight.data_ptr()
 
     for _ in range(2):
         reloaded_w13 = torch.randn_like(layer.w13_weight)
         reloaded_w2 = torch.randn_like(layer.w2_weight)
+        reloaded_w13[:, intermediate:padded].zero_()
+        if is_gated:
+            reloaded_w13[:, padded + intermediate :].zero_()
+        reloaded_w2[:, :, intermediate:].zero_()
         expected_w13, expected_w2 = (
             convert_moe_weights_to_flashinfer_trtllm_block_layout(
                 {},
                 reloaded_w13.clone(),
                 reloaded_w2.clone(),
+                is_gated_act_gemm=is_gated,
             )
         )
 
-        layer.w13_weight.copy_(reloaded_w13)
-        layer.w2_weight.copy_(reloaded_w2)
-        method._setup_kernel(layer, layer.w13_weight, layer.w2_weight)
+        # The loader writes only logical checkpoint slices, not padding.
+        layer.w13_weight.fill_(float("nan"))
+        layer.w2_weight.fill_(float("nan"))
+        layer.w13_weight[:, :intermediate].copy_(reloaded_w13[:, :intermediate])
+        if is_gated:
+            layer.w13_weight[:, padded : padded + intermediate].copy_(
+                reloaded_w13[:, padded : padded + intermediate]
+            )
+        layer.w2_weight[:, :, :intermediate].copy_(reloaded_w2[:, :, :intermediate])
+        method.process_weights_after_loading(layer)
 
         assert layer.w13_weight.shape == w13_shape
         assert layer.w2_weight.shape == w2_shape
         assert layer.w13_weight.data_ptr() == w13_ptr
         assert layer.w2_weight.data_ptr() == w2_ptr
         kernel_w13, kernel_w2 = method._kernel_weights(layer)
-        torch.testing.assert_close(kernel_w13, expected_w13)
-        torch.testing.assert_close(kernel_w2, expected_w2)
+        assert torch.equal(kernel_w13, expected_w13)
+        assert torch.equal(kernel_w2, expected_w2)
+
+
+@pytest.mark.parametrize("is_gated", [True, False])
+@pytest.mark.parametrize("cache_ndim", [3, 4])
+@pytest.mark.parametrize("mode", ["copy", "zero_copy"])
+def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
+    monkeypatch, is_gated, cache_ndim, mode
+):
+    """Tensor-only IPC restores must preserve packed values and kernel views."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    from vllm.model_executor.utils import weights_already_processed
+
+    method, layer = _make_unquantized_flashinfer_test_layer(
+        monkeypatch, 192, is_gated, device="meta"
+    )
+    packed = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        {},
+        torch.randn_like(layer.w13_weight, device="cuda"),
+        torch.randn_like(layer.w2_weight, device="cuda"),
+        is_gated_act_gemm=is_gated,
+    )
+    expected = [weight.clone() for weight in packed]
+    entries = {}
+    for name, weight in zip(("w13_weight", "w2_weight"), packed):
+        cached = weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
+        entries[name] = TensorEntry.from_tensor(cached, kind="param")
+    loader = object.__new__(IpcModelLoader)
+    loader.mode = mode
+    loader._apply_entries(layer, entries, {}, torch.accelerator.current_device_index())
+    pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
+
+    # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
+    with weights_already_processed():
+        method.process_weights_after_loading(layer)
+    assert method.moe_kernel is not None
+    actual = method._kernel_weights(layer)
+    for weight, reference, pointer in zip(actual, expected, pointers):
+        assert weight.data_ptr() == pointer
+        assert torch.equal(weight, reference)
+    for source, reference, pointer in zip(packed, expected, pointers):
+        assert torch.equal(source, reference)
+        assert (source.data_ptr() == pointer) == (mode == "zero_copy")
 
 
 @pytest.mark.parametrize(
