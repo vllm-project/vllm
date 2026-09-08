@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -9,6 +10,13 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+    triton_warmup_inputs,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -46,6 +54,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
+
+        _PREPARE_PREFILL_INPUTS_KERNEL.register_warmup(speculator=self)
+        if self.num_speculative_steps > 1:
+            _PREPARE_DECODE_INPUTS_KERNEL.register_warmup(speculator=self)
+            _UPDATE_DRAFT_INPUTS_KERNEL.register_warmup(speculator=self)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -794,7 +807,8 @@ def prepare_prefill_inputs(
     max_num_reqs,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
-    _prepare_prefill_inputs_kernel[(num_reqs,)](
+    _PREPARE_PREFILL_INPUTS_KERNEL(
+        (num_reqs,),
         last_token_indices,
         current_draft_step,
         input_buffers.input_ids,
@@ -882,7 +896,8 @@ def prepare_decode_inputs(
     advance_draft_positions: bool = True,
 ):
     num_reqs = draft_tokens.shape[0]
-    _prepare_decode_inputs_kernel[(num_reqs + 1,)](
+    _PREPARE_DECODE_INPUTS_KERNEL(
+        (num_reqs + 1,),
         draft_tokens,
         draft_tokens.stride(0),
         target_seq_lens,
@@ -985,7 +1000,8 @@ def update_draft_inputs(
     advance_draft_positions: bool = True,
 ):
     _, hidden_size = hidden_states.shape
-    _update_draft_inputs_kernel[(num_reqs,)](
+    _UPDATE_DRAFT_INPUTS_KERNEL(
+        (num_reqs,),
         output_draft_tokens,
         output_draft_tokens.stride(0),
         next_input_hidden_states,
@@ -1004,3 +1020,237 @@ def update_draft_inputs(
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
+
+
+class PreparePrefillInputsKernel(
+    VllmTritonJitKernel["PreparePrefillInputsKernel.CompileKey"]
+):
+    """Triton warmup owner for ``_prepare_prefill_inputs_kernel``."""
+
+    kernel = staticmethod(_prepare_prefill_inputs_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        max_num_reqs: int
+
+    def dispatch(  # type: ignore[override]
+        self, *, max_num_reqs: int
+    ) -> CompileKey:
+        return self.CompileKey(
+            max_num_reqs=triton_scalar_specialization_rep(max_num_reqs)
+        )
+
+    def get_warmup_keys(
+        self, *, speculator: AutoRegressiveSpeculator
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(max_num_reqs=speculator.max_num_reqs)
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        return triton_warmup_inputs(
+            self.kernel,
+            int64_ptr,  # last_token_indices_ptr
+            int64_ptr,  # draft_current_step_ptr
+            int32_ptr,  # draft_input_ids_ptr
+            int64_ptr,  # draft_positions_ptr
+            int32_ptr,  # draft_query_start_loc_ptr
+            int32_ptr,  # draft_seq_lens_ptr
+            int32_ptr,  # target_input_ids_ptr
+            int64_ptr,  # target_positions_ptr
+            int32_ptr,  # idx_mapping_ptr
+            int64_ptr,  # last_sampled_ptr
+            int32_ptr,  # next_prefill_tokens_ptr
+            int32_ptr,  # num_sampled_ptr
+            int32_ptr,  # num_rejected_ptr
+            int32_ptr,  # query_start_loc_ptr
+            int32_ptr,  # seq_lens_ptr
+            compile_key.max_num_reqs,
+            BLOCK_SIZE=1024,
+            grid=(1,),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+
+
+class PrepareDecodeInputsKernel(
+    VllmTritonJitKernel["PrepareDecodeInputsKernel.CompileKey"]
+):
+    """Triton warmup owner for ``_prepare_decode_inputs_kernel``."""
+
+    kernel = staticmethod(_prepare_decode_inputs_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        draft_tokens_stride: int
+        max_model_len: int
+        max_num_reqs: int
+        advance_draft_positions: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        draft_tokens_stride: int,
+        max_model_len: int,
+        max_num_reqs: int,
+        advance_draft_positions: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            draft_tokens_stride=triton_scalar_specialization_rep(draft_tokens_stride),
+            max_model_len=triton_scalar_specialization_rep(max_model_len),
+            max_num_reqs=triton_scalar_specialization_rep(max_num_reqs),
+            advance_draft_positions=advance_draft_positions,
+        )
+
+    def get_warmup_keys(
+        self, *, speculator: AutoRegressiveSpeculator
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            draft_tokens_stride=speculator.num_speculative_steps,
+            max_model_len=speculator.max_model_len,
+            max_num_reqs=speculator.max_num_reqs,
+            advance_draft_positions=speculator.advance_draft_positions,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        draft_tokens_ptr = TritonWarmupTensor(
+            torch.int32, strides=(compile_key.draft_tokens_stride,)
+        )
+        return triton_warmup_inputs(
+            self.kernel,
+            draft_tokens_ptr,
+            draft_tokens_ptr.stride(0),
+            int32_ptr,  # target_seq_lens_ptr
+            int32_ptr,  # num_rejected_ptr
+            int32_ptr,  # input_ids_ptr
+            int64_ptr,  # positions_ptr
+            int64_ptr,  # sample_src_positions_ptr
+            int32_ptr,  # query_start_loc_ptr
+            int32_ptr,  # seq_lens_ptr
+            compile_key.max_model_len,
+            compile_key.max_num_reqs,
+            BLOCK_SIZE=1024,
+            ADVANCE_DRAFT_POSITIONS=compile_key.advance_draft_positions,
+            grid=(1,),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+
+
+class UpdateDraftInputsKernel(
+    VllmTritonJitKernel["UpdateDraftInputsKernel.CompileKey"]
+):
+    """Triton warmup owner for ``_update_draft_inputs_kernel``."""
+
+    kernel = staticmethod(_update_draft_inputs_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_dtype: torch.dtype
+        output_draft_tokens_stride: int
+        next_input_hidden_states_stride: int
+        hidden_states_stride: int
+        hidden_size: int
+        max_model_len: int
+        num_speculative_steps: int
+        advance_draft_positions: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        hidden_dtype: torch.dtype,
+        output_draft_tokens_stride: int,
+        next_input_hidden_states_stride: int,
+        hidden_states_stride: int,
+        hidden_size: int,
+        max_model_len: int,
+        num_speculative_steps: int,
+        advance_draft_positions: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            hidden_dtype=hidden_dtype,
+            output_draft_tokens_stride=triton_scalar_specialization_rep(
+                output_draft_tokens_stride
+            ),
+            next_input_hidden_states_stride=triton_scalar_specialization_rep(
+                next_input_hidden_states_stride
+            ),
+            hidden_states_stride=triton_scalar_specialization_rep(hidden_states_stride),
+            hidden_size=triton_scalar_specialization_rep(hidden_size),
+            max_model_len=triton_scalar_specialization_rep(max_model_len),
+            num_speculative_steps=triton_scalar_specialization_rep(
+                num_speculative_steps
+            ),
+            advance_draft_positions=advance_draft_positions,
+        )
+
+    def get_warmup_keys(
+        self, *, speculator: AutoRegressiveSpeculator
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            hidden_dtype=speculator.dtype,
+            output_draft_tokens_stride=speculator.num_speculative_steps,
+            next_input_hidden_states_stride=speculator.hidden_size,
+            hidden_states_stride=speculator.hidden_size,
+            hidden_size=speculator.hidden_size,
+            max_model_len=speculator.max_model_len,
+            num_speculative_steps=speculator.num_speculative_steps,
+            advance_draft_positions=speculator.advance_draft_positions,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        output_draft_tokens_ptr = TritonWarmupTensor(
+            torch.int32, strides=(compile_key.output_draft_tokens_stride, 1)
+        )
+        next_input_hidden_states_ptr = TritonWarmupTensor(
+            compile_key.hidden_dtype,
+            strides=(compile_key.next_input_hidden_states_stride, 1),
+        )
+        hidden_states_ptr = TritonWarmupTensor(
+            compile_key.hidden_dtype,
+            strides=(compile_key.hidden_states_stride, 1),
+        )
+        return triton_warmup_inputs(
+            self.kernel,
+            output_draft_tokens_ptr,
+            output_draft_tokens_ptr.stride(0),
+            next_input_hidden_states_ptr,
+            next_input_hidden_states_ptr.stride(0),
+            int32_ptr,  # input_ids_ptr
+            int64_ptr,  # positions_ptr
+            int64_ptr,  # sample_src_positions_ptr
+            int32_ptr,  # seq_lens_ptr
+            int32_ptr,  # draft_tokens_ptr
+            int64_ptr,  # current_draft_step_ptr
+            hidden_states_ptr,
+            hidden_states_ptr.stride(0),
+            compile_key.hidden_size,
+            compile_key.max_model_len,
+            compile_key.num_speculative_steps,
+            BLOCK_SIZE=1024,
+            ADVANCE_DRAFT_POSITIONS=compile_key.advance_draft_positions,
+            grid=(1,),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+
+
+_PREPARE_PREFILL_INPUTS_KERNEL = PreparePrefillInputsKernel()
+_PREPARE_DECODE_INPUTS_KERNEL = PrepareDecodeInputsKernel()
+_UPDATE_DRAFT_INPUTS_KERNEL = UpdateDraftInputsKernel()
