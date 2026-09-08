@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -560,6 +569,129 @@ def copy_and_expand_dflash_inputs_kernel(
         query_out,
         mask=is_sample,
     )
+
+
+class CopyAndExpandDflashInputsKernel(
+    VllmTritonJitKernel["CopyAndExpandDflashInputsKernel.CompileKey"]
+):
+    kernel = staticmethod(copy_and_expand_dflash_inputs_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_table_stride: int
+        parallel_drafting_token_id: int
+        block_size: int
+        num_query_per_req: int
+        num_speculative_tokens: int
+        total_input_tokens: int
+        triton_block_size: int
+        has_num_rejected: bool
+
+    def dispatch(
+        self,
+        *,
+        block_table_stride: int,
+        parallel_drafting_token_id: int,
+        block_size: int,
+        num_query_per_req: int,
+        num_speculative_tokens: int,
+        total_input_tokens: int,
+        triton_block_size: int,
+        has_num_rejected: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_table_stride=triton_scalar_specialization_rep(block_table_stride),
+            parallel_drafting_token_id=triton_scalar_specialization_rep(
+                parallel_drafting_token_id
+            ),
+            block_size=triton_scalar_specialization_rep(block_size),
+            num_query_per_req=triton_scalar_specialization_rep(num_query_per_req),
+            num_speculative_tokens=triton_scalar_specialization_rep(
+                num_speculative_tokens
+            ),
+            total_input_tokens=triton_scalar_specialization_rep(total_input_tokens),
+            triton_block_size=triton_block_size,
+            has_num_rejected=has_num_rejected,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        block_table_stride: int,
+        parallel_drafting_token_id: int,
+        block_size: int,
+        num_speculative_tokens: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            block_table_stride=block_table_stride,
+            parallel_drafting_token_id=parallel_drafting_token_id,
+            block_size=block_size,
+            num_query_per_req=1 + num_speculative_tokens,
+            num_speculative_tokens=num_speculative_tokens,
+            total_input_tokens=(1, 2, 16),
+            triton_block_size=(1, 2, 4, 8, 16, 32, 64, 128, 256),
+            has_num_rejected=(False, True),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        return dict(
+            next_token_ids_ptr=int32_ptr,
+            target_positions_ptr=int64_ptr,
+            out_input_ids_ptr=int32_ptr,
+            out_context_positions_ptr=int64_ptr,
+            out_query_positions_ptr=int64_ptr,
+            out_context_slot_mapping_ptr=int64_ptr,
+            out_query_slot_mapping_ptr=int64_ptr,
+            out_token_indices_ptr=int32_ptr,
+            block_table_ptr=int32_ptr,
+            query_start_loc_ptr=int32_ptr,
+            num_rejected_tokens_ptr=int32_ptr,
+            max_tokens_per_req=compile_key.triton_block_size,
+            **vars(compile_key),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        *,
+        next_token_ids_ptr: torch.Tensor,
+        target_positions_ptr: torch.Tensor,
+        out_input_ids_ptr: torch.Tensor,
+        out_context_positions_ptr: torch.Tensor,
+        out_query_positions_ptr: torch.Tensor,
+        out_context_slot_mapping_ptr: torch.Tensor,
+        out_query_slot_mapping_ptr: torch.Tensor,
+        out_token_indices_ptr: torch.Tensor,
+        block_table_ptr: torch.Tensor,
+        query_start_loc_ptr: torch.Tensor,
+        num_rejected_tokens_ptr: torch.Tensor | int,
+        block_table_stride: int,
+        parallel_drafting_token_id: int,
+        block_size: int,
+        num_query_per_req: int,
+        num_speculative_tokens: int,
+        total_input_tokens: int,
+        max_tokens_per_req: int,
+        triton_block_size: int,
+        has_num_rejected: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        num_reqs = query_start_loc_ptr.shape[0] - 1
+        num_blocks = triton.cdiv(max_tokens_per_req, triton_block_size)
+        return (num_reqs, num_blocks), dict(
+            block_table_stride=block_table_stride,
+            parallel_drafting_token_id=parallel_drafting_token_id,
+            block_size=block_size,
+            num_query_per_req=num_query_per_req,
+            num_speculative_tokens=num_speculative_tokens,
+            total_input_tokens=total_input_tokens,
+            BLOCK_SIZE=triton_block_size,
+            HAS_NUM_REJECTED=has_num_rejected,
+        )
+
+
+_COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL = CopyAndExpandDflashInputsKernel()
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

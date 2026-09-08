@@ -62,6 +62,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
@@ -167,64 +168,82 @@ def _gemma4_routing_kernel(
     tl.store(topk_weights_ptr + base_off, all_weights, mask=top_mask)
 
 
-@dataclass(frozen=True)
-class _Gemma4RoutingCompileKey:
-    E: int
-    K: int
-    BLOCK_E: int
+class Gemma4RoutingKernel(
+    VllmTritonJitKernel["Gemma4RoutingKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_experts: int
+        topk: int
+        block_e: int
+        num_warps: int
 
-
-class _Gemma4RoutingKernel(VllmTritonJitKernel[_Gemma4RoutingCompileKey]):
-    """JIT-warmup owner for :func:`_gemma4_routing_kernel`.
-
-    The MoE routing kernel specializes on the constexprs ``E`` (number of
-    experts), ``K`` (top-k) and ``BLOCK_E`` (``next_power_of_2(E)``). All three
-    are fixed by the model config, so there is a single compile key per model.
-    """
-
-    CompileKey = _Gemma4RoutingCompileKey
     kernel = staticmethod(_gemma4_routing_kernel)
 
-    def dispatch(self, E, K, BLOCK_E):
-        return self.CompileKey(E=E, K=K, BLOCK_E=BLOCK_E)
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_experts: int,
+        topk: int,
+        num_warps: int = 1,
+    ) -> CompileKey:
+        return self.CompileKey(
+            num_experts=num_experts,
+            topk=topk,
+            block_e=triton.next_power_of_2(num_experts),
+            num_warps=num_warps,
+        )
 
-    def get_warmup_keys(self, vllm_config):
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         text_config = _get_text_config(vllm_config.model_config.hf_config)
-        E = int(text_config.num_experts)
-        K = int(text_config.top_k_experts)
-        BLOCK_E = triton.next_power_of_2(E)
-        return [self.dispatch(E=E, K=K, BLOCK_E=BLOCK_E)]
+        return self._trace_dispatch(self.dispatch)(
+            num_experts=text_config.num_experts,
+            topk=text_config.top_k_experts,
+            num_warps=1,
+        )
 
-    def warmup_inputs(self, compile_key):
-        E = compile_key.E
-        K = compile_key.K
-        return {
-            "gating": TritonWarmupTensor(torch.float32, shape=(1, E)),
-            "per_expert_scale": TritonWarmupTensor(torch.float32, shape=(E,)),
-            "topk_weights": TritonWarmupTensor(torch.float32, shape=(1, K)),
-            "topk_ids": TritonWarmupTensor(torch.int32, shape=(1, K)),
-            "E": E,
-            "K": K,
-            "BLOCK_E": compile_key.BLOCK_E,
-        }
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
+        return dict(
+            gating=TritonWarmupTensor(
+                torch.float32, shape=(1, compile_key.num_experts)
+            ),
+            per_expert_scale=TritonWarmupTensor(
+                torch.float32, shape=(compile_key.num_experts,)
+            ),
+            topk_weights=TritonWarmupTensor(
+                torch.float32, shape=(1, compile_key.topk)
+            ),
+            topk_ids=TritonWarmupTensor(
+                torch.int32, shape=(1, compile_key.topk)
+            ),
+            num_experts=compile_key.num_experts,
+            topk=compile_key.topk,
+            block_e=compile_key.block_e,
+            num_warps=compile_key.num_warps,
+        )
 
     @kernel_launcher
     def __call__(
         self,
-        gating,
-        per_expert_scale,
-        topk_weights,
-        topk_ids,
-        E,
-        K,
-        BLOCK_E,
-        num_warps=1,
-    ):
-        # Reproduces the HEAD launch: grid=(T,) rows, num_warps default 1.
-        return (gating.shape[0],), {"num_warps": num_warps}
+        gating: torch.Tensor,
+        per_expert_scale: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        num_experts: int,
+        topk: int,
+        block_e: int,
+        num_warps: int = 1,
+    ) -> LaunchSpec:
+        return (gating.shape[0],), dict(
+            E=num_experts,
+            K=topk,
+            BLOCK_E=block_e,
+            num_warps=num_warps,
+        )
 
 
-_GEMMA4_ROUTING_KERNEL = _Gemma4RoutingKernel()
+_GEMMA4_ROUTING_KERNEL = Gemma4RoutingKernel()
 
 
 def gemma4_fused_routing_kernel_triton(
@@ -244,9 +263,9 @@ def gemma4_fused_routing_kernel_triton(
         per_expert_scale,
         weights,
         ids,
-        E,
-        topk,
-        BLOCK_E,
+        num_experts=E,
+        topk=topk,
+        block_e=BLOCK_E,
         num_warps=num_warps,
     )
     return weights, ids
@@ -437,10 +456,7 @@ class Gemma4MoE(nn.Module):
             activation="gelu_tanh",
         )
 
-        # Register the routing kernel for AOT JIT warmup so its compile happens
-        # in the runner's JitWarmupRegistry (when enable_jit_warmup is set)
-        # instead of on the first forward. Gate on the same platforms that take
-        # the Triton path in ``routing_function`` above.
+        # Register only on platforms that use the Triton routing path.
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
             _GEMMA4_ROUTING_KERNEL.register_warmup()
 
