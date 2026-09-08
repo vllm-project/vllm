@@ -199,6 +199,7 @@ class KimiK2Parser(ParserEngine):
                 self._tool_slots[idx].name = ""
             return
 
+        self._ensure_slot(idx)
         slot = self._tool_slots[idx]
         slot.id = tool_id or ""
         super()._emit_name_delta(idx, deltas, tool_name)
