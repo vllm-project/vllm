@@ -152,7 +152,7 @@ pub fn lower_sampling_params(
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
     let routed_experts_prompt_start = routed_experts_prompt_start.unwrap_or(0);
-    if routed_experts_prompt_start >= prompt_len {
+    if routed_experts_prompt_start > prompt_len {
         return Err(Error::InvalidRoutedExpertsPromptStart {
             start: routed_experts_prompt_start,
             prompt_len,
@@ -446,26 +446,26 @@ mod tests {
     fn lower_sampling_params_validates_routed_experts_prompt_start() {
         let params = lower_sampling_params_with_limits(
             SamplingParams {
-                routed_experts_prompt_start: Some(2),
-                ..SamplingParams::default()
-            },
-            sample_sampling_limits(),
-        )
-        .expect("prompt suffix starts inside prompt");
-        assert_eq!(params.routed_experts_prompt_start, 2);
-
-        let error = lower_sampling_params_with_limits(
-            SamplingParams {
                 routed_experts_prompt_start: Some(3),
                 ..SamplingParams::default()
             },
             sample_sampling_limits(),
         )
-        .expect_err("prompt end is outside routed-experts data");
+        .expect("prompt suffix may start at prompt end");
+        assert_eq!(params.routed_experts_prompt_start, 3);
+
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                routed_experts_prompt_start: Some(4),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect_err("prompt start after prompt end is invalid");
         assert!(matches!(
             error,
             Error::InvalidRoutedExpertsPromptStart {
-                start: 3,
+                start: 4,
                 prompt_len: 3
             }
         ));

@@ -2073,7 +2073,7 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        assert prompt_start <= request.num_prompt_tokens
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
