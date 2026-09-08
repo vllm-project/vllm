@@ -83,6 +83,9 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
+_BOOTSTRAP_QUERY_TIMEOUT_SECONDS = 60.0
+_BOOTSTRAP_QUERY_MAX_ATTEMPTS = 3
+_BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -1905,8 +1908,27 @@ class MooncakeConnectorWorker:
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=_BOOTSTRAP_QUERY_TIMEOUT_SECONDS
+            ) as client:
+                for attempt in range(1, _BOOTSTRAP_QUERY_MAX_ATTEMPTS + 1):
+                    try:
+                        response = await client.get(url)
+                        break
+                    except httpx.RequestError as e:
+                        if attempt == _BOOTSTRAP_QUERY_MAX_ATTEMPTS:
+                            raise
+                        logger.warning(
+                            "Bootstrap query to %s failed on attempt %d/%d "
+                            "(%s: %s); retrying in %.1f seconds",
+                            remote_bootstrap_addr,
+                            attempt,
+                            _BOOTSTRAP_QUERY_MAX_ATTEMPTS,
+                            type(e).__name__,
+                            e,
+                            _BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS,
+                        )
+                        await asyncio.sleep(_BOOTSTRAP_QUERY_RETRY_DELAY_SECONDS)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
@@ -1921,8 +1943,9 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
+                "Failed to connect to bootstrap server %s (%s): %s",
                 remote_bootstrap_addr,
+                type(e).__name__,
                 e,
             )
 
