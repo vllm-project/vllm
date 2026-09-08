@@ -442,6 +442,7 @@ branch, or tag revision.
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
 For `BUILD_BASE_IMAGE`, use:
+
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
 - `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
 
