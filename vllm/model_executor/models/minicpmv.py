@@ -102,6 +102,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
@@ -1459,8 +1460,9 @@ _MINICPMV_CUDAGRAPH_BUF_KEY_PIXEL = "minicpmv_pixel_values"
 # mm_kwargs keys for the flat pixel-value tensor
 _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE = "minicpmv_encoder_input_flat"
 _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO = "minicpmv_video_encoder_input_flat"
-_MINICPMV_CUDAGRAPH_PIXEL_HW_KEY = "minicpmv_encoder_pixel_hw"
-_MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY = "minicpmv_encoder_max_patches"
+# Resolved patch-grid capture-axis key ``(nb_h, nb_w)`` of the sub-batch;
+# pixel dims and max patches are derived from it and the patch size.
+_MINICPMV_CUDAGRAPH_PATCH_GRID_KEY = "minicpmv_encoder_patch_grid"
 
 _MINICPMV_BASE_PATCH_BUCKETS: tuple[tuple[int, int], ...] = (
     (32, 32),
@@ -1472,8 +1474,7 @@ _ENCODER_CUDAGRAPH_MM_KWARGS_SKIP_KEYS = frozenset(
     {
         _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE,
         _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO,
-        _MINICPMV_CUDAGRAPH_PIXEL_HW_KEY,
-        _MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY,
+        _MINICPMV_CUDAGRAPH_PATCH_GRID_KEY,
     }
 )
 
@@ -1585,11 +1586,6 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         th, tw = patch_grid_key
         return th * tw
 
-    def _mcpmv_max_patches_per_slice(self) -> int:
-        image_size = int(self.vpm.embeddings.image_size)
-        patch_size = int(self.vpm.embeddings.patch_size)
-        return (image_size // patch_size) ** 2
-
     def _mcpmv_patch_grid_keys(self) -> tuple[tuple[int, int], ...]:
         """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
         max_side = int(self.vpm.embeddings.image_size) // int(
@@ -1606,30 +1602,24 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             keys.append(full)
         return tuple(keys)
 
-    def resolve_encoder_cudagraph_capture_axis_keys(
+    def _mcpmv_resolve_patch_grid(
         self,
-        mm_kwargs: dict[str, Any],
+        tgt_sizes: torch.Tensor,
+        slice_counts: list[int],
         indices: list[int],
-        capture_axes: Sequence[Sequence[Hashable]],
-    ) -> tuple[Hashable, ...]:
-        keys = cast("tuple[tuple[int, int], ...]", tuple(capture_axes[0]))
+    ) -> tuple[int, int]:
+        """Smallest patch-grid key covering all selected items."""
+        keys = self._mcpmv_patch_grid_keys()
         if not indices:
-            return (keys[0],)
-        video = self.get_input_modality(mm_kwargs) == "video"
-        pixel_values_key = "video_pixel_values" if video else "pixel_values"
-        pixel_values: list[list[torch.Tensor]] = mm_kwargs[pixel_values_key]
-        slice_counts = [len(img) for img in pixel_values]
-        tgt_sizes = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
-        tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
+            return keys[0]
         tgt_groups = torch.split(tgt_sizes, slice_counts)
         selected = torch.cat([tgt_groups[i] for i in indices], dim=0)
         need_h = int(selected[:, 0].max().item())
         need_w = int(selected[:, 1].max().item())
-        for candidate_key in keys:
-            th, tw = candidate_key
+        for th, tw in keys:
             if th >= need_h and tw >= need_w:
-                return (candidate_key,)
-        return (keys[-1],)
+                return (th, tw)
+        return keys[-1]
 
     def _mcpmv_max_slices_cap(
         self,
@@ -1726,14 +1716,14 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
-        return self.select_encoder_cudagraph_items_for_axes(mm_kwargs, indices)
+        subset, patch_grid = self._mcpmv_select_items(mm_kwargs, indices)
+        subset[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] = (patch_grid,)
+        return subset
 
-    def select_encoder_cudagraph_items_for_axes(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-        axis_keys: tuple[Hashable, ...] | None = None,
-    ) -> dict[str, Any]:
+    def _mcpmv_select_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> tuple[dict[str, Any], tuple[int, int]]:
+        """Slice mm_kwargs for `indices`; also returns the patch-grid key."""
         video = self.get_input_modality(mm_kwargs) == "video"
         pixel_values_key = "video_pixel_values" if video else "pixel_values"
         tgt_key = "video_tgt_sizes" if video else "tgt_sizes"
@@ -1764,25 +1754,14 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
                     ),
                 }
             )
-            return subset
+            return subset, self._mcpmv_patch_grid_keys()[0]
 
         slice_counts = [len(item_slices) for item_slices in pixel_values]
         tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
         tgt_groups = torch.split(tgt_sizes, slice_counts)
 
-        if axis_keys:
-            patch_grid = cast("tuple[int, int]", axis_keys[0])
-        else:
-            patch_grid = cast(
-                "tuple[int, int]",
-                self.resolve_encoder_cudagraph_capture_axis_keys(
-                    mm_kwargs,
-                    indices,
-                    self.get_encoder_cudagraph_config().capture_axes,
-                )[0],
-            )
+        patch_grid = self._mcpmv_resolve_patch_grid(tgt_sizes, slice_counts, indices)
         pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
-        max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
 
         selected_pixel_values = [pixel_values[i] for i in indices]
         selected_tgt_sizes_list = [tgt_groups[i] for i in indices]
@@ -1805,11 +1784,10 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
                 pixel_values_key: selected_pixel_values,
                 tgt_key: selected_tgt_sizes_list,
                 flat_key: packed_flat_pixels,
-                _MINICPMV_CUDAGRAPH_PIXEL_HW_KEY: (pixel_h, pixel_w),
-                _MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY: max_patches,
+                _MINICPMV_CUDAGRAPH_PATCH_GRID_KEY: patch_grid,
             }
         )
-        return subset
+        return subset, patch_grid
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1820,13 +1798,15 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         dtype: torch.dtype,
         path: str = "default",
     ) -> EncoderCudaGraphCaptureInputs:
-        return self.prepare_encoder_cudagraph_capture_inputs_for_axes(
+        # Without capture-axis context, use the largest (full-resolution)
+        # patch grid.
+        return self._mcpmv_capture_inputs(
             token_budget,
             max_batch_size,
             max_frames_per_batch,
             device,
             dtype,
-            path,
+            patch_grid=self._mcpmv_patch_grid_keys()[-1],
         )
 
     def prepare_encoder_cudagraph_capture_inputs_for_axes(
@@ -1839,11 +1819,29 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        if axis_keys:
-            patch_grid = cast("tuple[int, int]", axis_keys[0])
-        else:
-            # Default to the largest (full-resolution) patch grid.
-            patch_grid = self._mcpmv_patch_grid_keys()[-1]
+        patch_grid = (
+            cast("tuple[int, int]", axis_keys[0])
+            if axis_keys
+            else self._mcpmv_patch_grid_keys()[-1]
+        )
+        return self._mcpmv_capture_inputs(
+            token_budget,
+            max_batch_size,
+            max_frames_per_batch,
+            device,
+            dtype,
+            patch_grid=patch_grid,
+        )
+
+    def _mcpmv_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        patch_grid: tuple[int, int],
+    ) -> EncoderCudaGraphCaptureInputs:
         th, tw = patch_grid
         pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
         max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
@@ -1886,8 +1884,9 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
             else _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE
         )
         flat_pixels = mm_kwargs[flat_key]  # (num_actual_slices, 3*pixel_h*pixel_w)
-        pixel_hw = mm_kwargs[_MINICPMV_CUDAGRAPH_PIXEL_HW_KEY]
-        pixel_h, pixel_w = int(pixel_hw[0]), int(pixel_hw[1])
+        patch_grid = mm_kwargs[_MINICPMV_CUDAGRAPH_PATCH_GRID_KEY]
+        pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
+        max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
         pixel_buffer = flat_pixels.reshape(-1, 3, pixel_h, pixel_w)
 
         device = next(self.vpm.parameters()).device
@@ -1899,7 +1898,6 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         else:
             tgt_sizes = tgt_sizes_raw.to(device=device, dtype=torch.long)
 
-        max_patches = int(mm_kwargs[_MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY])
         patches_per_slice = tgt_sizes.prod(-1).clamp(max=max_patches)
         col_idx = torch.arange(max_patches, device=device)
         patch_attention_mask = col_idx.unsqueeze(0) < patches_per_slice.unsqueeze(1)

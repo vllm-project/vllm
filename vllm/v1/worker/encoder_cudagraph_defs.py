@@ -9,6 +9,12 @@ import torch
 
 EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 
+# Reserved mm_kwargs key: models with ``EncoderCudaGraphConfig.capture_axes``
+# put the resolved per-axis keys (one per axis, in order) into the dict
+# returned by ``select_encoder_cudagraph_items()``; the manager pops it before
+# the kwargs are used anywhere else.
+ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
+
 
 @dataclass
 class EncoderItemSpec:

@@ -25,6 +25,7 @@ from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphConfig,
     EncoderItemSpec,
 )
@@ -365,18 +366,25 @@ class EncoderCudaGraphManager:
             return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
 
     def _select_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-        axis_keys: CaptureAxisKeys | None = None,
-    ) -> dict[str, Any]:
-        """Select the mm kwargs for `indices` from the model."""
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> tuple[dict[str, Any], CaptureAxisKeys]:
+        """Select the mm kwargs for `indices` from the model.
+
+        Returns the sliced mm_kwargs together with the resolved capture-axis
+        keys (popped out of the returned dict; empty without capture axes).
+        """
         # Same as `_get_item_specs`: implementations re-read the per-item
         # grid/patch counts to slice the batch, so the D2H is inherent.
         with gpu_sync_allowed():
-            return self.model.select_encoder_cudagraph_items_for_axes(
-                mm_kwargs, indices, axis_keys
+            selected = self.model.select_encoder_cudagraph_items(mm_kwargs, indices)
+        axis_keys = selected.pop(ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG, ())
+        if len(axis_keys) != len(self._capture_axes):
+            raise ValueError(
+                f"Model returned {len(axis_keys)} capture axis keys, "
+                f"expected {len(self._capture_axes)} "
+                f"(one per axis of capture_axes)."
             )
+        return selected, axis_keys
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
@@ -497,18 +505,7 @@ class EncoderCudaGraphManager:
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:
-            axis_keys: CaptureAxisKeys | None = None
-            if self._capture_axes:
-                axis_keys = self.model.resolve_encoder_cudagraph_capture_axis_keys(
-                    mm_kwargs,
-                    batch_indices,
-                    self._capture_axes,
-                )
-            batch_mm_kwargs = self._select_items(
-                mm_kwargs,
-                batch_indices,
-                axis_keys,
-            )
+            batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
             graph_outputs: dict[str, torch.Tensor] = {}
             all_eager = True
 
@@ -529,7 +526,7 @@ class EncoderCudaGraphManager:
                         batch_mm_kwargs,
                         token_budget,
                         path=path,
-                        axis_keys=axis_keys or (),
+                        axis_keys=axis_keys,
                     )
                     assert graph_output is not None
                     output = graph_output
@@ -586,9 +583,9 @@ class EncoderCudaGraphManager:
         ]
 
         if len(local_indices) > 0:
-            local_mm_kwargs = self._select_items(mm_kwargs, local_indices)
+            local_mm_kwargs = self._select_items(mm_kwargs, local_indices)[0]
         else:
-            local_mm_kwargs = self._select_items(mm_kwargs, [])
+            local_mm_kwargs = self._select_items(mm_kwargs, [])[0]
 
         max_output_tokens_per_rank = (
             max(

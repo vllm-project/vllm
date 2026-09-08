@@ -1925,6 +1925,11 @@ class SupportsEncoderCudaGraph(Protocol):
         - Qwen-family: slice concatenated pixel_values by cumulative
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models that configure ``EncoderCudaGraphConfig.capture_axes`` must
+        additionally store the resolved per-axis keys (one key per axis, in
+        order) under ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG`` in the returned
+        dict; the manager pops it before the kwargs are used elsewhere.
         """
         ...
 
@@ -1994,34 +1999,6 @@ class SupportsEncoderCudaGraph(Protocol):
         Used as eager fallback when inputs exceed all budgets.
         """
         ...
-
-    def resolve_encoder_cudagraph_capture_axis_keys(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-        capture_axes: Sequence[Sequence[Hashable]],
-    ) -> tuple[Hashable, ...]:
-        """Resolve one key per capture axis for the given indices.
-
-        Called only when ``EncoderCudaGraphConfig.capture_axes`` is non-empty.
-        The returned tuple must contain one key from each axis of
-        capture_axes, in order.
-        """
-        return tuple(axis[0] for axis in capture_axes)
-
-    def select_encoder_cudagraph_items_for_axes(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-        axis_keys: tuple[Hashable, ...] | None = None,
-    ) -> dict[str, Any]:
-        """select_encoder_cudagraph_items variant aware of capture axes.
-
-        Called by the manager so that models enabling capture axes can slice
-        inputs for the given per-axis keys. By default, delegates to
-        select_encoder_cudagraph_items and ignores the keys.
-        """
-        return self.select_encoder_cudagraph_items(mm_kwargs, indices)
 
     def prepare_encoder_cudagraph_capture_inputs_for_axes(
         self,
