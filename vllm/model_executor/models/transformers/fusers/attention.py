@@ -124,8 +124,7 @@ class AttentionFuser(BaseFuser):
             device = vllm_config.device_config.device
             data = torch.empty(size, dtype=sinks.dtype, device=device)
             sinks_param = nn.Parameter(data, requires_grad=False)
-            weight_attrs = {"weight_loader": sharded_weight_loader(0)}
-            set_weight_attrs(sinks_param, weight_attrs)
+            set_weight_attrs(sinks_param, {"weight_loader": sharded_weight_loader(0)})
             setattr(module, self.s_aux_expr.attr, sinks_param)
         return module
 
