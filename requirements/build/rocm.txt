@@ -2,13 +2,13 @@
 -r ../common.txt
 
 
---extra-index-url https://download.pytorch.org/whl/rocm7.1
-torch==2.11.0
-torchvision==0.26.0
-torchaudio==2.11.0
-triton==3.6.0
+--extra-index-url https://repo.amd.com/rocm/whl-multi-arch/
+torch==2.12.0+rocm7.14.0
+torchvision==0.27.0+rocm7.14.0
+torchaudio==2.11.0+rocm7.14.0
+triton==3.7.1+git0263a6a6
 cmake>=3.26.1,<4
-packaging>=24.2
+packaging>=26.2
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
 setuptools-rust>=1.9.0

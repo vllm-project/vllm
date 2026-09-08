@@ -6,6 +6,7 @@ use std::mem::size_of;
 
 use half::{bf16, f16};
 use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs};
+use ndarray::ArrayD;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireArrayData, WireTensor};
@@ -75,11 +76,7 @@ pub(super) fn collect_tensors(
         ..
     } = preprocessed;
 
-    let primary_value = {
-        let shape = encoder_input.shape().to_vec();
-        let data = encoder_input.into_iter().collect();
-        KwargValue::from_f32_tensor(data, shape, float_dtype)?
-    };
+    let primary_value = KwargValue::from_f32_array(encoder_input, float_dtype)?;
 
     let mut tensors = HashMap::new();
     tensors.insert(primary_key.to_string(), primary_value);
@@ -95,7 +92,7 @@ impl KwargValue {
 
         Ok(match value {
             ModelSpecificValue::Tensor { data, shape } => {
-                Self::from_f32_tensor(data, shape, float_dtype)?
+                Self::from_f32_parts(data, shape, float_dtype)?
             }
             ModelSpecificValue::IntTensor { data, shape } => {
                 let wire = WireTensor::from_i64(shape, data).map_err(Error::Multimodal)?;
@@ -126,9 +123,31 @@ impl KwargValue {
         })
     }
 
+    fn from_f32_array(array: ArrayD<f32>, float_dtype: ModelDtype) -> Result<Self> {
+        let shape = array.shape().to_vec();
+        // `into_iter()` on dynamically-dimensioned arrays walks a slow
+        // per-element path; take the raw buffer instead when the layout
+        // allows it.
+        let data = if array.is_standard_layout() {
+            let len = array.len();
+            let (data, offset) = array.into_raw_vec_and_offset();
+            let start = offset.unwrap_or(0);
+            if start == 0 && data.len() == len {
+                data
+            } else {
+                // Buffer with unused head/tail: copy the used range, which
+                // standard strides place contiguously in logical order.
+                data[start..start + len].to_vec()
+            }
+        } else {
+            array.into_iter().collect()
+        };
+        Self::from_f32_parts(data, shape, float_dtype)
+    }
+
     /// Convert a float tensor to the target float dtype if needed, keeping the
     /// same shape.
-    fn from_f32_tensor(data: Vec<f32>, shape: Vec<usize>, float_dtype: ModelDtype) -> Result<Self> {
+    fn from_f32_parts(data: Vec<f32>, shape: Vec<usize>, float_dtype: ModelDtype) -> Result<Self> {
         let (kind, wire) = match float_dtype {
             ModelDtype::Float16 => (
                 TensorKind::F16,
@@ -316,6 +335,52 @@ fn raw_tensor_bytes(tensor: &WireTensor, element_size: usize) -> Result<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::{Array2, s};
+
+    #[test]
+    fn collect_tensors_lowering_matches_logical_order_across_layouts() {
+        let standard =
+            Array2::from_shape_vec((2, 3), (1..=6).map(|v| v as f32).collect::<Vec<f32>>())
+                .unwrap();
+        let standard_with_offset =
+            Array2::from_shape_vec((3, 3), (1..=9).map(|v| v as f32).collect::<Vec<f32>>())
+                .unwrap()
+                .slice_move(s![1.., ..]);
+        let strided =
+            Array2::from_shape_vec((2, 3), (1..=6).map(|v| v as f32).collect::<Vec<f32>>())
+                .unwrap()
+                .reversed_axes();
+
+        assert!(standard.is_standard_layout());
+        assert!(standard_with_offset.is_standard_layout());
+        assert!(!strided.is_standard_layout());
+
+        for (name, array) in [
+            ("standard", standard),
+            ("standard_with_offset", standard_with_offset),
+            ("strided", strided),
+        ] {
+            let expected: Vec<u8> = array.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let shape = array.shape().to_vec();
+            let preprocessed = PreprocessedEncoderInputs::new(array, vec![6], vec![(3, 2)]);
+            let tensors =
+                collect_tensors(preprocessed, "pixel_values", ModelDtype::Float32).unwrap();
+
+            let ProtocolKwargValue::Tensor(tensor) =
+                ProtocolKwargValue::try_from(&tensors["pixel_values"]).unwrap()
+            else {
+                panic!("expected tensor for {name} layout");
+            };
+
+            assert_eq!(tensor.shape, shape, "{name} layout shape");
+            assert_eq!(tensor.dtype, "float32", "{name} layout dtype");
+            assert_eq!(
+                tensor.data.into_raw_view().unwrap(),
+                expected,
+                "{name} layout data"
+            );
+        }
+    }
 
     #[test]
     fn batched_wire_value_at_drops_first_axis() {
@@ -383,7 +448,7 @@ mod tests {
     #[test]
     fn bfloat16_tensor_wire_uses_bfloat16_dtype() {
         let value =
-            KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::BFloat16).unwrap();
+            KwargValue::from_f32_parts(vec![1.0, -1.0], vec![2], ModelDtype::BFloat16).unwrap();
 
         let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(&value).unwrap()
         else {
@@ -398,7 +463,7 @@ mod tests {
     #[test]
     fn float16_tensor_wire_uses_float16_dtype() {
         let value =
-            KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::Float16).unwrap();
+            KwargValue::from_f32_parts(vec![1.0, -1.0], vec![2], ModelDtype::Float16).unwrap();
 
         let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(&value).unwrap()
         else {
