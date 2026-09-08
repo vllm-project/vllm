@@ -646,13 +646,17 @@ def test_swap_blocks(
         block_mapping_tensor,
     )
 
-    for src, dst in block_mapping:
-        torch.testing.assert_close(
-            src_key_caches_clone[src].cpu(), dist_key_caches[0][dst].cpu()
-        )
-        torch.testing.assert_close(
-            src_value_caches_clone[src].cpu(), dist_value_caches[0][dst].cpu()
-        )
+    src_indices = block_mapping_tensor[:, 0].to(src_key_caches_clone.device)
+    dst_indices = block_mapping_tensor[:, 1].to(dist_key_caches[0].device)
+
+    torch.testing.assert_close(
+        src_key_caches_clone.index_select(0, src_indices).cpu(),
+        dist_key_caches[0].index_select(0, dst_indices).cpu(),
+    )
+    torch.testing.assert_close(
+        src_value_caches_clone.index_select(0, src_indices).cpu(),
+        dist_value_caches[0].index_select(0, dst_indices).cpu(),
+    )
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
