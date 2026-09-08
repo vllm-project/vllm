@@ -523,7 +523,11 @@ RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constr
     && pip check
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
-RUN ldconfig
+# Keep the copied profiler's runtime dependency installed across apt autoremove.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libdw1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
