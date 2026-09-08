@@ -14,7 +14,7 @@ from vllm.model_executor.models.gemma3n import (
     Gemma3nTextModel,
     _kv_sharing_weights_mapper,
 )
-from vllm.model_executor.models.gemma4 import Gemma4Model
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
 
@@ -57,36 +57,65 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 
 
 @pytest.mark.cpu_test
-def test_gemma4_kv_shared_layer_loads_plain_q_proj() -> None:
-    """KV-shared layers have q_proj instead of a packed qkv_proj; their
-    redundant K/V tensors in original checkpoints have no parameter and are
-    skipped rather than failing the load."""
-    model = torch.nn.Module()
-    model.config = SimpleNamespace(num_experts=0)
-    model.start_layer, model.end_layer = 0, 2
-    model.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
-    for layer in model.layers:
-        layer.self_attn = torch.nn.Module()
-    model.layers[0].self_attn.qkv_proj = torch.nn.Linear(2, 6, bias=False)
-    model.layers[1].self_attn.q_proj = torch.nn.Linear(2, 2, bias=False)
-    shards: list[str] = []
-    model.layers[0].self_attn.qkv_proj.weight.weight_loader = (
-        lambda param, weight, shard_id: shards.append(shard_id)
+def test_gemma4_attention_mapper() -> None:
+    """Layers with a qkv_proj pack q/k/v; `attention_k_eq_v` full-attention
+    layers also load K as the V shard; KV-shared layers keep q_proj and drop
+    the K/V tensors original checkpoints still ship for them."""
+    config = SimpleNamespace(
+        num_hidden_layers=3,
+        num_kv_shared_layers=1,
+        attention_k_eq_v=True,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention"],
     )
-
-    q_weight = torch.full((2, 2), 2.0)
     weights = [
-        (f"layers.{i}.self_attn.{tensor}.weight", q_weight)
-        for i in (0, 1)
-        for tensor in ("q_proj", "k_proj", "v_proj")
-    ] + [("layers.1.self_attn.k_norm.weight", torch.ones(2))]
-    loaded = Gemma4Model.load_weights(cast(Gemma4Model, model), weights)
+        (f"model.layers.{i}.self_attn.{tensor}.weight", torch.full((2, 2), i + 1.0))
+        for i in range(3)
+        for tensor in ("q_proj", "k_proj", "k_norm")
+    ]
 
-    assert shards == ["q", "k", "v"]
-    assert "layers.1.self_attn.q_proj.weight" in loaded
-    assert not any(name.startswith("layers.1.self_attn.k") for name in loaded)
-    assert not any(name.startswith("layers.1.self_attn.v") for name in loaded)
-    assert torch.equal(model.layers[1].self_attn.q_proj.weight, q_weight)
+    mapper = Gemma4ForCausalLM.build_hf_to_vllm_mapper(config)
+    mapped = list(mapper.apply(weights))
+
+    assert [(name, getattr(w, "shard_id", None)) for name, w in mapped] == [
+        ("model.layers.0.self_attn.qkv_proj.weight", "q"),
+        ("model.layers.0.self_attn.qkv_proj.weight", "k"),
+        ("model.layers.0.self_attn.k_norm.weight", None),
+        ("model.layers.1.self_attn.qkv_proj.weight", "q"),
+        ("model.layers.1.self_attn.qkv_proj.weight", "k"),
+        ("model.layers.1.self_attn.qkv_proj.weight", "v"),
+        ("model.layers.1.self_attn.k_norm.weight", None),
+        ("model.layers.2.self_attn.q_proj.weight", None),
+    ]
+    k_weight, v_weight = weights[4][1], mapped[5][1]
+    assert torch.equal(v_weight, k_weight) and v_weight is not k_weight
+
+
+@pytest.mark.cpu_test
+def test_gemma4_expert_names_map_onto_moe() -> None:
+    """HF keeps experts and per_expert_scale on the layer/router; vLLM nests
+    them under `moe`, so fused and per-expert tensors reach RoutedExperts."""
+    prefix = "model.language_model.layers.0."
+    weights = [
+        (prefix + name, torch.empty(0))
+        for name in (
+            "experts.gate_up_proj",
+            "experts.3.down_proj.weight_packed",
+            "router.per_expert_scale",
+            "mlp.gate_proj.weight",
+        )
+    ]
+
+    mapped = [
+        (name, getattr(w, "shard_id", None))
+        for name, w in Gemma4ForCausalLM.hf_to_vllm_mapper.apply(weights)
+    ]
+
+    assert mapped == [
+        ("model.layers.0.moe.experts.gate_up_proj", None),
+        ("model.layers.0.moe.experts.3.down_proj.weight_packed", None),
+        ("model.layers.0.moe.per_expert_scale", None),
+        ("model.layers.0.mlp.gate_up_proj.weight", 0),
+    ]
 
 
 @pytest.mark.cpu_test
