@@ -164,6 +164,8 @@ def test_activate_adapter_warns_when_no_lora_weights_applied(
     warning_once.assert_called_once()
     message = warning_once.call_args.args[0] % warning_once.call_args.args[1:]
     assert "No LoRA weights were applied for adapter 1 on this worker" in message
+    assert "Requests may use the base model" in message
+    assert "--lora-target-modules" in message
 
 
 def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):

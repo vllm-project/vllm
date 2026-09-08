@@ -356,6 +356,7 @@ class LoRAModelManager:
         if num_lora_weights_applied == 0:
             logger.warning_once(
                 "No LoRA weights were applied for adapter %s on this worker. "
+                "Requests may use the base model; check --lora-target-modules. "
                 "This may be expected with pipeline or expert parallelism.",
                 lora_model.id,
             )
