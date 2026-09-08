@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from torch import fx, nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import (
     StackedFuser,
@@ -26,15 +27,12 @@ from vllm.model_executor.models.utils import ShardId, maybe_prefix
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+logger = init_logger(__name__)
+
 
 @dataclass
 class MergedColumnParallelFuser(StackedFuser):
-    """Fuse any number of same-input linears into one merged projection.
-
-    Deliberately absent from `fuser.FUSERS`: which sibling linears may share a
-    column-parallel GEMM is a semantic question, so subclasses opt in (fusing
-    every group blindly would replace head-aware QKV sharding, for one).
-    """
+    """Fuser for merging column-parallel linear projections."""
 
     linear_names: tuple[str, ...]
     merged_name: ClassVar[str] = "merged_proj"
@@ -91,12 +89,12 @@ class MergedColumnParallelFuser(StackedFuser):
         """Replace the parallel calls with one merged call and split."""
         funcdef, fn = recover_forward(type(module))
         calls = [single_self_call(funcdef, name) for name in self.linear_names]
-        if len({ast.dump(call.args[0]) for call in calls}) != 1:
+        if len(set(ast.dump(call.args[0]) for call in calls)) != 1:
             raise ValueError("parallel linears read different inputs")
         blocks = [innermost_block(funcdef.body, call) for call in calls]
         if any(found is None for found in blocks):
             raise ValueError("parallel linear calls not found in the function body")
-        if len({id(block) for block, _ in blocks}) != 1:
+        if len(set(id(block) for block, _ in blocks)) != 1:
             raise ValueError("parallel linear calls are in different blocks")
 
         block = blocks[0][0]
@@ -137,25 +135,25 @@ class MergedColumnParallelFuser(StackedFuser):
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
-        """Check that the projections can share one column-parallel layer."""
-        linears = [module.get_submodule(name) for name in self.linear_names]
+        """Check that the parallel linears are compatible for merging."""
+        linear_layers = [module.get_submodule(name) for name in self.linear_names]
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         return (
-            len(linears) >= 2
-            and len({linear.in_features for linear in linears}) == 1
-            and len({linear.bias is None for linear in linears}) == 1
-            and all(linear.out_features % tp_size == 0 for linear in linears)
+            len(linear_layers) >= 2
+            and len(set(linear.in_features for linear in linear_layers)) == 1
+            and len(set(linear.bias is None for linear in linear_layers)) == 1
+            and all(linear.out_features % tp_size == 0 for linear in linear_layers)
         )
 
     def update_attrs(
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
-        """Replace the source projections with their merged equivalent."""
-        linears = [module.get_submodule(name) for name in self.linear_names]
+        """Replace the module's parallel linears with one merged projection."""
+        linear_modules = [module.get_submodule(name) for name in self.linear_names]
         merged = MergedColumnParallelLinear(
-            input_size=linears[0].in_features,
-            output_sizes=[linear.out_features for linear in linears],
-            bias=linears[0].bias is not None,
+            input_size=linear_modules[0].in_features,
+            output_sizes=[linear.out_features for linear in linear_modules],
+            bias=linear_modules[0].bias is not None,
             quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, self.merged_name),
             return_bias=False,
@@ -163,3 +161,9 @@ class MergedColumnParallelFuser(StackedFuser):
         setattr(module, self.merged_name, merged)
         for name in self.linear_names:
             delattr(module, name)
+        logger.debug(
+            "%s -> %s: %s",
+            ", ".join(f"{n}: {m}" for n, m in zip(self.linear_names, linear_modules)),
+            self.merged_name,
+            merged,
+        )
