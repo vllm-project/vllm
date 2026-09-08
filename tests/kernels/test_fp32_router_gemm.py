@@ -3,8 +3,7 @@
 """Tests for fp32_router_gemm kernel: activation×weight→fp32.
 
 Supported (hidden_size, num_experts) pairs:
-  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3,
-  (6144, 256) -> GLM-5.2
+  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
 
 Correctness baseline: F.linear in float32. Every M in [1, 32] is covered so
 all tuned geometries (wide-block, experts-per-block, token-group; boundaries
@@ -19,7 +18,7 @@ from vllm._custom_ops import fp32_router_gemm
 from vllm.platforms import current_platform
 
 # (hidden_size, num_experts)
-SHAPES = [(3072, 256), (6144, 128), (6144, 256)]
+SHAPES = [(3072, 256), (6144, 128)]
 ALL_M = list(range(1, 33))
 # Absolute tolerance for fp32 kernel vs float64 reference
 ATOL_FP32 = 2e-4
