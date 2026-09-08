@@ -103,12 +103,14 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run():
     assert runner._dummy_run.call_args_list == [
         call(
             num_tokens=8192,
+            skip_attn=False,
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
         ),
         call(
             num_tokens=128,
+            skip_attn=False,
             skip_eplb=True,
             is_profile=True,
             randomize_inputs=True,
