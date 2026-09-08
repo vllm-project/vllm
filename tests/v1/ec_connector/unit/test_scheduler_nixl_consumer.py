@@ -4,6 +4,7 @@ import time
 import uuid
 
 import pytest
+import torch
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
@@ -11,6 +12,11 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+)
 
 _N, _BS, _HID, _ES = 16, 64, 32, 2
 
@@ -21,10 +27,12 @@ class _Pos:
 
 
 class _Feature:
-    def __init__(self, mm_hash, length=1):
+    def __init__(self, mm_hash, length=1, data=None):
         self.mm_hash = mm_hash
         self.identifier = mm_hash
         self.mm_position = _Pos(0, length)
+        self.data = data
+        self.modality = "image"
 
 
 class _Request:
@@ -97,6 +105,7 @@ def _consumer_sched(monkeypatch):
     # directly since this helper builds gate-off then flips fields on.
     s._hidden_dim = _HID
     s._element_size = _ES
+    s._metadata_resolver._cache["image"] = {"image_grid_thw"}
     return s
 
 
@@ -161,8 +170,10 @@ def test_no_remote_announcement_is_ready(monkeypatch, params):
     s.shutdown()
 
 
-def test_tombstoned_read_fails_the_request(monkeypatch):
-    """A failed remote read must not admit a request with no local media."""
+@pytest.mark.parametrize("payload", [None, "metadata", "pixels", "embeds", "shm"])
+@pytest.mark.parametrize("failure", ["tombstone", "timeout"])
+def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload, failure):
+    """A remote miss is fatal only when local model input is unavailable."""
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
@@ -173,23 +184,90 @@ def test_tombstoned_read_fails_the_request(monkeypatch):
         return True
 
     monkeypatch.setattr(s, "_start_xfer", _fake_start)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    fields = {
+        "metadata": {"image_grid_thw": torch.tensor([1, 2, 2])},
+        "pixels": {"pixel_values": torch.ones(1, 3)},
+        "embeds": {"image_embeds": torch.ones(1, _HID)},
+        "shm": {"address": 123, "monotonic_id": 1},
+    }
+    data = (
+        MultiModalKwargsItem(
+            {
+                key: MultiModalFieldElem(value, MultiModalSharedField(batch_size=1))
+                for key, value in fields[payload].items()
+            }
+        )
+        if payload is not None
+        else None
+    )
+    req = _Request([_Feature("h1", 1, data)], params=_params("h1", 1))
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
     # Step 1: start the read.
     assert s.ensure_cache_available(req, 0) is False
     s.build_connector_meta(scheduler_output=None)
 
-    # Producer rejected the read -> tombstoned.
-    fake._results.tombstoned.add("h1")
+    if failure == "tombstone":
+        fake._results.tombstoned.add("h1")
+    else:
+        now[0] += sched_mod._ADMIT_DEFER_TIMEOUT_S + 1
+        fake._results.retryable.add("h1")
     s._sessions[("h", 1)] = fake
 
-    # Step 2: the entry is discarded and the request is reported unschedulable.
-    assert s.ensure_cache_available(req, 0) is False
+    can_fallback = payload in ("pixels", "embeds", "shm")
+    assert s.ensure_cache_available(req, 0) is can_fallback
     assert s._cache.get("h1") is None
     assert "h1" not in s._in_flight
-    assert s.take_unavailable_requests() == {"r1"}
+    assert s.take_unavailable_requests() == (set() if can_fallback else {"r1"})
     # Drained by the read, so the scheduler cannot abort it twice.
     assert s.take_unavailable_requests() == set()
+    if can_fallback:
+        # A later scheduling step must not retry the failed remote source.
+        s.build_connector_meta(scheduler_output=None)
+        assert s.ensure_cache_available(req, 0)
+        assert fake.started == ["h1"]
+    s.shutdown()
+
+
+def test_request_finished_clears_only_its_wait_budget(monkeypatch):
+    """Cancelled requests leave no clocks behind, even for a shared hash."""
+    s = _consumer_sched(monkeypatch)
+    monkeypatch.setattr(s, "_start_xfer", lambda *args: False)
+    old = _Request([_Feature("h1")], params=_params("h1", 1), req_id="old")
+    new = _Request([_Feature("h1")], params=_params("h1", 1), req_id="new")
+    assert not s.ensure_cache_available(old, 0)
+    assert not s.ensure_cache_available(new, 0)
+    assert s.request_finished(old) == (False, None)
+    assert set(s._deferred_since) == {("new", "h1")}
+    s.shutdown()
+
+
+@pytest.mark.parametrize("retry", [False, True], ids=["in-flight", "retryable"])
+def test_remote_wait_budget_survives_retries_and_long_steps(monkeypatch, retry):
+    """Neither retries nor delayed scheduling may restart the request budget."""
+    s = _consumer_sched(monkeypatch)
+    fake = _FakeSession()
+    s._sessions[("h", 1)] = fake
+
+    def start(mm_hash, info, size):
+        assert s._cache.alloc(mm_hash, 1) is not None
+        fake.started.append(mm_hash)
+        return True
+
+    monkeypatch.setattr(s, "_start_xfer", start)
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    req = _Request([_Feature("h1")], params=_params("h1", 1))
+    assert not s.ensure_cache_available(req, 0)
+    for elapsed in (20, 40, 121):
+        now[0] = 1000.0 + elapsed
+        if retry:
+            fake._results.retryable.add("h1")
+        s.build_connector_meta(scheduler_output=None)
+        assert not s.ensure_cache_available(req, 0)
+        assert s.take_unavailable_requests() == ({"r1"} if elapsed > 60 else set())
+    assert len(fake.started) == (3 if retry else 1)
     s.shutdown()
 
 

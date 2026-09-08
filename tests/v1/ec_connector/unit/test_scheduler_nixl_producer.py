@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 import uuid
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
@@ -64,6 +63,7 @@ def test_request_finished_producer_emits_params(monkeypatch):
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
+    assert entry.evictable
     assert params == {
         "h1": {
             "metadata": {},
@@ -111,107 +111,4 @@ def test_request_finished_skips_unallocated_entry(monkeypatch):
     # The item's placeholder metadata is still reported even though there's
     # no cache entry to transfer (empty "metadata": no fields, no transfer).
     assert params == {"h1": {"metadata": {}}}
-    s.shutdown()
-
-
-# ── announced encodings are held until read ──────────────────────────────────
-
-
-class _FakeProducerSession:
-    """Stands in for ProducerSession so build_connector_meta can run."""
-
-    def __init__(self):
-        self.served: list[str] = []
-
-    def poll_step(self):
-        pass
-
-    def take_served(self):
-        served, self.served = self.served, []
-        return served
-
-
-def _announcing_sched(monkeypatch, lease=30.0):
-    s = _sched_gate_off(monkeypatch)
-    s._nixl_enabled = True
-    s._peer_host, s._peer_port = "1.2.3.4", 5601
-    s._hidden_dim, s._element_size = 32, 2
-    s._announce_lease_s = lease
-    s._producer_session = _FakeProducerSession()
-    return s
-
-
-def _announce(s, mm_hash, length=2):
-    return s.request_finished(_Request([_Feature(mm_hash, length=length)]))
-
-
-def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
-    """A save completing after its announcement must acquire the pending pin."""
-    from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-        ECCPUWorkerMetadata,
-    )
-    from vllm.v1.outputs import ECConnectorOutput
-
-    s = _announcing_sched(monkeypatch)
-    entry = s._cache.alloc("h1", 2)
-    assert entry is not None and not entry.ready
-    _announce(s, "h1")
-    assert len(s._announce["h1"].pending) == 1
-
-    s.update_connector_output(
-        ECConnectorOutput(
-            ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=["h1"])
-        )
-    )
-    assert entry.ready
-    assert not entry.evictable
-    assert not s._announce["h1"].pending
-    s.shutdown()
-
-
-def test_each_announcement_keeps_its_own_hold(monkeypatch):
-    """An announced encoding stays pinned until both consumers have read it."""
-    s = _announcing_sched(monkeypatch)
-    entry = s._cache.alloc("h1", 2)
-    assert entry is not None
-    s._cache.mark_ready("h1")
-    assert entry.evictable
-    _announce(s, "h1")
-    assert not entry.evictable
-    _announce(s, "h1")
-
-    s._producer_session.served.append("h1")
-    s.build_connector_meta(scheduler_output=None)
-    assert not entry.evictable
-
-    s._producer_session.served.append("h1")
-    s.build_connector_meta(scheduler_output=None)
-    assert entry.evictable
-    s.shutdown()
-
-
-def test_a_reannouncement_does_not_extend_the_earlier_hold(monkeypatch):
-    """Unread announcements expire independently, eventually freeing the entry."""
-    clock = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
-
-    s = _announcing_sched(monkeypatch, lease=30.0)
-    entry = s._cache.alloc("h1", 2)
-    s._cache.mark_ready("h1")
-
-    _announce(s, "h1")
-    clock[0] += 29.0
-    _announce(s, "h1")
-    assert len(s._announce["h1"].holds) == 2
-
-    # Past the first lease, inside the second.
-    clock[0] += 2.0
-    s.build_connector_meta(scheduler_output=None)
-    assert len(s._announce["h1"].holds) == 1
-    assert not entry.evictable
-
-    clock[0] += 30.0
-    s.build_connector_meta(scheduler_output=None)
-    assert "h1" not in s._announce
-    assert entry.evictable
     s.shutdown()

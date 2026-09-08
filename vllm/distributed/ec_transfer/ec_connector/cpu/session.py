@@ -260,11 +260,6 @@ class ProducerSession:
         # Key: "{consumer_session_id}:{mm_hash}" — matches the NIXL notif_msg exactly,
         # so completion notification lookup is a direct dict pop with no parsing.
         self._active_xfers: dict[str, ProducerXfer] = {}
-        # One entry per grant whose read finished or whose lease lapsed, for
-        # the scheduler to release the matching pin it took when announcing.
-        # A list, not a set: two consumers reading the same encoding hold two
-        # pins, and collapsing their events would release only one.
-        self._served: list[str] = []
 
         self._req_decoder = msgspec.msgpack.Decoder(XferReq)
         self._req_encoder = msgspec.msgpack.Encoder()
@@ -370,17 +365,11 @@ class ProducerSession:
                 xfer = self._active_xfers.pop(key, None)
                 if xfer is not None:
                     self._cache.unpin(xfer.mm_hash)
-                    self._served.append(xfer.mm_hash)
                     logger.debug(
                         "EC producer: NIXL READ completed mm_hash=%s key=%s",
                         xfer.mm_hash,
                         key,
                     )
-
-    def take_served(self) -> list[str]:
-        """Return and clear one entry per grant that finished or lapsed."""
-        served, self._served = self._served, []
-        return served
 
     def _sweep_timeouts(self) -> None:
         for key, xfer in list(self._active_xfers.items()):
@@ -393,7 +382,6 @@ class ProducerSession:
                     key,
                 )
                 self._cache.unpin(xfer.mm_hash)
-                self._served.append(xfer.mm_hash)
                 del self._active_xfers[key]
 
 
@@ -513,10 +501,7 @@ class ConsumerSession:
                 self._completed.add(mm_hash)
                 del self._xfers[mm_hash]
             elif state == XferState.ACK_TIMEOUT:
-                # A busy producer is a transient condition, not a broken one:
-                # drop every trace of the attempt so a later admit pass can
-                # re-issue the read as if it were the first. This is also the
-                # only path to a tombstone that would otherwise log nothing.
+                # The scheduler bounds retries with a per-request deadline.
                 logger.warning(
                     "EC consumer: no XferAck for mm_hash=%s from %s:%d in time; "
                     "will re-request",
