@@ -5,6 +5,8 @@
 from pathlib import Path
 
 import pytest
+import torch
+from huggingface_hub.constants import HF_HUB_OFFLINE
 
 import vllm.envs as envs
 from vllm import SamplingParams
@@ -27,7 +29,10 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def uno_adapter_path() -> str:
     snapshot = hf_api().snapshot_download(
-        repo_id="s-sahoo/uno-qwen3-8B", allow_patterns=["adapter/*"]
+        repo_id="s-sahoo/uno-qwen3-8B",
+        revision="8819e09ac901e7290d8d89d62c98b9f756c602fe",
+        allow_patterns=["adapter/*"],
+        local_files_only=HF_HUB_OFFLINE,
     )
     return str(Path(snapshot) / "adapter")
 
@@ -64,7 +69,10 @@ def test_uno_greedy_matches_base_model(
         batches.append(list(reversed(prompts)))
     sampling = SamplingParams(temperature=0, max_tokens=64, ignore_eos=True, seed=0)
     prefill_budget = 256
+    # Bound the reservation on larger devices while keeping both engines matched.
+    total_memory = torch.cuda.get_device_properties(0).total_memory
     common = dict(
+        revision="b968826d9c46dd6066d109eabc6255188de91218",
         dtype="bfloat16",
         trust_remote_code=False,
         enforce_eager=True,
@@ -75,7 +83,8 @@ def test_uno_greedy_matches_base_model(
         max_num_batched_tokens=prefill_budget,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=min(0.9, 24 * 1024**3 / total_memory),
+        kv_cache_memory_bytes=2 * 1024**3,
         enable_lora=True,
         max_lora_rank=128,
         max_loras=2,
