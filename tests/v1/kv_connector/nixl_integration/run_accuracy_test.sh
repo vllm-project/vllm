@@ -36,7 +36,9 @@ if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
   echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
 
-DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
+# Empty leaves the layout to the backends, for models that constrain it.
+PREFILLER_KV_LAYOUT=${PREFILLER_KV_LAYOUT-"HND"}
+DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
   KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
 else
@@ -44,9 +46,9 @@ else
 fi
 
 if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
-  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
-else
-  KV_EXTRA_CONFIG=''
+  # Cross-layer blocks are exercised via the block-outermost layout.
+  PREFILLER_KV_LAYOUT="BLHNC"
+  DECODER_KV_LAYOUT="BLHNC"
 fi
 
 # Connector: default pull NixlConnector; NixlPushConnector enables PP prefill.
@@ -54,11 +56,11 @@ KV_CONNECTOR=${KV_CONNECTOR:-NixlConnector}
 
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
+  KV_CONFIG_D="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
 fi
 
 # Models to run
@@ -112,7 +114,7 @@ wait_for_server() {
 # Function to clean up previous instances
 wait_for_gpu_memory_release() {
   if [[ "$SMI_BIN" == *"rocm"* ]]; then
-    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
   fi
 }
 
@@ -176,7 +178,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    ${PREFILLER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$PREFILLER_KV_LAYOUT} \
     VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -227,16 +229,19 @@ run_tests_for_model() {
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
     INTERNAL_PORT=$((DECODER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
-    DECODER_INTERNAL_PORT_ENV=
+    # For non-DP mode, set VLLM_PORT to pin the internal port;
+    # For DP mode, set VLLM_DP_MASTER_PORT instead to avoid race condition.
     if [[ -z "${DP_EP:-}" ]]; then
       DECODER_INTERNAL_PORT_ENV="VLLM_PORT=$INTERNAL_PORT"
+    else
+      DECODER_INTERNAL_PORT_ENV="VLLM_DP_MASTER_PORT=$INTERNAL_PORT"
     fi
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+    ${DECODER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT} \
     $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \

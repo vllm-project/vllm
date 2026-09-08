@@ -5,10 +5,10 @@
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import _custom_ops as ops
-from vllm.models.minimax_m3.common.indexer import (
-    MiniMaxM3IndexerBackend,
-)
+from vllm.config import CacheConfig
+from vllm.config.cache import _layout_from_name
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
@@ -19,15 +19,16 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import (
-    MiniMaxM3SparseBackend,
-    MiniMaxM3SparseTritonImpl,
-)
+from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    MLAAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 if not (current_platform.is_cuda() or current_platform.is_rocm()):
     pytest.skip(
@@ -37,35 +38,46 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
 
 
 @pytest.fixture
-def kv_layout(request):
-    """Set the global KV cache layout for one test and restore it after."""
-    set_kv_cache_layout(request.param)
-    try:
-        yield request.param
-    finally:
-        set_kv_cache_layout(None)
+def kv_layout(request) -> KVCacheLayout:
+    """Resolve the requested layout name (legacy NHD/HND aliases included)."""
+    return _layout_from_name(request.param)
 
 
-def _stride_order_for(backend: type[MiniMaxM3SparseBackend], ndim: int) -> tuple:
-    """Mirror the allocator's stride-order resolution (identity fallback)."""
-    try:
-        stride_order = backend.get_kv_cache_stride_order()
-        assert len(stride_order) == ndim
-    except (AttributeError, NotImplementedError):
-        stride_order = tuple(range(ndim))
+def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
+    """Per-layer physical stride order for the given layout; the 3-dim
+    indexer side cache (H=1) is contiguous, so identity."""
+    if ndim == 3:
+        return (0, 1, 2)
+    stride_order = layout.layer_view_order
+    assert len(stride_order) == ndim
     return stride_order
 
 
+def _main_spec() -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_DIM,
+        head_size_v=HEAD_DIM,
+        dtype=DTYPE,
+    )
+
+
+def _main_kv_logical_shape(num_pages: int) -> tuple[int, ...]:
+    """Standardized per-layer logical shape [B, H, N, C] for the main cache,
+    derived the same way the production allocator does."""
+    shape_bytes = compute_layer_kv_cache_shape_bytes(_main_spec(), num_pages)
+    return (*shape_bytes[:-1], shape_bytes[-1] // DTYPE.itemsize)
+
+
 def _allocate_main_kv_via_contract(
-    num_pages: int, device: torch.device | str = "cuda"
+    num_pages: int, layout: KVCacheLayout, device: torch.device | str = "cuda"
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
-    currently active layout: allocate the physical (permuted) tensor, then
-    expose the inverse-permuted logical-NHD view the backend sees."""
-    logical_shape = MiniMaxM3SparseBackend.get_kv_cache_shape(
-        num_pages, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    )
-    stride_order = _stride_order_for(MiniMaxM3SparseBackend, len(logical_shape))
+    given layout: allocate the physical (permuted) tensor, then expose the
+    inverse-permuted logical [B, H, N, C] view the backend sees."""
+    logical_shape = _main_kv_logical_shape(num_pages)
+    stride_order = _layer_stride_order(layout, len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
     inv_order = [stride_order.index(i) for i in range(len(stride_order))]
     raw = torch.randn(physical_shape, device=device, dtype=DTYPE)
@@ -79,6 +91,382 @@ BLOCK_SIZE = 128
 DTYPE = torch.bfloat16
 SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
+
+
+@pytest.mark.parametrize(
+    (
+        "num_reqs",
+        "head_dim",
+        "query_dtype",
+        "cache_dtype",
+        "is_gfx950",
+        "expected",
+    ),
+    [
+        (19, 128, torch.bfloat16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.bfloat16, torch.bfloat16, True, (32, True)),
+        (32, 128, torch.bfloat16, torch.bfloat16, True, (32, True)),
+        (33, 128, torch.bfloat16, torch.bfloat16, True, (16, True)),
+        (64, 128, torch.bfloat16, torch.bfloat16, True, (16, True)),
+        (65, 128, torch.bfloat16, torch.bfloat16, True, (4, False)),
+        (20, 128, torch.bfloat16, torch.bfloat16, False, (16, False)),
+        (20, 64, torch.bfloat16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.float16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.bfloat16, torch.float16, True, (16, False)),
+    ],
+)
+def test_amd_decode_score_split_launch_policy(
+    num_reqs: int,
+    head_dim: int,
+    query_dtype: torch.dtype,
+    cache_dtype: torch.dtype,
+    is_gfx950: bool,
+    expected: tuple[int, bool],
+):
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        _decode_score_split_launch_policy,
+    )
+
+    assert (
+        _decode_score_split_launch_policy(
+            num_reqs,
+            head_dim,
+            query_dtype,
+            cache_dtype,
+            is_gfx950=is_gfx950,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("num_reqs", range(1, 12))
+def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        _decode_score_program_budget,
+    )
+
+    budget = _decode_score_program_budget(
+        num_reqs,
+        128,
+        torch.bfloat16,
+        torch.bfloat16,
+        is_gfx950=True,
+    )
+    assert budget is not None
+    patterns = (
+        (0,) * num_reqs,
+        tuple((request * 7919 + 17) % 65535 for request in range(num_reqs)),
+        (65534,) * num_reqs,
+    )
+    for request_blocks in patterns:
+        width = max(1, (sum(request_blocks) + budget - 1) // budget)
+        grid = budget + len(request_blocks) - 1
+        intervals = []
+        for request, blocks in enumerate(request_blocks):
+            programs = (blocks + width - 1) // width
+            for local_program in range(programs):
+                begin = local_program * width
+                intervals.append((request, begin, min(begin + width, blocks)))
+
+        assert len(intervals) <= grid
+        by_request: list[list[tuple[int, int]]] = [[] for _ in request_blocks]
+        for request, begin, end in intervals:
+            assert 0 <= request < len(request_blocks)
+            assert 0 <= begin < end <= request_blocks[request]
+            by_request[request].append((begin, end))
+        for blocks, request_intervals in zip(
+            request_blocks,
+            by_request,
+            strict=True,
+        ):
+            cursor = 0
+            for begin, end in request_intervals:
+                assert begin == cursor
+                cursor = end
+            assert cursor == blocks
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 balanced decode score is ROCm-only",
+)
+@pytest.mark.parametrize(
+    (
+        "num_reqs",
+        "max_block",
+        "num_idx_heads",
+        "decode_query_len",
+        "max_decode_query_len",
+        "init_blocks",
+        "local_blocks",
+    ),
+    [
+        (1, 37, 1, 1, 1, 1, 0),
+        (8, 37, 1, 1, 4, 2, 1),
+        (9, 37, 1, 4, 4, 0, 2),
+        (11, 37, 1, 3, 5, 1, 3),
+        (1, 37, 2, 1, 1, 2, 0),
+        (8, 37, 2, 1, 4, 0, 1),
+        (9, 37, 2, 4, 4, 1, 2),
+        (11, 37, 2, 3, 5, 2, 3),
+        (1, 37, 4, 1, 1, 0, 0),
+        (8, 37, 4, 1, 4, 1, 1),
+        (9, 37, 4, 4, 4, 2, 2),
+        (11, 37, 4, 3, 5, 0, 3),
+        (20, 65, 1, 4, 4, 1, 3),
+        (36, 65, 1, 4, 4, 2, 2),
+        (64, 65, 1, 4, 4, 0, 1),
+    ],
+)
+def test_amd_optimized_decode_score_bitwise_and_graph_replay(
+    num_reqs: int,
+    max_block: int,
+    num_idx_heads: int,
+    decode_query_len: int,
+    max_decode_query_len: int,
+    init_blocks: int,
+    local_blocks: int,
+):
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        _decode_index_score_balanced_kernel,
+        _decode_index_score_kernel,
+        _decode_score_program_budget,
+        _decode_score_split_launch_policy,
+    )
+
+    set_random_seed(0)
+    head_dim = 128
+    block_size_q = 1 << (max_decode_query_len - 1).bit_length()
+    score_stride = (max_block + 15) // 16 * 16
+    num_pages = num_reqs * max_block
+    block_table = torch.arange(
+        num_pages,
+        device="cuda",
+        dtype=torch.int32,
+    ).reshape(num_reqs, max_block)
+    idx_q = torch.randn(
+        (num_reqs * decode_query_len, num_idx_heads, head_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    index_kv_cache = torch.randn(
+        (num_pages, BLOCK_SIZE, head_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    seq_lens = torch.empty(num_reqs, device="cuda", dtype=torch.int32)
+    deployed_score = torch.empty(
+        (num_idx_heads, num_reqs * decode_query_len, score_stride),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    optimized_score = torch.empty_like(deployed_score)
+    budget = _decode_score_program_budget(
+        num_reqs,
+        head_dim,
+        idx_q.dtype,
+        index_kv_cache.dtype,
+        is_gfx950=True,
+    )
+    optimized_chunks = None
+    if budget is None:
+        optimized_chunks, use_high_batch_config = _decode_score_split_launch_policy(
+            num_reqs,
+            head_dim,
+            idx_q.dtype,
+            index_kv_cache.dtype,
+            is_gfx950=True,
+        )
+        assert use_high_batch_config
+    target = max(1, min(256, 512 // num_reqs))
+    deployed_chunks = 1 << (target.bit_length() - 1)
+
+    def launch_deployed() -> None:
+        _decode_index_score_kernel[(num_reqs, deployed_chunks)](
+            idx_q,
+            index_kv_cache,
+            deployed_score,
+            block_table,
+            seq_lens,
+            num_idx_heads,
+            head_dim,
+            init_blocks,
+            local_blocks,
+            decode_query_len,
+            idx_q.stride(0),
+            idx_q.stride(1),
+            idx_q.stride(2),
+            index_kv_cache.stride(0),
+            index_kv_cache.stride(1),
+            index_kv_cache.stride(2),
+            deployed_score.stride(0),
+            deployed_score.stride(1),
+            deployed_score.stride(2),
+            block_table.stride(0),
+            BLOCK_SIZE_K=BLOCK_SIZE,
+            BLOCK_SIZE_Q=block_size_q,
+            num_kv_chunks=deployed_chunks,
+            USE_PDL=False,
+        )
+
+    def launch_optimized() -> None:
+        if budget is not None:
+            _decode_index_score_balanced_kernel[(budget + num_reqs - 1,)](
+                idx_q,
+                index_kv_cache,
+                optimized_score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                num_reqs,
+                budget,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                optimized_score.stride(0),
+                optimized_score.stride(1),
+                optimized_score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=BLOCK_SIZE,
+                BLOCK_SIZE_Q=block_size_q,
+                num_warps=2,
+                num_stages=1,
+            )
+        else:
+            assert optimized_chunks is not None
+            _decode_index_score_kernel[(num_reqs, optimized_chunks)](
+                idx_q,
+                index_kv_cache,
+                optimized_score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                optimized_score.stride(0),
+                optimized_score.stride(1),
+                optimized_score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=BLOCK_SIZE,
+                BLOCK_SIZE_Q=block_size_q,
+                num_kv_chunks=optimized_chunks,
+                USE_PDL=False,
+                num_warps=2,
+                num_stages=1,
+            )
+
+    def score_masks(
+        expected_seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        query_offsets = torch.arange(decode_query_len, device="cuda")
+        kv_lens = torch.clamp(
+            expected_seq_lens[:, None] - decode_query_len + query_offsets + 1,
+            min=0,
+        )
+        query_blocks = (kv_lens + BLOCK_SIZE - 1) // BLOCK_SIZE
+        block_ids = torch.arange(score_stride, device="cuda")
+        topk_mask = block_ids[None, :] < query_blocks.reshape(-1, 1)
+        request_blocks = query_blocks.max(dim=1).values
+        write_mask = (
+            block_ids[None, :]
+            < request_blocks.repeat_interleave(decode_query_len)[:, None]
+        )
+        return write_mask, topk_mask
+
+    def packed_keys(score: torch.Tensor, live: torch.Tensor) -> torch.Tensor:
+        normalized = torch.where(torch.isnan(score), -1e30, score)
+        normalized = torch.where(normalized == 0.0, 0.0, normalized)
+        bits = normalized.contiguous().view(torch.int32).to(torch.int64)
+        bits &= 0xFFFFFFFF
+        ordered = bits ^ torch.where(
+            bits >> 31 != 0,
+            0xFFFFFFFF,
+            0x80000000,
+        )
+        index = torch.arange(score_stride, device="cuda") + 1
+        keys = (1 << 48) | (ordered << 16) | (0xFFFF - index)
+        return torch.where(live, keys, 0)
+
+    def assert_exact(expected_seq_lens: torch.Tensor) -> None:
+        write_mask, topk_mask = score_masks(expected_seq_lens)
+        write_mask = write_mask.unsqueeze(0).expand_as(deployed_score)
+        topk_mask = topk_mask.unsqueeze(0)
+        deployed = deployed_score
+        optimized = optimized_score
+        assert torch.equal(
+            deployed[write_mask].contiguous().view(torch.int32),
+            optimized[write_mask].contiguous().view(torch.int32),
+        )
+        assert torch.isnan(deployed[~write_mask]).all()
+        assert torch.isnan(optimized[~write_mask]).all()
+        deployed_keys = packed_keys(deployed, topk_mask)
+        optimized_keys = packed_keys(optimized, topk_mask)
+        assert torch.equal(deployed_keys, optimized_keys)
+        deployed_topk = torch.topk(deployed_keys, 16, dim=-1, sorted=True)
+        optimized_topk = torch.topk(optimized_keys, 16, dim=-1, sorted=True)
+        assert torch.equal(deployed_topk.values, optimized_topk.values)
+        assert torch.equal(deployed_topk.indices, optimized_topk.indices)
+
+    uniform = torch.full(
+        (num_reqs,),
+        max_block * BLOCK_SIZE,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    one_active = torch.zeros(num_reqs, device="cuda", dtype=torch.int32)
+    one_active[0] = max(1, max_block // 2) * BLOCK_SIZE
+    patterns = [uniform, one_active]
+    non_aligned = torch.tensor(
+        [(max_block - 1) * BLOCK_SIZE + request % 3 + 1 for request in range(num_reqs)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    patterns.append(non_aligned)
+
+    seq_lens.copy_(uniform)
+    deployed_score.fill_(float("nan"))
+    optimized_score.fill_(float("nan"))
+    launch_deployed()
+    launch_optimized()
+    assert_exact(uniform)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        launch_optimized()
+    addresses = (
+        seq_lens.data_ptr(),
+        optimized_score.data_ptr(),
+        block_table.data_ptr(),
+        index_kv_cache.data_ptr(),
+    )
+    for pattern in patterns:
+        seq_lens.copy_(pattern)
+        deployed_score.fill_(float("nan"))
+        optimized_score.fill_(float("nan"))
+        launch_deployed()
+        graph.replay()
+        assert_exact(pattern)
+        assert addresses == (
+            seq_lens.data_ptr(),
+            optimized_score.data_ptr(),
+            block_table.data_ptr(),
+            index_kv_cache.data_ptr(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -431,7 +819,7 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
     not current_platform.is_device_capability_family(100),
     reason="fmha_sm100 indexer requires SM100 (Blackwell).",
 )
-@pytest.mark.parametrize("topk", [8, 16])
+@pytest.mark.parametrize("topk", [16])
 @pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     import vllm.models.minimax_m3.common.indexer as indexer_mod
@@ -471,6 +859,14 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     num_tokens = batch.compute_num_tokens()
+    # Absolute token positions; the MSA builder derives per-token causal page
+    # counts from them.
+    common.positions = torch.cat(
+        [
+            torch.arange(s - q, s, device=device, dtype=torch.int64)
+            for s, q in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
 
     # Deterministic index cache: distinct, monotonic per-logical-block values so
     # the top-k is unambiguous (both kernels pick the same blocks, no fp ties).
@@ -515,14 +911,14 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     triton_impl.index_cache.kv_cache = index_cache
 
     # Exercise the shared persistent top-k buffer for BOTH impls: each must write
-    # decode ([:, :nd]) and prefill ([:, nd:]) into its buffer and return views.
-    # Separate buffers so the two forwards don't clobber each other.
+    # decode ([:nd]) and prefill ([nd:]) into its token-major buffer and (Triton
+    # only) return views. Separate buffers so the two forwards don't clobber.
     nd = sum(q for q in batch.query_lens if q <= 1)
     msa_impl.topk_indices_buffer = torch.full(
-        (num_idx_heads, num_tokens, topk), -2, dtype=torch.int32, device=device
+        (num_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
     )
     triton_impl.topk_indices_buffer = torch.full(
-        (num_idx_heads, num_tokens, topk), -2, dtype=torch.int32, device=device
+        (num_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
     )
 
     attn_metadata = {
@@ -533,18 +929,17 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
         msa_decode, msa_prefill = msa_impl(index_q)
         tri_decode, tri_prefill = triton_impl(index_q)
 
-    assert msa_decode is not None and tri_decode is not None
-    assert msa_prefill is not None and tri_prefill is not None
-    _assert_topk_indices_equal_unordered(msa_decode, tri_decode)
-    _assert_topk_indices_equal_unordered(msa_prefill, tri_prefill)
-    # decode/prefill outputs are views into each impl's persistent buffer.
-    for impl, dec, pre in (
-        (msa_impl, msa_decode, msa_prefill),
-        (triton_impl, tri_decode, tri_prefill),
-    ):
-        buf = impl.topk_indices_buffer
-        assert dec.data_ptr() == buf[:, :nd, :].data_ptr()
-        assert pre.data_ptr() == buf[:, nd:, :].data_ptr()
+    # MSA's return is vestigial; the attend reads its buffer directly.
+    assert msa_decode is None and msa_prefill is None
+    assert tri_decode is not None and tri_prefill is not None
+    _assert_topk_indices_equal_unordered(
+        msa_impl.topk_indices_buffer[:num_tokens],
+        triton_impl.topk_indices_buffer[:num_tokens],
+    )
+    # Triton's decode/prefill outputs are views into its persistent buffer.
+    buf_htk = triton_impl.topk_indices_buffer.transpose(0, 1)
+    assert tri_decode.data_ptr() == buf_htk[:, :nd, :].data_ptr()
+    assert tri_prefill.data_ptr() == buf_htk[:, nd:, :].data_ptr()
 
 
 @pytest.mark.parametrize(
@@ -618,6 +1013,338 @@ def test_decode_index_topk_correctness(
         local_blocks,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
+
+
+@pytest.mark.parametrize(
+    (
+        "max_block",
+        "total_q",
+        "num_idx_heads",
+        "topk",
+        "is_gfx950",
+        "expected",
+    ),
+    [
+        (0, 24, 1, 16, True, (2, False, False)),
+        (1, 1, 1, 16, True, (16, True, True)),
+        (512, 4, 1, 16, True, (16, True, True)),
+        (513, 24, 4, 16, True, (16, True, True)),
+        (2760, 5, 2, 16, True, (16, True, True)),
+        (8192, 64, 4, 16, True, (16, True, True)),
+        (8193, 4, 1, 16, True, (16, False, False)),
+        (8193, 16, 1, 16, True, (4, False, False)),
+        (65534, 64, 1, 16, True, (1, False, False)),
+        (513, 16, 1, 13, True, (4, False, False)),
+        (513, 16, 4, 16, False, (1, False, False)),
+    ],
+)
+def test_amd_decode_topk_launch_policy(
+    max_block: int,
+    total_q: int,
+    num_idx_heads: int,
+    topk: int,
+    is_gfx950: bool,
+    expected: tuple[int, bool, bool],
+):
+    """All supported head and query layouts use adaptive selection."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        _decode_topk_launch_policy,
+    )
+
+    assert (
+        _decode_topk_launch_policy(
+            max_block,
+            total_q,
+            num_idx_heads,
+            topk,
+            is_gfx950=is_gfx950,
+        )
+        == expected
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize(
+    (
+        "num_topk_chunks",
+        "single_tile_guaranteed",
+        "adaptive_final_merge",
+        "max_blocks",
+        "topk",
+        "num_idx_heads",
+    ),
+    [
+        (1, False, False, 65534, 16, 1),
+        (2, False, False, 8193, 16, 1),
+        (4, False, False, 8193, 16, 1),
+        (8, False, False, 8193, 16, 1),
+        (16, False, False, 8193, 16, 1),
+        (16, False, False, 65534, 16, 1),
+        (2, True, False, 513, 13, 1),
+        (4, False, True, 8192, 16, 2),
+        (16, True, True, 8192, 16, 4),
+    ],
+)
+def test_amd_decode_fused_topk_total_order_and_replay(
+    num_topk_chunks: int,
+    single_tile_guaranteed: bool,
+    adaptive_final_merge: bool,
+    max_blocks: int,
+    topk: int,
+    num_idx_heads: int,
+):
+    """Atomic multi-chunk selection is ordered and resets graph state."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        SPARSE_BLOCK_SIZE,
+        _decode_topk_fused_kernel,
+    )
+
+    set_random_seed(0)
+    block_size_t = 1 << (topk - 1).bit_length()
+    long_seq_lens_list = [
+        0,
+        1,
+        15 * SPARSE_BLOCK_SIZE,
+        16 * SPARSE_BLOCK_SIZE,
+        17 * SPARSE_BLOCK_SIZE,
+        255 * SPARSE_BLOCK_SIZE,
+        256 * SPARSE_BLOCK_SIZE,
+        257 * SPARSE_BLOCK_SIZE,
+        511 * SPARSE_BLOCK_SIZE,
+        512 * SPARSE_BLOCK_SIZE,
+        513 * SPARSE_BLOCK_SIZE,
+        max_blocks * SPARSE_BLOCK_SIZE,
+    ]
+    short_seq_lens_list = [0, 1, 127, 128, 129, 0, 1, 128, 129, 0, 1, 129]
+    boundary_limit = 0
+    if num_topk_chunks == 16 and max_blocks >= 8192:
+        boundary_limit = 15
+    elif num_topk_chunks == 4 and adaptive_final_merge:
+        boundary_limit = 4
+    if boundary_limit:
+        boundary_blocks = [
+            (active_chunks - 1) * 512 + 1
+            for active_chunks in range(3, boundary_limit + 1)
+        ]
+        assert [(num_blocks + 511) // 512 for num_blocks in boundary_blocks] == list(
+            range(3, boundary_limit + 1)
+        )
+        long_seq_lens_list.extend(
+            num_blocks * SPARSE_BLOCK_SIZE for num_blocks in boundary_blocks
+        )
+        short_seq_lens_list.extend(
+            num_blocks * SPARSE_BLOCK_SIZE for num_blocks in reversed(boundary_blocks)
+        )
+    batch = len(long_seq_lens_list)
+    score = torch.randn((num_idx_heads, batch, max_blocks), device="cuda")
+    score[:, :, 0] = float("nan")
+    score[:, :, 1] = float("inf")
+    score[:, :, 2] = float("-inf")
+    score[:, :, 3] = 0.0
+    score[:, :, 4] = -0.0
+    score[:, :, 5] = 7.0
+    score[:, :, 6] = -1e30
+    score[:, :, 256] = 7.0
+    score[:, :, 512] = 7.0
+
+    seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
+    partial = torch.full(
+        (num_topk_chunks, num_idx_heads, batch, block_size_t),
+        -1,
+        device="cuda",
+        dtype=torch.int64,
+    )
+    counter = torch.zeros((num_idx_heads, batch), device="cuda", dtype=torch.int32)
+    actual = torch.full(
+        (num_idx_heads, batch, topk), -2, device="cuda", dtype=torch.int32
+    )
+    dummy_block_table = torch.zeros(
+        (batch, max_blocks), device="cuda", dtype=torch.int32
+    )
+    addresses = (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+    long_seq_lens = torch.tensor(long_seq_lens_list, device="cuda", dtype=torch.int32)
+    short_seq_lens = torch.tensor(short_seq_lens_list, device="cuda", dtype=torch.int32)
+
+    def launch() -> None:
+        _decode_topk_fused_kernel[(batch, num_idx_heads, num_topk_chunks)](
+            score,
+            partial,
+            counter,
+            actual,
+            seq_lens,
+            dummy_block_table,
+            actual,
+            seq_lens,
+            1,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            partial.stride(0),
+            partial.stride(1),
+            partial.stride(2),
+            partial.stride(3),
+            counter.stride(0),
+            counter.stride(1),
+            actual.stride(0),
+            actual.stride(1),
+            actual.stride(2),
+            dummy_block_table.stride(0),
+            actual.stride(1),
+            topk=topk,
+            block_size=SPARSE_BLOCK_SIZE,
+            pages_per_sparse_block=8,
+            block_page_stride=8,
+            NUM_TOPK_CHUNKS=num_topk_chunks,
+            BLOCK_SIZE_K=512,
+            BLOCK_SIZE_T=block_size_t,
+            EMIT_SPARSE_TABLE=False,
+            SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
+            ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
+            num_warps=4 if adaptive_final_merge else 8,
+            num_stages=2,
+        )
+
+    score_cpu = score.cpu()
+
+    def reference(seq_lens_list: list[int]) -> torch.Tensor:
+        expected = torch.full((num_idx_heads, batch, topk), -1, dtype=torch.int32)
+        for head in range(num_idx_heads):
+            for row, seq_len in enumerate(seq_lens_list):
+                num_blocks = (seq_len + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
+                values = score_cpu[head, row, :num_blocks].tolist()
+                values = [-1e30 if value != value else value for value in values]
+                selected = sorted(
+                    range(num_blocks),
+                    key=lambda index: (-values[index], index),
+                )[:topk]
+                expected[head, row, : len(selected)] = torch.tensor(selected)
+        return expected
+
+    seq_lens.copy_(long_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+
+    seq_lens.copy_(short_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(short_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+
+    replay_count = 8 if max_blocks == 65534 else 128
+    for replay in range(replay_count):
+        seq_lens.copy_(long_seq_lens if replay % 2 == 0 else short_seq_lens)
+        launch()
+    seq_lens.copy_(long_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+    assert addresses == (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+
+    if (num_topk_chunks, single_tile_guaranteed, adaptive_final_merge, max_blocks) in (
+        (4, False, False, 8193),
+        (16, False, False, 8193),
+        (4, False, True, 8192),
+        (16, True, True, 8192),
+    ):
+        graph = torch.cuda.CUDAGraph()
+        torch.accelerator.synchronize()
+        with torch.cuda.graph(graph):
+            launch()
+        seq_lens.copy_(short_seq_lens)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(actual.cpu(), reference(short_seq_lens_list))
+        assert torch.count_nonzero(counter).item() == 0
+        seq_lens.copy_(long_seq_lens)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+        assert torch.count_nonzero(counter).item() == 0
+        assert addresses == (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize(
+    ("num_idx_heads", "decode_query_len", "max_decode_query_len"),
+    [(1, 1, 1), (2, 1, 4), (4, 4, 4), (4, 3, 8)],
+)
+def test_amd_decode_index_topk_end_to_end(
+    num_idx_heads: int,
+    decode_query_len: int,
+    max_decode_query_len: int,
+):
+    """ROCm BF16 score-to-selector parity crosses the atomic boundary."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode as amd_minimax_m3_index_decode,
+    )
+
+    torch.manual_seed(0)
+    topk = 16
+    head_dim = 16
+    seq_lens = torch.tensor([65537], device="cuda", dtype=torch.int32)
+    q_lens = torch.tensor([decode_query_len], device="cuda", dtype=torch.int32)
+    prefix_lens = seq_lens - q_lens
+    max_seq_len = int(seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_table = torch.randperm(
+        max_blocks, device="cuda", dtype=torch.int32
+    ).unsqueeze(0)
+    idx_q = torch.randn(
+        decode_query_len,
+        num_idx_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    index_kv_cache = torch.randn(
+        max_blocks,
+        BLOCK_SIZE,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    completion_counter = torch.zeros(
+        (num_idx_heads, decode_query_len), device="cuda", dtype=torch.int32
+    )
+
+    actual = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=0,
+        local_blocks=1,
+        num_kv_heads=num_idx_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
+        completion_counter=completion_counter,
+    )
+    expected = _reference_index_topk(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        topk,
+        0,
+        1,
+    )
+    torch.accelerator.synchronize()
+
+    _assert_topk_indices_equal_unordered(actual, expected)
+    assert torch.count_nonzero(completion_counter).item() == 0
 
 
 @pytest.mark.skipif(
@@ -810,7 +1537,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ):
@@ -844,7 +1571,7 @@ def test_prefill_sparse_attention_correctness(
     # Allocate the main KV cache through the backend layout contract so the
     # physical storage matches the active layout (contiguous NHD or strided
     # HND), while the kernels and reference see the logical-NHD view.
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     # Build sparse block indices with the same contract as the real M3 indexer:
     # one forced local block, then score-selected older causal blocks.
@@ -897,37 +1624,30 @@ def test_prefill_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
-def test_main_backend_layout_contract():
-    """The main sparse backend exposes the logical-NHD shape and the
-    flash_attn-style stride order for each layout."""
+def test_main_cache_layout_contract():
+    """The standardized per-layer logical shape is [B, H, N, C] with packed
+    K/V content, and the legacy layout aliases resolve to the expected
+    per-layer stride orders."""
     nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
+    logical = _main_kv_logical_shape(nb)
     assert logical == (nb, h, bs, 2 * d)
     # The old separate K/V-axis shape is no longer the logical shape.
     assert logical != (nb, 2, bs, h, d)
 
-    try:
-        set_kv_cache_layout("HND")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 1, 2, 3)
-        set_kv_cache_layout("NHD")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 2, 1, 3)
-    finally:
-        set_kv_cache_layout(None)
+    assert KVCacheLayout.LBHNC.layer_view_order == (0, 1, 2, 3)
+    assert KVCacheLayout.LBNHC.layer_view_order == (0, 2, 1, 3)
 
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-        finally:
-            set_kv_cache_layout(None)
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "HND")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "NHD")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBNHC
+
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         # Valid permutation: no duplicates, covers every axis.
         assert set(order) == set(range(len(order)))
-
-    # M3 has no cross-layer KV blocks.
-    with pytest.raises(NotImplementedError):
-        MiniMaxM3SparseBackend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
 
 
 def test_aiter_sparse_pa_layout_contract(monkeypatch):
@@ -941,17 +1661,21 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
         lambda: True,
     )
 
-    nb, bs, h, d = 7, BLOCK_SIZE, 1, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    assert logical == (nb, 2, bs, h, d)
-    assert order == (1, 0, 2, 3, 4)
+    backend = sparse_attn_mod.MiniMaxM3SparseBackend
+    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
 
-    physical_shape = tuple(logical[i] for i in order)
-    inv_order = [order.index(i) for i in range(len(order))]
-    raw = torch.empty(physical_shape, device="cuda", dtype=DTYPE)
-    logical_view = raw.permute(*inv_order)
-    key_cache, value_cache = logical_view.unbind(1)
+    nb, h = 7, 1
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=h,
+        head_size=HEAD_DIM,
+        dtype=DTYPE,
+        num_head_slots=2,
+        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+    )
+    raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
+    key_cache, value_cache = view.unbind(1)
     assert key_cache.is_contiguous()
     assert value_cache.is_contiguous()
 
@@ -968,48 +1692,37 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        MiniMaxM3SparseBackend.get_kv_cache_shape(7, BLOCK_SIZE, 2, HEAD_DIM)
+        sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
 
 
-def test_main_backend_unknown_layout_raises(monkeypatch):
-    """An unrecognized layout (injected past env-var validation) is rejected."""
-    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
-
-    monkeypatch.setattr(sparse_attn_mod, "get_kv_cache_layout", lambda: "BOGUS")
-    with pytest.raises(ValueError, match="Unknown cache layout format"):
-        MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-
-
-def test_indexer_backend_stride_order_is_identity():
-    """The 3-dim indexer cache must not inherit the parent's 4-element stride
-    order; it overrides to the 3-element identity so the allocator keeps the
-    contiguous layout."""
-    assert MiniMaxM3IndexerBackend.get_kv_cache_stride_order() == (0, 1, 2)
-
-    # Cross-layer (per-layer-stacked) KV blocks are not supported.
-    with pytest.raises(NotImplementedError):
-        MiniMaxM3IndexerBackend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
-
-    # The stride order matches the 3-dim indexer shape rank.
-    indexer_shape = MiniMaxM3IndexerBackend.get_kv_cache_shape(
-        5, BLOCK_SIZE, 1, HEAD_DIM
+def test_indexer_cache_squeezes_to_contiguous_3d():
+    """The indexer side cache is standardized 4D with H=1: under both layouts
+    the allocator's logical view stays contiguous and squeezes (as
+    `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
+    [num_blocks, block_size, head_dim] cache the kernels consume."""
+    nb = 5
+    ispec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
     )
-    assert len(indexer_shape) == 3
-    assert _stride_order_for(MiniMaxM3IndexerBackend, len(indexer_shape)) == (0, 1, 2)
+    shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
+    assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
+    assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
+
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
+        view = dense_kv_cache_views(iraw, ispec, nb, 1, layout, BLOCK_SIZE)[0]
+        assert tuple(view.shape) == (nb, 1, BLOCK_SIZE, HEAD_DIM)
+        indexer_cache = view.squeeze(1)
+        assert tuple(indexer_cache.shape) == (nb, BLOCK_SIZE, HEAD_DIM)
+        assert indexer_cache.is_contiguous()
 
 
 def test_hnd_allocation_is_packed_head_major():
     """Under HND the backend-visible logical view is the packed head-major
     physical allocation."""
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    finally:
-        set_kv_cache_layout(None)
+    logical = _main_kv_logical_shape(nb)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     physical_shape = tuple(logical[i] for i in stride_order)
     assert physical_shape == (nb, h, bs, 2 * d)
@@ -1035,27 +1748,13 @@ def test_main_cache_is_block_first_and_unpadded():
     """The allocator's contiguous-view branch (not the padded-strided branch)
     is used for the main GQA cache: its spec is unpadded and the physical
     layout keeps num_blocks as the first dimension under both layouts."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM,
-        head_size_v=HEAD_DIM,
-        dtype=DTYPE,
-    )
+    spec = _main_spec()
     # Unpadded -> allocator uses kv_tensor.view(...) rather than as_strided().
     assert spec.page_size_padded is None
 
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(
-        4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    )
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-        finally:
-            set_kv_cache_layout(None)
+    logical = _main_kv_logical_shape(4)
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         inv_order = [order.index(i) for i in range(len(order))]
         # Physical first dim is num_blocks (block-first); required by the
         # padded-strided branch's block-first assumption if it were ever taken.
@@ -1260,6 +1959,137 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
     assert torch.equal(sparse_bt, expected_bt)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize("block_page_stride", [8, 16])
+@pytest.mark.parametrize(
+    "seq_lens_list",
+    [
+        [4097],
+        [65537],
+        [1, 129, 4097, 0],
+        [127, 128, 129, 256, 4097, 0],
+        [1, 127, 128, 129, 255, 256, 257, 4097, 0],
+    ],
+)
+def test_amd_decode_fused_topk_emits_sparse_table(
+    block_page_stride: int, seq_lens_list: list[int]
+):
+    """The fused selector must match top-k followed by table construction."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode as amd_minimax_m3_index_decode,
+    )
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_build_sparse_block_table_decode,
+    )
+
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.tensor(seq_lens_list, device="cuda", dtype=torch.int32)
+    batch = seq_lens.numel()
+    total_q = batch * decode_query_len
+    max_seq_len = int(seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    index_block_table = torch.zeros(
+        (batch, max_blocks), device="cuda", dtype=torch.int32
+    )
+    for req_id, seq_len in enumerate(seq_lens.tolist()):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        pages = torch.arange(max_blocks, device="cuda", dtype=torch.int32)
+        index_block_table[req_id, :num_blocks] = torch.roll(pages, req_id)[:num_blocks]
+
+    # The index cache and main-attention cache have independent physical page
+    # mappings in production. Disjoint values make using the wrong table fail.
+    attention_block_table = torch.full_like(index_block_table, -31337)
+    for req_id, seq_len in enumerate(seq_lens.tolist()):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        first_page = 10_000 + req_id * max_blocks
+        attention_block_table[req_id, :num_blocks] = torch.arange(
+            first_page + num_blocks - 1,
+            first_page - 1,
+            -1,
+            device="cuda",
+            dtype=torch.int32,
+        )
+    assert not torch.equal(index_block_table, attention_block_table)
+
+    idx_q = torch.randn(total_q, 1, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    index_kv_cache = torch.randn(
+        max_blocks,
+        BLOCK_SIZE,
+        HEAD_DIM,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    decode_kwargs = {
+        "max_seq_len": max_seq_len,
+        "topk": TOPK,
+        "init_blocks": 0,
+        "local_blocks": 1,
+        "num_kv_heads": 1,
+        "decode_query_len": decode_query_len,
+        "max_decode_query_len": decode_query_len,
+    }
+    completion_counter = torch.zeros((1, total_q), device="cuda", dtype=torch.int32)
+
+    expected_topk = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        index_block_table,
+        seq_lens,
+        completion_counter=completion_counter,
+        **decode_kwargs,
+    )
+    expected_sparse_bt, expected_sparse_ctx = (
+        minimax_m3_build_sparse_block_table_decode(
+            expected_topk,
+            attention_block_table,
+            seq_lens,
+            decode_query_len,
+            block_page_stride,
+        )
+    )
+
+    topk_out = torch.full_like(expected_topk, -27182)
+    sparse_bt_out = torch.full(
+        (total_q, TOPK * PAGES_PER_SPARSE_BLOCK),
+        -27182,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    sparse_ctx_out = torch.full((total_q,), -27182, device="cuda", dtype=torch.int32)
+    actual_topk = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        index_block_table,
+        seq_lens,
+        out=topk_out,
+        attention_block_table=attention_block_table,
+        sparse_block_table_out=sparse_bt_out,
+        sparse_context_lens_out=sparse_ctx_out,
+        block_page_stride=block_page_stride,
+        completion_counter=completion_counter,
+        **decode_kwargs,
+    )
+    torch.accelerator.synchronize()
+
+    assert actual_topk.data_ptr() == topk_out.data_ptr()
+    assert torch.equal(actual_topk, expected_topk)
+    assert torch.equal(sparse_bt_out, expected_sparse_bt)
+    assert torch.equal(sparse_ctx_out, expected_sparse_ctx)
+    assert torch.count_nonzero(completion_counter).item() == 0
+
+    if seq_lens_list[-1] == 0:
+        padded_rows = slice(total_q - decode_query_len, total_q)
+        assert torch.all(actual_topk[:, padded_rows] == -1)
+        assert torch.count_nonzero(sparse_bt_out[padded_rows]) == 0
+        assert torch.count_nonzero(sparse_ctx_out[padded_rows]) == 0
+
+
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize(
     "seq_lens_list",
@@ -1268,7 +2098,7 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     seq_lens_list: tuple[int, ...],
     decode_query_len: int,
     num_padded_reqs: int,
@@ -1280,7 +2110,7 @@ def test_decode_sparse_attention_correctness(
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, decode_query_len, num_padded_reqs
     )
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     actual = torch.empty_like(q)
     minimax_m3_sparse_attn_decode(
@@ -1357,92 +2187,19 @@ def test_decode_wrong_layout_breaks_parity():
     assert (actual.float() - expected.float()).abs().max().item() > 1.7e-2
 
 
-def _make_attn_group(backend, spec):
-    return AttentionGroup(
-        backend=backend,
-        layer_names=["main"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
-
-
 def test_main_cache_byte_identical_through_production_allocator():
-    """AC-2: drive the real allocator (`_reshape_kv_cache`) for the M3 main
+    """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
-    same shape, stride, and storage offset as the packed-HND allocation; the
-    indexer `MLAAttentionSpec` allocates through the same path to its 3-dim
-    shape."""
+    same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM,
-        head_size_v=HEAD_DIM,
-        dtype=DTYPE,
-    )
+    spec = _main_spec()
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    group = _make_attn_group(MiniMaxM3SparseBackend, spec)
-    try:
-        set_kv_cache_layout("HND")
-        kv_caches = _reshape_kv_cache([group], {"main": raw}, "auto", [BLOCK_SIZE], {})
-    finally:
-        set_kv_cache_layout(None)
-    view = kv_caches["main"]
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LBHNC, BLOCK_SIZE)[0]
 
     oracle = raw.view(DTYPE).view((nb, NUM_KV_HEADS, BLOCK_SIZE, 2 * HEAD_DIM))
     assert tuple(view.shape) == tuple(oracle.shape)
     assert view.stride() == oracle.stride()
     assert view.storage_offset() == oracle.storage_offset()
-
-    # Indexer cache allocates through the same path under both layouts.
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
-    for layout in ("NHD", "HND"):
-        iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
-        igroup = AttentionGroup(
-            backend=MiniMaxM3IndexerBackend,
-            layer_names=["idx"],
-            kv_cache_spec=ispec,
-            kv_cache_group_id=0,
-        )
-        try:
-            set_kv_cache_layout(layout)
-            iout = _reshape_kv_cache([igroup], {"idx": iraw}, "auto", [BLOCK_SIZE], {})
-        finally:
-            set_kv_cache_layout(None)
-        assert tuple(iout["idx"].shape) == (nb, BLOCK_SIZE, HEAD_DIM)
-
-
-def test_indexer_inherited_stride_order_trips_allocator_assert():
-    """AC-4 negative: without the indexer override, the inherited 4-element
-    stride order trips the allocator's `len(stride_order) == len(shape)` assert
-    for the 3-dim indexer shape; the `AssertionError` is NOT swallowed by the
-    allocator's `(AttributeError, NotImplementedError)` fallback."""
-
-    class _BrokenIndexerBackend(MiniMaxM3IndexerBackend):
-        # Simulate inheriting the parent's 4-element stride order.
-        get_kv_cache_stride_order = staticmethod(
-            MiniMaxM3SparseBackend.get_kv_cache_stride_order
-        )
-
-    nb = 4
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
-    iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
-    igroup = AttentionGroup(
-        backend=_BrokenIndexerBackend,
-        layer_names=["idx"],
-        kv_cache_spec=ispec,
-        kv_cache_group_id=0,
-    )
-    try:
-        set_kv_cache_layout("HND")
-        with pytest.raises(AssertionError):
-            _reshape_kv_cache([igroup], {"idx": iraw}, "auto", [BLOCK_SIZE], {})
-    finally:
-        set_kv_cache_layout(None)
 
 
 def test_padded_main_cache_is_flagged():
@@ -1458,11 +2215,7 @@ def test_padded_main_cache_is_flagged():
         )
         assert inv_order[0] == 0, "main GQA cache must remain block-first"
 
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    finally:
-        set_kv_cache_layout(None)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     good = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -1486,13 +2239,13 @@ def test_padded_main_cache_is_flagged():
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
-def test_reshape_and_cache_flash_write_persists(kv_layout: str):
+def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
     packed-content K/V split views. Writing through those views must persist
     into the bound storage under both layouts."""
     torch.manual_seed(0)
     num_pages = 4
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
     with torch.no_grad():
         kv_cache.zero_()
 

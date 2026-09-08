@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling mixture-of-experts on vLLM's FusedMoE abstraction.
+"""Inkling mixture-of-experts on vLLM's MoERunner abstraction.
 
 Overfit to the served checkpoint: sigmoid gate (+ selection bias) top-k over
 the routed experts, log-sigmoid renormalization over the k routed + S shared
 "sink" logits, scaled by route_scale * global_scale. The routed top-k goes
-through vLLM's FusedMoE (which handles TP/EP); the sink experts run in
+through vLLM's MoERunner (which handles TP/EP); the sink experts run in
 :class:`InklingSinkExperts` -- replicated across EP ranks (every token
 activates every sink) and always bf16 (the checkpoint excludes every
 ``shared_experts`` from quantization).
@@ -35,7 +35,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -265,7 +265,7 @@ class InklingGate(nn.Module):
 
 
 def _inkling_moe_ep_size() -> int:
-    """EP size the FusedMoE layer will run with (mirrors
+    """EP size the MoERunner layer will run with (mirrors
     FusedMoEParallelConfig.make: experts shard over tp * dp * pcp when
     expert parallelism is enabled)."""
     parallel_config = get_current_vllm_config().parallel_config
@@ -444,7 +444,7 @@ class InklingMoE(nn.Module):
 
         # The released MXFP4 checkpoint keeps the first routed-expert layer
         # in bf16 and lists its two expert weights explicitly in Quark's
-        # exclusion list.  FusedMoE asks for a quant method at the module
+        # exclusion list.  FusedMoEFactory asks for a quant method at the module
         # prefix, so an exact weight exclusion would otherwise be missed and
         # the bf16 tensors would be loaded into MXFP4 parameters.
         routed_quant_config = quant_config
@@ -458,7 +458,7 @@ class InklingMoE(nn.Module):
             if routed_weights <= excluded:
                 routed_quant_config = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -503,7 +503,7 @@ class InklingMoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """FusedMoE ``custom_routing_function``: the routed top-k slice of the
+        """MoERunner ``custom_routing_function``: the routed top-k slice of the
         full (routed + sink) selection.
 
         forward() stashes its selection (keyed by logits identity) so the
@@ -523,7 +523,7 @@ class InklingMoE(nn.Module):
         router_logits = self.gate.compute_logits(x)
         num_tokens = x.shape[0]
         # One gate select per layer: the routed slice is stashed for the
-        # routing function inside the FusedMoE op; the sink gammas are the
+        # routing function inside the MoERunner op; the sink gammas are the
         # trailing columns.
         k = self.gate.topk
         weights, ids = self.gate.select_experts(router_logits)

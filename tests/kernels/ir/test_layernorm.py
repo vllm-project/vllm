@@ -12,26 +12,27 @@ from tests.ir.ir_test_utils import (
     clone_args,
     supported_providers,
 )
-from tests.kernels.allclose_default import get_default_rtol
+from tests.utils import set_random_seed
 from vllm import ir
 from vllm.platforms import current_platform
 
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
+IS_GPGPU_DEVICE = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_rms_norm_registration():
     expected = {
         "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
+        "vllm_c": IS_GPGPU_DEVICE,
         "aiter": current_platform.is_rocm(),
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "rmsnorm"),
-        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -46,11 +47,12 @@ def test_rms_norm_registration():
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        set_random_seed(0)
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
@@ -65,9 +67,13 @@ class TestRMSNorm:
         assert out.dtype == x.dtype
         assert out.device == x.device
 
-        # Check the scaling property of rms norm
+        # Check the scaling property of rms norm. This holds only
+        # approximately: epsilon does not scale with x, so
+        # rms_norm(2x) = x / sqrt(mean(x^2) + epsilon/4), which differs from
+        # rms_norm(x) by the epsilon term. Use the op's declared tolerance
+        # rather than a tighter hard-coded one.
         out2 = rms_norm_native(x * 2.0, weight, epsilon=epsilon)
-        torch.testing.assert_close(out2, out, rtol=get_default_rtol(out), atol=1e-3)
+        assert_close(ir.ops.rms_norm, out2, out)
 
         # Mean square should be approximately 1 (ignoring epsilon and weight scaling)
         combined_norm = out.float() / weight.float()
@@ -117,7 +123,7 @@ class TestRMSNorm:
         out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
         assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
@@ -203,18 +209,17 @@ fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_fused_add_rms_norm_registration():
     expected = {
         "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
+        "vllm_c": IS_GPGPU_DEVICE,
         "aiter": current_platform.is_rocm(),
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "fused_add_rms_norm"),
-        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -261,11 +266,12 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestFusedAddRMSNorm:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
+        set_random_seed(0)
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=4,
             hidden_size=8,
@@ -304,7 +310,7 @@ class TestFusedAddRMSNorm:
         out2, _ = fused_add_rms_norm_native(
             x * 2.0, torch.zeros_like(x), weight, epsilon=epsilon
         )
-        torch.testing.assert_close(out2, out1, rtol=get_default_rtol(out), atol=1e-3)
+        assert_close(ir.ops.fused_add_rms_norm, out2, out1)
 
         # Check behavior with and without weight
         weight1 = torch.ones_like(weight)

@@ -8,7 +8,9 @@ set -ex
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93"}
+# Pinned in full: an abbreviated hash is not a ref, so a consumer that
+# fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
 
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
@@ -195,6 +197,21 @@ do_build() {
 #endif\
 #endif\
 #endif' csrc/kernels/backend/symmetric.hpp
+    fi
+
+    if [[ "$name" == "DeepEP" ]]; then
+        # DeepEP links against the CUDA driver API in driverless build images.
+        local cuda_driver_stub
+        local cuda_driver_stub_dir
+        cuda_driver_stub=$(
+            find -H "$CUDA_HOME" -path "*/stubs/libcuda.so" -print -quit
+        )
+        if [[ -z "$cuda_driver_stub" ]]; then
+            echo "CUDA driver stub not found under $CUDA_HOME" >&2
+            exit 1
+        fi
+        cuda_driver_stub_dir=$(dirname "$cuda_driver_stub")
+        export LIBRARY_PATH="${cuda_driver_stub_dir}${LIBRARY_PATH:+:$LIBRARY_PATH}"
     fi
 
     if [ "$MODE" = "install" ]; then

@@ -198,7 +198,7 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
             self.gate = gate  # canonical path: "moe.gate"
 
             # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how FusedMoE.runner.gate references the
+            # path. This mirrors how MoERunner.runner.gate references the
             # block's gate in qwen3_moe.
             class _Runner(nn.Module):
                 def __init__(self, g):
@@ -698,6 +698,10 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
     # Identical mapping, but the metadata must follow the new slot layout.
     manager.set_adapter_mapping(LoRAMapping((1, 2), (1, 2)))
     assert punica_wrapper.token_lora_indices.tolist() == [1, 0]
+
+    manager.remove_all_adapters()
+    assert manager._last_mapping is None
+    assert manager._last_slot_layout is None
 
 
 @pytest.mark.parametrize("device", DEVICES)

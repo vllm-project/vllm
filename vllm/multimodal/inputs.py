@@ -23,7 +23,7 @@ from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
 
 from .media import MediaWithBytes
 
@@ -229,61 +229,103 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 
-def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
+def nested_tensors_equal(
+    a: NestedTensors,
+    b: NestedTensors,
+    check_dtype: bool = True,
+) -> bool:
     """
     Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
+
+    If `check_dtype` is `True`, the tensors must have the same dtype.
     """
+    check_dtype_func = (
+        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    )
     if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and torch.equal(a, b)
+        return (
+            isinstance(b, torch.Tensor)
+            and torch.equal(a, b)
+            and check_dtype_func(a, b, check_dtype)
+        )
     elif isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and torch.equal(b, a)
+        return (
+            isinstance(a, torch.Tensor)
+            and torch.equal(b, a)
+            and check_dtype_func(b, a, check_dtype)
+        )
 
     if isinstance(a, list):
         return (
             isinstance(b, list)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, list):
         return (
             isinstance(a, list)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     if isinstance(a, tuple):
         return (
             isinstance(b, tuple)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, tuple):
         return (
             isinstance(a, tuple)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     # Both a and b are scalars
     return a == b
 
 
+def _nested_tensors_are_cpu(tensors: NestedTensors) -> bool:
+    """Whether every tensor in `tensors` lives in host memory."""
+    return not any(
+        isinstance(x, torch.Tensor) and not x.is_cpu for x in json_iter_leaves(tensors)
+    )
+
+
+def _is_dense(t: torch.Tensor) -> bool:
+    """Whether `t`'s elements fill a contiguous storage range, possibly
+    permuted (e.g. a transposed matrix). Such layouts can be copied with
+    pitched cudaMemcpy2D/3DAsync directly from pinned memory, whereas
+    gapped layouts (e.g. strided slices) stage through a pageable temp."""
+    if not t.is_contiguous():
+        expected_stride = 1
+        for stride, size in sorted(zip(t.stride(), t.shape)):
+            if size > 1:
+                if stride != expected_stride:
+                    return False
+                expected_stride *= size
+    return True
+
+
 def _nested_tensors_h2d(
     tensors: NestedTensors,
     device: torch.types.Device,
+    *,
+    pin_memory: bool = False,
 ) -> NestedTensors:
     if device is None:
         return tensors
 
-    return json_map_leaves(
-        (
-            lambda x: x.to(device=device, non_blocking=True)
-            if isinstance(x, torch.Tensor)
-            else x
-        ),
-        tensors,
-    )
+    def _h2d(x: torch.Tensor) -> torch.Tensor:
+        if not isinstance(x, torch.Tensor):
+            return x
+        if pin_memory and x.is_cpu and not (x.is_pinned() and _is_dense(x)):
+            # Ensure tensor is pinned and dense for non_blocking H2D copy.
+            x = x.new_empty(x.shape, pin_memory=True).copy_(x)
+        return x.to(device=device, non_blocking=True)
+
+    return json_map_leaves(_h2d, tensors)
 
 
 BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
@@ -428,10 +470,7 @@ class BaseMultiModalField(ABC):
 
     @abstractmethod
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         raise NotImplementedError
 
@@ -457,10 +496,17 @@ class BaseMultiModalField(ABC):
             device = "cpu"
         if pin_memory and self.keep_on_cpu:
             pin_memory = False
+        if device == "cpu" or device == torch.device("cpu"):
+            pin_memory = False
 
         batch = [elem.data for elem in elems]
+        if pin_memory and not _nested_tensors_are_cpu(batch):
+            # Data already sits on an accelerator (e.g. a device-side HF
+            # processor handed it over by IPC). Pinning is a host-memory
+            # concept, and `pin_memory()` rejects device tensors outright.
+            pin_memory = False
         out = self._reduce_data(batch, pin_memory=pin_memory)
-        return _nested_tensors_h2d(out, device=device)
+        return _nested_tensors_h2d(out, device=device, pin_memory=pin_memory)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -480,10 +526,7 @@ class MultiModalBatchedField(BaseMultiModalField):
         return [field_factory(item) for item in data]
 
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             batch = cast(list[torch.Tensor], batch)
@@ -491,20 +534,11 @@ class MultiModalBatchedField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.stack(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                out = batch[0].unsqueeze(0)
-                if not pin_memory:
-                    return out.contiguous()
-                # Avoid extra copy - pinning unpinned memory will make it contiguous
-                if not out.is_contiguous() and out.is_pinned():
-                    out = out.contiguous()
-                return out.pin_memory()
+                return batch[0].unsqueeze(0)
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
-                out = torch.empty(
-                    (len(batch), *batch[0].shape),
-                    dtype=batch[0].dtype,
-                    device=batch[0].device,
-                    pin_memory=pin_memory,
+                out = batch[0].new_empty(
+                    (len(batch), *first_shape), pin_memory=pin_memory
                 )
                 return torch.stack(batch, out=out)
 
@@ -536,10 +570,7 @@ class MultiModalFlatField(BaseMultiModalField):
         return [field_factory(data[cast(slice, s)]) for s in self.slices]
 
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             batch = cast(list[torch.Tensor], batch)
@@ -547,13 +578,7 @@ class MultiModalFlatField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                out = batch[0]
-                if not pin_memory:
-                    return out.contiguous()
-                # Avoid extra copy - pinning unpinned memory will make it contiguous
-                if not out.is_contiguous() and out.is_pinned():
-                    out = out.contiguous()
-                return out.pin_memory()
+                return batch[0]
 
             dim = self.dim + (self.dim < 0) * len(batch[0].shape)
 
@@ -565,11 +590,8 @@ class MultiModalFlatField(BaseMultiModalField):
             if all(_shape_before_after(elem) == first_shape for elem in batch):
                 shape_before, shape_after = first_shape
                 shape_concat = sum(item.shape[dim] for item in batch)
-                out = torch.empty(
-                    (*shape_before, shape_concat, *shape_after),
-                    dtype=batch[0].dtype,
-                    device=batch[0].device,
-                    pin_memory=pin_memory,
+                out = batch[0].new_empty(
+                    (*shape_before, shape_concat, *shape_after), pin_memory=pin_memory
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
@@ -591,12 +613,7 @@ class MultiModalFlatField(BaseMultiModalField):
                     max_sizes.append(max(t.shape[d] for t in batch))
 
             # Step 2: Create zero-initialized output tensor
-            out = torch.zeros(
-                max_sizes,
-                dtype=batch[0].dtype,
-                device=batch[0].device,
-                pin_memory=pin_memory,
-            )
+            out = batch[0].new_zeros(max_sizes, pin_memory=pin_memory)
 
             # Step 3: Slice-assign each tensor to its proper position
             concat_offset = 0

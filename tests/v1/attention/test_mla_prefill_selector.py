@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -57,11 +58,33 @@ def _make_vllm_config(
 class TestGetMLAPrefillBackend:
     """Tests for get_mla_prefill_backend (public API)."""
 
-    def test_no_device_capability_returns_flash_attn(self):
+    def test_cpu_uses_sdpa_prefill(self):
         vllm_config = _make_vllm_config()
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = True
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is MLAPrefillBackendEnum.CPU.get_class()
+
+    def test_no_device_capability_returns_flash_attn(self):
+        vllm_config = _make_vllm_config()
+
+        class FlashAttnBackend:
+            @staticmethod
+            def get_name():
+                return "FLASH_ATTN"
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(
+                MLAPrefillBackendEnum.FLASH_ATTN,
+                "get_class",
+                return_value=FlashAttnBackend,
+            ),
+        ):
             mock_platform.get_device_capability.return_value = None
+            mock_platform.is_cpu.return_value = False
 
             backend = get_mla_prefill_backend(vllm_config)
             assert backend.get_name() == "FLASH_ATTN"
@@ -78,6 +101,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -96,6 +120,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -109,6 +134,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=10, minor=0
             )
@@ -151,6 +177,7 @@ class TestGetMLAPrefillBackend:
                 return_value=3,
             ),
         ):
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -287,6 +314,11 @@ class TestBackendValidation:
             assert invalid_reasons == []
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
 class TestROCmAiterFAPrefillSelection:
     """Tests for the ROCm AITER FlashAttention MLA prefill backend."""
 

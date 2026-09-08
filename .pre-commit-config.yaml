@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'vllm/third_party/.*'
+exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -35,6 +35,11 @@ repos:
   rev: v1.7.7
   hooks:
   - id: actionlint
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+  hooks:
+  - id: shellcheck
+    args: ["-s", "bash", "--format=gcc"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
@@ -126,7 +131,6 @@ repos:
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, xpu,
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
@@ -154,6 +158,11 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/docs\.(in|txt)$
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  hooks:
+  - id: check-json
+    files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
@@ -161,6 +170,13 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
+  - id: check-label-rules
+    name: Check auto-label rules still match real files
+    language: python
+    entry: python tools/pre_commit/check_label_rules.py
+    files: ^\.github/mergify\.yml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML, regex]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
@@ -184,11 +200,6 @@ repos:
     entry: python tools/pre_commit/mypy.py "3.13"
     <<: *mypy_common
     stages: [manual] # Only run in CI
-  - id: shellcheck
-    name: Lint shell scripts
-    entry: tools/pre_commit/shellcheck.sh
-    language: script
-    types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh

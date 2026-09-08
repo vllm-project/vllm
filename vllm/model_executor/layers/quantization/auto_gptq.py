@@ -490,8 +490,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe,
             weight_key,
             quant_config=self.quant_config,
-            may_have_zp=True,
+            may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
+            allow_tile_padding=not self.quant_config.desc_act,
         )
 
     def create_weights(
@@ -540,7 +541,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size // self.quant_config.pack_factor,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -564,7 +565,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 scales_size13,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -585,7 +586,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 scales_size13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -653,7 +656,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         w13_bias = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -769,7 +772,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
@@ -784,7 +786,12 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
 
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
@@ -804,16 +811,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_zp=getattr(layer, "w2_qzeros", None) if use_zp else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(

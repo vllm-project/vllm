@@ -27,6 +27,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -157,7 +158,7 @@ def _expand_prompt_embeds_placeholders(
     `token_ids` is replaced with a consecutive span of
     `tensor.shape[0]` copies, following tensors in order.
     """
-    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates, tokenizer=None)
+    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates)
     return expanded
 
 
@@ -171,11 +172,7 @@ def _build_prompt_embeds_positions(
     Expects `token_ids` to already contain expanded N-token spans.
     Returns `[(start_idx, length), ...]` aligned with the tensors.
     """
-    placeholders = find_mm_placeholders(
-        prompt=token_ids,
-        mm_prompt_updates=mm_prompt_updates,
-        tokenizer=None,
-    )
+    placeholders = find_mm_placeholders(token_ids, mm_prompt_updates)
     features = placeholders.get("prompt_embeds", [])
 
     if len(features) != num_tensors:
@@ -210,7 +207,7 @@ def _build_mixed_prompt_embeds(
     return full_embeds, is_token_ids.tolist()
 
 
-_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, bool], str | None]()
+_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, str | None, str | None, bool], str | None]()
 """
 Used in `_try_get_processor_chat_template` to avoid calling
 `cached_get_processor` again if the processor fails to be loaded.
@@ -222,9 +219,16 @@ This is needed because `lru_cache` does not cache when an exception happens.
 def _try_get_processor_chat_template(
     tokenizer: HfTokenizer,
     *,
+    revision: str | None,
+    code_revision: str | None,
     trust_remote_code: bool,
 ) -> str | None:
-    cache_key = (tokenizer.name_or_path, trust_remote_code)
+    cache_key = (
+        tokenizer.name_or_path,
+        revision,
+        code_revision,
+        trust_remote_code,
+    )
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -234,6 +238,8 @@ def _try_get_processor_chat_template(
         processor = cached_get_processor(
             tokenizer.name_or_path,
             processor_cls=(PythonBackend, TokenizersBackend, ProcessorMixin),
+            revision=revision,
+            code_revision=code_revision,
             trust_remote_code=trust_remote_code,
         )
         if (
@@ -271,6 +277,8 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
+            revision=model_config.revision,
+            code_revision=model_config.code_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
@@ -502,6 +510,22 @@ def _consolidate_system_messages(
     return [merged, *non_system]
 
 
+_CONTENT_FORMATS_MAXSIZE = 32
+_CONTENT_FORMATS = dict[
+    tuple[str | None, bool, str, str | None, str | None, bool],
+    "ChatTemplateContentFormat",
+]()
+"""
+Used in `_resolve_chat_template_content_format` to avoid resolving and parsing
+the chat template on every request.
+
+`lru_cache` cannot be used because `tools` is a list and `ModelConfig` defines
+`__eq__` without `__hash__`, so the key holds the fields `resolve_chat_template`
+selects the template by. Only the presence of `tools` is part of it: it decides
+whether the processor template is tried, and its contents never reach the AST.
+"""
+
+
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
@@ -509,6 +533,17 @@ def _resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
+    cache_key = (
+        chat_template,
+        tools is None,
+        tokenizer.name_or_path,
+        model_config.revision,
+        model_config.code_revision,
+        model_config.trust_remote_code,
+    )
+    if (cached_format := _CONTENT_FORMATS.get(cache_key)) is not None:
+        return cached_format
+
     resolved_chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -528,31 +563,12 @@ def _resolve_chat_template_content_format(
         else _detect_content_format(jinja_text, default="string")
     )
 
+    # Requests may carry their own chat template, so bound the cache.
+    if len(_CONTENT_FORMATS) >= _CONTENT_FORMATS_MAXSIZE:
+        _CONTENT_FORMATS.clear()
+    _CONTENT_FORMATS[cache_key] = detected_format
+
     return detected_format
-
-
-@lru_cache
-def _log_chat_template_content_format(
-    chat_template: str | None,  # For caching purposes
-    given_format: ChatTemplateContentFormatOption,
-    detected_format: ChatTemplateContentFormatOption,
-):
-    logger.info(
-        "Detected the chat template content format to be '%s'. "
-        "You can set `--chat-template-content-format` to override this.",
-        detected_format,
-    )
-
-    if given_format != "auto" and given_format != detected_format:
-        logger.warning(
-            "You specified `--chat-template-content-format %s` "
-            "which is different from the detected format '%s'. "
-            "If our automatic detection is incorrect, please consider "
-            "opening a GitHub issue so that we can improve it: "
-            "https://github.com/vllm-project/vllm/issues/new/choose",
-            given_format,
-            detected_format,
-        )
 
 
 def resolve_chat_template_content_format(
@@ -563,9 +579,6 @@ def resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
-    if given_format != "auto":
-        return given_format
-
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
@@ -573,13 +586,24 @@ def resolve_chat_template_content_format(
         model_config=model_config,
     )
 
-    _log_chat_template_content_format(
-        chat_template,
-        given_format=given_format,
-        detected_format=detected_format,
-    )
+    if given_format == "auto":
+        logger.info_once(
+            "Detected the chat template content format to be '%s'. "
+            "You can set `--chat-template-content-format` to override this.",
+            detected_format,
+        )
+    elif given_format != detected_format:
+        logger.warning_once(
+            "You specified `--chat-template-content-format %s` "
+            "which is different from the detected format '%s'. "
+            "If our automatic detection is incorrect, please consider "
+            "opening a GitHub issue so that we can improve it: "
+            "https://github.com/vllm-project/vllm/issues/new/choose",
+            given_format,
+            detected_format,
+        )
 
-    return detected_format
+    return detected_format if given_format == "auto" else given_format
 
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
@@ -659,6 +683,18 @@ def resolve_chat_template_kwargs(
 
     accept_vars = (fn_kw | template_vars | hf_base_params) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
+
+
+def _template_error_reason(exc: BaseException) -> str:
+    # Extract the most specific reason from a chat template error chain.
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, jinja2.TemplateError):
+            return str(current)
+        current = current.__cause__ or current.__context__
+    return str(exc)
 
 
 @overload
@@ -783,10 +819,13 @@ def safe_apply_chat_template(
             **resolved_kwargs,
         )
     except Exception as e:
-        logger.exception(
-            "An error occurred in `transformers` while applying chat template"
-        )
-        raise ValueError(str(e)) from e
+        # Chat templates reject invalid user input (e.g. an unsupported
+        # `reasoning_effort` value) by raising from within the template.
+        # Surface those as a 400 Bad Request carrying the template's own
+        # reason (which typically lists the supported values) instead of a
+        # 500 or any generic upstream wrapper message.
+        logger.warning("Chat template rejected the request: %s", e)
+        raise VLLMValidationError(_template_error_reason(e)) from e
 
     if return_assistant_tokens_mask:
         assert isinstance(plain, list), f"Expected list[int], got {type(plain)}"
@@ -1276,8 +1315,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
 
-    @staticmethod
     def _apply_prompt_embeds_to_engine_input(
+        self,
         engine_input: MultiModalInput,
         prompt_embeds_tensors: list[torch.Tensor],
         mm_updates: MultiModalPromptUpdates,
@@ -1300,6 +1339,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         pe_kwargs_items: list[MultiModalKwargsItem] = []
         pe_hashes: list[str] = []
         pe_placeholders: list[PlaceholderRange] = []
+        mm_config = self.model_config.get_multimodal_config()
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
@@ -1313,7 +1353,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                     }
                 )
             )
-            pe_hashes.append(MultiModalHasher.hash_kwargs(prompt_embeds=tensor))
+            pe_hashes.append(
+                MultiModalHasher.hash_kwargs(
+                    mm_config.mm_hasher_algorithm, prompt_embeds=tensor
+                )
+            )
             # `is_embed=None` matches the existing image_embeds-style
             # "no encoder, just splice the tensor directly" semantics.
             pe_placeholders.append(

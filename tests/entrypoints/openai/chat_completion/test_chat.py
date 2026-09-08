@@ -18,6 +18,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 # any model with a chat template should work here
@@ -1074,7 +1075,7 @@ def test_chat_completion_request_n_parameter_exceeds_default_limit(
         max_tokens=10,
     )
 
-    with pytest.raises(ValueError, match="n must be at most"):
+    with pytest.raises(VLLMValidationError, match="n must be at most"):
         request.to_sampling_params(
             max_tokens=10,
             default_sampling_params={},
@@ -1136,7 +1137,7 @@ def test_chat_completion_request_n_parameter_custom_limit(
         max_tokens=10,
     )
 
-    with pytest.raises(ValueError, match="n must be at most 128"):
+    with pytest.raises(VLLMValidationError, match="n must be at most 128"):
         request_over.to_sampling_params(
             max_tokens=10,
             default_sampling_params={},
@@ -1160,7 +1161,7 @@ def test_chat_completion_request_n_parameter_massive_value(
         max_tokens=1,
     )
 
-    with pytest.raises(ValueError, match="n must be at most"):
+    with pytest.raises(VLLMValidationError, match="n must be at most"):
         request.to_sampling_params(
             max_tokens=1,
             default_sampling_params={},

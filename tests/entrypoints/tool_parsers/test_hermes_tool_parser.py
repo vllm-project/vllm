@@ -45,7 +45,7 @@ class ServerConfig(TypedDict, total=False):
     model: str
     arguments: list[str]
     model_arg: str
-    tool_parser: ToolParser
+    tool_parser: type[ToolParser]
 
 
 CONFIGS: dict[str, ServerConfig] = {

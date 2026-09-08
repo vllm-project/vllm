@@ -10,7 +10,11 @@ from torch import fx, nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVParallelLinear
-from vllm.model_executor.models.transformers.fusers.base import StackedFuser
+from vllm.model_executor.models.transformers.fusers.base import (
+    StackedFuser,
+    fused_head_size,
+    local_output_sizes,
+)
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     innermost_block,
@@ -134,7 +138,7 @@ class QKVFuser(StackedFuser):
         if names & set(temps):
             raise ValueError("fused temporaries would shadow existing names")
         merged = f"self.{self.merged_name}"
-        sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
+        sections = local_output_sizes(self.merged_name)
         template = f"{', '.join(temps)} = {merged}(__arg__).split({sections}, -1)"
         assign = ast.parse(template).body[0]
         arg = next(
@@ -155,7 +159,7 @@ class QKVFuser(StackedFuser):
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         v = module.get_submodule(self.v_name)
-        head_size = vllm_config.model_config.get_head_size()
+        head_size = fused_head_size(module, vllm_config)
         compatible = (
             q.in_features == k.in_features == v.in_features
             and len({proj.bias is None for proj in (q, k, v)}) == 1
@@ -171,7 +175,7 @@ class QKVFuser(StackedFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
         quant_config = vllm_config.quant_config
-        head_size = vllm_config.model_config.get_head_size()
+        head_size = fused_head_size(module, vllm_config)
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         merged = QKVParallelLinear(
