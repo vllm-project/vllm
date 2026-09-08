@@ -167,12 +167,12 @@ class EncoderCudaGraphManager:
 
         self._ordered_secondary_capture_axis_keys: tuple[Hashable, ...] | None = None
         if self.config.enable_secondary_capture_axis:
-            keys = tuple(self.model.get_encoder_cudagraph_secondary_capture_axis_keys())
+            keys = self.model.get_encoder_cudagraph_secondary_capture_axis_keys()
             if not keys:
                 raise ValueError(
                     "Secondary capture axis is enabled but no keys were returned."
                 )
-            self._ordered_secondary_capture_axis_keys = keys
+            self._ordered_secondary_capture_axis_keys = tuple(keys)
 
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
@@ -246,6 +246,7 @@ class EncoderCudaGraphManager:
                 if token_budget == 0:
                     continue
                 if self.config.enable_secondary_capture_axis:
+                    assert self._ordered_secondary_capture_axis_keys is not None
                     for (
                         secondary_capture_axis_key
                     ) in self._ordered_secondary_capture_axis_keys:
@@ -302,7 +303,7 @@ class EncoderCudaGraphManager:
 
         graph_set = self._get_graph_set(path)
 
-        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs_for_axis(
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
@@ -372,7 +373,7 @@ class EncoderCudaGraphManager:
         # Same as `_get_item_specs`: implementations re-read the per-item
         # grid/patch counts to slice the batch, so the D2H is inherent.
         with gpu_sync_allowed():
-            return self.model.select_encoder_cudagraph_items(
+            return self.model.select_encoder_cudagraph_items_for_axis(
                 mm_kwargs, indices, secondary_capture_axis_key
             )
 
@@ -499,6 +500,7 @@ class EncoderCudaGraphManager:
         for batch_indices, path_budgets in batches:
             secondary_capture_axis_key: Hashable | None = None
             if self.config.enable_secondary_capture_axis:
+                assert self._ordered_secondary_capture_axis_keys is not None
                 secondary_capture_axis_key = (
                     self.model.resolve_encoder_cudagraph_secondary_capture_axis_key(
                         mm_kwargs,
@@ -527,13 +529,14 @@ class EncoderCudaGraphManager:
                         )
                 else:
                     all_eager = False
-                    output = self._run_budget_graph(
+                    graph_output = self._run_budget_graph(
                         batch_mm_kwargs,
                         token_budget,
                         path=path,
                         secondary_capture_axis_key=secondary_capture_axis_key,
                     )
-                    assert output is not None
+                    assert graph_output is not None
+                    output = graph_output
                 graph_outputs[path] = output
 
             if all_eager:

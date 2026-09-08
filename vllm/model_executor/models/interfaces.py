@@ -1802,7 +1802,6 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         """Select a subset of items and return mm_kwargs for the sub-batch.
 
@@ -1848,7 +1847,6 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1906,6 +1904,45 @@ class SupportsEncoderCudaGraph(Protocol):
         one of ordered_secondary_capture_axis_keys.
         """
         return ordered_secondary_capture_axis_keys[0]
+
+    def select_encoder_cudagraph_items_for_axis(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
+    ) -> dict[str, Any]:
+        """select_encoder_cudagraph_items variant aware of the secondary axis.
+
+        Called by the manager so that models enabling the secondary capture
+        axis can slice inputs for the given key. By default, delegates to
+        select_encoder_cudagraph_items and ignores the key.
+        """
+        return self.select_encoder_cudagraph_items(mm_kwargs, indices)
+
+    def prepare_encoder_cudagraph_capture_inputs_for_axis(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        """prepare_encoder_cudagraph_capture_inputs variant aware of the
+        secondary capture axis.
+
+        By default, delegates to prepare_encoder_cudagraph_capture_inputs and
+        ignores the key.
+        """
+        return self.prepare_encoder_cudagraph_capture_inputs(
+            token_budget,
+            max_batch_size,
+            max_frames_per_batch,
+            device,
+            dtype,
+            path,
+        )
 
 
 @overload

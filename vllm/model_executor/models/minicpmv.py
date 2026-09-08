@@ -1684,6 +1684,13 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+    ) -> dict[str, Any]:
+        return self.select_encoder_cudagraph_items_for_axis(mm_kwargs, indices)
+
+    def select_encoder_cudagraph_items_for_axis(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
         secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         video = self.get_input_modality(mm_kwargs) == "video"
@@ -1769,9 +1776,31 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+    ) -> EncoderCudaGraphCaptureInputs:
+        return self.prepare_encoder_cudagraph_capture_inputs_for_axis(
+            token_budget,
+            max_batch_size,
+            max_frames_per_batch,
+            device,
+            dtype,
+            path,
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs_for_axis(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
         secondary_capture_axis_key: Hashable | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        assert secondary_capture_axis_key is not None
+        if secondary_capture_axis_key is None:
+            # Default to the largest (full-resolution) patch grid.
+            secondary_capture_axis_key = (
+                self.get_encoder_cudagraph_secondary_capture_axis_keys()[-1]
+            )
         th = int(secondary_capture_axis_key[0])
         tw = int(secondary_capture_axis_key[1])
         normalized_key = (th, tw)
