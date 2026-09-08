@@ -35,6 +35,10 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return max(split_k, 1)
 
 
+def _mhc_fused_n_splits(num_tokens: int, hidden_size: int) -> int:
+    return 8 if num_tokens < 8 and hidden_size <= 4096 else 4
+
+
 @tilelang_jit
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
@@ -1057,7 +1061,13 @@ class HcPrenormGemmTileLangKernel(
         if max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            num_tokens=WarmupIntRange(
+                1,
+                max_tokens + 1,
+                advance=lambda value: (
+                    128 if value < 128 else 1024 if value < 1024 else max_tokens + 1
+                ),
+            ),
             hc_hidden_size=hidden_size * hc_mult,
             hidden_size=hidden_size,
             hc_mult=hc_mult,
@@ -1235,7 +1245,7 @@ class MhcPreBigFuseTileLangKernel(
             if use_pre_gemm_splits
             else n_splits
         )
-        fused_n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        fused_n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
         actual_n_splits = fused_n_splits if use_fused_tilelang else pre_gemm_n_splits
         actual_norm_eps = broadcast_norm_eps if is_broadcast else norm_eps
         actual_use_norm_weight = use_norm_weight or is_broadcast
@@ -1299,7 +1309,11 @@ class MhcPreBigFuseTileLangKernel(
         )
         return self._trace_dispatch(self.dispatch)(
             warmup_cases,
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            num_tokens=WarmupIntRange(
+                1,
+                max_tokens + 1,
+                advance=lambda value: 8 if value < 8 else cdiv(value, 64) * 64 + 1,
+            ),
             n_splits=1,
             hidden_size=hidden_size,
             hc_mult=hc_mult,
@@ -1538,7 +1552,7 @@ class MhcFusedTileLangKernel(
     ) -> CompileKey:
         # TODO(gnovack): investigate autotuning these heuristics
         tile_n = 2 if num_tokens < 8 else 3
-        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
         return self.CompileKey(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
@@ -1602,13 +1616,11 @@ class MhcFusedTileLangKernel(
     ) -> TileLangLaunchSpec:
         num_tokens = residual_in.shape[0]
         tile_n = 2 if num_tokens < 8 else 3
-        n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
         yp_out = residual_in.new_empty(
             (n_splits, num_tokens, hc_mult3), dtype=torch.float32
         )
-        rp_out = residual_in.new_empty(
-            (n_splits, num_tokens), dtype=torch.float32
-        )
+        rp_out = residual_in.new_empty((n_splits, num_tokens), dtype=torch.float32)
         residual_out = residual_in.new_empty(residual_in.shape)
         return (
             (),
