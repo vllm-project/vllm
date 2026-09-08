@@ -1528,11 +1528,13 @@ class TestGLMGASamplingCaps:
 
 
 class TestGlm5NextSamplingCaps:
-    """Same bound as TestGLMGASamplingCaps, for the glm5next sampler.
+    """The glm5next sampler must size its walk from the clip, not the request.
 
-    ``fps`` and ``max_frames`` size a candidate walk of
-    ``duration * target_fps`` entries before deduplication, so an oversized
-    value allocates work unrelated to how many frames the clip holds.
+    ``glm_sample_frame_indices`` walks ``duration * target_fps`` candidates and
+    deduplicates at the end, so an fps above the source rate builds a candidate
+    list unrelated to the frame count. Clamping to the source rate is free in
+    output terms: no sampling rate can return frames the container does not
+    hold.
     """
 
     @staticmethod
@@ -1543,21 +1545,12 @@ class TestGlm5NextSamplingCaps:
             duration = round((total_frames - 1) / fps) + 1
         return VideoSourceMetadata(total_frames, fps, duration)
 
-    def test_class_cap_overrides_kwargs_max_frames(self):
-        source = self._source(total_frames=10_000, fps=30.0)
-        target = VideoTargetMetadata(num_frames=-1, fps=30, max_duration=-1)
-        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(
-            source,
-            target,
-            max_frames=100_000,
-        )
-        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
+    def test_target_fps_clamped_to_source_rate(self, monkeypatch):
+        """The sampler receives the source rate, not the requested one.
 
-    def test_class_cap_overrides_target_fps(self, monkeypatch):
-        """The sampler must receive the capped values, not the requested ones.
-
-        Asserting only on the returned length would pass with the fps cap
-        removed, because `max_frames` alone already bounds the output.
+        Asserting on the returned indices alone would not catch a removed
+        clamp: for many inputs both rates deduplicate to the same list, which
+        is exactly why the clamp is safe.
         """
         seen = {}
         import vllm.transformers_utils.processors.glm5next as glm5next_processor
@@ -1570,19 +1563,36 @@ class TestGlm5NextSamplingCaps:
 
         monkeypatch.setattr(glm5next_processor, "glm_sample_frame_indices", spy)
 
-        source = self._source(total_frames=2, fps=2.0, duration=1.0)
+        source = self._source(total_frames=900, fps=30.0, duration=30.0)
         target = VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
-        indices = Glm5NextVideoBackend.compute_frames_index_to_sample(
+        Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
+
+        assert seen["target_fps"] == source.original_fps
+
+    @pytest.mark.parametrize(
+        ("total_frames", "original_fps", "duration"),
+        [(2, 2.0, 1.0), (900, 30.0, 30.0), (10_000, 30.0, 334.0)],
+    )
+    def test_clamp_does_not_change_sampling(
+        self, total_frames, original_fps, duration
+    ):
+        """Requesting above the source rate samples the same frames as at it."""
+        source = self._source(total_frames, original_fps, duration)
+        oversized = Glm5NextVideoBackend.compute_frames_index_to_sample(
             source,
-            target,
-            max_frames=2_000_000,
+            VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1),
         )
-        assert seen["target_fps"] == Glm5NextVideoBackend._MAX_FPS
-        assert seen["max_frame_count"] == Glm5NextVideoBackend._MAX_FRAMES
-        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
+        at_source_rate = Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source,
+            VideoTargetMetadata(
+                num_frames=-1, fps=int(original_fps), max_duration=-1
+            ),
+        )
+        assert oversized == at_source_rate
+        assert len(oversized) <= total_frames
 
     def test_normal_operation_unchanged(self):
-        """A 30s clip below both caps samples exactly as the bare sampler does."""
+        """A clip below the source rate samples exactly as the bare sampler does."""
         from vllm.transformers_utils.processors.glm5next import (
             glm_sample_frame_indices,
         )
@@ -1591,15 +1601,10 @@ class TestGlm5NextSamplingCaps:
         target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
         indices = Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
         expected = glm_sample_frame_indices(
-            900,
-            30.0,
-            30.0,
-            target_fps=None,
-            max_frame_count=Glm5NextVideoBackend._MAX_FRAMES,
+            900, 30.0, 30.0, target_fps=None, max_frame_count=None,
             temporal_patch_size=2,
         )
         assert indices == expected
-        assert 0 < len(indices) <= Glm5NextVideoBackend._MAX_FRAMES
         assert all(0 <= idx < 900 for idx in indices)
 
 

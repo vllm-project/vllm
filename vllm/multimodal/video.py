@@ -701,10 +701,6 @@ class Glm5NextVideoBackend(VideoBackend):
     """
 
     _SEEK_GAP_THRESHOLD: ClassVar[int] = 64
-    # Mirrors GLM_VIDEO_DEFAULT_MAX_FRAMES in the processor module, which
-    # cannot be imported here (multimodal must not pull in transformers_utils).
-    _MAX_FRAMES: ClassVar[int] = 2048
-    _MAX_FPS: ClassVar[int] = 30
 
     @classmethod
     def compute_frames_index_to_sample(
@@ -720,22 +716,22 @@ class Glm5NextVideoBackend(VideoBackend):
         )
 
         # The sampler walks `duration * target_fps` candidates before
-        # deduplicating, so both knobs bound an intermediate allocation that
-        # is independent of how many frames the source actually has. Cap them
-        # the way GLMGAVideoBackend does; short-clip padding to `extract_t` is
-        # reference behavior and stays untouched.
-        max_frames = kwargs.get("max_frames")
-        max_frames = (
-            cls._MAX_FRAMES if max_frames is None else min(max_frames, cls._MAX_FRAMES)
-        )
-        target_fps = min(target.fps, cls._MAX_FPS) if target.fps > 0 else None
+        # deduplicating, so a requested fps above the source rate sizes that
+        # walk from the request instead of from the clip. Sampling faster than
+        # the source cannot yield more frames, so clamping to the source rate
+        # bounds the walk by the frame count without changing which frames come
+        # back. Short-clip padding to `extract_t` is reference behavior and
+        # stays untouched.
+        target_fps = target.fps if target.fps > 0 else None
+        if target_fps is not None and source.original_fps > 0:
+            target_fps = min(target_fps, source.original_fps)
 
         return glm_sample_frame_indices(
             source.total_frames_num,
             source.original_fps,
             source.duration or 0,
             target_fps=target_fps,
-            max_frame_count=max_frames,
+            max_frame_count=kwargs.get("max_frames"),
             temporal_patch_size=kwargs.get("temporal_patch_size", 2),
         )
 
