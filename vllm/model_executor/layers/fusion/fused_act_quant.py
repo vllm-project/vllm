@@ -123,17 +123,6 @@ def _silu_and_mul_nvfp4_dynamic(
     # consumer GEMM's alpha (= input_global_scale * weight_global_scale)
     # divides it back out, so quantize with the reciprocal like the unfused
     # scaled_fp4_quant path does.
-    input_global_scale_inv = getattr(linear, "input_global_scale_inv", None)
-    assert input_global_scale_inv is not None, (
-        "input_global_scale_inv is required for NVFP4 quantization"
-    )
-
-<<<<<<< HEAD
-    torch.ops._C.silu_and_mul_nvfp4_quant(
-        result, block_scale, x, input_global_scale_inv
-    )
-
-=======
     global_scale_inv = get_input_quant_scales(linear).global_scale_inv
     assert global_scale_inv is not None, (
         "NVFP4 quantization requires an inverse global scale"
@@ -141,7 +130,6 @@ def _silu_and_mul_nvfp4_dynamic(
 
     torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, global_scale_inv)
 
->>>>>>> 1941015b2c ([Quantization] Expose input quantization scales through linear kernel contract)
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
         scale=block_scale,
