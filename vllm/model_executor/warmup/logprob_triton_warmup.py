@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu.sample.logprob import MAX_TOPK_BLOCK, compute_token_logprobs
+from vllm.v1.worker.gpu.sample.logprob import _MAX_TOPK_BLOCK, compute_token_logprobs
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -40,7 +40,7 @@ def _warm_topk_log_softmax_kernel(
     """
     logits = torch.zeros(1, vocab_size, device=device, dtype=dtype)
     topk = 1
-    while topk <= MAX_TOPK_BLOCK:
+    while topk <= _MAX_TOPK_BLOCK:
         token_ids = torch.zeros(1, topk, device=device, dtype=torch.int64)
         compute_token_logprobs(logits, token_ids)
         topk *= 2

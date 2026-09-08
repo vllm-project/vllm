@@ -9,9 +9,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
-# Upper bound on the topk kernel's per-iteration gather width. Public: also
-# used by logprob_triton_warmup to enumerate every TOPK_BLOCK_SIZE bucket.
-MAX_TOPK_BLOCK = 1024
+# Upper bound on the topk kernel's per-iteration gather width.
+_MAX_TOPK_BLOCK = 1024
 
 
 @triton.jit(do_not_specialize_on_alignment=["topk"])
@@ -93,7 +92,7 @@ def compute_token_logprobs(
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
-    topk_block_size = min(triton.next_power_of_2(num_logprobs), MAX_TOPK_BLOCK)
+    topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
