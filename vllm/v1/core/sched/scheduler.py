@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -342,6 +343,19 @@ class Scheduler(SchedulerInterface):
         )
         needs_mamba_cache_alignment = self.need_mamba_block_aligned_split
         self.needs_mamba_cache_alignment = needs_mamba_cache_alignment
+        mamba_block_sizes = {
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        if len(mamba_block_sizes) > 1:
+            raise ValueError(
+                "All Mamba cache groups must use the same block size for "
+                "batch-invariant prefix-cache alignment."
+            )
+        self.mamba_state_block_size = next(
+            iter(mamba_block_sizes), self.cache_config.block_size
+        )
         batch_invariant_prefill_chunk_sizes: set[int] = set()
         if envs.VLLM_BATCH_INVARIANT:
             for group in kv_cache_config.kv_cache_groups:
@@ -363,9 +377,11 @@ class Scheduler(SchedulerInterface):
             )
             if batch_invariant_prefill_chunk_size is not None:
                 if needs_mamba_cache_alignment:
-                    raise NotImplementedError(
-                        "Batch-invariant recurrent prefill does not yet "
-                        "support Mamba cache alignment."
+                    # One grid for FLA chunk partitions and align-mode state
+                    # saves (PR #46592 architecture; GDN uses FLA_CHUNK_SIZE).
+                    batch_invariant_prefill_chunk_size = math.lcm(
+                        batch_invariant_prefill_chunk_size,
+                        self.mamba_state_block_size,
                     )
                 if self.max_num_scheduled_tokens < batch_invariant_prefill_chunk_size:
                     raise ValueError(
@@ -386,8 +402,24 @@ class Scheduler(SchedulerInterface):
             batch_invariant_prefill_chunk_size = None
 
         self.mamba_prefill_alignment = batch_invariant_prefill_chunk_size or (
-            self.cache_config.block_size if needs_mamba_cache_alignment else 1
+            self.mamba_state_block_size if needs_mamba_cache_alignment else 1
         )
+        self.kv_cache_manager.batch_invariant_hit_alignment = (
+            self.mamba_prefill_alignment
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and needs_mamba_cache_alignment
+                and batch_invariant_prefill_chunk_size is not None
+            )
+            else 0
+        )
+        if self.kv_cache_manager.batch_invariant_hit_alignment:
+            logger.info(
+                "Batch-invariant prefix caching: prefill/hit alignment=%s "
+                "(FLA chunk lcm mamba_state_block_size=%s)",
+                self.mamba_prefill_alignment,
+                self.mamba_state_block_size,
+            )
         if self.mamba_prefill_alignment > 1:
             self.need_mamba_block_aligned_split = True
         # TODO: Support models with multiple Mamba specs that require different

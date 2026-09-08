@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+import vllm.envs as envs
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -172,6 +173,9 @@ class KVCacheManager:
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        # Set by the scheduler after combining FLA chunk size with mamba
+        # block size. 0 disables canonical hit truncation.
+        self.batch_invariant_hit_alignment = 0
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -261,6 +265,25 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+
+        chunk = self.batch_invariant_hit_alignment
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and chunk > 1
+            and 0 < num_new_computed_tokens < request.num_tokens - 1
+        ):
+            canonical_tokens = num_new_computed_tokens // chunk * chunk
+            if canonical_tokens != num_new_computed_tokens:
+                tmp_blocks = self.create_kv_cache_blocks(computed_blocks)
+                if canonical_tokens == 0:
+                    computed_blocks = tuple([] for _ in range(len(computed_blocks)))
+                    num_new_computed_tokens = 0
+                else:
+                    tmp_blocks = self.truncate_computed_blocks(
+                        tmp_blocks, canonical_tokens
+                    )
+                    computed_blocks = tuple(list(g) for g in tmp_blocks.blocks)
+                    num_new_computed_tokens = canonical_tokens
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
