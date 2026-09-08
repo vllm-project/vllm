@@ -450,6 +450,11 @@ class ServingTokens(GenerateBaseServing):
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
                                 routed_experts=routed_experts_b64,
+                                sampling_mask=(
+                                    output.sampling_mask.token_ids
+                                    if output.sampling_mask is not None
+                                    else None
+                                ),
                             )
                         ],
                     )
