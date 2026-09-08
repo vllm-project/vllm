@@ -320,19 +320,19 @@ def _shard_grammar_output(
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
-    cu_num_logits_np = input_batch.cu_num_logits_np
+    grammar_req_ids = grammar_output.structured_output_request_ids
+    if not grammar_req_ids:
+        return None
+    assert grammar_output.grammar_bitmask.shape[0] % len(grammar_req_ids) == 0
+    mask_stride = grammar_output.grammar_bitmask.shape[0] // len(grammar_req_ids)
 
     local_ids: list[str] = []
     keep_indices: list[int] = []
-    cursor = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        req_idx = req_id_to_idx[req_id]
-        num_req_logits = int(cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx])
+    for grammar_idx, req_id in enumerate(grammar_req_ids):
         if req_id in owned:
             local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + num_req_logits))
-        cursor += num_req_logits
+            start = grammar_idx * mask_stride
+            keep_indices.extend(range(start, start + mask_stride))
     if not local_ids:
         return None
     return GrammarOutput(

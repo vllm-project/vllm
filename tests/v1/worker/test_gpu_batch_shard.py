@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     _shard_grammar_output,
 )
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
 DEVICE = "cuda"
 
@@ -278,14 +279,25 @@ def test_shard_no_spec():
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])
-def test_shard_grammar_output(tp_size: int):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=requires_cuda)])
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "draft_mode"),
+    [(0, "none"), (3, "mixed"), (3, "none"), (3, "full")],
+)
+def test_shard_grammar_output(
+    tp_size: int, device: str, num_speculative_tokens: int, draft_mode: str
+):
     """The grammar filter keeps exactly the owned requests' bitmask rows, in
     grammar order, and the per-rank pieces partition the global bitmask."""
     rng = np.random.default_rng(5)
     max_num_reqs = 32
     num_reqs = 12
     slots = rng.choice(np.arange(max_num_reqs), size=num_reqs, replace=False)
-    k = rng.integers(0, 4, size=num_reqs)
+    k = rng.integers(0, num_speculative_tokens + 1, size=num_reqs)
+    if draft_mode == "none":
+        k.fill(0)
+    elif draft_mode == "full":
+        k.fill(num_speculative_tokens)
     cu = np.zeros(num_reqs + 1, dtype=np.int32)
     np.cumsum(1 + k, out=cu[1:])
     owner = slots % tp_size
@@ -294,7 +306,9 @@ def test_shard_grammar_output(tp_size: int):
     req_ids = [f"req-{i}" for i in range(num_reqs)]
     grammar_idx = list(rng.permutation(np.arange(0, num_reqs, 2)))
     grammar_req_ids = [req_ids[i] for i in grammar_idx]
-    num_grammar_rows = sum(int(cu[i + 1] - cu[i]) for i in grammar_idx)
+    # Prefill and shortened drafts still own a full block of grammar masks.
+    mask_stride = num_speculative_tokens + 1
+    num_grammar_rows = len(grammar_idx) * mask_stride
     bitmask = rng.integers(0, 2**31, size=(num_grammar_rows, 4), dtype=np.int32)
     input_batch = SimpleNamespace(req_ids=req_ids, cu_num_logits_np=cu)
 
@@ -303,11 +317,23 @@ def test_shard_grammar_output(tp_size: int):
     cursor = 0
     for i in grammar_idx:
         row_offsets[i] = cursor
-        cursor += int(cu[i + 1] - cu[i])
+        cursor += mask_stride
 
     grammar_output = GrammarOutput(
         structured_output_request_ids=grammar_req_ids,
         grammar_bitmask=bitmask,
+    )
+    vocab_size = 113  # Include a partial packed word and kernel vocabulary tile.
+    worker = (
+        StructuredOutputsWorker(
+            max_num_logits=num_reqs * mask_stride,
+            vocab_size=vocab_size,
+            device=torch.device(device),
+            mask_stride=mask_stride,
+            num_bonus_tokens=1,
+        )
+        if device == "cuda"
+        else None
     )
 
     kept_total = 0
@@ -320,15 +346,46 @@ def test_shard_grammar_output(tp_size: int):
             continue
         assert local is not None
         assert local.structured_output_request_ids == [req_ids[i] for i in expected_idx]
+        assert local.grammar_bitmask.shape == (len(expected_idx) * mask_stride, 4)
         expected_rows = np.concatenate(
             [
-                np.arange(row_offsets[i], row_offsets[i] + cu[i + 1] - cu[i])
+                np.arange(row_offsets[i], row_offsets[i] + mask_stride)
                 for i in expected_idx
             ]
         )
         assert (local.grammar_bitmask == bitmask[expected_rows.astype(int)]).all()
         kept_total += local.grammar_bitmask.shape[0]
+        if worker is not None:
+            local_indices = [req_ids.index(req_id) for req_id in local_req_ids]
+            local_counts = np.array([1 + k[i] for i in local_indices], dtype=np.int32)
+            local_cu = np.zeros(len(local_req_ids) + 1, dtype=np.int32)
+            np.cumsum(local_counts, out=local_cu[1:])
+            expected = torch.arange(int(local_cu[-1]) * vocab_size, dtype=torch.float32)
+            expected = expected.reshape(-1, vocab_size)
+            logits = expected.to(device)
+            for local_idx, global_idx in enumerate(local_indices):
+                if global_idx not in row_offsets:
+                    continue
+                for position in range(local_counts[local_idx]):
+                    packed = bitmask[row_offsets[global_idx] + position]
+                    vocab = np.arange(vocab_size)
+                    disallowed = ((packed[vocab // 32] >> (vocab % 32)) & 1) == 0
+                    expected[local_cu[local_idx] + position, disallowed] = -float("inf")
+            local_batch = SimpleNamespace(
+                req_ids=local_req_ids,
+                cu_num_logits=torch.from_numpy(local_cu).to(device),
+            )
+            worker.apply_grammar_bitmask(
+                logits,
+                local_batch,
+                local.structured_output_request_ids,
+                local.grammar_bitmask,
+            )
+            torch.testing.assert_close(logits.cpu(), expected, rtol=0, atol=0)
     assert kept_total == num_grammar_rows
+    assert _shard_grammar_output(grammar_output, input_batch, []) is None
+    non_grammar_ids = [req_id for req_id in req_ids if req_id not in grammar_req_ids]
+    assert _shard_grammar_output(grammar_output, input_batch, non_grammar_ids) is None
 
 
 @requires_cuda

@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from itertools import repeat
 from typing import Any
 
 import pytest
-import torch._dynamo.config as dynamo_config
 
 from tests.utils import (
     large_gpu_mark,
@@ -122,7 +120,7 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
 
     struct_outputs = StructuredOutputsParams(json=sample_json_schema)
 
-    test_sampling_params = [
+    test_sampling_params: list[dict[str, Any]] = [
         dict(),
         dict(frequency_penalty=-1.0),
         dict(bad_words=["the", " the"]),
@@ -157,7 +155,6 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
 
 
-@pytest.mark.flaky(reruns=2, only_on=current_platform.is_rocm())
 @pytest.mark.skipif(
     current_platform.is_xpu(),
     reason=("XPU matmul/attention kernels are not batch-invariant"),
@@ -198,7 +195,6 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     run_tests(monkeypatch, MODEL, test_configs, [{}])
 
 
-@dynamo_config.patch(cache_size_limit=16)
 def run_tests(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
@@ -208,7 +204,8 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    # Flex attention supports float32.
+    # Keep the validated numerical fixture until an alternative passes the
+    # full accuracy matrix; automatic ROCm selection has not passed it.
     attention_config = {"backend": "FLEX_ATTENTION"}
 
     with monkeypatch.context() as m:
@@ -250,10 +247,11 @@ def run_tests(
             test_logprobs,
         ), test_acceptance_rate, params in zip(
             baseline_tests,
-            baseline_acceptances or repeat(None),
+            baseline_acceptances or [None] * len(test_sampling_params),
             test_outputs,
-            test_acceptance_rates or repeat(None),
+            test_acceptance_rates or [None] * len(test_sampling_params),
             test_sampling_params,
+            strict=True,
         ):
             reason = None
             try:
@@ -268,7 +266,7 @@ def run_tests(
 
             if reason is None:
                 try:
-                    assert _all_logprobs_match(base_logprobs, test_logprobs)
+                    _assert_logprobs_match(base_logprobs, test_logprobs)
                 except AssertionError as e:
                     reason = "logprobs", e
 
@@ -374,10 +372,9 @@ def run_test(
             metrics_before = vllm_model.llm.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
             results.append(
-                vllm_model.generate(
-                    example_prompts,
-                    sampling_params=SamplingParams(**default_params, **override_params),
-                    return_logprobs=True,
+                _generate_with_logprobs(
+                    vllm_model,
+                    SamplingParams(**default_params, **override_params),
                 )
             )
             metrics_after = vllm_model.llm.get_metrics()
@@ -396,7 +393,7 @@ def run_test(
         # First check that the different parameter configs
         # actually result in different output.
         for (other_test_outs, other_test_logprobs), params in zip(
-            results[1:], sampling_param_tests[1:]
+            results[1:], sampling_param_tests[1:], strict=True
         ):
             with pytest.raises(AssertionError):
                 check_outputs_equal(
@@ -405,40 +402,72 @@ def run_test(
                     name_0=f"baseline params={params}",
                     name_1=f"other params={params}",
                 )
-                assert _all_logprobs_match(results[0][1], other_test_logprobs)
+                _assert_logprobs_match(results[0][1], other_test_logprobs)
 
     return test_config, results, acceptance_rates
 
 
-def _all_logprobs_match(req_a, req_b) -> bool:
-    return (
-        req_a == req_b
-        or len(req_a) == len(req_b)
-        and all(
-            len(seq_a) == len(seq_b)
-            and all(_logprobs_match(a, b) for a, b in zip(seq_a, seq_b))
-            for seq_a, seq_b in zip(req_a, req_b)
-        )
+def _generate_with_logprobs(runner: VllmRunner, params: SamplingParams):
+    requests = runner.llm.generate(
+        runner.get_inputs(example_prompts), sampling_params=params
     )
+    assert len(requests) == len(example_prompts)
+    outputs, logprobs = [], []
+    for request in requests:
+        assert len(request.outputs) == 1
+        (completion,) = request.outputs
+        prompt_ids = request.prompt_token_ids
+        tokens = list(completion.token_ids)
+        _assert_requested_logprobs(tokens, completion.logprobs, params.logprobs)
+        if params.prompt_logprobs is None:
+            assert request.prompt_logprobs is None
+        else:
+            assert request.prompt_logprobs is not None
+            assert len(request.prompt_logprobs) == len(prompt_ids)
+            assert request.prompt_logprobs[0] is None
+            _assert_requested_logprobs(
+                prompt_ids[1:], request.prompt_logprobs[1:], params.prompt_logprobs
+            )
+        outputs.append(
+            ([prompt_ids + tokens], [(request.prompt or "") + completion.text])
+        )
+        logprobs.append((request.prompt_logprobs or []) + (completion.logprobs or []))
+    return outputs, logprobs
 
 
-def _logprobs_match(
-    lps_a: dict[int, Logprob] | None,
-    lps_b: dict[int, Logprob] | None,
-) -> bool:
-    if lps_a is None or lps_b is None:
-        return lps_a is lps_b
-    rel_tol, abs_tol = 1e-3, 1e-6
-    return (
-        len(lps_a) == len(lps_b)
-        and lps_a.keys() == lps_b.keys()
-        and all(
-            a.decoded_token == b.decoded_token
-            and a.rank == pytest.approx(b.rank, rel=0.005)
-            and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
-            for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
-        )
-    )
+def _assert_requested_logprobs(
+    tokens: list[int],
+    scores: list[dict[int, Logprob] | None] | None,
+    requested: int | None,
+):
+    # A comparison must not pass because both engines omitted requested scores.
+    if requested is None:
+        assert scores is None
+        return
+    assert scores is not None and len(scores) == len(tokens)
+    for token, token_scores in zip(tokens, scores, strict=True):
+        assert token_scores is not None and token in token_scores
+        assert max(1, requested) <= len(token_scores) <= requested + 1
+
+
+def _assert_logprobs_match(req_a, req_b) -> None:
+    assert len(req_a) == len(req_b), "logprob request count differs"
+    for request, (seq_a, seq_b) in enumerate(zip(req_a, req_b, strict=True)):
+        assert len(seq_a) == len(seq_b), f"request {request}: score count differs"
+        for position, (lps_a, lps_b) in enumerate(zip(seq_a, seq_b, strict=True)):
+            context = f"request {request}, score position {position}"
+            if lps_a is None or lps_b is None:
+                assert lps_a is lps_b, context
+                continue
+            assert lps_a.keys() == lps_b.keys(), (
+                f"{context}: token sets differ: {lps_a.keys()} != {lps_b.keys()}"
+            )
+            for token, a in lps_a.items():
+                b = lps_b[token]
+                detail = f"{context}, token {token}: baseline={a}, candidate={b}"
+                assert a.decoded_token == b.decoded_token, detail
+                assert a.rank == pytest.approx(b.rank, rel=0.005), detail
+                assert a.logprob == pytest.approx(b.logprob, rel=1e-3, abs=1e-6), detail
 
 
 def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
