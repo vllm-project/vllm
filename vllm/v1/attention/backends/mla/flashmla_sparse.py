@@ -136,7 +136,8 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        return [576]
+        # GLM-5 NoPE layout: 512 with no RoPE part.
+        return [576, 512]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -163,6 +164,14 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if head_size == 512 and kv_cache_dtype is not None and is_quantized_kv_cache(
+            kv_cache_dtype
+        ):
+            return (
+                "FLASHMLA_SPARSE supports the 512-dim NoPE layout (e.g. GLM-5) "
+                "only with a bf16 kv-cache; the fp8_ds_mla/nvfp4_ds_mla cache "
+                "formats are defined for the DeepSeek 576-dim layout"
+            )
         if kv_cache_dtype == "nvfp4_ds_mla" and device_capability.major != 10:
             return (
                 f"FLASHMLA_SPARSE only supports the {kv_cache_dtype} kv-cache "
@@ -996,7 +1005,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             q = self.q_concat_buffer[: ql_nope.shape[0]]
-            ops.concat_mla_q(ql_nope, q_pe, q)
+            if q_pe.size(-1) == 0:
+                # NoPE layout (e.g. GLM-5): no rope part to concatenate.
+                # concat_mla_q hardcodes rope_dim == 64, so copy directly
+                # into the (head-padded) buffer instead.
+                q[:, : ql_nope.shape[1]].copy_(ql_nope)
+            else:
+                ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
 

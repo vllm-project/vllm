@@ -327,6 +327,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 qk_rope_head_dim=64,
                 v_head_dim=128,
             ),
+            # GLM-5 NoPE: qk = 256 + 0, same kernel dims as the (192, 64, 256)
+            # DeepSeek V3.2 layout above (qk_head_dim=256, v_head_dim=256).
+            MLADimensions(
+                qk_nope_head_dim=256,
+                qk_rope_head_dim=0,
+                v_head_dim=256,
+            ),
         ]
 
     def __init__(

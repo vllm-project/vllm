@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -29,6 +30,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+logger = init_logger(__name__)
 
 
 class FlashAttnMLASparseBackend(AttentionBackend):
@@ -196,6 +199,16 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         assert self.topk_indices_buffer is not None, (
             "Indexer or topk_indices_buffer required for sparse MLA"
         )
+        if self.qk_rope_head_dim == 0:
+            # forward_mqa passes a 0-width rope part as q; this only works
+            # with an FA3 build whose kernels special-case head_size == 0
+            # (only_qv, i.e. the vllm-flash-attn `rope_dim` branch). Stock
+            # FA3 fails TMA descriptor creation on 0-width tensors.
+            logger.warning_once(
+                "NoPE sparse MLA (qk_rope_head_dim=0) with FLASH_ATTN_MLA_SPARSE "
+                "requires a FlashAttention build with FA3 only_qv support "
+                "(vllm-flash-attn `rope_dim` branch)."
+            )
         self.supports_quant_query_input = False
 
     def forward_mqa(
