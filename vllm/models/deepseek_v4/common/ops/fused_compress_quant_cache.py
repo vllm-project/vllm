@@ -7,9 +7,9 @@ Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_sparse_attn:
         head=512, nope=448 FP8 + rope=64 bf16
   - _fused_kv_compress_norm_rope_insert_indexer_attn:
-        head=128, all FP8, 1 block/token
+        head=128, Hadamard-rotated, all FP8, 1 block/token
   - _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn:
-        head=128, MXFP4 (block=32), 4 ue8m0 bytes
+        head=128, Hadamard-rotated, MXFP4 (block=32), 4 ue8m0 bytes
 
 RoPE is register-based via tl.reshape -> tl.split -> tl.interleave (or the
 even/odd halves are consumed directly for MXFP4, no interleave needed).
@@ -32,7 +32,7 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
-from .fused_indexer_q import _fp32x2_to_fp4x2
+from .fused_indexer_q import _fp32x2_to_fp4x2, _rope_hadamard_full
 
 
 def compress_norm_rope_store_triton(
@@ -64,18 +64,22 @@ def compress_norm_rope_store_triton(
     Picks one of the three kernels in this module based on ``head_dim`` and
     ``use_fp4_cache``. Identical launch signature for all three.
     """
+    # The Hadamard rotation applies to the production indexer dims only
+    # (head_dim=128, rope_dim=64); other dims take the original path.
+    hadamard = head_dim == 128 and rope_head_dim == 64
+    kernel_kwargs: dict[str, Any] = {}
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
+        kernel_kwargs["SANITIZE_CACHE_NANS"] = _ON_GFX950
         num_warps = 4
-        kernel_kwargs = {"SANITIZE_CACHE_NANS": _ON_GFX950}
     elif use_fp4_cache:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
+        kernel_kwargs["HADAMARD"] = hadamard
         num_warps = 1
-        kernel_kwargs = {}
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
+        kernel_kwargs["HADAMARD"] = hadamard
         num_warps = 1
-        kernel_kwargs = {}
 
     kernel[(num_actual,)](
         # state cache
@@ -708,8 +712,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,  # 128 for indexer
     SCALE_DIM: tl.constexpr,  # 4 for indexer (1 float32)
     KV_BLOCK_STRIDE: tl.constexpr,
+    HADAMARD: tl.constexpr = False,
 ):
-    """Fused compress → RMSNorm → RoPE → FP8 quant → store.
+    """Fused compress → RMSNorm → RoPE → Hadamard → FP8 quant → store.
+
+    The Hadamard rotation only runs when HADAMARD is set (production indexer
+    dims head_dim=128, rope_dim=64); other dims take the original path.
 
     One program per token; early-exits for non-boundary positions.
 
@@ -797,29 +805,18 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         + kv_pos_in_block * SCALE_DIM
     )
 
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    # ── Register-based GPT-J forward RoPE in fp32 ─────────────────────
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)  # each [NUM_PAIRS] fp32
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
+    # ── Register-based GPT-J forward RoPE in fp32, bf16 roundtrip, and
+    # (when HADAMARD) the Hadamard rotation ────────────────────────────
     compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-    result = tl.interleave(new_even, new_odd)  # fp32
+    result_bf16 = _rope_hadamard_full(
+        normed,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        compressed_pos,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        HADAMARD,
+    )
 
     # ── FP8 UE8M0 quant: single block, flat reduction ────────────────
     tl.static_assert(
@@ -828,7 +825,6 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
 
-    result_bf16 = result.to(tl.bfloat16).to(tl.float32)
     absmax = tl.max(tl.abs(result_bf16), axis=0)  # scalar
     absmax = tl.maximum(absmax, 1e-4)
     raw_scale = absmax * INV_FP8_MAX
@@ -885,8 +881,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
+    HADAMARD: tl.constexpr = False,
 ):
-    """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
+    """Fused compress → RMSNorm → RoPE → Hadamard → MXFP4 quant → store.
+
+    The Hadamard rotation only runs when HADAMARD is set (production indexer
+    dims head_dim=128, rope_dim=64); other dims take the original path.
 
     One program per token; early-exits for non-boundary positions.
 
@@ -976,34 +976,21 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
         + kv_pos_in_block * SCALE_DIM
     )
 
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    # ── Register-based GPT-J forward RoPE in fp32 ─────────────────────
-    # We keep the even/odd halves (no tl.interleave afterwards) because the
-    # MXFP4 per-block absmax / pack naturally operates on (even, odd) pairs.
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)  # each [NUM_PAIRS] fp32
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
+    # ── Register-based GPT-J forward RoPE in fp32, bf16 roundtrip, and
+    # (when HADAMARD) the Hadamard rotation; split back into even/odd
+    # halves because the MXFP4 per-block absmax / pack below naturally
+    # operates on (even, odd) pairs. ───────────────────────────────────
     compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-
-    # bf16 roundtrip for parity with reference / Q-side kernel numerics.
-    new_even = new_even.to(tl.bfloat16).to(tl.float32)
-    new_odd = new_odd.to(tl.bfloat16).to(tl.float32)
+    x_full = _rope_hadamard_full(
+        normed,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        compressed_pos,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        HADAMARD,
+    )
+    new_even, new_odd = tl.split(tl.reshape(x_full, (HEAD_SIZE // 2, 2)))
 
     # ── MXFP4 quant: tile even/odd halves into (N_BLOCKS, HALF_BLOCK) ──
     # Each MXFP4 block of QUANT_BLOCK elements = HALF_BLOCK consecutive pairs,
