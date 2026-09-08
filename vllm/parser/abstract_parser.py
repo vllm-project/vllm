@@ -219,6 +219,21 @@ class Parser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+        """
+        Locate the token that ends reasoning within one window of tokens.
+
+        Args:
+            token_ids: The tokens to examine.
+
+        Returns:
+            The offset within ``token_ids`` of the last reasoning token, or
+            ``None`` when reasoning does not end in this window. Parsers that
+            cannot answer from a window alone always return ``None``; callers
+            fall back to :meth:`is_reasoning_end_streaming`.
+        """
+        return None
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
