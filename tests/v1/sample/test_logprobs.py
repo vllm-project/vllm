@@ -1093,10 +1093,15 @@ def _format_logprob_entries(
     }
 
 
-def _has_tied_peer(logprobs: LogprobsOnePosition, token_id: int) -> bool:
+def _has_tied_rank(
+    logprobs: LogprobsOnePosition, token_id: int, rank: int | None
+) -> bool:
+    """Check whether the alternate rank belongs to an exactly tied peer."""
     score = logprobs[token_id].logprob
-    return any(
-        other_id != token_id and other_logprob.logprob == score
+    return rank is not None and any(
+        other_id != token_id
+        and other_logprob.logprob == score
+        and other_logprob.rank == rank
         for other_id, other_logprob in logprobs.items()
     )
 
@@ -1136,8 +1141,8 @@ def _assert_logprob_position_close(
         )
         assert (
             ref_logprob.rank == spec_logprob.rank
-            or _has_tied_peer(ref, token_id)
-            or _has_tied_peer(spec, token_id)
+            or _has_tied_rank(ref, token_id, spec_logprob.rank)
+            or _has_tied_rank(spec, token_id, ref_logprob.rank)
         ), (
             f"Rank mismatch outside a tie for token_id={token_id} ({context}): "
             f"ref_rank={ref_logprob.rank}, spec_rank={spec_logprob.rank}, "
@@ -1177,7 +1182,8 @@ def _assert_logprob_position_close(
     )
 
 
-def test_spec_decode_logprobs_accepts_tied_rank_order():
+@pytest.mark.parametrize("tie_side", ["both", "ref", "spec"])
+def test_spec_decode_logprobs_accepts_tied_rank_order(tie_side: str):
     ref = {
         1: Logprob(-0.1, rank=1, decoded_token="a"),
         2: Logprob(-2.0, rank=2, decoded_token="b"),
@@ -1188,6 +1194,10 @@ def test_spec_decode_logprobs_accepts_tied_rank_order():
         3: Logprob(-2.0, rank=2, decoded_token="c"),
         2: Logprob(-2.0, rank=3, decoded_token="b"),
     }
+    if tie_side == "ref":
+        spec[2].logprob = -2.1
+    elif tie_side == "spec":
+        ref[3].logprob = -2.1
 
     _assert_logprob_position_close(ref, spec, sampled_token_id=1)
 
@@ -1220,6 +1230,27 @@ def test_spec_decode_logprobs_rejects_non_cutoff_swap():
     }
 
     with pytest.raises(AssertionError, match="outside the cutoff tie"):
+        _assert_logprob_position_close(ref, spec, sampled_token_id=1)
+
+
+def test_spec_decode_logprobs_rejects_swapped_tie_groups():
+    """Separate tied score groups must not exchange rank ranges."""
+    ref = {
+        1: Logprob(-0.1, rank=1, decoded_token="a"),
+        2: Logprob(-1.0, rank=2, decoded_token="b"),
+        3: Logprob(-1.0, rank=3, decoded_token="c"),
+        4: Logprob(-1.2, rank=4, decoded_token="d"),
+        5: Logprob(-1.2, rank=5, decoded_token="e"),
+    }
+    spec = {
+        1: Logprob(-0.1, rank=1, decoded_token="a"),
+        2: Logprob(-1.2, rank=4, decoded_token="b"),
+        3: Logprob(-1.2, rank=5, decoded_token="c"),
+        4: Logprob(-1.0, rank=2, decoded_token="d"),
+        5: Logprob(-1.0, rank=3, decoded_token="e"),
+    }
+
+    with pytest.raises(AssertionError, match="Rank mismatch outside a tie"):
         _assert_logprob_position_close(ref, spec, sampled_token_id=1)
 
 
