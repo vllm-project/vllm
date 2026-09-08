@@ -995,44 +995,6 @@ if has_flashinfer():
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
 
 
-def flashinfer_mm_mxfp8(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    block_scale_a: torch.Tensor,
-    block_scale_b: torch.Tensor,
-    out_dtype: torch.dtype,
-    backend: str = "cutlass",
-) -> torch.Tensor:
-    """MXFP8 MM helper - mirrors flashinfer_scaled_fp4_mm API.
-
-    Takes non-transposed weights and handles transpose internally.
-
-    CRITICAL: mm_mxfp8 CUTLASS kernel requires SWIZZLED 1D scales for optimal
-    performance and accuracy. Both input and weight scales should be in
-    swizzled format from FlashInfer's mxfp8_quantize(is_sf_swizzled_layout=True).
-    """
-    # a shape [M, K]
-    # b shape [K, N]
-    assert a.ndim == 2 and b.ndim == 2
-    assert a.shape[1] == b.shape[1]  # K dimension must match
-
-    if block_scale_b.ndim != 1:
-        raise ValueError(
-            "mm_mxfp8 expects 1D swizzled weight scales for CUTLASS; "
-            f"got shape={tuple(block_scale_b.shape)}"
-        )
-
-    # Output tensor [M, N]
-    return mm_mxfp8(
-        a,
-        b.t(),  # Transpose weight: [N, K] -> [K, N]
-        block_scale_a,
-        block_scale_b,
-        out_dtype,
-        backend=backend,
-    )
-
-
 def flashinfer_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
