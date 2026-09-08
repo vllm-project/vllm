@@ -254,6 +254,7 @@ async fn chat_completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -277,6 +278,8 @@ async fn chat_completion_chunk_stream(
         created,
         response_model,
     ));
+    let include_usage = enable_force_include_usage || include_usage;
+    let include_continuous_usage = enable_force_include_usage || include_continuous_usage;
     let mut saw_tool_calls = false;
     // `LogprobsDelta` is emitted after all chat events for one decoded update.
     // If that update contains hidden reasoning, including delimiter-only block
