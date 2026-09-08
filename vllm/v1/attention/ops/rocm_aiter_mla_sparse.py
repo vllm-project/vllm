@@ -427,6 +427,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     token_to_seq: torch.Tensor,
     block_tile_size: int = 16,
     head_tile_size: int = 16,
+    cache_layout: str | None = None,
 ):
     num_tokens = k_fp8.size(0)
     block_size = k_cache.size(1)
@@ -440,7 +441,10 @@ def cp_gather_indexer_k_quant_cache_triton(
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    if cache_layout is None:
+        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    else:
+        layout = cache_layout
     kernel_args = (
         k_cache_value,
         k_cache_scale,
@@ -584,24 +588,27 @@ def _fp8_paged_mqa_logits_decode_kernel(
     kv_val_ptr,  # fp8, block-flat: [num_blocks, block_size*(D+4)]
     kv_scale_ptr,  # fp32, block-flat: [num_blocks, block_size*(D+4)//4]
     weights_ptr,  # fp32 [B*NEXT_N, H]
-    row_seq_ptr,  # int32 [B*NEXT_N]  per-(b,n) causal valid-key count
+    ctx_lens_ptr,  # int32 [B*NEXT_N] if CTX_PER_ROW else [B]
     block_tables_ptr,  # int32 [B, max_blocks]
-    logits_ptr,  # fp32 [B*NEXT_N, max_model_len]  (pre-filled -inf)
+    logits_ptr,  # fp32 [B*NEXT_N, max_model_len]
     stride_q_b,
     stride_q_n,
     stride_q_h,
+    stride_w_row,
     stride_kvblk_fp8,
     stride_kvblk_f32,
     scale_region_off,  # block_size*D // 4 (fp32 offset of scale region within a block)
     stride_bt_b,
     stride_logits_row,
     max_blocks,  # block_tables width; guards the block-table gather
+    max_model_len,
     NUM_HEADS: tl.constexpr,
     HEAD_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,  # paged-cache page size
     BLOCK_KV: tl.constexpr,  # positions per tile; must divide BLOCK_SIZE
     N_SPLITS: tl.constexpr,  # KV-tile parallelism factor (grid dim 1)
     NEXT_N: tl.constexpr,  # query positions per batch (1 = decode; >1 = MTP verify)
+    CTX_PER_ROW: tl.constexpr,  # ctx_lens is already per-(b, n)
 ):
     # scale_region_off = block_size*D//4 needs D % 4 == 0 (D=128).
     tl.static_assert(HEAD_SIZE % 4 == 0)
@@ -610,7 +617,11 @@ def _fp8_paged_mqa_logits_decode_kernel(
     split = tl.program_id(1)
     b = row // NEXT_N
     n = row % NEXT_N
-    seq_len = tl.load(row_seq_ptr + row)
+    if CTX_PER_ROW:
+        seq_len = tl.load(ctx_lens_ptr + row)
+    else:
+        seq_len = tl.load(ctx_lens_ptr + b) - NEXT_N + n + 1
+    seq_len = tl.minimum(tl.maximum(seq_len, 0), max_model_len)
 
     h = tl.arange(0, NUM_HEADS)
     d = tl.arange(0, HEAD_SIZE)
@@ -618,7 +629,7 @@ def _fp8_paged_mqa_logits_decode_kernel(
     q = tl.load(
         q_ptr + b * stride_q_b + n * stride_q_n + h[:, None] * stride_q_h + d[None, :]
     )
-    w = tl.load(weights_ptr + row * NUM_HEADS + h).to(tl.float32)  # [H]
+    w = tl.load(weights_ptr + row * stride_w_row + h).to(tl.float32)  # [H]
 
     kv_col = tl.arange(0, BLOCK_KV)
     for kv_start in tl.range(split * BLOCK_KV, seq_len, N_SPLITS * BLOCK_KV):
@@ -670,29 +681,19 @@ def rocm_fp8_paged_mqa_logits_triton(
 
     fp8_dtype = current_platform.fp8_dtype()
     num_blocks = kv_cache_fp8.shape[0]
-    # Each position stores D fp8 values followed by a 4-byte fp32 scale.
     kv_flat = kv_cache_fp8.reshape(
         num_blocks, -1
     )  # uint8 [num_blocks, block_size*(D+4)]
     kv_val = kv_flat.view(fp8_dtype)  # [num_blocks, block_size*(D+4)] fp8
     kv_scale = kv_flat.view(torch.float32)  # [num_blocks, block_size*(D+4)//4] fp32
 
-    # Per-(b,n) causal key count. MTP: query n sees keys [0, context-next_n+n].
-    cl = context_lens.reshape(-1).to(torch.int64)
-    if next_n > 1 and cl.numel() == batch_size:
-        n_idx = torch.arange(next_n, device=cl.device, dtype=torch.int64)
-        row_seq = cl.view(batch_size, 1) - next_n + n_idx[None, :] + 1
-        row_seq = row_seq.clamp_min(0).reshape(-1)
-    else:
-        row_seq = cl
-    # Clamp to the logits width so the per-row store can't run off the buffer.
-    row_seq = row_seq.clamp_(0, max_model_len).to(torch.int32)
+    cl = context_lens.reshape(-1)
+    ctx_per_row = not (next_n > 1 and cl.numel() == batch_size)
 
     max_blocks = block_tables.shape[1]
     (out_logits,) = current_workspace_manager().get_simultaneous(
         ((batch_size * next_n, max_model_len), torch.float32),
     )
-    out_logits.fill_(float("-inf"))
 
     # Memory-bound over the KV range: split each row's keys across programs so
     # few-row / long-context launches still fill the GPU. All terms are static
@@ -705,24 +706,27 @@ def rocm_fp8_paged_mqa_logits_triton(
         kv_val,
         kv_scale,
         weights,
-        row_seq,
+        cl,
         block_tables,
         out_logits,
         q_fp8.stride(0),
         q_fp8.stride(1),
         q_fp8.stride(2),
+        weights.stride(0),
         kv_val.stride(0),
         kv_scale.stride(0),
         (block_size * head_size) // 4,
         block_tables.stride(0),
         out_logits.stride(0),
         max_blocks,
+        max_model_len,
         NUM_HEADS=num_heads,
         HEAD_SIZE=head_size,
         BLOCK_SIZE=block_size,
         BLOCK_KV=BLOCK_KV,
         N_SPLITS=N_SPLITS,
         NEXT_N=next_n,
+        CTX_PER_ROW=ctx_per_row,
         num_warps=4,
         num_stages=2,
     )
@@ -763,8 +767,7 @@ def rocm_fp8_paged_mqa_logits(
         q_fp8: Query tensor of shape [B, next_n, H, D]. Casted to
             `torch.float8_e4m3fn` by caller.
         kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
-            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
-            4 bytes per (block,pos) store the `float` dequant scale.
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
@@ -773,6 +776,7 @@ def rocm_fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
+        skip_k_cache_insert: True when the DSv4 compressor already wrote k_cache.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -1112,6 +1116,7 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
                 token_to_seq=chunk.token_to_seq,
+                cache_layout="NORMAL" if skip_k_cache_insert else None,
             )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
