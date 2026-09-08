@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -32,6 +33,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
+    EvictionHintContext,
     KVCacheBlock,
     get_block_hash,
     get_group_id,
@@ -62,6 +64,120 @@ def _auto_init_hash_fn(request):
     else:
         hash_fn = sha256
     init_none_hash(hash_fn)
+
+
+def _make_hint_test_block_pool() -> tuple[BlockPool, list[KVCacheBlock]]:
+    pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=16)
+    return pool, pool.blocks[1:]
+
+
+def test_block_pool_resolves_eviction_hint_only_when_cached_candidate_is_scanned():
+    pool, blocks = _make_hint_test_block_pool()
+    cached_hash = make_block_hash_with_group_id(BlockHash(b"cached"), 0)
+    pool._insert_block_hash(cached_hash, blocks[1], num_tokens=16)
+    resolve_calls = 0
+
+    def resolve() -> set[int]:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return {blocks[1].block_id}
+
+    selected = pool.get_new_blocks(2, EvictionHintContext(resolve))
+
+    assert selected == [blocks[0], blocks[2]]
+    assert resolve_calls == 1
+
+
+def test_block_pool_does_not_resolve_eviction_hint_for_uncached_prefix():
+    pool, blocks = _make_hint_test_block_pool()
+    resolve_calls = 0
+
+    def resolve() -> set[int]:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return {blocks[3].block_id}
+
+    selected = pool.get_new_blocks(2, EvictionHintContext(resolve))
+
+    assert selected == blocks[:2]
+    assert resolve_calls == 0
+
+
+def test_allocate_slots_propagates_error_and_clears_hint_context(monkeypatch):
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=32,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    request = make_request(
+        "allocation-error",
+        list(range(block_size)),
+        block_size,
+        sha256,
+    )
+    contexts = []
+
+    def fail_allocation(*args, **kwargs):
+        contexts.append(kwargs["eviction_hint_context"])
+        raise RuntimeError("allocation failure")
+
+    monkeypatch.setattr(
+        manager.coordinator,
+        "allocate_new_blocks",
+        Mock(side_effect=fail_allocation),
+    )
+
+    with pytest.raises(RuntimeError, match="allocation failure"):
+        manager.allocate_slots(
+            request,
+            num_new_tokens=block_size,
+            waiting_requests_provider=lambda: (),
+        )
+
+    assert len(contexts) == 1
+    with pytest.raises(RuntimeError, match="cleared"):
+        contexts[0].get_retained_block_ids()
+
+
+def test_waiting_eviction_hint_resolver_is_read_only(monkeypatch):
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=32,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    retained_block = KVCacheBlock(block_id=7)
+    lookup = Mock(return_value=(([retained_block],), 4, 0))
+    monkeypatch.setattr(manager.coordinator, "find_longest_cache_hit", lookup)
+
+    ready = SimpleNamespace(
+        num_tokens=8,
+        skip_reading_prefix_cache=False,
+        block_hashes=[],
+    )
+    short_request = SimpleNamespace(
+        num_tokens=1,
+        skip_reading_prefix_cache=False,
+        block_hashes=[],
+    )
+    skipped_request = SimpleNamespace(
+        num_tokens=8,
+        skip_reading_prefix_cache=True,
+        block_hashes=[],
+    )
+
+    retained_ids = manager._get_retained_block_ids_for_waiting_requests(
+        lambda: (ready, short_request, skipped_request)
+    )
+
+    assert retained_ids == {retained_block.block_id}
+    lookup.assert_called_once_with([], 7)
+    assert retained_block.ref_cnt == 0
+    assert retained_block.prev_free_block is None
+    assert retained_block.next_free_block is None
 
 
 def make_request(

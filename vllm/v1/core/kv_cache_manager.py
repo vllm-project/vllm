@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -14,7 +14,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    EvictionHintContext,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -214,6 +218,30 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and not request.skip_reading_prefix_cache
 
+    def _get_retained_block_ids_for_waiting_requests(
+        self, waiting_requests_provider: Callable[[], Sequence[Request]]
+    ) -> set[int]:
+        """Resolve cache-hit blocks for a bounded ready-waiting snapshot.
+
+        This method is deliberately read-only.  It does not touch blocks or
+        emit metrics/events; those actions remain in the normal allocation
+        path after the selector chooses blocks.
+        """
+        retained_block_ids: set[int] = set()
+        for waiting_request in waiting_requests_provider():
+            if waiting_request.num_tokens <= 1 or not self.prefix_cache_lookup_enabled(
+                waiting_request
+            ):
+                continue
+            computed_blocks, _, _ = self.coordinator.find_longest_cache_hit(
+                waiting_request.block_hashes, waiting_request.num_tokens - 1
+            )
+            for group_blocks in computed_blocks:
+                retained_block_ids.update(
+                    block.block_id for block in group_blocks if not block.is_null
+                )
+        return retained_block_ids
+
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
         if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
@@ -353,6 +381,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        waiting_requests_provider: Callable[[], Sequence[Request]] | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -385,6 +414,8 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            waiting_requests_provider: Optional lazy provider for a bounded,
+                read-only ready-waiting snapshot used only for eviction hints.
 
         Blocks layout:
         ```
@@ -525,25 +556,39 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        if (
-            new_computed_block_list is not self.empty_kv_cache_blocks.blocks
-            or num_external_computed_tokens > 0
-        ):
-            # Append the new computed blocks to the request blocks until now to
-            # avoid the case where the new blocks cannot be allocated.
-            self.coordinator.allocate_new_computed_blocks(
-                request_id=request.request_id,
-                new_computed_blocks=new_computed_block_list,
-                num_local_computed_tokens=num_local_computed_tokens,
-                num_external_computed_tokens=num_external_computed_tokens,
+        eviction_hint_context = None
+        if self.enable_caching and waiting_requests_provider is not None:
+            eviction_hint_context = EvictionHintContext(
+                lambda: self._get_retained_block_ids_for_waiting_requests(
+                    waiting_requests_provider
+                )
             )
 
-        new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id,
-            num_tokens_need_slot,
-            num_tokens_main_model,
-            num_encoder_tokens,
-        )
+        try:
+            if (
+                new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+                or num_external_computed_tokens > 0
+            ):
+                # Append the new computed blocks to the request blocks until now to
+                # avoid the case where the new blocks cannot be allocated.
+                self.coordinator.allocate_new_computed_blocks(
+                    request_id=request.request_id,
+                    new_computed_blocks=new_computed_block_list,
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
+                    eviction_hint_context=eviction_hint_context,
+                )
+
+            new_blocks = self.coordinator.allocate_new_blocks(
+                request.request_id,
+                num_tokens_need_slot,
+                num_tokens_main_model,
+                num_encoder_tokens,
+                eviction_hint_context=eviction_hint_context,
+            )
+        finally:
+            if eviction_hint_context is not None:
+                eviction_hint_context.clear()
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
