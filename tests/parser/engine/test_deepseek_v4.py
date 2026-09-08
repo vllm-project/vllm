@@ -293,7 +293,9 @@ class TestMissingInvokeEnd:
         assert collect_function_name(results) == "get_weather"
         args = json.loads(collect_tool_arguments(results))
         assert args == {"location": "NYC"}
-        assert "Done." in collect_content(results)
+        # A tool call ends the turn; anything after the block is dropped.
+        assert "Done." not in collect_content(results)
+        assert "DSML" not in collect_content(results)
 
 
 class TestMissingToolCallsWrapper:
@@ -324,6 +326,43 @@ class TestMissingToolCallsWrapper:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"command": "echo hi"}
         assert result.content == "Let me run it.\n"
+
+    @pytest.mark.parametrize("trailing_end", [True, False])
+    def test_trailing_content_dropped_consistently(
+        self, mock_tokenizer, mock_request, trailing_end
+    ):
+        """Text after a tool block is dropped whether or not the closing
+        wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
+        change what the client sees."""
+        text = "pre\n" + self._ORPHAN
+        if trailing_end:
+            text += DSML_TOOL_END
+        text += "Done."
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        assert result.content == "pre\n"
+
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_function_name(results) == "terminal"
+        assert collect_content(results) == "pre\n"
+
+    def test_second_wrapped_block_after_orphan(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = self._ORPHAN + DSML_TOOL_START + self._ORPHAN + DSML_TOOL_END
+        result = parser.extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "terminal",
+            "terminal",
+        ]
+        assert result.content is None
 
     def test_streaming_marker_split_across_deltas(self, mock_tokenizer, mock_request):
         text = "Let me run it.\n" + self._ORPHAN + DSML_TOOL_END
