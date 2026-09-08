@@ -61,8 +61,6 @@ def test_gpu_write(device):
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
-    monkeypatch.setenv("VLLM_STAGED_WRITE_USE_UVA_CONTENTS", "1")
-
     def fail_async_tensor_h2d(*args, **kwargs):
         pytest.fail("UVA-backed targets should not copy write contents to the GPU")
 
@@ -110,12 +108,10 @@ def test_growable_uva_pool_overwrites_exposed_prefix(input_type):
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("uva_target", [False, True])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.float32])
-def test_staged_write_ab_inflight(enabled, uva_target, dtype, monkeypatch):
+def test_staged_write_inflight(uva_target, dtype):
     """Preserve every generation until its consumer finishes before slot reuse."""
-    monkeypatch.setenv("VLLM_STAGED_WRITE_USE_UVA_CONTENTS", str(int(enabled)))
     device = torch.device("cuda:0")
     with torch.accelerator.device_index(device.index):
         state = StagedWriteTensor(
@@ -125,7 +121,7 @@ def test_staged_write_ab_inflight(enabled, uva_target, dtype, monkeypatch):
             max_concurrency=2,
             uva_instead_of_gpu=uva_target,
         )
-        assert (state.write_contents is not None) == (enabled and uva_target)
+        assert (state.write_contents is not None) == uva_target
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         pending: list[tuple[torch.cuda.Event, torch.Tensor, torch.Tensor]] = []

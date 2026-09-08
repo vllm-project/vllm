@@ -6,7 +6,6 @@ from functools import partial
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
@@ -172,7 +171,6 @@ class StagedWriteTensor:
         self.dtype = dtype
         self.device = device
         self.max_concurrency = max_concurrency
-        self.uva_instead_of_gpu = uva_instead_of_gpu
 
         if not uva_instead_of_gpu:
             # Create a GPU tensor (default)
@@ -195,7 +193,7 @@ class StagedWriteTensor:
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_contents = (
             GrowableUvaBufferPool(dtype, max_concurrency)
-            if uva_instead_of_gpu and envs.VLLM_STAGED_WRITE_USE_UVA_CONTENTS
+            if uva_instead_of_gpu
             else None
         )
 
