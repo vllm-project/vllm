@@ -4,11 +4,18 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import (
+    resolve_dcp_kv_block_size,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -37,13 +44,9 @@ def build_offloading_config(
     parallel_config = vllm_config.parallel_config
     groups = tuple(
         OffloadingGroupConfig(
-            tokens_per_block=(
-                group.kv_cache_spec.block_size
-                * (
-                    parallel_config.decode_context_parallel_size
-                    if isinstance(group.kv_cache_spec, AttentionSpec)
-                    else 1
-                )
+            tokens_per_block=resolve_dcp_kv_block_size(
+                group.kv_cache_spec,
+                parallel_config.decode_context_parallel_size,
             ),
             layer_names=tuple(group.layer_names),
         )
@@ -139,35 +142,46 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
     )
-    # Canonical pages are topology-free by construction, so the canonical
-    # layout widens the gate to every config whose mappings derive portable:
-    # exactly-sharded or replicated GQA heads (writer rotation) and the
-    # TP-replicated MLA latent (one canonical copy for all replicas). The
-    # model-runner version is irrelevant here — certification happens per
-    # layer against live tensor strides at registration, and create_worker
-    # fails closed against this flag if any layer cannot be certified.
+    # Canonical pages are topology-free, so the gate widens to every config
+    # whose mappings derive portable, group by group; certification happens
+    # per layer at registration and create_worker fails closed on this flag.
     if canonical_layout and not is_parallelism_agnostic:
         tp_size = parallel_config.tensor_parallel_size
-        if isinstance(single_group_spec, FullAttentionSpec):
-            if type(single_group_spec) is MLAAttentionSpec:
-                spec_certifiable = (
-                    single_group_spec.tokens_per_state == 1
-                    and single_group_spec.real_page_size_bytes
-                    % single_group_spec.block_size
-                    == 0
+        total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+
+        def spec_certifiable(spec: KVCacheSpec) -> bool:
+            """Conservative static mirror of _layer_mapping's per-layer checks."""
+            if not isinstance(spec, AttentionSpec):
+                return False
+            if spec.kv_quant_mode.is_per_token_head:
+                return False
+            if type(spec) is MLAAttentionSpec:
+                return (
+                    spec.tokens_per_state == 1
+                    and spec.real_page_size_bytes % spec.block_size == 0
                 )
-            else:
-                total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
-                spec_certifiable = (
-                    total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
-                )
-            is_parallelism_agnostic = (
-                spec_certifiable
-                and not single_group_spec.kv_quant_mode.is_per_token_head
-                and parallel_config.decode_context_parallel_size == 1
-                and parallel_config.prefill_context_parallel_size == 1
-                and parallel_config.world_size == tp_size
-            )
+            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+                return False
+            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+                return False
+            return (
+                total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+            ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
+
+        # UniformTypeKVCacheSpecs groups (e.g. MLA plus its DSA indexer) hold
+        # one spec per layer; certify per layer, as the mapping derivation does.
+        layer_specs = [
+            spec
+            for group in kv_cache_config.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ]
+        is_parallelism_agnostic = (
+            len(layer_specs) > 0
+            and all(spec_certifiable(spec) for spec in layer_specs)
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.world_size == tp_size
+        )
 
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (

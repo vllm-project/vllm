@@ -465,6 +465,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
+    mamba_cache_mode: Literal["all", "align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -498,6 +499,7 @@ def make_kv_cache_config(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
+                    mamba_cache_mode=mamba_cache_mode,
                 ),
             )
         )

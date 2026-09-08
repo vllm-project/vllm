@@ -6,6 +6,7 @@ steps:
   key: plugin-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/plugins/
@@ -62,7 +63,7 @@ steps:
       - vllm/platforms/rocm.py
 
 
-- label: ":nvidia: (H200) GGUF Plugin"
+- label: ":nvidia: (H200 MIG 18GB) GGUF Plugin"
   key: gguf-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -75,7 +76,7 @@ steps:
     - pip install "vllm-gguf-plugin >= 0.0.2"
     - pytest -v -s plugins_tests/gguf
 
-- label: ":nvidia: (H200) BitsAndBytes Plugin"
+- label: ":nvidia: (H200 MIG 18GB) BitsAndBytes Plugin"
   key: bitsandbytes-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -96,6 +97,7 @@ steps:
   key: bitsandbytes-plugin-2-gpus
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   soft_fail: true
   optional: true

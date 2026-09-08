@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
+    resolve_quant_method,
 )
 
 if TYPE_CHECKING:
@@ -199,7 +200,7 @@ class RoutedExperts(PluggableLayer):
         """
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix)
+            quant_method = resolve_quant_method(quant_config, self, prefix)
         if quant_method is None:
             quant_method = UnquantizedFusedMoEMethod(moe_config)
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -832,6 +833,20 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
+                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                if (
+                    quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+                    and scale_refine is not None
+                ):
+                    # FP8 block scales are stored per (block_n, block_k) tile
+                    # of the unsharded weight, while the TP-sharded parameters
+                    # use a refined block grid (see Fp8MoEMethod). Upsample the
+                    # scales to the refined grid (lossless: the refined block
+                    # divides the checkpoint block) so per-rank slicing stays
+                    # exact. Dim -2 is the weight's N dim, dim -1 is K.
+                    loaded_weight = loaded_weight.repeat_interleave(
+                        scale_refine[0], dim=-2
+                    ).repeat_interleave(scale_refine[1], dim=-1)
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,

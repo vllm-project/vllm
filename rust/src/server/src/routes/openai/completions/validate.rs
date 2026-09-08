@@ -3,6 +3,7 @@
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -85,12 +86,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
-    }
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
 
     Ok(())
 }
