@@ -28,6 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -448,6 +449,16 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
+# PEP 563 stringifies annotations in this module, so the decorator cannot infer
+# these; they are the set DeepSeek-V2 infers for the same forward signature.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class SarvamMLAModel(nn.Module, EagleModelMixin):
     """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
 
