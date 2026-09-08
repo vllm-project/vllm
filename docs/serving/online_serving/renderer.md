@@ -28,26 +28,58 @@ VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 vllm serve <model>
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Get Responses prompt token IDs
+
+Use `/v1/responses/render` to get prompt token IDs before choosing a model
+replica. `/tokenize` accepts completion and chat inputs; Responses input uses
+the render endpoint. Rendering applies prompt construction and preprocessing
+without running inference.
+
 The Responses render endpoint uses the same prompt construction as
 `/v1/responses` and returns one token-in `GenerateRequest`. It is stateless:
 inline history is supported, but `previous_response_id` is not. Callers must
 resolve stored response state and include the resulting history in the request
 before rendering.
 
+Configure the renderer and generation workers with the same model, tokenizer,
+chat template, and preprocessing options. Render the full request, including
+instructions, history, tools, and any template or truncation options, so the
+returned IDs reflect the prompt the model will receive.
+
 For multimodal requests, the `GenerateRequest` contains the model-processed
 multimodal payload, which can be substantially larger than the source image or
 video. The caller must forward that payload unchanged to the generation service
 and provision transport limits and memory accordingly.
 
+For example, start a standard inference server with scale-out endpoints enabled:
+
 ```bash
-curl http://localhost:8000/v1/responses/render \
+VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct
+```
+
+Send a Responses request and use `jq` to extract the `token_ids` field:
+
+```bash
+curl --fail --silent --show-error http://localhost:8000/v1/responses/render \
     -H "Content-Type: application/json" \
     -d '{
         "model": "meta-llama/Llama-3.1-8B-Instruct",
         "input": "Explain prefix caching in one sentence.",
         "max_output_tokens": 32
-    }'
+    }' | jq '.token_ids'
 ```
+
+To count the rendered prompt tokens for this text request, replace the `jq`
+filter with `'.token_ids | length'`. The endpoint returns the full
+`GenerateRequest`; `jq` filters the response on the client. Keep the complete
+response if you will forward it to `/inference/v1/generate`, including any
+multimodal features.
+
+If the server has `--api-key` or `VLLM_API_KEY` configured, add
+`-H "Authorization: Bearer <api-key>"` to the request. See
+[API key authentication limitations](../../usage/security.md#api-key-authentication-limitations)
+for the existing authentication boundaries.
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
 
