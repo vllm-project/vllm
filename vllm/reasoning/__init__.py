@@ -72,6 +72,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "granite_thinking_parser": (
+        "granite_thinking_engine_reasoning_parser",
+        "GraniteThinkingParserReasoningAdapter",
+    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
