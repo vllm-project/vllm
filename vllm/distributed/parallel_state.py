@@ -1551,22 +1551,22 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
-_NP: GroupCoordinator | None = None
+_ETP: GroupCoordinator | None = None
 
 
-def get_np_group() -> GroupCoordinator:
-    """Return the group that shards one PLE n-gram embedding table."""
-    assert _NP is not None, "n-gram parallel group is not initialized"
-    return _NP
+def get_etp_group() -> GroupCoordinator:
+    """Return the Engram Tensor Parallel (ETP) group that shards one embedding table."""
+    assert _ETP is not None, "Engram tensor-parallel group is not initialized"
+    return _ETP
 
 
-_NP_DP: GroupCoordinator | None = None
+_ETP_DP: GroupCoordinator | None = None
 
 
-def get_np_dp_group() -> GroupCoordinator:
-    """Return DP ranks whose tokens share one NP embedding table."""
-    assert _NP_DP is not None, "n-gram DP group is not initialized"
-    return _NP_DP
+def get_etp_dp_group() -> GroupCoordinator:
+    """Return DP ranks whose tokens share one ETP embedding table."""
+    assert _ETP_DP is not None, "Engram DP group is not initialized"
+    return _ETP_DP
 
 
 _DCP: GroupCoordinator | None = None
@@ -2026,34 +2026,41 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
-    global _NP, _NP_DP
-    assert _NP is None, "n-gram parallel group is already initialized"
-    assert _NP_DP is None, "n-gram DP group is already initialized"
-    ngram_parallel_size = parallel_config.ngram_parallel_size
-    assert ngram_parallel_size is not None
-    if ngram_parallel_size == tensor_model_parallel_size:
-        _NP = _TP
+    global _ETP, _ETP_DP
+    assert _ETP is None, "Engram tensor-parallel group is already initialized"
+    assert _ETP_DP is None, "Engram DP group is already initialized"
+    engram_tensor_parallel_size = (
+        config.engram_config.get_parallel_size(parallel_config)
+        if config.engram_config is not None
+        else tensor_model_parallel_size
+    )
+    if engram_tensor_parallel_size == tensor_model_parallel_size:
+        _ETP = _TP
     else:
-        np_data_parallel_size = ngram_parallel_size // tensor_model_parallel_size
-        group_ranks = (
-            all_ranks.permute(0, 2, 3, 1, 4).reshape(-1, ngram_parallel_size).unbind(0)
+        etp_data_parallel_size = (
+            engram_tensor_parallel_size // tensor_model_parallel_size
         )
-        _NP = init_model_parallel_group(
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 1, 4)
+            .reshape(-1, engram_tensor_parallel_size)
+            .unbind(0)
+        )
+        _ETP = init_model_parallel_group(
             [ranks.tolist() for ranks in group_ranks],
             get_world_group().local_rank,
             backend,
-            group_name="np",
+            group_name="etp",
         )
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1)
-            .reshape(-1, np_data_parallel_size)
+            .reshape(-1, etp_data_parallel_size)
             .unbind(0)
         )
-        _NP_DP = init_model_parallel_group(
+        _ETP_DP = init_model_parallel_group(
             [ranks.tolist() for ranks in group_ranks],
             get_world_group().local_rank,
             backend,
-            group_name="np_dp",
+            group_name="etp_dp",
         )
 
     # Build the DCP model-parallel groups.
@@ -2190,14 +2197,14 @@ def initialize_model_parallel(
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
-        "TP rank %s, NP rank %s, EP rank %s, EPLB rank %s",
+        "TP rank %s, ETP rank %s, EP rank %s, EPLB rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
-        _NP.rank_in_group,
+        _ETP.rank_in_group,
         _EP.rank_in_group if _EP is not None else "N/A",
         _EPLB.rank_in_group if _EPLB is not None else "N/A",
     )
@@ -2292,15 +2299,15 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP, _NP, _NP_DP
+    global _TP, _ETP, _ETP_DP
 
-    if _NP_DP:
-        _NP_DP.destroy()
-    _NP_DP = None
+    if _ETP_DP:
+        _ETP_DP.destroy()
+    _ETP_DP = None
 
-    if _NP and _NP is not _TP:
-        _NP.destroy()
-    _NP = None
+    if _ETP and _ETP is not _TP:
+        _ETP.destroy()
+    _ETP = None
 
     if _TP:
         _TP.destroy()

@@ -2078,6 +2078,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Keep Qwen4Exp PLE embedding tables in pinned CPU memory and gather their
     # rows through UVA on a dedicated CUDA stream.
+    # Legacy fallback for EngramConfig.cpu_offload, which takes precedence.
+    # This environment variable may be removed in a future release.
     "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "0"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(

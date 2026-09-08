@@ -10,10 +10,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_np_dp_group, get_np_group, get_tp_group
+from vllm.distributed import get_etp_dp_group, get_etp_group, get_tp_group
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -96,7 +95,7 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
 
 
 class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
-    """NP-sharded PLE table shared by device and pinned-host backends."""
+    """ETP-sharded PLE table shared by device and pinned-host backends."""
 
     supports_prefetch: ClassVar[bool] = False
 
@@ -122,7 +121,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             padding_size=padding_size,
             prefix=prefix,
             quant_method=embedding_method,
-            parallel_group=get_np_group(),
+            parallel_group=get_etp_group(),
         )
         self.embedding_method = embedding_method
         self.data_parallel_rank = data_parallel_rank
@@ -130,10 +129,10 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         tp_size = get_tp_group().world_size
         if self.tp_size % tp_size:
             raise ValueError(
-                "NP size must be divisible by TP size, but got "
-                f"NP={self.tp_size} and TP={tp_size}"
+                "ETP size must be divisible by TP size, but got "
+                f"ETP={self.tp_size} and TP={tp_size}"
             )
-        self.np_data_parallel_size = self.tp_size // tp_size
+        self.etp_data_parallel_size = self.tp_size // tp_size
 
     @abstractmethod
     def allocate_embedding_weight(
@@ -153,37 +152,37 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         """Delegate storage-format conversion to the embedding method."""
         return self.embedding_method.dequantize(self, embeddings, output_dtype)
 
-    def _get_np_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
+    def _get_etp_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
         """Return the per-DP slot size and this rank's slot offset."""
-        if self.np_data_parallel_size == 1:
+        if self.etp_data_parallel_size == 1:
             return local_num_tokens, 0
         dp_metadata: DPMetadata | None = get_forward_context().dp_metadata
         if dp_metadata is None:
-            raise RuntimeError("NP spanning DP requires DP token metadata")
-        group_start = (self.data_parallel_rank // self.np_data_parallel_size) * (
-            self.np_data_parallel_size
+            raise RuntimeError("ETP spanning DP requires DP token metadata")
+        group_start = (self.data_parallel_rank // self.etp_data_parallel_size) * (
+            self.etp_data_parallel_size
         )
-        group_end = group_start + self.np_data_parallel_size
+        group_end = group_start + self.etp_data_parallel_size
         token_counts = dp_metadata.num_tokens_across_dp_cpu.tolist()
         group_counts = token_counts[group_start:group_end]
         slot_size = max(group_counts)
-        np_dp_rank = get_np_dp_group().rank_in_group
-        return slot_size, np_dp_rank * slot_size
+        etp_dp_rank = get_etp_dp_group().rank_in_group
+        return slot_size, etp_dp_rank * slot_size
 
-    def _gather_np_ids(
+    def _gather_etp_ids(
         self,
         ngram_ids: torch.Tensor,
         slot_size: int,
     ) -> torch.Tensor:
-        """Gather DP-local IDs that share one NP-sharded PLE table."""
-        if self.np_data_parallel_size == 1:
+        """Gather DP-local IDs that share one ETP-sharded PLE table."""
+        if self.etp_data_parallel_size == 1:
             return ngram_ids
         if ngram_ids.shape[0] < slot_size:
             padding = ngram_ids.new_zeros(
                 slot_size - ngram_ids.shape[0], ngram_ids.shape[1]
             )
             ngram_ids = torch.cat((ngram_ids, padding), dim=0)
-        return get_np_dp_group().all_gather(ngram_ids, dim=0)
+        return get_etp_dp_group().all_gather(ngram_ids, dim=0)
 
     def _select_embeddings(
         self,
@@ -191,8 +190,8 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         local_num_tokens: int,
         slot_offset: int,
     ) -> torch.Tensor:
-        """Select this DP rank's rows from the NP-reduced embeddings."""
-        if self.np_data_parallel_size == 1:
+        """Select this DP rank's rows from the ETP-reduced embeddings."""
+        if self.etp_data_parallel_size == 1:
             return embeddings
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
@@ -390,10 +389,10 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Resident embedding prefetch is a no-op."""
         return None
 
-    def fetch_np_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        """Gather NP inputs, look up embeddings, and select local rows."""
-        slot_size, slot_offset = self._get_np_gather_slot(ngram_ids.shape[0])
-        gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
+    def fetch_etp_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        """Gather ETP inputs, look up embeddings, and select local rows."""
+        slot_size, slot_offset = self._get_etp_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_etp_ids(ngram_ids, slot_size)
         embeddings = super().forward(gathered_ids)
         return self._select_embeddings(
             embeddings,
@@ -402,9 +401,9 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         )
 
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        if self.np_data_parallel_size == 1:
+        if self.etp_data_parallel_size == 1:
             return super().forward(ngram_ids)
-        return self.fetch_np_embeddings(ngram_ids)
+        return self.fetch_etp_embeddings(ngram_ids)
 
 
 @triton.jit
@@ -457,7 +456,7 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         layer_name: str = "",
     ) -> None:
         if not is_uva_available():
-            raise RuntimeError("VLLM_PLE_CPU_OFFLOAD requires UVA support")
+            raise RuntimeError("Engram CPU offload requires UVA support")
         super().__init__(
             num_embeddings,
             embedding_dim,
@@ -474,7 +473,7 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         self._block_d = triton.next_power_of_2(self.embedding_dim)
         self._prefetch_stream = torch.cuda.Stream(device=self._uva_weight.device)
         self._prefetch_buffer = torch.empty(
-            max_total_tokens * self.np_data_parallel_size,
+            max_total_tokens * self.etp_data_parallel_size,
             num_ngram_heads,
             self.embedding_dim,
             dtype=self.weight.dtype,
@@ -502,7 +501,7 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         input_ids: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Look up local NP rows while preserving the weight storage dtype."""
+        """Look up local ETP rows while preserving the weight storage dtype."""
         expected_shape = (*input_ids.shape, self.embedding_dim)
         if output is None:
             output = torch.empty(
@@ -533,8 +532,8 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             )
         return output
 
-    def _reduce_np_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Combine pinned lookup results owned by different NP ranks."""
+    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Combine pinned lookup results owned by different ETP ranks."""
         if self.tp_size == 1:
             return embeddings
         assert self.parallel_group is not None
@@ -550,9 +549,9 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         hidden_states: torch.Tensor,
         ngram_ids: torch.Tensor,
     ) -> None:
-        """Gather NP IDs and launch their UVA lookup on the side stream."""
-        slot_size, _ = self._get_np_gather_slot(ngram_ids.shape[0])
-        gathered_ids = self._gather_np_ids(ngram_ids, slot_size)
+        """Gather ETP IDs and launch their UVA lookup on the side stream."""
+        slot_size, _ = self._get_etp_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_etp_ids(ngram_ids, slot_size)
         active_output = self._prefetch_buffer[: gathered_ids.shape[0]]
         prefetch_stream = self._prefetch_stream
         prefetch_stream.wait_stream(torch.cuda.current_stream())
@@ -566,11 +565,11 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         prefetch_output: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Join the side stream, reduce NP shards, and select local rows."""
+        """Join the side stream, reduce ETP shards, and select local rows."""
         torch.cuda.current_stream().wait_stream(self._prefetch_stream)
-        slot_size, slot_offset = self._get_np_gather_slot(output.shape[0])
-        active_output = prefetch_output[: slot_size * self.np_data_parallel_size]
-        embeddings = self._reduce_np_embeddings(active_output)
+        slot_size, slot_offset = self._get_etp_gather_slot(output.shape[0])
+        active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
+        embeddings = self._reduce_etp_embeddings(active_output)
         embeddings = self._select_embeddings(
             embeddings,
             output.shape[0],
@@ -760,9 +759,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
             Qwen4ExpPinnedHostEmbedding
-            if envs.VLLM_PLE_CPU_OFFLOAD
+            if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
         self.ngram_embedding = embedding_cls(

@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
+    EngramConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -480,7 +481,6 @@ class EngineArgs:
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
-    ngram_parallel_size: int | None = ParallelConfig.ngram_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
@@ -689,6 +689,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    engram_config: EngramConfig | None = VllmConfig.engram_config
     mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
@@ -783,6 +784,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.engram_config, dict):
+            self.engram_config = EngramConfig(**self.engram_config)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -1074,11 +1077,6 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
-        )
-        parallel_group.add_argument(
-            "--ngram-parallel-size",
-            "-np",
-            **parallel_kwargs["ngram_parallel_size"],
         )
         parallel_group.add_argument(
             "--decode-context-parallel-size",
@@ -1697,6 +1695,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--engram-config", **vllm_kwargs["engram_config"])
         vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
@@ -2294,7 +2293,6 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
-            ngram_parallel_size=self.ngram_parallel_size,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
@@ -2584,6 +2582,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            engram_config=self.engram_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
