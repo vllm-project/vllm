@@ -1021,6 +1021,9 @@ class WorkerProc:
                 # Check if fault tolerance is enabled
                 ft_enabled = self.worker.vllm_config.parallel_config.enable_fault_tolerance
                 if ft_enabled:
+                    # Mark the worker as faulted so that subsequent RPCs
+                    # are skipped until retry() completes recovery.
+                    self.worker.model_runner.fault_occur = True
                     # In FT scenario, even if the forward pass throws an exception,
                     # we need to extract the kv_connector_output and pass it to the
                     # executor so that KV transfer progress is not lost.
@@ -1106,6 +1109,9 @@ class WorkerProc:
                     # Check if fault tolerance is enabled
                     ft_enabled = self.worker.vllm_config.parallel_config.enable_fault_tolerance
                     if ft_enabled:
+                        # Mark the worker as faulted so that subsequent RPCs
+                        # are skipped until retry() completes recovery.
+                        self.worker.model_runner.fault_occur = True
                         # In FT scenario, even if the forward pass throws an exception,
                         # we need to extract the kv_connector_output and pass it to the
                         # executor so that KV transfer progress is not lost.
