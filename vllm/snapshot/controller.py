@@ -90,8 +90,8 @@ def create_snapshot(
         child_argv = _child_engine_argv(args, engine_argv)
         root_pid = toolset.launch_child(work_dir, child_argv)
         oracle = toolset.wait_ready(work_dir, root_pid)
-        inventory = toolset.inventory(root_pid, target)
-        toolset.dump(target, work_dir, inventory)
+        inventory = toolset.inventory(root_pid, target, work_dir, portable=portable)
+        attachments = toolset.dump(target, work_dir, inventory, portable=portable)
         toolset.verify_dead(inventory)
         manifest = toolset.make_manifest(
             args,
@@ -99,6 +99,7 @@ def create_snapshot(
             inventory,
             oracle,
             target,
+            attachments,
             work_dir=work_dir,
             cleanup_work_dir=cleanup_work_dir,
         )

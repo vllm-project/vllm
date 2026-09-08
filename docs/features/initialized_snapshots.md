@@ -69,12 +69,30 @@ Snapshots currently require:
   directories and mutable revisions are not supported.
 - Enough disk for the artifact, with the same installed vLLM package, model
   files, container filesystem, and generated-cache paths available at restore.
-  Generated-cache files are not copied into the artifact. The manifest
-  fingerprints the ones the captured tree holds open, so restore fails early
-  and names the file when one is removed or replaced. Only open descriptors
-  are recorded. A library the tree mapped and then closed is not fingerprinted,
-  and CRIU still reopens it by path, so replacing that file permanently
-  invalidates the artifact without an early error.
+  The manifest fingerprints the generated-cache files the captured tree keeps
+  open, so restore fails early and names the file when one is removed or
+  replaced.
+- With `--portable` the artifact also carries its own copy of them: create
+  stages every file the tree reaches through a descriptor or a file-backed
+  mapping under a resolved generated-cache root, plus every other regular
+  file those roots hold as warm state, and restore reproduces the paths that
+  are missing. A path holding different content is refused rather than
+  overwritten, so a cache root shared with another engine still needs the
+  same state. A lock file the tree holds open is carried like any other
+  referenced file, and CRIU replays its advisory lock on restore. The
+  per-file and total carry size limits default to 1 GiB each; set
+  `VLLM_SNAPSHOT_ATTACHMENT_MAX_FILE_BYTES` or
+  `VLLM_SNAPSHOT_ATTACHMENT_MAX_TOTAL_BYTES` to change them. A create that
+  exceeds a limit fails while the inventory is assembled, before CRIU runs.
+- `/var/lib/libuuid/clock.txt` is the same kind of dependency with different
+  semantics: libuuid keeps it open for the process lifetime (a time-based-UUID
+  watermark), so CRIU reopens its path, but its content is machine state. A
+  portable artifact carries it as warm state — written back only when
+  missing, never fingerprinted — so a target host keeps its own watermark.
+- The child log is carried with the same semantics: CRIU reopens its path,
+  but the work directory holding it does not travel with the artifact, so a
+  portable artifact carries the log as warm state and restore writes it back
+  when the directory has no log to reset.
 
 The official CUDA 13 `vllm/vllm-openai` Linux x86-64 images include the
 snapshot runtime. CUDA 12.x and Arm64 images omit it. A compatible host
@@ -128,15 +146,19 @@ Stop and remove it only after the restored API server is no longer needed.
 
 Create initializes the engine, records a one-token canary, releases and reloads
 weights and KV cache to rehearse restore, then releases them again for capture.
-The manifest is published only after CRIU completes and the source tree stops.
+The manifest is published only after CRIU completes and the
+source tree stops. Once the images are written create stages the generated
+files the image still reopens by path; the process that compiled them no longer
+exists, so nothing can rewrite those bytes while they are copied.
 Creation is offline preparation and is not part of restore latency.
 
 The private `0700` artifact contains process memory, CUDA state, engine
-arguments, compatibility identity, and canary output; its manifest is `0600`.
-Literal API keys and Hugging Face tokens are redacted from the manifest's engine
-arguments. The manifest records selected environment names plus deterministic
-name-bound fingerprints, not their values. The protected CRIU artifact can
-still contain process secrets, so treat it as sensitive data. Restore reloads
+arguments, compatibility identity, canary output, and the generated files
+the image reopens by path; its manifest is `0600`. Literal API keys and
+Hugging Face tokens are redacted from the manifest's engine arguments. The
+manifest records selected environment names plus deterministic name-bound
+fingerprints, not their values. The protected CRIU artifact can still
+contain process secrets, so treat it as sensitive data. Restore reloads
 model files and KV cache before binding HTTP, then reproduces the canary or
 tears down the restored tree. The inspect command prints that identity and
 canary without executing the saved process.
@@ -144,11 +166,15 @@ canary without executing the saved process.
 ## Restore behavior
 
 Restore fails before CRIU runs if the saved identity does not match the current
-host. It does not silently fall back to ordinary startup. After CRIU restores
-the process tree, vLLM releases the saved engine to bind the requested HTTP
-address and checks the first generated token and sampled-token log probability
-against the snapshot canary. The command returns only after that check passes.
-The restored API server continues to run as a detached process.
+host. It does not silently fall back to ordinary startup. Before CRIU runs, the
+paths the artifact carries are reproduced from it: a missing file is written
+back, a file that exists with the captured content is left alone, and a file
+whose content differs fails the restore instead of being overwritten. Anything
+that step wrote is removed again when the restore later fails. After CRIU
+restores the process tree, vLLM releases the saved engine to bind the requested
+HTTP address and checks the first generated token and sampled-token log
+probability against the snapshot canary. The command returns only after that
+check passes. The restored API server continues to run as a detached process.
 
 The pre-release port probe is best-effort only. It neither reserves the port
 nor authenticates the listener that appears afterward.
@@ -179,8 +205,11 @@ snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
   existing sleep level 2 reload support; distributed and RDMA snapshots are not
   supported. The snapshot-only NCCL default does not change ordinary serve or
   multi-GPU defaults.
-- CRIU support varies by kernel and driver. Preserve package, library, model,
-  and generated-cache paths for the artifact lifetime.
+- CRIU support varies by kernel and driver. Preserve the package, library, and
+  model paths for the artifact lifetime. The generated files the image reopens
+  travel in the artifact, so clearing that cache no longer invalidates it, but
+  restore still needs to write them back where it finds nothing, and a path it
+  finds holding other content stops the restore.
 - A snapshot can include application secrets or request state present in the
   process. Build it before traffic and protect it like process memory.
 - Any feature that opens an external connection must close it before capture.
