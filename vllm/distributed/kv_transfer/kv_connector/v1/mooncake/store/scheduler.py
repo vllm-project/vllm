@@ -429,15 +429,21 @@ class MooncakeStoreScheduler:
         if not save_metas:
             return
 
-        block_state = scheduler_output.kv_connector_block_state
-        assert block_state is not None, (
-            "Current block tables are required for Mooncake store jobs"
-        )
+        block_state = getattr(scheduler_output, "kv_connector_block_state", None)
         for req_meta in save_metas:
-            block_ids = block_state.block_ids.get(req_meta.req_id)
-            assert block_ids is not None, (
-                f"Missing current block table for store request {req_meta.req_id}"
+            block_ids = (
+                block_state.block_ids.get(req_meta.req_id)
+                if block_state is not None
+                else None
             )
+            if block_ids is None:
+                logger.warning_once(
+                    "Skipping Mooncake store save for request %s because its "
+                    "current block table is missing",
+                    req_meta.req_id,
+                )
+                meta.requests.remove(req_meta)
+                continue
             req_meta.block_ids = block_ids
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:

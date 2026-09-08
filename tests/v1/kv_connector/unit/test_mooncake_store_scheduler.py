@@ -5,9 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    scheduler as scheduler_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeLookupResult,
+    MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
@@ -126,6 +130,87 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         scheduled_spec_decode_tokens={},
         kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1],)),
     )
+
+
+@pytest.mark.parametrize(
+    "block_state",
+    [
+        None,
+        KVConnectorBlockState(block_ids={}, boundary_state_offloads={}),
+    ],
+)
+def test_stale_save_without_current_block_table_is_dropped(block_state, monkeypatch):
+    scheduler = _make_bare_scheduler()
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+    stale_save = ReqMeta(
+        req_id="stale-request",
+        token_len_chunk=16,
+        block_ids=([7],),
+        block_hashes=[b"h0"],
+        can_save=True,
+    )
+    load_only = ReqMeta(
+        req_id="load-request",
+        token_len_chunk=16,
+        block_ids=([8],),
+        block_hashes=[b"h0"],
+        can_save=False,
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            kvpool_cached_tokens=16,
+            can_load=True,
+        ),
+    )
+    meta.requests.extend([stale_save, load_only])
+    warnings = []
+    monkeypatch.setattr(
+        scheduler_module.logger,
+        "warning_once",
+        lambda message, req_id: warnings.append(message % req_id),
+    )
+
+    scheduler._apply_current_save_block_ids(
+        meta,
+        SimpleNamespace(kv_connector_block_state=block_state),
+    )
+
+    assert meta.requests == [load_only]
+    assert warnings == [
+        (
+            "Skipping Mooncake store save for request stale-request because its "
+            "current block table is missing"
+        )
+    ]
+
+
+def test_current_block_table_replaces_save_metadata_blocks(monkeypatch):
+    scheduler = _make_bare_scheduler()
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+    req_meta = ReqMeta(
+        req_id="req-0",
+        token_len_chunk=16,
+        block_ids=([7],),
+        block_hashes=[b"h0"],
+        can_save=True,
+    )
+    meta.add_request(req_meta)
+    warnings = []
+    monkeypatch.setattr(
+        scheduler_module.logger,
+        "warning_once",
+        lambda *args: warnings.append(args),
+    )
+
+    scheduler._apply_current_save_block_ids(
+        meta,
+        SimpleNamespace(
+            kv_connector_block_state=_make_connector_block_state(block_ids=([3],))
+        ),
+    )
+
+    assert meta.requests == [req_meta]
+    assert req_meta.block_ids == ([3],)
+    assert warnings == []
 
 
 def test_scheduler_only_tracks_token_ids_for_kv_events():
