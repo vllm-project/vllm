@@ -119,12 +119,14 @@ class AttentionQuantPatternModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        spec = AttentionSpec(
-            block_size=self.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=self.head_size,
-            dtype=self.attn.kv_cache_torch_dtype,
-            kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
+        spec = self.attn.attn_backend.customize_spec(
+            AttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.attn.kv_cache_torch_dtype,
+                kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
+            )
         )
         supported = get_supported_kv_cache_layouts([self.attn.attn_backend])
         layout = resolve_kv_cache_layout(
@@ -272,6 +274,7 @@ elif current_platform.is_rocm():
     "batch_size", [7, 256, 533] if current_platform.is_cuda() else [8]
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "nvfp4"])
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
@@ -293,6 +296,7 @@ def test_attention_quant_pattern(
     head_size: int,
     batch_size: int,
     dtype: torch.dtype,
+    kv_cache_dtype: str,
     custom_ops: str,
     model_name: str,
     model_class: type[AttentionQuantPatternModel],
@@ -306,6 +310,16 @@ def test_attention_quant_pattern(
     ):
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if kv_cache_dtype == "nvfp4" and backend != AttentionBackendEnum.FLASHINFER:
+        pytest.skip("NVFP4 KV cache is only supported by FlashInfer")
+
+    # trtllm-gen has no NVFP4-KV kernel with NVFP4 output, so with an NVFP4 KV
+    # cache the FP4 output fusion must be rejected: the standalone
+    # scaled_fp4_quant stays in the graph and the result is unchanged. FP8 output
+    # fusion with NVFP4 KV is supported.
+    expect_fusion = not (
+        kv_cache_dtype == "nvfp4" and model_class.quant_key is kNvfp4Dynamic
+    )
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -332,7 +346,7 @@ def test_attention_quant_pattern(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
         ),
-        cache_config=CacheConfig(cache_dtype="fp8"),
+        cache_config=CacheConfig(cache_dtype=kv_cache_dtype),
         attention_config=AttentionConfig(backend=backend),
     )
 
@@ -410,7 +424,7 @@ def test_attention_quant_pattern(
 
         result_fused = compiled_fused(q, k, v)
 
-        if backend == AttentionBackendEnum.FLASHINFER:
+        if backend == AttentionBackendEnum.FLASHINFER and expect_fusion:
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
@@ -423,6 +437,8 @@ def test_attention_quant_pattern(
             torch.testing.assert_close(
                 result_unfused, result_fused_2, atol=1e-2, rtol=1e-2
             )
+        elif not expect_fusion:
+            assert compiled_fused.attn._o_scale_float is None
 
     # Check attn fusion support
     quant_key: QuantKey = model_class.quant_key
@@ -430,9 +446,14 @@ def test_attention_quant_pattern(
         layer.impl.fused_output_quant_supported(quant_key)
         for key, layer in vllm_config.compilation_config.static_forward_context.items()
     ]
-    assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
-        "All layers should support attention fusion"
-    )
+    if expect_fusion:
+        assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
+            "All layers should support attention fusion"
+        )
+    else:
+        assert sum(attn_fusion_supported) == 0, (
+            "No layer should support attention fusion"
+        )
 
     # Check quantization ops in the graph before and after fusion
     quant_op = (
@@ -441,9 +462,19 @@ def test_attention_quant_pattern(
         else QUANT_OPS[quant_key]
     )
 
-    # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
-    # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
+    if expect_fusion:
+        # Note: for fp8, fully_replaced=False because query quant ops remain in
+        # graph. Only output quant ops are fused into attention.
+        test_backend.check_before_ops(
+            [quant_op], fully_replaced=quant_key is kNvfp4Dynamic
+        )
+    else:
+        # Fusion rejected: the standalone output quant must survive untouched.
+        num_pre = test_backend.op_count(quant_op, before=True)
+        assert num_pre > 0, f"Op {quant_op} not found in pre-pass graph"
+        assert test_backend.op_count(quant_op) == num_pre, (
+            "Output quant op should remain when fusion is rejected"
+        )
 
     # access the underlying `AttnQuantFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
@@ -459,9 +490,14 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
         "Attention should not have output_scale before fusion"
     )
-    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-        "Attention should have output_scale after fusion"
-    )
+    if expect_fusion:
+        assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+            "Attention should have output_scale after fusion"
+        )
+    else:
+        assert attn_nodes_post[0].kwargs.get("output_scale") is None, (
+            "Attention should not have output_scale when fusion is rejected"
+        )
 
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
@@ -477,9 +513,9 @@ def test_attention_quant_pattern(
         "The kv_cache_dummy_dep should be consistent before and after fusion"
     )
 
-    if quant_key.dtype == FP8_DTYPE:
+    if quant_key.dtype == FP8_DTYPE or not expect_fusion:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
-            "Attention should not have output_block_scale after FP8 fusion"
+            "Attention should not have output_block_scale unless FP4 fusion happened"
         )
     elif quant_key.dtype == FP4_DTYPE:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
