@@ -1550,6 +1550,13 @@ class TestGlm5NextSamplingCaps:
         )
         assert seen["target_fps"] == source.original_fps
 
+        # No fps requested still means the sampler's own default, not the
+        # source rate.
+        Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source, VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+        )
+        assert seen["target_fps"] is None
+
     @pytest.mark.parametrize(
         "source",
         [
