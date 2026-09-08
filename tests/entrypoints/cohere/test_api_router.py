@@ -33,8 +33,8 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Response,
 )
 from vllm.entrypoints.cohere.serving import CohereServingChatV2
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
 )
@@ -58,6 +58,7 @@ def _enable_cohere_api(monkeypatch):
     flag inside the test body.
     """
     monkeypatch.setenv("VLLM_ENABLE_COHERE_API", "1")
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
 
 
 # ----------------------------------------------------------------------
@@ -402,11 +403,12 @@ class TestRenderEndpoint:
         assert "/cohere/v2/chat/render" in paths
 
     def test_route_not_registered_when_flag_unset(self, monkeypatch):
-        monkeypatch.delenv("VLLM_ENABLE_COHERE_API", raising=False)
+        monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
         app = FastAPI()
         attach_router(app)
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat/render" not in paths
+        assert "/cohere/v2/chat" in paths
 
     def test_returns_generate_request_json(self):
         render_handler = _RenderHandler(_generate_request())
