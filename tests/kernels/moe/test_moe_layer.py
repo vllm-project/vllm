@@ -164,7 +164,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
 # fmt: on
 
 # Which quantization methods support EPLB.
-# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
+# ModelOptMoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
 # TODO: double check modelopt fp8
 # modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
 EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
