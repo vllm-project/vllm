@@ -19,6 +19,11 @@ import torch
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_emit import (
+    _bmm_chunk_workspace_range_fwd,
+    _chunk_scan_workspace_range_fwd,
+    _workspace_chunk_cumsum_fwd,
+)
 
 
 class ExactReplayBuffers(NamedTuple):
@@ -132,8 +137,133 @@ def exact_replay_ssd(
         out.copy_(out_aug[meta.step_dst])
     if meta.boundary_rows.numel() > 0:
         ssm_state[slots64[meta.boundary_rows]] = states[meta.boundary_chunk_idx]
+    if meta.zero_state_rows.numel() > 0:
+        # No chunk completed yet: a zero state lets a single-row decode read
+        # the slot as its boundary state without a separate flag.
+        ssm_state[slots64[meta.zero_state_rows]] = 0
     if meta.store_src.numel() > 0:
         store_slot = slots64[meta.store_seq]
         buffers.x[store_slot, meta.store_pos] = x_aug[meta.store_src]
         buffers.dt[store_slot, meta.store_pos] = dt_aug[meta.store_src]
         buffers.B[store_slot, meta.store_pos] = B_aug[meta.store_src]
+
+
+def exact_replay_emit(
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    *,
+    A: torch.Tensor,
+    D: torch.Tensor,
+    dt_bias: torch.Tensor,
+    out: torch.Tensor,
+    ssm_state: torch.Tensor,
+    slots: torch.Tensor,
+    meta,
+    chunk_size: int,
+    buffers: ExactReplayBuffers,
+) -> None:
+    """One decode step, one token per sequence, through the row-gated kernels.
+
+    Instead of re-running the chunked scan over each sequence's partial chunk,
+    the step writes its token into the buffers and computes only that token's
+    output row from the buffered inputs and the boundary state in
+    ``ssm_state`` (zero while the sequence is still in its first chunk, see
+    ``zero_state_rows``). Sequences that complete a chunk fold it into the
+    boundary state with the single-shot kernels, so the bits match a
+    single-shot prefill exactly.
+
+    Args:
+        x, dt, B, C: ``(num_seqs, ...)`` inputs of this step's tokens.
+        A, D, dt_bias: per-head parameters as in :func:`exact_replay_ssd`.
+        out: ``(num_seqs, nheads, head_dim)`` preallocated output.
+        ssm_state: the fp32 SSM cache.
+        slots: ``(num_seqs,)`` state slot of each sequence.
+        meta: ``ExactReplayMetadata`` for these rows, all with one token.
+        chunk_size: the model's SSD chunk size.
+        buffers: the partial-chunk input buffers.
+    """
+    num_rows, nheads, head_dim = x.shape
+    ngroups, dstate = B.shape[1], B.shape[2]
+    device = x.device
+    slots64 = slots.to(torch.int64)
+    slots32 = slots.to(torch.int32)
+    pos32 = meta.row_pos
+    pos64 = pos32.to(torch.int64)
+
+    buffers.x[slots64, pos64] = x
+    buffers.dt[slots64, pos64] = dt
+    buffers.B[slots64, pos64] = B
+
+    rows = torch.arange(num_rows, dtype=torch.int32, device=device)
+    dt_out = torch.empty(
+        nheads, num_rows, chunk_size, dtype=torch.float32, device=device
+    )
+    dA_cumsum = torch.empty_like(dt_out)
+    cb = torch.empty(num_rows, ngroups, chunk_size, dtype=torch.float32, device=device)
+    _workspace_chunk_cumsum_fwd(
+        buffers.dt,
+        A,
+        chunk_size,
+        slots32,
+        pos32,
+        dt_bias,
+        dt_out=dt_out,
+        dA_cumsum=dA_cumsum,
+    )
+    _bmm_chunk_workspace_range_fwd(
+        C, buffers.B, chunk_size, slots32, pos32, rows, pos32, out=cb
+    )
+    _chunk_scan_workspace_range_fwd(
+        cb,
+        buffers.x,
+        dt_out,
+        dA_cumsum,
+        C,
+        ssm_state,
+        slots32,
+        slots32,
+        pos32,
+        rows,
+        pos32,
+        rows,
+        out,
+        D=D,
+    )
+
+    if meta.boundary_rows.numel() == 0:
+        return
+    # Fold the completed chunks into their boundary states with the same
+    # kernels a single-shot prefill uses; C does not enter the state.
+    fold_slots = slots64[meta.boundary_rows]
+    n_fold = fold_slots.numel()
+    x_f = buffers.x[fold_slots].reshape(n_fold * chunk_size, nheads, head_dim)
+    dt_f = buffers.dt[fold_slots].reshape(n_fold * chunk_size, nheads)
+    B_f = buffers.B[fold_slots].reshape(n_fold * chunk_size, ngroups, dstate)
+    cu = torch.arange(
+        0, (n_fold + 1) * chunk_size, chunk_size, dtype=torch.int32, device=device
+    )
+    seq = torch.arange(n_fold, dtype=torch.int32, device=device)
+    states = mamba_chunk_scan_combined_varlen(
+        x_f,
+        dt_f,
+        A,
+        B_f,
+        torch.zeros_like(B_f),
+        chunk_size=chunk_size,
+        D=D,
+        z=None,
+        dt_bias=dt_bias,
+        seq_idx=seq,
+        cu_seqlens=cu,
+        cu_chunk_seqlens=cu,
+        last_chunk_indices=seq,
+        initial_states=ssm_state[fold_slots],
+        return_intermediate_states=False,
+        dt_softplus=True,
+        dt_limit=(0.0, float("inf")),
+        out=torch.empty_like(x_f),
+        state_dtype=ssm_state.dtype,
+    )
+    ssm_state[fold_slots] = states

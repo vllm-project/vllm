@@ -29,6 +29,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.exact_replay import (
     ExactReplayBuffers,
+    exact_replay_emit,
     exact_replay_ssd,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -1134,7 +1135,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 slots_d = state_indices_tensor_d_input
                 if slots_d.dim() == 2:
                     slots_d = slots_d[:, 0]
-                exact_replay_ssd(
+                # One token per row: compute only that row from the buffered
+                # chunk instead of re-running the scan over the partial chunk.
+                replay_fn = (
+                    exact_replay_emit
+                    if num_decode_tokens == num_decodes
+                    else exact_replay_ssd
+                )
+                replay_fn(
                     hidden_states_d.view(
                         -1, self.num_heads // self.tp_size, self.head_dim
                     ),

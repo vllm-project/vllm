@@ -199,6 +199,13 @@ class ExactReplayMetadata:
     store_src: torch.Tensor
     store_seq: torch.Tensor
     store_pos: torch.Tensor
+    row_pos: torch.Tensor
+    """``(num_seqs,)`` int32: position inside the chunk of each sequence's
+    first token of this step (tokens already buffered before it)."""
+    zero_state_rows: torch.Tensor
+    """Sequences that still have no completed chunk after this step; their
+    SSM state slot is zeroed so a later single-row decode can read it as the
+    boundary state."""
 
 
 def build_exact_replay_metadata(
@@ -232,6 +239,8 @@ def build_exact_replay_metadata(
     store_src: list[int] = []
     store_seq: list[int] = []
     store_pos: list[int] = []
+    row_pos: list[int] = []
+    zero_state_rows: list[int] = []
     offset = 0
     for i, (nc, q) in enumerate(zip(num_computed, query_lens)):
         n_pre = nc % chunk_size
@@ -261,6 +270,9 @@ def build_exact_replay_metadata(
             store_src.extend(range(base, base + tail_len))
             store_seq.extend([i] * tail_len)
             store_pos.extend(range(tail_len))
+        row_pos.append(n_pre)
+        if nc - n_pre == 0 and full == 0:
+            zero_state_rows.append(i)
         offset += aug_len
         cu_seqlens.append(offset)
     cu_chunk.append(offset)
@@ -289,6 +301,8 @@ def build_exact_replay_metadata(
         store_src=i64(store_src),
         store_seq=i64(store_seq),
         store_pos=i64(store_pos),
+        row_pos=i32(row_pos),
+        zero_state_rows=i64(zero_state_rows),
     )
 
 
