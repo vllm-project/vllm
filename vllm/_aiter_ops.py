@@ -211,6 +211,31 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def _validate_rocm_aiter_fused_moe_shared_expert_args(
+    shared_w1: torch.Tensor | None,
+    shared_w2: torch.Tensor | None,
+    shared_w1_scale: torch.Tensor | None,
+    shared_w2_scale: torch.Tensor | None,
+    shared_expert_id: int,
+) -> bool:
+    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
+    has_shared_expert = any(tensor is not None for tensor in shared_tensors)
+    if has_shared_expert:
+        if not all(tensor is not None for tensor in shared_tensors):
+            raise ValueError(
+                "Heterogeneous fused MoE requires both shared weights and scales."
+            )
+        if shared_expert_id < 0:
+            raise ValueError(
+                "Heterogeneous fused MoE requires a non-negative shared expert ID."
+            )
+    elif shared_expert_id >= 0:
+        raise ValueError(
+            "A non-negative shared expert ID requires shared weights and scales."
+        )
+    return has_shared_expert
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -236,7 +261,20 @@ def _rocm_aiter_fused_moe_impl(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
+    has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
+        shared_w1,
+        shared_w2,
+        shared_w1_scale,
+        shared_w2_scale,
+        shared_expert_id,
+    )
+
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
@@ -252,6 +290,15 @@ def _rocm_aiter_fused_moe_impl(
     ):
         extra_kwargs["beta"] = beta
         extra_kwargs["linear_beta"] = linear_beta
+
+    if has_shared_expert:
+        extra_kwargs.update(
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+        )
 
     return fused_moe(
         hidden_states,
@@ -304,6 +351,11 @@ def _rocm_aiter_fused_moe_fake(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -387,18 +439,6 @@ def _rocm_aiter_topk_softmax_impl(
     )
 
 
-def _rocm_aiter_topk_softmax_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    num_shared_experts: int = 0,
-    shared_expert_scoring_func: str = "",
-) -> None:
-    pass
-
-
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -407,14 +447,6 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(topk_weights, topk_indices, gating_output)
-
-
-def _rocm_aiter_topk_sigmoid_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-) -> None:
-    pass
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -441,19 +473,6 @@ def _rocm_aiter_biased_grouped_topk_impl(
     )
 
 
-def _rocm_aiter_biased_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
-
-
 def _rocm_aiter_grouped_topk_impl(
     gating_output: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -477,19 +496,6 @@ def _rocm_aiter_grouped_topk_impl(
         is_softmax,
         routed_scaling_factor,
     )
-
-
-def _rocm_aiter_grouped_topk_fake(
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
-    need_renorm: bool,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,  # mul to topk_weights
-) -> None:
-    pass
 
 
 def _rocm_aiter_fused_topk_impl(
@@ -618,7 +624,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
     )
 
 
-def _rocm_aiter_mla_decode_fwd_fake(
+def _rocm_aiter_mla_decode_fwd_lse_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
     o: torch.Tensor,
@@ -631,14 +637,95 @@ def _rocm_aiter_mla_decode_fwd_fake(
     logit_cap: float = 0.0,
     q_scale: torch.Tensor | None = None,
     kv_scale: torch.Tensor | None = None,
-    work_meta_data: torch.Tensor | None = None,
-    work_indptr: torch.Tensor | None = None,
-    work_info_set: torch.Tensor | None = None,
-    reduce_indptr: torch.Tensor | None = None,
-    reduce_final_map: torch.Tensor | None = None,
-    reduce_partial_map: torch.Tensor | None = None,
-) -> None:
-    pass
+) -> torch.Tensor:
+    """Run non-persistent AITER MLA decode and return natural-log LSE.
+
+    gfx942 persistent MLA kernels do not provide an LSE code object. Keeping
+    this as a separate op makes that constraint structural: callers that need
+    LSE cannot accidentally forward persistent work metadata.
+    """
+    from aiter.mla import get_meta_param, mla_decode_fwd
+
+    kwargs: dict[str, float | int | torch.Tensor | None | bool] = {
+        "sm_scale": sm_scale,
+        "logit_cap": logit_cap,
+        "return_lse": True,
+    }
+    if _check_aiter_mla_fp8_support():
+        kwargs["q_scale"] = q_scale
+        kwargs["kv_scale"] = kv_scale
+
+    if (
+        q.dtype == torch.bfloat16
+        and kv_buffer.dtype == torch.bfloat16
+        and q.shape[1] == 32
+    ):
+        from vllm.platforms.rocm import on_gfx950
+
+        if on_gfx950():
+            # The gfx950 H32 BF16 kernel mishandles ragged tails with split KV.
+            # Its single-split path returns correct output and natural-log LSE.
+            kwargs["num_kv_splits"] = 1
+            kwargs["num_kv_splits_indptr"] = torch.arange(
+                qo_indptr.shape[0], dtype=torch.int32, device=q.device
+            )
+
+    if q.dtype == FP8_DTYPE:
+        assert kv_indices is not None
+        num_kv_splits, num_kv_splits_indptr = get_meta_param(
+            None,
+            qo_indptr.shape[0] - 1,
+            kv_indices.numel(),
+            q.shape[1],
+            max_seqlen_qo,
+            q.dtype,
+        )
+        if num_kv_splits == 1:
+            # gfx942's one-split FP8 asm writes the final output directly but
+            # does not write either LSE buffer. Force the normal split reducer,
+            # which produces both the same output and an accurate natural LSE.
+            num_kv_splits = 2
+            num_kv_splits_indptr = torch.arange(
+                0,
+                (qo_indptr.shape[0]) * num_kv_splits,
+                num_kv_splits,
+                dtype=torch.int32,
+                device=q.device,
+            )
+        kwargs["num_kv_splits"] = num_kv_splits
+        kwargs["num_kv_splits_indptr"] = num_kv_splits_indptr
+
+    _, final_lse = mla_decode_fwd(
+        q,
+        kv_buffer.view(-1, 1, 1, q.shape[-1]),
+        o,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        max_seqlen_qo,
+        **kwargs,
+    )
+    if final_lse is None:
+        raise RuntimeError("AITER MLA decode did not return the requested LSE")
+    return final_lse
+
+
+def _rocm_aiter_mla_decode_fwd_lse_fake(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
+    sm_scale: float = 1.0,
+    logit_cap: float = 0.0,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(q.shape[:-1], dtype=torch.float32, device=q.device)
 
 
 def _rocm_aiter_w8a8_gemm_impl(
@@ -894,33 +981,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
-
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.numel() // hidden_dim
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.custom_fused_ar_rms(
         input_,
@@ -928,6 +994,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         weight,
         epsilon,
         use_1stage=use_1stage,
+        gemma_norm=gemma_norm,
     )
     assert result is not None
     return result[0], result[1]
@@ -938,6 +1005,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
 
@@ -949,38 +1017,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + RMSNorm + per-group FP8 quant.
-
-    Mirrors the eligibility logic of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``
-    for the 1-stage vs 2-stage AITER kernel dispatch (both variants run inside
-    AITER, the only choice we make here is the launcher to call into).
-    """
+    """Fused AllReduce + RMSNorm + per-group FP8 quant."""
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
 
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.numel() // hidden_dim
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.fused_ar_rms_per_group_quant(
         input_,
@@ -1032,28 +1074,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
 
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.fused_ar_rms_per_group_quant(
         input_,
@@ -1102,15 +1123,6 @@ def _rocm_aiter_per_tensor_quant_impl(
         dynamic_per_tensor_quant(out, x, scale)
     else:
         static_per_tensor_quant(out, x, scale)
-
-
-def _rocm_aiter_per_tensor_quant_fake(
-    out: torch.Tensor,
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    is_dynamic: bool,
-) -> None:
-    pass
 
 
 def _rocm_aiter_per_token_quant_impl(
@@ -1597,18 +1609,6 @@ def _triton_rotary_embedding_impl(
     key = key.view(key_shape)
 
 
-def _triton_rotary_embedding_fake(
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    head_size: int,
-    cos_sin_cache: torch.Tensor,
-    is_neox_style: bool,
-    offsets: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 def _rocm_aiter_fp8_attn_impl(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2088,6 +2088,44 @@ class rocm_aiter_ops:
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
     @staticmethod
+    def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
+        """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
+        if type(num_tokens) is not int or num_tokens <= 0:
+            return False
+
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter.fused_moe import fused_moe
+
+            params = inspect.signature(fused_moe).parameters
+            supports_dsv4_i384_fhmoe = getattr(fhmoe, "supports_dsv4_i384_fhmoe", None)
+            if not callable(supports_dsv4_i384_fhmoe):
+                return False
+            supports_num_tokens = supports_dsv4_i384_fhmoe(num_tokens)
+        except Exception:
+            return False
+
+        return supports_num_tokens is True and all(
+            name in params
+            for name in (
+                "shared_w1",
+                "shared_w2",
+                "shared_w1_scale",
+                "shared_w2_scale",
+                "shared_expert_id",
+            )
+        )
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
+        """Whether AITER has DSV4 native-I384 configs through the given M."""
+        return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
 
@@ -2132,7 +2170,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_softmax",
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-                fake_impl=_rocm_aiter_topk_softmax_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2140,7 +2177,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_topk_sigmoid",
                 op_func=_rocm_aiter_topk_sigmoid_impl,
                 mutates_args=["topk_weights", "topk_indices"],
-                fake_impl=_rocm_aiter_topk_sigmoid_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2148,7 +2184,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_biased_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2156,7 +2191,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_grouped_topk",
                 op_func=_rocm_aiter_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
-                fake_impl=_rocm_aiter_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2172,7 +2206,13 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
-                fake_impl=_rocm_aiter_mla_decode_fwd_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_mla_decode_fwd_lse",
+                op_func=_rocm_aiter_mla_decode_fwd_lse_impl,
+                mutates_args=["o"],
+                fake_impl=_rocm_aiter_mla_decode_fwd_lse_fake,
             )
 
             direct_register_custom_op(
@@ -2266,7 +2306,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=["out", "scale"],
-                fake_impl=_rocm_aiter_per_tensor_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2306,7 +2345,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_triton_rotary_embedding",
                 op_func=_triton_rotary_embedding_impl,
                 mutates_args=["query", "key"],  # These tensors are modified in-place
-                fake_impl=_triton_rotary_embedding_fake,
             )
 
             direct_register_custom_op(
@@ -2562,6 +2600,11 @@ class rocm_aiter_ops:
         swiglu_limit: float = 0.0,
         beta: float | None = None,
         linear_beta: float | None = None,
+        shared_w1: torch.Tensor | None = None,
+        shared_w2: torch.Tensor | None = None,
+        shared_w1_scale: torch.Tensor | None = None,
+        shared_w2_scale: torch.Tensor | None = None,
+        shared_expert_id: int = -1,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2588,6 +2631,11 @@ class rocm_aiter_ops:
             swiglu_limit,
             beta,
             linear_beta,
+            shared_w1,
+            shared_w2,
+            shared_w1_scale,
+            shared_w2_scale,
+            shared_expert_id,
         )
 
     @staticmethod
@@ -2751,6 +2799,37 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+        )
+
+    @staticmethod
+    def mla_decode_fwd_lse(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        qo_indptr: torch.Tensor,
+        max_seqlen_qo: int,
+        kv_indptr: torch.Tensor | None = None,
+        kv_indices: torch.Tensor | None = None,
+        kv_last_page_lens: torch.Tensor | None = None,
+        logit_cap: float = 0.0,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run MLA decode without persistent metadata and return its LSE."""
+        return torch.ops.vllm.rocm_aiter_mla_decode_fwd_lse(
+            q,
+            kv_buffer.view(-1, 1, 1, q.shape[-1]),
+            o,
+            qo_indptr,
+            max_seqlen_qo,
+            kv_indptr,
+            kv_indices,
+            kv_last_page_lens,
+            sm_scale=sm_scale,
+            logit_cap=logit_cap,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
         )
 
     @staticmethod
@@ -3170,6 +3249,13 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
         return shuffle_scale_a16w4(tensor, num_experts, gate_up)
+
+    @staticmethod
+    def shuffle_scale(tensor: torch.Tensor) -> torch.Tensor:
+        """Shuffle a non-gate/up E8M0 scale tensor for AITER."""
+        from aiter.ops.shuffle import shuffle_scale
+
+        return shuffle_scale(tensor)
 
     @staticmethod
     def shuffle_weights(
