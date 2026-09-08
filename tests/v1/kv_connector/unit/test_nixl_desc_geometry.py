@@ -463,8 +463,12 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
         remote_num_logical=12,
         remote_ssm_sizes=(24, 32),
     )
-    for rank in (0, 1):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=2)
+    worker._remote_agents[meta_r.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            meta_r, remote_tp_rank=rank, remote_tp_size=2
+        )
+        for rank in (0, 1)
+    }
 
     # Request B: 17 matched tokens. Local: 2 logical blocks (24 tok
     # capacity); remote: 16 prefilled tokens -> 2 remote logical blocks.
@@ -563,8 +567,12 @@ def _run_hetero_case(
         remote_num_logical=max(2 * n_remote + 4, 8),
         remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
     )
-    for rank in range(tp_size):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=tp_size)
+    worker._remote_agents[meta_r.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            meta_r, remote_tp_rank=rank, remote_tp_size=tp_size
+        )
+        for rank in range(tp_size)
+    }
 
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]

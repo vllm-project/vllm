@@ -2347,10 +2347,14 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
+        already_reported = set[ReqId]()
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
-            assert meta is not None, f"{req_id} not found in recving_metadata list"
+            if meta is None:
+                # A failed request may still have reads draining on later steps.
+                already_reported.add(req_id)
+                continue
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -2411,6 +2415,8 @@ class NixlBaseConnectorWorker:
 
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
+
+        done_recving -= already_reported
 
         self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
 
@@ -2540,18 +2546,24 @@ class NixlBaseConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # (multi-read) One handle is created per remote rank, and they do not
-        # all fail in the same _pop_done_transfers poll. The request is
-        # reported failed on the first one, which pops its metadata in
-        # get_finished(); on the later failures only the handle cleanup is left.
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) is not None:
-            if not self._is_hma_required:
-                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-            self._failed_recv_reqs.put(req_id)
+        self._fail_recv_request(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
+
+    def _fail_recv_request(self, req_id: str) -> None:
+        meta = self._recving_metadata.get(req_id)
+        if meta is None:
+            # An earlier failed read already completed this request.
+            return
+        if not any(meta.local_block_ids):
+            # Notification-only requests have no pending receive in the scheduler.
+            self._recving_metadata.pop(req_id)
+            return
+        # TODO (NickLucche) handle failed transfer for HMA.
+        if not self._is_hma_required:
+            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+        self._failed_recv_reqs.put(req_id)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
