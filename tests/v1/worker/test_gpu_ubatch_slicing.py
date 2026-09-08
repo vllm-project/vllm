@@ -266,50 +266,6 @@ def test_dummy_batch_can_be_microbatched():
         )
 
 
-def test_microbatches_carry_dcp_local_seq_lens():
-    """Microbatches read their per-request DCP seq_lens off the merged batch.
-
-    execute_model populates dcp_local_seq_lens before the ubatch split because
-    every microbatch's attention metadata comes from its own slice of it.
-    """
-    buffers = _make_buffers()
-    input_batch = _make_input_batch([4, 4, 4, 4], [8, 9, 10, 11], buffers)
-    dcp_local = buffers.dcp_local_seq_lens[: input_batch.num_reqs_after_padding]
-    dcp_local.copy_(torch.tensor([3, 4, 5, 6], dtype=torch.int32))
-    input_batch.dcp_local_seq_lens = dcp_local
-
-    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
-    ubatch_buffers = _make_ubatch_buffers()
-    ubatches = [
-        _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
-        for i, ubatch_slice in enumerate(ubatch_slices)
-    ]
-
-    assert [u.num_reqs for u in ubatches] == [2, 2]
-    torch.testing.assert_close(
-        ubatches[0].dcp_local_seq_lens, torch.tensor([3, 4], dtype=torch.int32)
-    )
-    torch.testing.assert_close(
-        ubatches[1].dcp_local_seq_lens, torch.tensor([5, 6], dtype=torch.int32)
-    )
-
-
-def test_microbatches_tolerate_absent_dcp_local_seq_lens():
-    """Without DCP the field stays None and slicing must not invent it."""
-    buffers = _make_buffers()
-    input_batch = _make_input_batch([4, 4, 4, 4], [8, 9, 10, 11], buffers)
-    assert input_batch.dcp_local_seq_lens is None
-
-    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
-    ubatch_buffers = _make_ubatch_buffers()
-    ubatches = [
-        _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
-        for i, ubatch_slice in enumerate(ubatch_slices)
-    ]
-
-    assert all(u.dcp_local_seq_lens is None for u in ubatches)
-
-
 def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,

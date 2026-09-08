@@ -1688,7 +1688,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not (dummy_run and skip_attn_for_dummy_run):
             maybe_prepare_dcp_local_seq_lens(
                 input_batch,
-                self.input_buffers,
+                (
+                    self.pcp_manager.input_buffers
+                    if self.pcp_manager is not None
+                    else self.input_buffers
+                ),
                 self.dcp_size,
                 self.dcp_rank,
                 self.cp_interleave,
