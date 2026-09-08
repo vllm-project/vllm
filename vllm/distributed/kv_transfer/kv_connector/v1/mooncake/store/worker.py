@@ -942,7 +942,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
             block_ids_per_group = req_meta.block_ids
             current_event = req_meta.current_event
 
-            if not self.is_live_store_job(req_meta):
+            # A pinned hand-off (finish or preemption) owns exact block refs and
+            # carries no resume offset, so it stays valid after the request's
+            # ledger entry was retired (preemption retires it in the same
+            # step the job is issued).
+            is_pinned_handoff = req_meta.token_len_chunk == 0 and bool(
+                req_meta.boundary_state_offloads
+            )
+            if not is_pinned_handoff and not self.is_live_store_job(req_meta):
                 return
 
             if self.enable_kv_event:
@@ -1652,6 +1659,7 @@ class MooncakeStoreWorker:
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         self.finished_store_req: set[str] = set()
+        self._issued_store_metadata: MooncakeStoreConnectorMetadata | None = None
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
@@ -2023,6 +2031,13 @@ class MooncakeStoreWorker:
         """
         if self._capacity_only or not self.can_put:
             return
+        self._issue_store_jobs(metadata)
+
+    def _issue_store_jobs(self, metadata: MooncakeStoreConnectorMetadata) -> None:
+        """Queue this step's store jobs once, whether or not a forward ran."""
+        if metadata is self._issued_store_metadata:
+            return
+        self._issued_store_metadata = metadata
 
         current_event = None
         for request in metadata.requests:
@@ -2049,6 +2064,10 @@ class MooncakeStoreWorker:
             return set(), set()
 
         if self.can_put:
+            # A step without a forward skips wait_for_save. Jobs whose blocks
+            # were written by earlier steps (pinned boundary hand-offs) must
+            # still be issued, otherwise their block references never drop.
+            self._issue_store_jobs(meta)
             self._close_ended_store_requests(finished_req_ids, meta)
 
         # Blocks read by a store job are released by the scheduler when the job
