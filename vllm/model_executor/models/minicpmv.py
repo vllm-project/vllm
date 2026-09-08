@@ -1797,31 +1797,13 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-    ) -> EncoderCudaGraphCaptureInputs:
-        # Without capture-axis context, use the largest (full-resolution)
-        # patch grid.
-        return self._mcpmv_capture_inputs(
-            token_budget,
-            max_batch_size,
-            max_frames_per_batch,
-            device,
-            dtype,
-            patch_grid=self._mcpmv_patch_grid_keys()[-1],
-        )
-
-    def prepare_encoder_cudagraph_capture_inputs_for_axes(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        device: torch.device,
-        dtype: torch.dtype,
-        path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         patch_grid = (
             cast("tuple[int, int]", axis_keys[0])
             if axis_keys
+            # Without capture-axis context, use the largest (full-resolution)
+            # patch grid.
             else self._mcpmv_patch_grid_keys()[-1]
         )
         return self._mcpmv_capture_inputs(

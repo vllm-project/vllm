@@ -1964,8 +1964,16 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """Create dummy inputs and buffers for CUDA graph capture."""
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Args:
+            axis_keys: The resolved capture-axis keys (one per axis of
+                ``EncoderCudaGraphConfig.capture_axes``) this capture is for.
+                None or empty when no capture axes are configured; models
+                without capture axes ignore it.
+        """
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1999,31 +2007,6 @@ class SupportsEncoderCudaGraph(Protocol):
         Used as eager fallback when inputs exceed all budgets.
         """
         ...
-
-    def prepare_encoder_cudagraph_capture_inputs_for_axes(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        device: torch.device,
-        dtype: torch.dtype,
-        path: str = "default",
-        axis_keys: tuple[Hashable, ...] | None = None,
-    ) -> "EncoderCudaGraphCaptureInputs":
-        """prepare_encoder_cudagraph_capture_inputs variant aware of
-        capture axes.
-
-        By default, delegates to prepare_encoder_cudagraph_capture_inputs and
-        ignores the keys.
-        """
-        return self.prepare_encoder_cudagraph_capture_inputs(
-            token_budget,
-            max_batch_size,
-            max_frames_per_batch,
-            device,
-            dtype,
-            path,
-        )
 
 
 @overload

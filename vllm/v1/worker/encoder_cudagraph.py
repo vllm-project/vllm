@@ -307,7 +307,7 @@ class EncoderCudaGraphManager:
 
         graph_set = self._get_graph_set(path)
 
-        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs_for_axes(
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
