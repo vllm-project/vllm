@@ -54,7 +54,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMxFp8Config,
@@ -130,13 +129,19 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 
 
-def test_legacy_fp8_online_quantization_prompts_new_interface() -> None:
-    """Legacy FP8 online quantization directs users to its replacement."""
-    with pytest.raises(
-        ValueError,
-        match="--quantization fp8_per_tensor.*online/",
-    ):
-        Fp8Config(is_checkpoint_fp8_serialized=False)
+def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
+    tmp_path, caplog, disable_log_dedup
+) -> None:
+    """Legacy FP8 online quantization uses the per-tensor shorthand."""
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path), quantization="fp8")
+
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, OnlineQuantizationConfig)
+    assert result.args == resolve_quantization_config("fp8_per_tensor", None)
+    assert "--quantization fp8 is deprecated for online quantization" in caplog.text
+    assert "--quantization fp8_per_tensor instead" in caplog.text
 
 
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(

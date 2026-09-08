@@ -383,11 +383,12 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
-        # TODO: Remove `is_checkpoint_fp8_serialized` altogether in a future release.
         if model_config.quantization == "fp8":
-            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
-            return Fp8Config(is_checkpoint_fp8_serialized=False)
+            logger.warning(
+                "--quantization fp8 is deprecated for online quantization; "
+                "use --quantization fp8_per_tensor instead."
+            )
+            return OnlineQuantizationConfig(args=_ONLINE_SHORTHANDS["fp8_per_tensor"])
         if model_config.quantization in _ONLINE_SHORTHANDS:
             args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
             assert isinstance(args, QuantizationConfigArgs)
