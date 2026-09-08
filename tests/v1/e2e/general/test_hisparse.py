@@ -5,6 +5,7 @@ import prometheus_client
 import pytest
 
 from tests.conftest import VllmRunner
+from tests.utils import fork_new_process_for_each_test
 from vllm.config import AttentionConfig, HiSparseConfig, KVTransferConfig
 from vllm.platforms import current_platform
 
@@ -52,6 +53,7 @@ def _offload_load_bytes() -> float:
 @pytest.mark.parametrize(
     "with_offloading", [False, True], ids=["standalone", "offload"]
 )
+@fork_new_process_for_each_test
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
