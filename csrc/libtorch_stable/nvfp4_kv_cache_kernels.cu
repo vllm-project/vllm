@@ -180,12 +180,13 @@ __global__ void reshape_and_cache_nvfp4_kernel(
     const int64_t key_stride,                  // key.stride(0) in elements
     const int64_t value_stride,                // value.stride(0) in elements
     const int num_heads, const int head_size, const int block_size,
-    const int64_t data_block_stride,         // data cache stride for dim 0
-    const int64_t data_head_stride,          // data cache stride for heads
-    const int64_t data_block_offset_stride,  // data cache stride for tokens
-    const int64_t scale_block_stride,        // scale cache stride for dim 0
-    const int64_t scale_head_stride,         // scale cache stride for heads
-    const int64_t scale_block_offset_stride  // scale cache stride for tokens
+    const int64_t data_block_stride,          // data cache stride for dim 0
+    const int64_t data_head_stride,           // data cache stride for heads
+    const int64_t data_block_offset_stride,   // data cache stride for tokens
+    const int64_t scale_block_stride,         // scale cache stride for dim 0
+    const int64_t scale_head_stride,          // scale cache stride for heads
+    const int64_t scale_block_offset_stride,  // scale cache stride for tokens
+    const bool swizzle_v_sf  // SM100 trtllm-gen swizzle or SM12x linear scales.
 ) {
   using CudaType = typename CUDATypeConverter<scalar_t>::Type;
   using PVec = PackedVec<CudaType, CVT_FP4_PACK16>;
@@ -280,12 +281,11 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 #endif
 
       // Write block scale to scale cache.
-      // K (kv==0): linear layout (no swizzle).
-      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
+      // K is linear; V uses the reader's architecture-specific scale layout.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
         uint8_t* __restrict__ scale_dst;
-        if (kv == 0) {
+        if (kv == 0 || !swizzle_v_sf) {
           scale_dst = scale_block + head * scale_head_stride +
                       block_offset * scale_block_offset_stride + scale_idx;
         } else {
@@ -332,9 +332,26 @@ void reshape_and_cache_nvfp4_dispatch(
 
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
-  STD_TORCH_CHECK(block_size % 4 == 0,
-                  "block_size must be divisible by 4 for NVFP4 KV cache "
-                  "swizzle");
+
+  // get_device_prop() queries the active device.
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      key.get_device_index());
+
+  // Direct callers on SM12x expect linear V scales, as do FlashInfer FA2/XQA
+  // readers. SM100 trtllm-gen keeps its four-token V-scale swizzle. Serving
+  // on SM12x uses FlashInfer's slot-mapping writer instead of this dispatch.
+  const bool swizzle_v_sf = get_device_prop()->major != 12;
+
+  STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
+                  "block_size must be divisible by 4 for NVFP4 KV cache V "
+                  "scale-factor swizzle (SM100 trtllm-gen path)");
+
+  // The swizzle requires complete four-token, four-scale groups.
+  STD_TORCH_CHECK(!swizzle_v_sf || scale_dim % 4 == 0,
+                  "head_size must be divisible by 64 (scale_dim divisible by "
+                  "4) for the NVFP4 KV cache V scale-factor swizzle (SM100 "
+                  "trtllm-gen path); got head_size=",
+                  head_size);
 
   // Detect physical layout from strides (based on full_dim).
   // HND: head stride > block_offset stride.
@@ -381,8 +398,6 @@ void reshape_and_cache_nvfp4_dispatch(
   dim3 grid(num_tokens);
   dim3 block(num_threads);
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
@@ -400,7 +415,7 @@ void reshape_and_cache_nvfp4_dispatch(
                   num_heads, head_size, block_size, data_block_stride,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
-                  scale_block_offset_stride);
+                  scale_block_offset_stride, swizzle_v_sf);
         } else if (kv_cache_dtype == "nvfp4_4over6") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
@@ -414,10 +429,16 @@ void reshape_and_cache_nvfp4_dispatch(
                   num_heads, head_size, block_size, data_block_stride,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
-                  scale_block_offset_stride);
+                  scale_block_offset_stride, swizzle_v_sf);
         } else {
           STD_TORCH_CHECK(false,
                           "Unsupported NVFP4 KV cache dtype: ", kv_cache_dtype);
         }
+        const cudaError_t launch_err = cudaGetLastError();
+        STD_TORCH_CHECK(
+            launch_err == cudaSuccess,
+            "reshape_and_cache_nvfp4 launch failed: ",
+            cudaGetErrorString(launch_err), " (device compute capability ",
+            get_device_prop()->major, ".", get_device_prop()->minor, ")");
       });
 }
