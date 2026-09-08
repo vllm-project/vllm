@@ -1787,7 +1787,10 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
                 num_local_experts=moe_config.num_local_experts,
                 topk=moe_config.experts_per_token,
             )
-        _register_pow2_routing_warmup(moe_config)
+        if not use_legacy_triton_kernels or (
+            moe_config.num_local_experts < moe_config.num_experts
+        ):
+            _register_pow2_routing_warmup(moe_config)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
