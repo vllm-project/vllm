@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm.model_executor.models.deepencoder as deepencoder
-from vllm.model_executor.kernels.deepencoder_attention import (
+from vllm.model_executor.models.deepencoder import (
     deepencoder_rel_pos_attention,
 )
 
@@ -76,6 +76,29 @@ def test_triton_attention_matches_dense_decomposed_bias(
     assert actual.dtype == expected.dtype
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_triton_attention_rejects_cross_device_bias() -> None:
+    batch, heads, height, width, dim = 1, 2, 2, 3, 64
+    tokens = height * width
+    q = torch.randn(batch, heads, tokens, dim, device="cuda", dtype=torch.float16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    rel_h = torch.randn(batch, heads, tokens, height, dtype=torch.float16)
+    rel_w = torch.randn(batch, heads, tokens, width, device="cuda", dtype=torch.float16)
+
+    with pytest.raises(AssertionError):
+        deepencoder_rel_pos_attention(
+            q,
+            k,
+            v,
+            rel_h,
+            rel_w,
+            height,
+            width,
+            dim**-0.5,
+        )
 
 
 def test_rel_pos_attention_cpu_fallback() -> None:

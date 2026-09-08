@@ -16,12 +16,10 @@ import torch
 import torch.nn.functional as F
 
 import vllm
-from vllm.model_executor.kernels.deepencoder_attention import (
-    deepencoder_rel_pos_attention,
-)
 from vllm.model_executor.models.deepencoder import (
     RelPosAttention,
     add_decomposed_rel_pos,
+    deepencoder_rel_pos_attention,
 )
 
 SHAPES = {
