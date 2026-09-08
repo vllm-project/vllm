@@ -135,11 +135,9 @@ curl http://localhost:8000/detect \
   -d '{"text":"Text to inspect"}'
 ```
 
-The example server is a reference implementation, not a public detection
-service. Access to scores or p-values creates a detector oracle: an adversary can
-recover token-level contributions with adaptive queries and use them to remove
-or forge the watermark. Production services should restrict access and apply
-authentication, authorization, and rate limits.
+Scores and p-values expose information about the per-token watermark signal.
+Repeated queries can use this information to construct text that imitates
+watermarked output or to modify watermarked text so it is no longer detected.
 
 ## Limitations
 
