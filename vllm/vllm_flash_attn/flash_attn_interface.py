@@ -445,6 +445,7 @@ def compile_flash_attn_varlen_func_from_specs(
     v_shape: tuple[int, ...],
     q_dtype: torch.dtype,
     v_stride: tuple[int, ...] | None = None,
+    k_stride: tuple[int, ...] | None = None,
     cu_seqlens_q_shape: tuple[int, ...] | None = None,
     cu_seqlens_k_shape: tuple[int, ...] | None = None,
     max_seqlen_q: int | None = None,
@@ -457,6 +458,12 @@ def compile_flash_attn_varlen_func_from_specs(
     return_softmax_lse=False,
     num_splits: int = 0,
     fa_version: int = DEFAULT_FA_VERSION,
+    seqused_k_shape: tuple[int, ...] | None = None,
+    page_table_shape: tuple[int, ...] | None = None,
+    q_descale: bool = False,
+    k_descale: bool = False,
+    v_descale: bool = False,
+    softcap: float | None = None,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -467,7 +474,8 @@ def compile_flash_attn_varlen_func_from_specs(
     del deterministic
 
     from vllm.vllm_flash_attn.cute.interface import (
-        compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
+        _flash_attn_fwd,
+        _make_compile_only_tensor_spec,
     )
 
     real_window_size: tuple[int, int]
@@ -480,21 +488,64 @@ def compile_flash_attn_varlen_func_from_specs(
     if softmax_scale is None:
         softmax_scale = q_shape[-1] ** (-0.5)
 
-    return _fa4_compile_flash_attn_varlen_func_from_specs(
-        q_shape=q_shape,
-        k_shape=k_shape,
-        v_shape=v_shape,
-        q_dtype=q_dtype,
-        v_stride=v_stride,
-        cu_seqlens_q_shape=cu_seqlens_q_shape,
-        cu_seqlens_k_shape=cu_seqlens_k_shape,
+    q = _make_compile_only_tensor_spec(q_shape, q_dtype)
+    k = _make_compile_only_tensor_spec(k_shape, q_dtype, stride=k_stride)
+    v = _make_compile_only_tensor_spec(v_shape, q_dtype, stride=v_stride)
+    out = _make_compile_only_tensor_spec(
+        (*q_shape[:-1], v_shape[-1]),
+        q_dtype,
+    )
+    lse = None
+    if return_softmax_lse:
+        assert q is not None
+        if cu_seqlens_q_shape is None:
+            lse_shape = (*q.shape[:-3], q.shape[-2], q.shape[-3])
+            lse_stride = None
+        else:
+            lse_shape = (q.shape[-2], q.shape[0])
+            lse_stride = (None, 1)
+        lse = _make_compile_only_tensor_spec(
+            lse_shape,
+            torch.float32,
+            4,
+            stride=lse_stride,
+        )
+
+    return _flash_attn_fwd(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=_make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4),
+        cu_seqlens_k=_make_compile_only_tensor_spec(cu_seqlens_k_shape, torch.int32, 4),
+        seqused_k=_make_compile_only_tensor_spec(seqused_k_shape, torch.int32, 4),
+        page_table=_make_compile_only_tensor_spec(page_table_shape, torch.int32, 4),
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
         causal=causal,
-        window_size=real_window_size,
+        softcap=softcap,
+        window_size_left=real_window_size[0],
+        window_size_right=real_window_size[1],
         num_splits=num_splits,
         return_lse=return_softmax_lse,
+        out=out,
+        lse=lse,
+        q_descale=(
+            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            if q_descale
+            else None
+        ),
+        k_descale=(
+            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            if k_descale
+            else None
+        ),
+        v_descale=(
+            _make_compile_only_tensor_spec((1,), torch.float32, 4)
+            if v_descale
+            else None
+        ),
+        compile_only=True,
     )
 
 
