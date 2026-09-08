@@ -37,17 +37,9 @@ class ECCPUConnector(ECConnectorBase):
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
         super().__init__(vllm_config=vllm_config, role=role)
 
-        ec_config = vllm_config.ec_transfer_config
-        assert ec_config is not None
-        raw_nixl = ec_config.get_from_extra_config("ec_enable_nixl", False)
-        nixl_enabled = (
-            raw_nixl
-            if isinstance(raw_nixl, bool)
-            else str(raw_nixl).strip().lower() in ("true", "1", "yes")
-        )
-        if nixl_enabled and not vllm_config.use_v2_model_runner:
+        if not vllm_config.use_v2_model_runner:
             raise ValueError(
-                "ECCPUConnector with NIXL requires the V2 model runner. "
+                "ECCPUConnector requires the V2 model runner. "
                 "Set VLLM_USE_V2_MODEL_RUNNER=1."
             )
 

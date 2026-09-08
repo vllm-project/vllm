@@ -9,14 +9,12 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnect
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
 
-def _cfg(*, nixl_enabled=False, use_v2_model_runner=True):
+def _cfg():
     ec = MagicMock()
     ec.is_ec_producer = True
     ec.is_ec_consumer = True
-    ec.get_from_extra_config.return_value = nixl_enabled
     cfg = MagicMock()
     cfg.ec_transfer_config = ec
-    cfg.use_v2_model_runner = use_v2_model_runner
     return cfg
 
 
@@ -39,44 +37,17 @@ def test_worker_role_builds_only_worker(monkeypatch):
 
 
 @pytest.mark.parametrize("role", [ECConnectorRole.SCHEDULER, ECConnectorRole.WORKER])
-@pytest.mark.parametrize("nixl_enabled", [False, "false", "0", "no"])
-def test_v1_model_runner_is_allowed_without_nixl(monkeypatch, role, nixl_enabled):
+def test_v1_model_runner_is_rejected(monkeypatch, role):
+    """The V1 runner never reports save completions, so refuse to start."""
     monkeypatch.setattr(
         ECCPUConnector, "_make_scheduler", lambda self, cfg: MagicMock()
     )
     monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: MagicMock())
-    cfg = _cfg(
-        nixl_enabled=nixl_enabled,
-        use_v2_model_runner=False,
-    )
+    cfg = _cfg()
+    cfg.use_v2_model_runner = False
 
-    ECCPUConnector(cfg, role)
-
-
-@pytest.mark.parametrize("role", [ECConnectorRole.SCHEDULER, ECConnectorRole.WORKER])
-@pytest.mark.parametrize("nixl_enabled", [True, "true", "1", "yes"])
-def test_v1_model_runner_is_rejected_with_nixl(monkeypatch, role, nixl_enabled):
-    monkeypatch.setattr(
-        ECCPUConnector, "_make_scheduler", lambda self, cfg: MagicMock()
-    )
-    monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: MagicMock())
-    cfg = _cfg(
-        nixl_enabled=nixl_enabled,
-        use_v2_model_runner=False,
-    )
-
-    with pytest.raises(ValueError, match="with NIXL requires the V2 model runner"):
+    with pytest.raises(ValueError, match="V2 model runner"):
         ECCPUConnector(cfg, role)
-
-
-@pytest.mark.parametrize("role", [ECConnectorRole.SCHEDULER, ECConnectorRole.WORKER])
-def test_v2_model_runner_is_allowed_with_nixl(monkeypatch, role):
-    monkeypatch.setattr(
-        ECCPUConnector, "_make_scheduler", lambda self, cfg: MagicMock()
-    )
-    monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: MagicMock())
-
-    ECCPUConnector(_cfg(nixl_enabled=True), role)
 
 
 def test_factory_registered():
