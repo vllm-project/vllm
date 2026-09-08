@@ -33,6 +33,23 @@ else:
 logger = init_logger(__name__)
 
 
+def _grammar_start_allowed(
+    reasoner: "ReasoningParser",
+    input_ids: Sequence[int],
+    delta_ids: Iterable[int],
+) -> bool:
+    """When the structured-output bitmask may start filling.
+
+    Prefer ``is_grammar_start_allowed`` when the parser defines it; otherwise
+    fall back to ``is_reasoning_end_streaming`` so older / test stubs keep
+    working.
+    """
+    fn = getattr(reasoner, "is_grammar_start_allowed", None)
+    if callable(fn):
+        return bool(fn(input_ids, delta_ids))
+    return bool(reasoner.is_reasoning_end_streaming(input_ids, delta_ids))
+
+
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
@@ -314,7 +331,7 @@ class StructuredOutputManager:
                             history_len = len(history)
                             simulated_buf = history + list(req_tokens)
                         simulated = simulated_buf[: history_len + i + 1]
-                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
+                        if _grammar_start_allowed(reasoner, simulated, [token]):
                             # Reasoning ended mid-window. Constrain the rest
                             # of the window via bitmask. Skip grammar advance
                             # through the marker (it is reasoning content);
@@ -440,7 +457,7 @@ class StructuredOutputManager:
                 else max(len(all_token_ids) + delta_from, 0)
             )
             delta_ids = itertools.islice(all_token_ids, start, None)
-        if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
+        if _grammar_start_allowed(reasoner, all_token_ids, delta_ids):
             structured_req.reasoning_ended = True
 
             # Record the boundary so the scheduler can exclude reasoning tokens.
@@ -459,7 +476,7 @@ class StructuredOutputManager:
 
         Returns:
             The absolute index of the token at which
-            ``is_reasoning_end_streaming`` first fires. Falls back to the
+            ``is_grammar_start_allowed`` first fires. Falls back to the
             final index when no single token triggers the detection (e.g.
             a multi-token marker only recognized on the full delta), which
             conservatively treats the whole step as reasoning content.
@@ -468,7 +485,7 @@ class StructuredOutputManager:
         for idx in range(start, len(all_token_ids)):
             token = all_token_ids[idx]
             prefix.append(token)
-            if reasoner.is_reasoning_end_streaming(prefix, [token]):
+            if _grammar_start_allowed(reasoner, prefix, [token]):
                 return idx
         return len(all_token_ids) - 1
 
