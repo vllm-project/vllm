@@ -62,42 +62,41 @@ class GLUFuser(MergedColumnParallelFuser):
     def up_name(self) -> str:
         return self.linear_names[1]
 
-    @staticmethod
-    def _get_glu_nodes(
-        linears: list[fx.Node], module: nn.Module
-    ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node] | None:
-        """Find the GLU pattern `act(gate(x)) * up(x)` among sibling linears.
+    @classmethod
+    def _is_act_of_gate(cls, node: fx.Node, module: nn.Module) -> bool:
+        """Is node `act(gate(x))` where `gate` is linear and `act` is not linear."""
+        return (
+            node.op == "call_module"
+            and not is_linear(node, module)
+            and len(node.args) == 1
+            and isinstance(node.args[0], fx.Node)
+            and is_linear(node.args[0], module)
+        )
 
-        The siblings need not be exactly the gate and the up projection: a
-        module may run other projections on the same input (e.g. a router).
-        """
-        for gate in linears:
-            act = next(
-                (
-                    node
-                    for node in gate.users
-                    if node.op == "call_module"
-                    and not is_linear(node, module)
-                    and node.args == (gate,)
-                ),
-                None,
-            )
-            if act is None:
-                continue
-            for up in linears:
-                if up is gate:
+    @classmethod
+    def _get_glu_nodes(
+        cls, graph: fx.Graph, module: nn.Module
+    ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node] | None:
+        """Search graph for the GLU pattern `act(gate(x)) * up(x)`."""
+        for mul in graph.nodes:
+            if (
+                mul.op == "call_function"
+                and mul.target == operator.mul
+                and len(mul.args) == 2
+                and all(isinstance(arg, fx.Node) for arg in mul.args)
+            ):
+                a, b = mul.args
+                if cls._is_act_of_gate(a, module) and is_linear(b, module):
+                    act, gate, up = a, a.args[0], b
+                elif cls._is_act_of_gate(b, module) and is_linear(a, module):
+                    act, gate, up = b, b.args[0], a
+                else:
                     continue
-                mul = next(
-                    (
-                        node
-                        for node in act.users
-                        if node.op == "call_function"
-                        and node.target == operator.mul
-                        and node.args in ((act, up), (up, act))
-                    ),
-                    None,
-                )
-                if mul is not None:
+                if (
+                    all(len(args) == 1 for args in (gate.args, up.args))
+                    and isinstance(x := gate.args[0], fx.Node)
+                    and x is up.args[0]
+                ):
                     return act, gate, up, mul
         return None
 
@@ -121,12 +120,7 @@ class GLUFuser(MergedColumnParallelFuser):
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "GLUFuser | None":
-        """Fuse the gate and up projections of the module's (only) GLU."""
-        groups = cls.sibling_groups(graph, module)
-        glu_nodes = next(
-            filter(None, (cls._get_glu_nodes(group, module) for group in groups)), None
-        )
-        if glu_nodes is None:
+        if (glu_nodes := cls._get_glu_nodes(graph, module)) is None:
             return None
         act_node, gate_node, up_node, mul_node = glu_nodes
 
