@@ -120,8 +120,6 @@ AttnTypeStr = Literal[
 ]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-
 def _is_nvfp4_quant_group(group: object) -> bool:
     """Whether one compressed-tensors config group describes an NVFP4 scheme.
 
@@ -155,6 +153,8 @@ def _is_nvfp4_quant_group(group: object) -> bool:
         and bool(acts.get("symmetric", True))
     )
 
+
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
