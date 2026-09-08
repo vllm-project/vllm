@@ -13,6 +13,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
 )
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -77,7 +78,7 @@ def set_env_vars_and_device(env: dict[str, str]) -> None:
     device = torch.device(f"{accelerator_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
 
-    backend = "xccl" if torch.xpu.is_available() else "nccl"
+    backend = "xccl" if current_platform.is_xpu() else "nccl"
 
     # Create a minimal vllm config for init_distributed_environment
     vllm_config = VllmConfig()

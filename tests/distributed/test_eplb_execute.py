@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -192,7 +193,7 @@ def verify_redundant_experts_have_same_weights(
     total_physical_experts = world_size * num_local_experts
     # XPU: gloo does not support XPU tensors, so gather on CPU then move back.
     # CUDA: gloo supports CUDA tensors directly, keep original device.
-    use_cpu_gather = torch.xpu.is_available()
+    use_cpu_gather = current_platform.is_xpu()
 
     ok = True
     for layer in range(num_layers):
@@ -280,7 +281,7 @@ def verify_redundant_experts_have_same_weights(
 
 
 def assert_verification_synced(local_ok: bool, msg: str, cpu_group) -> None:
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         # XPU: default group backend (gloo) does not support XPU tensors;
         # use CPU tensor with cpu_group instead.
         ok_tensor = torch.tensor(
@@ -576,11 +577,11 @@ def test_rearrange_expert_weights_with_redundancy(
 
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
-    if eplb_communicator == "nixl" and torch.xpu.is_available():
+    if eplb_communicator == "nixl" and current_platform.is_xpu():
         pytest.skip("NIXL does not support XPU")
     if eplb_communicator in ("torch_nccl", "pynccl") and not torch.cuda.is_available():
         pytest.skip(f"{eplb_communicator} requires CUDA")
-    if eplb_communicator == "torch_xccl" and not torch.xpu.is_available():
+    if eplb_communicator == "torch_xccl" and not current_platform.is_xpu():
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
@@ -639,7 +640,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             original_weights.append(layer_copy)
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-        default_backend = "torch_xccl" if torch.xpu.is_available() else "torch_nccl"
+        default_backend = "torch_xccl" if current_platform.is_xpu() else "torch_nccl"
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=default_backend,
@@ -696,9 +697,9 @@ def test_async_transfer_layer_without_mtp(
 
     if eplb_communicator == "nixl" and not has_nixl():
         pytest.skip("NIXL is not available")
-    if eplb_communicator == "nixl" and torch.xpu.is_available():
+    if eplb_communicator == "nixl" and current_platform.is_xpu():
         pytest.skip("NIXL does not support XPU")
-    if eplb_communicator == "torch_xccl" and not torch.xpu.is_available():
+    if eplb_communicator == "torch_xccl" and not current_platform.is_xpu():
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
@@ -780,7 +781,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             original_weights.append(layer_copy)
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-        default_backend = "torch_xccl" if torch.xpu.is_available() else "torch_nccl"
+        default_backend = "torch_xccl" if current_platform.is_xpu() else "torch_nccl"
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=default_backend,

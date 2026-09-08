@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import requests
-import torch
+
+from vllm.platforms import current_platform
 
 from ..evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from ..utils import RemoteOpenAIServer, multi_gpu_test
@@ -220,7 +221,7 @@ def test_elastic_ep_scaling(enforce_eager: bool, traffic_mode: str):
 
     if not has_nixl():
         pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         pytest.skip("Elastic EP with NIXL is not supported on XPU")
 
     initial_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INITIAL_DP", "2"))
@@ -272,7 +273,7 @@ def test_elastic_ep_scaling_uneven():
 
     if not has_nixl():
         pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         pytest.skip("Elastic EP with NIXL is not supported on XPU")
 
     vllm_serve_args = _base_serve_args()

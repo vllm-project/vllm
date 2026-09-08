@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent, device_stream
+from vllm.platforms import current_platform
 
 
 def test_wait_blocks_until_record():
@@ -65,7 +66,7 @@ def test_producer_consumer(device):
     """
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-    if device == "xpu" and not torch.xpu.is_available():
+    if device == "xpu" and not current_platform.is_xpu():
         pytest.skip("XPU not available")
     worker_stream = torch.Stream()
     # Create a single element counter that will be shared between two threads

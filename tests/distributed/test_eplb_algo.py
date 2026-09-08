@@ -10,6 +10,7 @@ from vllm.distributed.eplb.eplb_state import (
     compute_logical_maps,
 )
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+from vllm.platforms import current_platform
 
 
 def test_eplb_load_stats_reduce_across_ranks():
@@ -268,7 +269,7 @@ def test_device_compatibility(device):
     """Test device compatibility"""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-    if device == "xpu" and not torch.xpu.is_available():
+    if device == "xpu" and not current_platform.is_xpu():
         pytest.skip("XPU not available")
 
     weight = torch.tensor([[10, 20, 30, 40]], device=device)

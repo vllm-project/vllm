@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -217,7 +218,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
         expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
-        default_backend = "torch_xccl" if torch.xpu.is_available() else "torch_nccl"
+        default_backend = "torch_xccl" if current_platform.is_xpu() else "torch_nccl"
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=default_backend,
