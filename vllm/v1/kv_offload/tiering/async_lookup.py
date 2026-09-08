@@ -51,7 +51,7 @@ class LookupPhase(Enum):
 
     PENDING = auto()  # Accumulated in _lookup_batch, but not yet submitted.
     IN_FLIGHT = auto()  # Submitted to the worker, but not yet resolved.
-    RESOLVED = auto()  # The worker result has been applied to the state.
+    RESOLVED = auto()  # A final verdict has been applied to the state.
 
 
 @dataclass(slots=True)
