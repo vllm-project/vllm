@@ -98,7 +98,7 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
     per_token_bytes: int,
-    page_budget: int | None,
+    page_budget: int,
     fallback: int,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
@@ -106,34 +106,24 @@ def _largest_kernel_block_within(
     A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
     wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
     block whose natural page still fits under ``page_budget`` minimizes that waste.
-    Falls back to the smallest supported block when ``page_budget`` is None (no padding
-    — the block is handled by ``unify``'s integer scaling instead) or nothing fits.
+    ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
+    Falls back to the smallest supported block when nothing fits.
     """
     from vllm.v1.attention.backend import MultipleOf
 
     sizes = attn_backend.get_supported_kernel_block_sizes()
+    max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
-    if not candidates:
-        candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
+    candidates.extend(
+        max(s.base, max_block_size // s.base * s.base)
+        for s in sizes
+        if isinstance(s, MultipleOf)
+    )
     if not candidates:
         return fallback
     smallest = min(candidates)
-    if not page_budget or per_token_bytes <= 0:
-        return smallest
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
     return max(fitting) if fitting else smallest
-
-
-def _supports_unsplit_block(
-    attn_backend: "type[AttentionBackend]", block_size: int
-) -> bool:
-    """Whether the backend can run ``block_size`` as its kernel block as-is."""
-    from vllm.v1.attention.backend import MultipleOf
-
-    return any(
-        block_size % s.base == 0 if isinstance(s, MultipleOf) else block_size == s
-        for s in attn_backend.get_supported_kernel_block_sizes()
-    )
 
 
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
@@ -655,14 +645,10 @@ class Attention(nn.Module, AttentionLayerBase):
                     sliding_window=self.sliding_window,
                 )
             ).real_page_size_bytes
-            if shared_page is None and _supports_unsplit_block(
-                self.attn_backend, block_size
-            ):
-                sw_block_size = block_size
-            else:
-                sw_block_size = _largest_kernel_block_within(
-                    self.attn_backend, sw_per_token, shared_page, block_size
-                )
+            page_budget = shared_page or sw_per_token * block_size
+            sw_block_size = _largest_kernel_block_within(
+                self.attn_backend, sw_per_token, page_budget, block_size
+            )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
