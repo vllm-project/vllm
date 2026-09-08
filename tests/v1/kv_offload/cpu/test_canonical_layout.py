@@ -9,9 +9,12 @@ import torch
 
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     CanonicalPageMapping,
     CopyRun,
     GPULoadStoreSpec,
+    resolve_device_pointers,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
@@ -93,14 +96,14 @@ def _whole_page_mapping() -> CanonicalPageMapping:
     return CanonicalPageMapping(2048, 2048, (identity,), 1, 0, True)
 
 
-def _transfer(handler, num_blocks: int, gpu_to_cpu: bool) -> None:
+def _transfer(handler, kv_caches, num_blocks: int, gpu_to_cpu: bool) -> None:
     block_ids = list(range(num_blocks))
     gpu_spec = GPULoadStoreSpec(
         block_ids, group_sizes=(num_blocks,), block_indices=(0,)
     )
     cpu_spec = CPULoadStoreSpec(block_ids)
-    src, dst = (gpu_spec, cpu_spec) if gpu_to_cpu else (cpu_spec, gpu_spec)
-    assert handler.transfer_async(0, src, dst)
+    device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
+    assert handler.transfer_async(0, device_ptrs, cpu_spec)
     deadline = time.time() + 30
     while time.time() < deadline:
         if handler.get_finished():
@@ -109,11 +112,20 @@ def _transfer(handler, num_blocks: int, gpu_to_cpu: bool) -> None:
     raise TimeoutError("transfer did not complete")
 
 
-def _canonical_handler(gpu_tensor, cpu_tensor, mapping, gpu_to_cpu):
+def _make_kv_caches(gpu_tensor, mapping):
+    page = mapping.local_page_size_bytes
+    return CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=gpu_tensor, page_size_bytes=page)],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page, mapping=mapping)]
+        ],
+    )
+
+
+def _canonical_handler(cpu_tensor, mapping, gpu_to_cpu):
     page = mapping.local_page_size_bytes
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page, mapping=mapping)]]
     return SingleDirectionOffloadingHandler(
-        gpu_tensors=[gpu_tensor],
         cpu_tensors=[cpu_tensor],
         blocks_per_chunk=1,
         layer_refs_per_group=refs,
@@ -136,10 +148,10 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     cpu_canonical = torch.zeros(num_blocks, 2048, dtype=torch.int8, pin_memory=True)
 
     for rank in (0, 1):
-        store = _canonical_handler(
-            gpu_rank[rank], cpu_canonical, _tp2_rank_mapping(rank), gpu_to_cpu=True
-        )
-        _transfer(store, num_blocks, gpu_to_cpu=True)
+        mapping = _tp2_rank_mapping(rank)
+        kv_caches = _make_kv_caches(gpu_rank[rank], mapping)
+        store = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=True)
+        _transfer(store, kv_caches, num_blocks, gpu_to_cpu=True)
     torch.accelerator.synchronize()
 
     # independent oracle: replay each rank's runs in numpy
@@ -157,19 +169,19 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
 
     # each rank reloads its shard bit-exact
     gpu_back = torch.zeros(num_blocks, 1024, dtype=torch.int8, device="cuda")
-    load = _canonical_handler(
-        gpu_back, cpu_canonical, _tp2_rank_mapping(0), gpu_to_cpu=False
-    )
-    _transfer(load, num_blocks, gpu_to_cpu=False)
+    mapping = _tp2_rank_mapping(0)
+    kv_caches = _make_kv_caches(gpu_back, mapping)
+    load = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
+    _transfer(load, kv_caches, num_blocks, gpu_to_cpu=False)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_back, gpu_rank[0])
 
     # a whole-page reader (TP1 topology) sees the assembled page
     gpu_full = torch.zeros(num_blocks, 2048, dtype=torch.int8, device="cuda")
-    load_full = _canonical_handler(
-        gpu_full, cpu_canonical, _whole_page_mapping(), gpu_to_cpu=False
-    )
-    _transfer(load_full, num_blocks, gpu_to_cpu=False)
+    mapping = _whole_page_mapping()
+    kv_caches = _make_kv_caches(gpu_full, mapping)
+    load_full = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
+    _transfer(load_full, kv_caches, num_blocks, gpu_to_cpu=False)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_full.cpu(), cpu_canonical)
 
@@ -245,25 +257,28 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
 
     try:
         for rank in range(writer_tp):
+            mapping = _nhd_shard_mapping(writer_tp, rank)
+            gpu_shard = _head_shard(full_kv, writer_tp, rank).cuda()
+            kv_caches = _make_kv_caches(gpu_shard, mapping)
             store = _canonical_handler(
-                _head_shard(full_kv, writer_tp, rank).cuda(),
                 canonical_view(rank, writer_tp),
-                _nhd_shard_mapping(writer_tp, rank),
+                mapping,
                 gpu_to_cpu=True,
             )
-            _transfer(store, num_blocks, gpu_to_cpu=True)
+            _transfer(store, kv_caches, num_blocks, gpu_to_cpu=True)
         torch.accelerator.synchronize()
 
         for rank in range(reader_tp):
             expected = _head_shard(full_kv, reader_tp, rank)
             gpu_out = torch.zeros_like(expected, device="cuda")
+            mapping = _nhd_shard_mapping(reader_tp, rank)
+            kv_caches = _make_kv_caches(gpu_out, mapping)
             load = _canonical_handler(
-                gpu_out,
                 canonical_view(rank, reader_tp),
-                _nhd_shard_mapping(reader_tp, rank),
+                mapping,
                 gpu_to_cpu=False,
             )
-            _transfer(load, num_blocks, gpu_to_cpu=False)
+            _transfer(load, kv_caches, num_blocks, gpu_to_cpu=False)
             torch.accelerator.synchronize()
             assert torch.equal(gpu_out.cpu(), expected), (
                 f"reader tp={reader_tp} rank={rank} bytes diverge from the "
