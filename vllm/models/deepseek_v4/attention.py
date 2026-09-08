@@ -22,7 +22,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.fused_qk_rmsnorm import (
+    _FUSED_Q_KV_RMSNORM_KERNEL,
+    fused_q_kv_rmsnorm,
+)
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
 )
@@ -416,6 +419,44 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 )
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
+            from vllm.platforms import current_platform
+            from vllm.utils.import_utils import has_cutedsl
+
+            _FUSED_Q_KV_RMSNORM_KERNEL.register_warmup()
+
+            backend_name = self.backend_cls.get_name()
+            if current_platform.is_cuda():
+                from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (  # noqa: E501
+                    _FUSED_INV_ROPE_FP8_QUANT_KERNEL,
+                )
+
+                _FUSED_INV_ROPE_FP8_QUANT_KERNEL.register_warmup()
+
+                if self.compress_ratio == 128:
+                    from vllm.models.deepseek_v4.sparse_mla import (
+                        _BUILD_C128A_TOPK_METADATA_KERNEL,
+                    )
+
+                    _BUILD_C128A_TOPK_METADATA_KERNEL.register_warmup()
+
+                if backend_name == "FLASHMLA_SPARSE_DSV4":
+                    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                        _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
+                        _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL,
+                    )
+
+                    _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
+                    if not has_cutedsl():
+                        _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL.register_warmup()
+                elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
+                    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                        _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL,
+                        _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
+                    )
+
+                    _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
+                    _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.register_warmup()
 
     def forward(
         self,
@@ -973,6 +1014,22 @@ class DeepseekV4Indexer(nn.Module):
             torch.cuda.Event(),
             torch.cuda.Event(),
         ]
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.platforms import current_platform
+            from vllm.utils.import_utils import has_cutedsl
+
+            if not has_cutedsl() and not current_platform.is_xpu():
+                from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
+                    _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL,
+                    _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL,
+                )
+
+                (
+                    _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL
+                    if self.use_fp4_kv
+                    else _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL
+                ).register_warmup()
 
     def forward(
         self,
