@@ -6,6 +6,7 @@
 These tests cover:
 - OutputProcessor.get_num_queued_tokens() token counting
 - AsyncLLM.check_admission() admission control logic
+- Admission rejection Prometheus samples
 - Exception classes (GracefulHTTPError, QueueOverflowError, MaxQueuedTokensError)
 - create_error_response() mapping GracefulHTTPError to HTTP 503
 - SchedulerConfig field defaults and validation
@@ -14,11 +15,13 @@ These tests cover:
 
 import argparse
 import asyncio
+import logging
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
 from vllm.config.scheduler import SchedulerConfig
@@ -36,6 +39,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.loggers import StatLoggerManager
+
+_ADMISSION_METRIC_MODEL = "admission-metric-test"
+_ADMISSION_LOGGER = "vllm.v1.engine.async_llm"
 
 pytestmark = pytest.mark.cpu_test
 
@@ -66,7 +73,38 @@ def _make_async_llm(
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
+    llm.logger_manager = None
     return llm
+
+
+def _attach_prometheus_logger(
+    llm: AsyncLLM, engine_indexes: list[int] | None = None
+) -> None:
+    """Attach a real Prometheus logger manager to a lightweight AsyncLLM."""
+    vllm_config = MagicMock()
+    vllm_config.observability_config.show_hidden_metrics = False
+    vllm_config.observability_config.kv_cache_metrics = False
+    vllm_config.model_config.served_model_name = _ADMISSION_METRIC_MODEL
+    vllm_config.model_config.max_model_len = 2048
+    vllm_config.model_config.is_diffusion = False
+    vllm_config.speculative_config = None
+    vllm_config.kv_transfer_config = None
+    vllm_config.lora_config = None
+    llm.logger_manager = StatLoggerManager(
+        vllm_config=vllm_config,
+        engine_idxs=engine_indexes,
+        enable_default_loggers=False,
+    )
+
+
+def _admission_rejection_count(reason: str) -> float:
+    """Read the Prometheus sample for one admission rejection reason."""
+    value = REGISTRY.get_sample_value(
+        "vllm:admission_rejections_total",
+        {"model_name": _ADMISSION_METRIC_MODEL, "reason": reason},
+    )
+    assert value is not None
+    return value
 
 
 def _make_output_processor(**request_states) -> OutputProcessor:
@@ -167,19 +205,35 @@ def test_admission_no_limits_allows_everything():
 
 def test_admission_reqs_allows_when_under_limit():
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=5)
+    _attach_prometheus_logger(llm)
     llm.check_admission()
+    llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 0
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
-def test_admission_reqs_rejects_at_limit():
+def test_admission_reqs_rejects_at_limit(caplog):
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=10)
-    with pytest.raises(QueueOverflowError):
+    _attach_prometheus_logger(llm, engine_indexes=[0, 1, 2])
+    with (
+        caplog.at_level(logging.INFO, logger=_ADMISSION_LOGGER),
+        pytest.raises(QueueOverflowError),
+    ):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
+    assert not any(
+        "Request queue full" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_admission_reqs_rejects_with_n():
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=8)
+    _attach_prometheus_logger(llm)
     with pytest.raises(QueueOverflowError):
         llm.check_admission(3)
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
 def test_admission_reqs_allows_n_at_boundary():
@@ -203,8 +257,11 @@ def test_admission_tokens_allows_when_under_limit():
 
 def test_admission_tokens_rejects_at_limit():
     llm = _make_async_llm(max_num_queued_tokens=1000, num_queued_tokens=1000)
+    _attach_prometheus_logger(llm)
     with pytest.raises(MaxQueuedTokensError):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 0
+    assert _admission_rejection_count("max_num_queued_tokens") == 1
 
 
 def test_admission_tokens_rejects_over_limit():
@@ -240,8 +297,11 @@ def test_admission_req_limit_checked_before_token_limit():
         num_unfinished=10,
         num_queued_tokens=1000,
     )
+    _attach_prometheus_logger(llm)
     with pytest.raises(QueueOverflowError):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
 # -- n derived from params at the add_request call site ---------------------
@@ -299,6 +359,17 @@ async def test_concurrent_single_request_admission_respects_limit():
     assert sum(result is None for result in results) == 1
     assert sum(isinstance(result, QueueOverflowError) for result in results) == 1
     assert len(request_states) == 1
+
+
+def test_admission_preflight_pass_then_reject_records_once():
+    llm = _make_async_llm(max_num_queued_reqs=1, num_unfinished=0)
+    _attach_prometheus_logger(llm)
+    llm.check_admission()
+    llm.output_processor.get_num_unfinished_requests.return_value = 1
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
 # ---------------------------------------------------------------------------
