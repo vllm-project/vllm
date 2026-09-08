@@ -75,6 +75,10 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,
                 (),

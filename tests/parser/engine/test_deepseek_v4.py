@@ -296,6 +296,96 @@ class TestMissingInvokeEnd:
         assert "Done." in collect_content(results)
 
 
+class TestMissingToolCallsWrapper:
+    """The model sometimes drops ``<｜DSML｜tool_calls>`` at long context and
+    opens ``<｜DSML｜invoke ...>`` directly (#48931). The invoke itself must
+    anchor tool-call detection so the block is never leaked as content.
+    """
+
+    _ORPHAN = (
+        f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+        f"{_param('command', 'true', 'echo hi')}\n"
+        f"{DSML_INVOKE_END}\n"
+    )
+
+    @pytest.mark.parametrize("trailing_end", [True, False])
+    def test_non_streaming(self, mock_tokenizer, mock_request, trailing_end):
+        text = "Let me run it.\n" + self._ORPHAN
+        if trailing_end:
+            text += DSML_TOOL_END
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "terminal"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content == "Let me run it.\n"
+
+    def test_streaming_marker_split_across_deltas(self, mock_tokenizer, mock_request):
+        text = "Let me run it.\n" + self._ORPHAN + DSML_TOOL_END
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert collect_function_name(results) == "terminal"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"command": "echo hi"}
+        content = collect_content(results)
+        assert "Let me run it." in content
+        assert "DSML" not in content
+
+    def test_parallel_orphan_invokes(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(self._ORPHAN + self._ORPHAN, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "terminal",
+            "terminal",
+        ]
+        assert result.content is None
+
+    def test_reasoning_missing_think_end_and_wrapper(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        text = "Let me run it.\n\n" + self._ORPHAN + DSML_TOOL_END
+        reasoning, content, tool_calls = parser.parse(text, mock_request)
+
+        assert reasoning == "Let me run it."
+        assert content is None
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "terminal"
+        assert json.loads(tool_calls[0].arguments) == {"command": "echo hi"}
+
+    def test_streaming_reasoning_missing_think_end_and_wrapper(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["Let me run it.\n\n", *list(self._ORPHAN), DSML_TOOL_END]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert reasoning == "Let me run it."
+        assert DSML_INVOKE_PREFIX not in reasoning
+        assert "DSML" not in content
+
+    def test_wrapper_present_is_unchanged(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = DSML_TOOL_START + "\n" + self._ORPHAN + DSML_TOOL_END
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "terminal"
+        assert result.content is None
+
+
 # ── Thinking mode initial state ──────────────────────────────────────
 
 
