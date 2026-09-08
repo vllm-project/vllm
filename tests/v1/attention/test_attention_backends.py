@@ -849,6 +849,120 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
 
 
+def _make_flashinfer_kv_sharing_test_objects(flashinfer_backend, dcp_world_size=1):
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 0.5
+    impl.kv_cache_dtype = "auto"
+    impl.kv_sharing_target_layer_name = "layers.0.attn"
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.is_kvcache_nvfp4 = False
+    impl.head_size = 4
+    impl.dcp_world_size = dcp_world_size
+    impl.window_left = -1
+    impl.logits_soft_cap = None
+    impl.sinks = None
+    impl.cache_config = SimpleNamespace(
+        get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC
+    )
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0),
+        _q_scale_float=1.0,
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+    return impl, layer
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_kv_sharing_decode_uses_shared_cache():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class DecodeWrapper:
+        _window_left = -1
+        _logits_soft_cap = 0.0
+        _sm_scale = 0.5
+
+        def run(self, query, kv_cache, **kwargs):
+            self.query = query
+            self.kv_cache = kv_cache
+            kwargs["out"].copy_(query)
+
+    wrapper = DecodeWrapper()
+    impl, layer = _make_flashinfer_kv_sharing_test_objects(flashinfer_backend)
+
+    query = torch.arange(4, dtype=torch.float32).reshape(1, 1, 4)
+    kv_cache = torch.arange(16, dtype=torch.float32).reshape(1, 1, 2, 8)
+    output = torch.empty_like(query)
+    metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=1,
+        slot_mapping=torch.tensor([0]),
+        q_data_type_prefill=torch.float32,
+        q_data_type_decode=torch.float32,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        causal=True,
+        prefill=None,
+        decode=flashinfer_backend.FIDecode(wrapper),
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+    result = impl.forward(layer, query, None, None, kv_cache, metadata, output)
+
+    assert result is output
+    torch.testing.assert_close(output, query)
+    torch.testing.assert_close(wrapper.query, query)
+    key_cache, value_cache = wrapper.kv_cache
+    torch.testing.assert_close(key_cache, kv_cache[..., :4])
+    torch.testing.assert_close(value_cache, kv_cache[..., 4:])
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_kv_sharing_dcp_prefill_is_rejected():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    impl, layer = _make_flashinfer_kv_sharing_test_objects(
+        flashinfer_backend, dcp_world_size=2
+    )
+    query = torch.arange(4, dtype=torch.float32).reshape(1, 1, 4)
+    kv_cache = torch.arange(16, dtype=torch.float32).reshape(1, 1, 2, 8)
+    output = torch.empty_like(query)
+    metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=1,
+        slot_mapping=torch.tensor([0]),
+        q_data_type_prefill=torch.float32,
+        q_data_type_decode=torch.float32,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_prefill_tokens=1,
+        causal=True,
+        prefill=flashinfer_backend.FIPrefill(SimpleNamespace()),
+        decode=None,
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+
+    with pytest.raises(NotImplementedError, match="DCP prefill"):
+        impl.forward(
+            layer,
+            query,
+            None,
+            None,
+            kv_cache,
+            metadata,
+            output,
+        )
+
+
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",

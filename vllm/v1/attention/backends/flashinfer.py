@@ -1940,8 +1940,8 @@ class FlashInferImpl(AttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: torch.Tensor,
@@ -1952,8 +1952,10 @@ class FlashInferImpl(AttentionImpl):
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size], or None for a
+                KV-sharing decoder layer.
+            value: shape = [num_tokens, num_kv_heads, head_size], or None for a
+                KV-sharing decoder layer.
             kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
@@ -2044,8 +2046,10 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens]
-        value = value[:num_actual_tokens]
+        if key is not None:
+            key = key[:num_actual_tokens]
+        if value is not None:
+            value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -2136,6 +2140,11 @@ class FlashInferImpl(AttentionImpl):
                 prefill_wrapper = attn_metadata.prefill.wrapper
                 assert prefill_wrapper is not None
                 if use_dcp:
+                    if key is None or value is None:
+                        raise NotImplementedError(
+                            "FlashInfer DCP prefill does not support KV-sharing "
+                            "layers"
+                        )
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     assert prefill_wrapper._context._window_left == self.window_left
                     assert prefill_wrapper._context._logits_soft_cap == (
