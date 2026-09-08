@@ -103,6 +103,40 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "all"])
+def test_replayssm_queues_live_copy_for_new_state_block(mamba_cache_mode: str):
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((2,), (3,)),
+        dtypes=(torch.float32, torch.float32),
+        replayssm_shapes=((4,), (5,), (6,)),
+        replayssm_dtypes=(torch.float32,) * 3,
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    block_pool = BlockPool(num_gpu_blocks=6, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+
+    manager.allocate_new_blocks("request", num_tokens=3, num_tokens_main_model=3)
+    assert manager.take_pending_cow_copies() == []
+    source = manager.req_to_blocks["request"][-1]
+
+    manager.allocate_new_blocks("request", num_tokens=5, num_tokens_main_model=5)
+    destination = manager.req_to_blocks["request"][-1]
+    assert manager.take_pending_cow_copies() == [(source, destination)]
+    assert source.ref_cnt == 2
+    assert destination.ref_cnt == 2
+
+    block_pool.free_blocks([source, destination])
+    assert source.ref_cnt == 1
+    assert destination.ref_cnt == 1
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,

@@ -38,7 +38,7 @@ class RecoverSSMState:
     def commit_step(
         self,
         num_sampled: torch.Tensor | int,
-        idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor | None,
         *,
         state_indices: torch.Tensor | None,
         num_accepted_tokens: torch.Tensor,
@@ -52,6 +52,7 @@ class RecoverSSMState:
             postprocess_meta = metadata.commit_recoverssm_state(num_sampled)
             if postprocess_meta is None:
                 continue
+            assert idx_mapping is not None
             assert state_indices is not None
             # RecoverSSM already restored the accepted state. Update its running
             # column and reset the next-step copy bias to the neutral value.

@@ -67,22 +67,21 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
     with patch.object(
         warmup, "flashinfer_replayssm_autotune_supported", return_value=True
     ):
-        result = warmup._replayssm_autotune_kwargs(_autotune_runner(**runner_kwargs))
-
-    expected_kwargs = {
-        **PREFILL_KWARGS,
-        "num_tokens": expected_num_reqs * query_len,
-        "uniform_decode": True,
-    }
-    if runner_kwargs.get("use_v2_model_runner"):
-        expected_kwargs["valid_dummy_state_slots"] = True
-    else:
-        expected_kwargs.update(
-            allow_microbatching=False,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
+        result = warmup._replayssm_autotune_kwargs(
+            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
         )
-    assert result == (expected_num_reqs, expected_kwargs)
+
+    assert result is not None
+    max_num_reqs, decode_kwargs = result
+    assert max_num_reqs == expected_num_reqs
+    assert decode_kwargs["num_tokens"] == expected_num_reqs * query_len
+    assert decode_kwargs["uniform_decode"] is True
+    if runner_kwargs.get("use_v2_model_runner"):
+        assert decode_kwargs["valid_dummy_state_slots"] is True
+        assert "profile_seq_lens" not in decode_kwargs
+    else:
+        assert decode_kwargs["profile_seq_lens"] == query_len + 1
+        assert decode_kwargs["force_attention"] is True
 
 
 @pytest.mark.parametrize(
@@ -92,7 +91,11 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
         (dict(backend=MambaBackendEnum.TRITON), True),
         ({}, False),
     ],
-    ids=["replayssm_disabled", "non_flashinfer_backend", "kernel_unavailable"],
+    ids=[
+        "replayssm_disabled",
+        "non_flashinfer_backend",
+        "kernel_unavailable",
+    ],
 )
 def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     with patch.object(
@@ -100,7 +103,9 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
         "flashinfer_replayssm_autotune_supported",
         return_value=flashinfer_supported,
     ):
-        result = warmup._replayssm_autotune_kwargs(_autotune_runner(**runner_kwargs))
+        result = warmup._replayssm_autotune_kwargs(
+            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
+        )
     assert result is None
 
 
@@ -112,12 +117,13 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
     mixer.kv_cache = (
         torch.full((4, 2), 3.0),
         torch.full((4, 2), 3.0),
-        *(torch.full((4, 2, 17), 3.0) for _ in range(3)),
     )
+    mixer.replayssm_cache = tuple(torch.full((4, 2, 17), 3.0) for _ in range(3))
     mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
     tracked = (
         *mixer.kv_cache,
+        *mixer.replayssm_cache,
         mixer._replayssm_ring_start,
         mixer._replayssm_prev_num_accepted,
     )

@@ -58,7 +58,7 @@ def postprocess_mamba(
 ):
     """CPU reference for the align-mode postprocess.
 
-    Used as a golden against the GPU fused kernel (``postprocess_mamba_align_gpu``).
+    Used as a golden against the GPU fused kernel (``postprocess_mamba_gpu``).
     Mirrors what the production code did before the fused kernel replaced it;
     kept here because production no longer has a CPU implementation.
     """
@@ -430,12 +430,18 @@ def _make_requests(
     req_ids: list[str],
     num_computed_tokens: list[int],
     block_ids_per_req: list[list[int]],
+    num_prompt_tokens: list[int] | None = None,
 ) -> dict[str, MagicMock]:
     """Create mock CachedRequestState objects."""
     requests = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
         req.num_computed_tokens = num_computed_tokens[i]
+        req.num_prompt_tokens = (
+            num_computed_tokens[i]
+            if num_prompt_tokens is None
+            else num_prompt_tokens[i]
+        )
         req.block_ids = {0: block_ids_per_req[i]}  # group_id=0
         requests[req_id] = req
     return requests
@@ -644,13 +650,16 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
 
 
 def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
-    """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
+    """Build a MambaSpecDecodeGPUContext stand-in exposing only the five
     per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
     ctx = MagicMock()
     ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_draft_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.is_prefilling_buf = _MockCpuGpuBuffer(max_num_reqs, torch.bool, device)
+    ctx.precopy_src_col_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.replayssm = None
     return ctx
 
 
@@ -661,6 +670,10 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
     device = torch.device("cpu")
     max_num_reqs = 8
     ctx = _make_staging_ctx(max_num_reqs, device)
+    ctx.block_size = 4
+    ctx.replayssm = MagicMock()
+    ctx.replayssm.materialize_prefixes = True
+    ctx.precopy_src_col_buf.gpu[:3] = torch.tensor([99, 199, 299], dtype=torch.int32)
 
     # Any negative int32 works as a sentinel: all staged values (state_idx,
     # scheduled/computed/draft token counts) are non-negative, so a negative
@@ -690,6 +703,7 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         req_ids=req_ids,
         num_computed_tokens=[10, 20, 30],
         block_ids_per_req=[[0], [0], [0]],
+        num_prompt_tokens=[11, 20, 40],
     )
     mamba_state_idx = {"req_a": 100, "req_b": 200, "req_c": 300}
     # A trailing entry past num_reqs must not be read.
@@ -702,6 +716,7 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         num_reqs,
         requests,
         mamba_state_idx,
+        run_prefix_state_migration=True,
     )
 
     np.testing.assert_array_equal(
@@ -714,6 +729,9 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         ctx.num_computed_tokens_buf.np[:num_reqs], [10, 20, 30]
     )
     np.testing.assert_array_equal(ctx.num_draft_tokens_buf.np[:num_reqs], [2, 0, 4])
+    np.testing.assert_array_equal(
+        ctx.is_prefilling_buf.np[:num_reqs], [True, False, True]
+    )
     for buf in bufs:
         assert (buf.np[num_reqs:] == sentinel).all()
 
@@ -725,6 +743,12 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         ctx.num_draft_tokens_buf.gpu[:num_reqs],
         torch.tensor([2, 0, 4], dtype=torch.int32),
     )
+    assert torch.equal(
+        ctx.is_prefilling_buf.gpu[:num_reqs],
+        torch.tensor([True, False, True]),
+    )
+    ctx.replayssm.reset_new_slots.assert_not_called()
+    ctx.replayssm.materialize.assert_not_called()
 
 
 def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
@@ -752,6 +776,7 @@ def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
             1,
             requests,
             mamba_state_idx,
+            run_prefix_state_migration=True,
         )
 
 
@@ -815,15 +840,20 @@ def _run_gpu_postprocess(
     gpu_ctx.initialize_from_forward_context(
         kv_cache_config, forward_context, copy_funcs, [block_table]
     )
+    accepted_gpu = t(num_accepted_tokens)
     gpu_ctx.run_fused_postprocess(
         num_reqs=len(req_ids),
-        num_accepted_tokens_gpu=t(num_accepted_tokens),
+        num_accepted_tokens_gpu=accepted_gpu,
         mamba_state_idx_gpu=t(mamba_state_idx),
         num_scheduled_tokens_gpu=t([num_scheduled_tokens[r] for r in req_ids]),
         num_computed_tokens_gpu=t(num_computed_tokens),
         num_draft_tokens_gpu=t([num_draft_tokens.get(r, 0) for r in req_ids]),
     )
     torch.accelerator.synchronize()
+    # Keep the normalized live buffer available to the assertions below. The
+    # context-owned buffer now intentionally preserves the original counts for
+    # ReplaySSM.
+    gpu_ctx._test_num_accepted_tokens = accepted_gpu
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -989,7 +1019,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
@@ -1411,7 +1441,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1575,7 +1605,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1708,7 +1738,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1843,7 +1873,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python (must NOT be 1)",
         )
@@ -1990,7 +2020,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch with non-sequential block IDs",
         )
@@ -2148,7 +2178,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch in mixed PC batch",
         )
@@ -2277,7 +2307,7 @@ class TestPostprocessMambaFusedKernel:
         # Old kernel (959ca0fd): `if src_addr == dst_addr` -> FAILS here (sets 1)
         # Fixed kernel (6466ce0d): `if src_block_idx == dest_block_idx and
         #   accept_token_bias == 0` -> PASSES (preserves 3)
-        kernel_accepted = gpu_ctx.num_accepted_tokens_out[0].item()
+        kernel_accepted = gpu_ctx._test_num_accepted_tokens[0].item()
         assert kernel_accepted == 3, (
             f"Kernel set num_accepted_tokens to {kernel_accepted} but expected 3. "
             f"The early-return guard likely compared physical addresses "
@@ -2452,7 +2482,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
@@ -2598,7 +2628,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx._test_num_accepted_tokens[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
@@ -2768,14 +2798,14 @@ class TestPostprocessMambaFusedKernel:
             [expected_accepted], dtype=torch.int32, device=device
         )
         torch.testing.assert_close(
-            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx_sd._test_num_accepted_tokens[:num_reqs],
             expected_accepted_tensor,
             rtol=0,
             atol=0,
             msg="SD num_accepted_tokens result is wrong",
         )
         torch.testing.assert_close(
-            gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx_ds._test_num_accepted_tokens[:num_reqs],
             expected_accepted_tensor,
             rtol=0,
             atol=0,

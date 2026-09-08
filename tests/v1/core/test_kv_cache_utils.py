@@ -3992,3 +3992,74 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+@pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_puzzle", "qwen3_5"])
+def test_native_mtp_draft_group_annotated_on_general_path(model_type: str):
+    specs = {
+        "language_model.model.layers.0.self_attn.attn": new_kv_cache_spec(),
+        "language_model.model.layers.1.linear_attn": new_mamba_spec(
+            block_size=64, mamba_cache_mode="align"
+        ),
+        # These models load native MTP after the target. The ordinary
+        # full-attention spec carries no drafter marker, so registration order
+        # is the model-scoped discriminator.
+        "model.layers.0.self_attn.attn": new_kv_cache_spec(),
+    }
+    assert len({spec.page_size_bytes for spec in specs.values()}) == 1
+
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type=model_type), specs
+    )
+
+    flagged = [group for group in groups if group.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.0.self_attn.attn" in flagged[0].layer_names
+    assert not any(
+        group.is_eagle_group
+        and "language_model.model.layers.1.linear_attn" in group.layer_names
+        for group in groups
+    )
+
+
+@pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_puzzle", "qwen3_5"])
+def test_native_mtp_draft_group_annotated_on_packed_path(model_type: str):
+    specs = {
+        "language_model.model.layers.0.self_attn.attn": new_kv_cache_spec(
+            num_kv_heads=1
+        ),
+        "language_model.model.layers.1.linear_attn": new_mamba_spec(
+            block_size=64, mamba_cache_mode="align"
+        ),
+        "model.layers.0.self_attn.attn": new_kv_cache_spec(num_kv_heads=1),
+    }
+    assert len({spec.page_size_bytes for spec in specs.values()}) > 1
+
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type=model_type), specs
+    )
+
+    flagged = [group for group in groups if group.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.0.self_attn.attn" in flagged[0].layer_names
+    assert not any(
+        group.is_eagle_group
+        and "language_model.model.layers.1.linear_attn" in group.layer_names
+        for group in groups
+    )
+
+
+@pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_puzzle", "qwen3_5"])
+def test_last_layer_fallback_requires_native_mtp(model_type: str):
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="eagle", model_type=model_type),
+        {
+            "language_model.model.layers.0.self_attn.attn": new_kv_cache_spec(),
+            "language_model.model.layers.1.linear_attn": new_mamba_spec(
+                block_size=64, mamba_cache_mode="align"
+            ),
+            "model.layers.0.self_attn.attn": new_kv_cache_spec(),
+        },
+    )
+
+    assert not any(group.is_eagle_group for group in groups)

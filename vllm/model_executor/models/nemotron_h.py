@@ -26,6 +26,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -740,17 +741,22 @@ class NemotronHForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
         cache_config = vllm_config.cache_config
-        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
+        dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
             cache_config.mamba_cache_dtype,
             cache_config.mamba_ssm_cache_dtype,
         )
-        if cache_config.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype,
-                vllm_config.model_config.dtype,
+        if (
+            cache_config.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.TRITON
+        ):
+            dtypes = (
+                *dtypes,
+                *MambaStateDtypeCalculator.replayssm_ring_dtypes(
+                    vllm_config.model_config.dtype
+                ),
             )
-        return base_dtype
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -766,14 +772,14 @@ class NemotronHForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-            - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+            - packed x/dt/B ReplaySSM rings for the Triton backend
         """
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
-        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
+        shapes = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.n_groups,
@@ -783,15 +789,24 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
-        if cache_config.use_replayssm:
-            return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shapes=base_shape,
-                n_groups=hf_config.n_groups,
-                tp_world_size=parallel_config.tensor_parallel_size,
-                logical_window=cache_config.replayssm_buffer_len,
-                backend=vllm_config.mamba_config.backend,
+        if (
+            cache_config.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.TRITON
+        ):
+            shapes = (
+                *shapes,
+                *MambaStateShapeCalculator.replayssm_ring_shapes(
+                    num_heads=hf_config.mamba_num_heads,
+                    head_dim=hf_config.mamba_head_dim,
+                    state_size=hf_config.ssm_state_size,
+                    n_groups=hf_config.n_groups,
+                    tp_world_size=parallel_config.tensor_parallel_size,
+                    logical_window=cache_config.replayssm_buffer_len,
+                    backend=vllm_config.mamba_config.backend,
+                    num_speculative_tokens=vllm_config.num_speculative_tokens,
+                ),
             )
-        return base_shape
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:

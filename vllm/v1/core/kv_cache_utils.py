@@ -984,9 +984,9 @@ def check_enough_kv_cache_memory(
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
 
@@ -1558,7 +1558,15 @@ def _get_per_layer_spec(
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return canonical KV plus ReplaySSM bytes per physical block."""
+    return _get_kv_cache_main_bytes_per_block(
+        kv_cache_groups
+    ) + _get_replayssm_bytes_per_block(kv_cache_groups)
+
+
+def _get_kv_cache_main_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
         return len(mla_names) * mla_page + len(idx_names) * idx_page
@@ -1572,6 +1580,19 @@ def _get_kv_cache_bytes_per_block(
     )
     assert bytes_per_block > 0
     return bytes_per_block
+
+
+def _get_replayssm_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    # ReplaySSM ring tensors use standalone allocations, so unlike canonical
+    # cache groups their storage cannot overlay by physical block ID.
+    return sum(
+        spec.replayssm_size_bytes
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+        if isinstance((spec := _get_per_layer_spec(group, layer_name)), MambaSpec)
+    )
 
 
 def validate_kv_cache_layout(
@@ -1647,11 +1668,14 @@ def get_kv_cache_config_from_groups(
             tail_names,
             _,
         ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        main_bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+            kv_cache_groups
+        )
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
-        size = bytes_per_block * num_blocks
+        size = main_bytes_per_block * num_blocks
         attn_specs = cast(
             UniformTypeKVCacheSpecs, attn_group.kv_cache_spec
         ).kv_cache_specs
@@ -1701,12 +1725,18 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
-    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+    main_bytes_per_block = _get_kv_cache_main_bytes_per_block(kv_cache_groups)
+    bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+        kv_cache_groups
+    )
+    assert bytes_per_block > 0
+    interleaved_block_stride = (
+        main_bytes_per_block if layout.is_block_outermost else None
+    )
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    size = bytes_per_block * num_blocks
+    size = main_bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
     #
@@ -2057,19 +2087,40 @@ def _get_packed_kv_cache_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=_is_deepseek_v4_eagle(vllm_config),
+        use_last_registered_draft_fallback=(
+            _uses_last_registered_draft_layer(vllm_config)
+        ),
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
-def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
+def _uses_last_registered_draft_layer(vllm_config: VllmConfig) -> bool:
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
         return False
-    model_config = vllm_config.model_config
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    model_type = model_config.hf_config.model_type
+    # DeepSeekV4 uses this ordering for its EAGLE-family heads. Some native MTP
+    # models have the same invariant, but only for their MTP path.
+    return model_type == "deepseek_v4" or _uses_native_mtp_draft_layer_fallback(
+        vllm_config
+    )
+
+
+def _uses_native_mtp_draft_layer_fallback(vllm_config: VllmConfig) -> bool:
+    spec_config = vllm_config.speculative_config
+    model_config = getattr(vllm_config, "model_config", None)
     return (
-        model_config is not None and model_config.hf_config.model_type == "deepseek_v4"
+        spec_config is not None
+        and spec_config.method == "mtp"
+        and model_config is not None
+        # These native MTP implementations register their ordinary attention
+        # draft layer after every target cache layer.
+        and model_config.hf_config.model_type
+        in ("nemotron_h", "nemotron_h_puzzle", "qwen3_5")
     )
 
 
@@ -2077,7 +2128,7 @@ def _annotate_eagle_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     kv_cache_groups: list[KVCacheGroupSpec],
-    use_deepseek_v4_fallback: bool = False,
+    use_last_registered_draft_fallback: bool = False,
 ) -> None:
     """Flag the KV cache groups that hold drafter attention layers.
 
@@ -2090,14 +2141,13 @@ def _annotate_eagle_groups(
        spec merging, wherever grouping happens to land. It is sufficient but
        not necessary: a drafter whose spec is indistinguishable from the
        target's cannot be found this way.
-    2. Model-scoped positional fallback for DeepseekV4, whose MTP block reuses
-       the target's own decoder layer and so carries no spec marker. Its draft
-       attention layer is always the last registered layer, so flag whichever
-       group holds it. This rule is only valid where the groups partition
-       exactly the layers of ``kv_cache_spec``, which is true on the packed
-       grouping path and not in general; other callers must leave
-       ``use_deepseek_v4_fallback`` False. The caller gates this fallback on
-       the configured model type.
+    2. Model-scoped positional fallback for models whose MTP attention carries
+       no spec marker but is known to register last. Flag whichever group holds
+       that layer. This rule requires ``kv_cache_groups`` to partition exactly
+       the layers of ``kv_cache_spec``. Both the packed and general grouping
+       callers satisfy that invariant; other callers must leave
+       ``use_last_registered_draft_fallback`` False. The caller also gates this
+       fallback on the configured model and speculative method.
        FIXME(yifan): avoid/generalize this hacky check.
 
     Args:
@@ -2105,7 +2155,9 @@ def _annotate_eagle_groups(
         kv_cache_spec: The kv cache spec of each attention layer, in layer
             registration order. Only read by rule 2.
         kv_cache_groups: Groups to annotate in place.
-        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4 packed group.
+        use_last_registered_draft_fallback: Enable rule 2 for a model with a
+            known last-registered draft layer when the groups exactly partition
+            ``kv_cache_spec``.
     """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle_block_drop():
@@ -2118,7 +2170,7 @@ def _annotate_eagle_groups(
         ):
             group.is_eagle_group = True
 
-    if not use_deepseek_v4_fallback:
+    if not use_last_registered_draft_fallback:
         return
     last_layer = next(reversed(kv_cache_spec))
     for group in kv_cache_groups:
@@ -2261,7 +2313,14 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    _annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+        use_last_registered_draft_fallback=(
+            _uses_native_mtp_draft_layer_fallback(vllm_config)
+        ),
+    )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
@@ -2339,10 +2398,10 @@ def _max_memory_usage_bytes_from_groups(
         (
             attn_group,
             mamba_groups,
-            mla_names,
-            idx_names,
-            mla_page,
-            idx_page,
+            _,
+            _,
+            _,
+            _,
             tail_names,
             _,
         ) = glm5_layout
@@ -2357,7 +2416,7 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+        return total_blocks * _pool_bytes_per_block(kv_cache_groups)
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0

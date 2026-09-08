@@ -61,6 +61,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -71,7 +72,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            use_ubatching=False,
+        ),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
@@ -91,14 +95,30 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
     config.cache_config.mamba_cache_mode = "none"
 
-    config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
+    config.use_v2_model_runner = False
+    config.parallel_config.use_ubatching = True
+    with pytest.raises(ValueError, match="does not support microbatching"):
         VllmConfig.validate_mamba_cached_kernel(config)
+    config.parallel_config.use_ubatching = False
+    config.use_v2_model_runner = True
+
+    config.model_config.architecture = "NemotronHForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+    # Ordinary Triton ReplaySSM keeps its pre-existing PP support surface.
+    config.model_config.architecture = "NemotronHForCausalLM"
+    config.num_speculative_tokens = 0
+    config.cache_config.use_kda_recoverssm = False
+    config.use_v2_model_runner = False
+    VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

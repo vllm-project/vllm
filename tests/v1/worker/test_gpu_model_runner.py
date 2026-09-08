@@ -717,6 +717,35 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_ids[1])
 
 
+def test_v1_recoverssm_commits_post_sampling_acceptance() -> None:
+    runner = object.__new__(GPUModelRunner)
+    runner._use_flashinfer_replayssm = False
+    runner._needs_prefix_state_migration = False
+    runner.speculative_config = SimpleNamespace()
+    runner.model_config = SimpleNamespace(is_hybrid=True)
+    runner.num_spec_tokens = 3
+    runner.num_accepted_tokens = SimpleNamespace(gpu=torch.ones(4, dtype=torch.int32))
+    runner.recoverssm = Mock()
+    runner.input_batch = SimpleNamespace(
+        num_accepted_tokens_cpu_tensor=torch.zeros(4, dtype=torch.int32)
+    )
+    runner.num_accepted_tokens_event = Mock()
+    runner.cache_config = SimpleNamespace(mamba_cache_mode="none")
+
+    output_token_ids = torch.tensor(
+        [[11, 12, -1, -1], [21, 22, 23, -1]], dtype=torch.int64
+    )
+    runner._update_states_after_model_execute(output_token_ids, Mock())
+
+    expected = torch.tensor([2, 3], dtype=torch.int32)
+    torch.testing.assert_close(runner.num_accepted_tokens.gpu[:2], expected)
+    args, kwargs = runner.recoverssm.commit_step.call_args
+    torch.testing.assert_close(args[0], expected)
+    assert args[1] is None
+    assert kwargs["state_indices"] is None
+    assert kwargs["num_accepted_tokens"] is runner.num_accepted_tokens.gpu
+
+
 def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(
     model_runner, model_runner_2, dist_init, monkeypatch
 ):

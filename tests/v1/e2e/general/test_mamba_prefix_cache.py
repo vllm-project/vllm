@@ -873,13 +873,9 @@ def get_mamba_prefix_cache_step_configs(
     return tests
 
 
-def _run_mamba_prefix_cache_mrv1(
+def _run_mamba_prefix_cache_mrv1_configured(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
-    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
-    # models like Qwen3-Next now default to the V2 runner.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
@@ -938,6 +934,21 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
+def _run_mamba_prefix_cache_mrv1(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    # The test patches V1 runner methods, while Qwen3-Next now defaults to V2.
+    # Scope the V1 override to this call, then clear the cached env value after
+    # monkeypatch restores it so following tests see the original runner choice.
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+            envs.disable_envs_cache()
+            _run_mamba_prefix_cache_mrv1_configured(patch, async_scheduling)
+    finally:
+        envs.disable_envs_cache()
+
+
 @create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
@@ -948,14 +959,11 @@ def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
 
-def _run_mamba_prefix_cache_mrv2(
+def _run_mamba_prefix_cache_mrv2_configured(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    envs.disable_envs_cache()
 
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -1037,6 +1045,8 @@ def _run_mamba_prefix_cache_mrv2(
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        is_prefilling: torch.Tensor | None = None,
     ) -> None:
         action = cur_step_action
         block_tables = captured.get("block_tables")
@@ -1050,7 +1060,12 @@ def _run_mamba_prefix_cache_mrv2(
             or action.postprocess_copy_idx == (-1, -1)
         ):
             return original_postprocess_state(
-                self, idx_mapping, num_sampled, num_computed_tokens
+                self,
+                idx_mapping,
+                num_sampled,
+                num_computed_tokens,
+                query_start_loc,
+                is_prefilling,
             )
         expected = action.postprocess_copy_idx
         snapshots = [
@@ -1058,7 +1073,12 @@ def _run_mamba_prefix_cache_mrv2(
             for temporal, bt in temporal_states(self, block_tables, kv_cache_config)
         ]
         ret = original_postprocess_state(
-            self, idx_mapping, num_sampled, num_computed_tokens
+            self,
+            idx_mapping,
+            num_sampled,
+            num_computed_tokens,
+            query_start_loc,
+            is_prefilling,
         )
         # Comparing device tensors for the assertion is a deliberate D2H.
         with gpu_sync_allowed():
@@ -1215,6 +1235,22 @@ def _run_mamba_prefix_cache_mrv2(
         del engine
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+def _run_mamba_prefix_cache_mrv2(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    # The test patches V2 runner methods in this process, so disable engine-core
+    # multiprocessing and select V2 only for this call. Clear the cached env
+    # values after monkeypatch restores them to avoid leaking either override.
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            envs.disable_envs_cache()
+            _run_mamba_prefix_cache_mrv2_configured(patch, async_scheduling)
+    finally:
+        envs.disable_envs_cache()
 
 
 @create_new_process_for_each_test()

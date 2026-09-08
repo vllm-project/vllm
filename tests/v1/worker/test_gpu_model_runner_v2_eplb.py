@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -203,3 +204,79 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_sample_tokens_postprocesses_state_before_drafting(monkeypatch):
+    events: list[Any] = []
+    runner = _make_runner()
+    input_batch = SimpleNamespace(
+        req_ids=["request"],
+        idx_mapping=torch.tensor([0], dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    hidden_states = torch.zeros(1, 1)
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=hidden_states,
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+    )
+    sampled_token_ids = torch.tensor([[1]])
+    num_sampled = torch.tensor([1], dtype=torch.int32)
+    num_rejected = torch.tensor([0], dtype=torch.int32)
+    runner.sample = lambda *_: (
+        SimpleNamespace(sampled_token_ids=sampled_token_ids),
+        num_sampled,
+        num_rejected,
+    )
+    runner.pp_handler = None
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=lambda *_: {}
+    )
+    runner.model = SimpleNamespace(compute_logits=None)
+    runner.main_stream = None
+    runner.output_copy_stream = None
+    runner.check_ep_fault = None
+    runner.pcp_manager = None
+    runner._draft_workspace_lane = None
+    runner.adaptive_verification = None
+    runner.sampler = SimpleNamespace(
+        penalties_state=SimpleNamespace(output_bin_counts=None),
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=None),
+            seeds=SimpleNamespace(gpu=None),
+        ),
+    )
+    runner.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=None),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int32)),
+        prompt_len=SimpleNamespace(np=None),
+        last_sampled_tokens=None,
+        next_prefill_tokens=None,
+        total_len=SimpleNamespace(gpu=None),
+        draft_tokens=torch.zeros((1, 1), dtype=torch.int64),
+    )
+
+    def postprocess_state(*_):
+        events.append("postprocess")
+
+    def propose(*_, **__):
+        events.append("draft")
+        return torch.tensor([[2]])
+
+    runner.speculator = SimpleNamespace(supports_mm_inputs=False, propose=propose)
+    runner.model_state = SimpleNamespace(
+        postprocess_state=postprocess_state,
+    )
+    monkeypatch.setattr(mrv2, "AsyncOutput", lambda **_: object())
+    monkeypatch.setattr(mrv2, "post_update", lambda *_: None)
+    monkeypatch.setattr(mrv2, "use_workspace_lane", lambda _: nullcontext())
+
+    mrv2.GPUModelRunner.sample_tokens(runner, None)
+
+    assert events == ["postprocess", "draft"]

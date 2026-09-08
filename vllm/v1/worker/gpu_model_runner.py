@@ -38,6 +38,7 @@ from vllm.config import (
 )
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -223,6 +224,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -245,8 +247,11 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
+    allocate_replayssm_caches,
     bind_kv_cache,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
+    get_replayssm_block_copy_tensors,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -614,6 +619,7 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        self.replayssm_block_copy_tensors: list[torch.Tensor] = []
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -1000,8 +1006,26 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+        self._use_flashinfer_replayssm = (
+            self.cache_config.use_replayssm
+            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self._needs_prefix_state_migration = (
+            self.cache_config.mamba_cache_mode == "align"
+            or (
+                self._use_flashinfer_replayssm
+                and self.cache_config.mamba_cache_mode == "all"
+            )
+        )
+        self.recoverssm = (
+            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+        )
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
-        if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
+        if (
+            self.cache_config.mamba_cache_mode == "all"
+            and self.num_spec_tokens > 0
+            and not self.cache_config.use_replayssm
+        ):
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
@@ -1066,10 +1090,9 @@ class GPUModelRunner(
         return self._mamba_state_copy_funcs
 
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
-        # Only reachable on the ``mamba_cache_mode == "align"`` path.
-        # The postprocess sub-object is additionally gated on spec
-        # decode + hybrid model.
-        assert self.cache_config.mamba_cache_mode == "align"
+        # The postprocess sub-object is also the model-level owner of
+        # FlashInfer ReplaySSM trackers, including STP.
+        assert self._needs_prefix_state_migration or self._use_flashinfer_replayssm
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
@@ -1079,7 +1102,8 @@ class GPUModelRunner(
                 device=self.device,
                 with_postprocess_align=(
                     self.speculative_config is not None and self.model_config.is_hybrid
-                ),
+                )
+                or self._use_flashinfer_replayssm,
             )
         return self._mamba_bufs
 
@@ -1234,7 +1258,7 @@ class GPUModelRunner(
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
         if scheduler_output.kv_cache_block_copies:
             copy_kv_cache_blocks_inplace(
-                self.kv_caches,
+                [*self.kv_caches, *self.replayssm_block_copy_tensors],
                 self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
@@ -1588,35 +1612,57 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        if not self.speculative_config or not self.model_config.is_hybrid:
+        if not (
+            self.recoverssm is not None
+            or self._use_flashinfer_replayssm
+            or (self.speculative_config and self.model_config.is_hybrid)
+        ):
             return
 
-        # Count the number of accepted tokens for each sequence.
-        # Valid tokens are contiguous from position 0, so counting non-(-1)
-        # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
-        self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+        if self.num_spec_tokens:
+            # Valid tokens are contiguous from position 0, so counting
+            # non-(-1) tokens gives the number accepted. STP is invariantly one
+            # and the input preparation already maintains that neutral value.
+            self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(
+                dim=1
+            )
 
-        if self.cache_config.mamba_cache_mode == "align":
+        if self.recoverssm is not None:
+            self.recoverssm.commit_step(
+                self.num_accepted_tokens.gpu[:num_reqs],
+                None,
+                state_indices=None,
+                num_accepted_tokens=self.num_accepted_tokens.gpu,
+            )
+
+        if self._needs_prefix_state_migration or self._use_flashinfer_replayssm:
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
             # pre-staged to GPU buffers in _prepare_inputs.
-            mamba_utils.postprocess_mamba_align_gpu(
+            mamba_utils.postprocess_mamba_gpu(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 num_accepted_tokens_cpu_tensor=(
                     self.input_batch.num_accepted_tokens_cpu_tensor
+                    if self.num_spec_tokens
+                    else None
                 ),
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
                 mamba_state_copy_funcs=self._get_mamba_state_copy_funcs(),
+                run_prefix_state_migration=self._needs_prefix_state_migration,
             )
 
-            assert self.num_accepted_tokens_event is not None
-            self.num_accepted_tokens_event.record()
+            if self._use_flashinfer_replayssm and not self.num_spec_tokens:
+                # STP ReplaySSM has no accepted-count D2H copy or event.
+                assert self.num_accepted_tokens_event is None
+            else:
+                assert self.num_accepted_tokens_event is not None
+                self.num_accepted_tokens_event.record()
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
@@ -1624,16 +1670,16 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
-            if self.cache_config.mamba_cache_mode == "all":
-                mamba_utils.postprocess_mamba_all(
-                    scheduler_output,
-                    self.kv_cache_config,
-                    self.input_batch,
-                    self.requests,
-                    self.mamba_state_idx,
-                    self.num_spec_tokens,
-                    num_reqs,
-                )
+        if self.cache_config.mamba_cache_mode == "all":
+            mamba_utils.postprocess_mamba_all(
+                scheduler_output,
+                self.kv_cache_config,
+                self.input_batch,
+                self.requests,
+                self.mamba_state_idx,
+                self.num_spec_tokens,
+                num_reqs,
+            )
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -2126,8 +2172,8 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         # Skipped under async scheduling (non-align): the CPU copy races with
         # the in-flight D2H copy and with input-batch row moves.
-        needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and not (
-            self.use_async_scheduling and self.cache_config.mamba_cache_mode != "align"
+        needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and (
+            not self.use_async_scheduling or self._needs_prefix_state_migration
         )
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
@@ -2674,6 +2720,14 @@ class GPUModelRunner(
             # padded attention metadata.
             spec_decode_common_attn_metadata = (
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+            )
+
+        if self.recoverssm is not None:
+            assert isinstance(attn_metadata, dict)
+            self.recoverssm.record_step(
+                attn_metadata,
+                self.attn_groups,
+                for_capture=for_cudagraph_capture,
             )
 
         return attn_metadata, spec_decode_common_attn_metadata
@@ -4424,7 +4478,8 @@ class GPUModelRunner(
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-            if self.cache_config.mamba_cache_mode == "align":
+            mamba_bufs = None
+            if self._needs_prefix_state_migration:
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
@@ -4444,29 +4499,52 @@ class GPUModelRunner(
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
                 )
-                # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                # for requests whose state was copied to a new block.
-                # Re-sync to GPU so the mamba kernel reads from the
-                # correct initial state slot (init_token_idx = 0).
+                # Baseline Mamba may reset an accepted-token offset after
+                # shifting state. ReplaySSM preserves it with the exact live
+                # block copy. Re-sync either result to GPU.
                 self.num_accepted_tokens.np[:num_reqs] = (
                     self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                 )
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                # Stage per-request inputs for the fused postprocess kernel
-                # only when that kernel will actually run. The kernel is
-                # gated on spec-decode + hybrid (see MambaBuffers.create);
-                # without it, ``mamba_bufs.postprocess_align`` is None and
-                # the staging buffers don't exist.
-                if mamba_bufs.postprocess_align is not None:
-                    mamba_utils.stage_postprocess_inputs_to_gpu(
-                        mamba_bufs.postprocess_align,
-                        scheduler_output,
-                        self.input_batch.req_ids,
-                        num_reqs,
-                        self.requests,
-                        self.mamba_state_idx,
+            elif self._use_flashinfer_replayssm:
+                mamba_bufs = self._get_mamba_bufs()
+
+            # Stage inputs whenever the fused state-copy or model-wide
+            # ReplaySSM tracker postprocess will run. Mode none does not run
+            # prefix preprocessing and always uses logical live column zero.
+            if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
+                mamba_ctx = mamba_bufs.postprocess_align
+                if not mamba_ctx.is_initialized:
+                    # First real batch only: model loading creates the buffers,
+                    # but the physical cache tensors and block tables are not
+                    # bound until KV-cache initialization. Capture their stable
+                    # addresses now for later graph-safe GPU postprocessing.
+                    mamba_ctx.initialize_from_forward_context(
+                        self.kv_cache_config,
+                        self.compilation_config.static_forward_context,
+                        self._get_mamba_state_copy_funcs(),
+                        [
+                            self.input_batch.block_table[gid].get_device_tensor(
+                                num_reqs
+                            )
+                            for gid in mamba_ctx.mamba_group_ids
+                        ],
                     )
+                # Every forward: copy this batch's scheduler decisions into
+                # persistent GPU buffers before model execution. After sampling
+                # reveals the accepted-token counts, postprocess_mamba_gpu uses
+                # the same snapshot to migrate canonical Mamba state and/or
+                # publish ReplaySSM's model-wide ring trackers.
+                mamba_utils.stage_postprocess_inputs_to_gpu(
+                    mamba_ctx,
+                    scheduler_output,
+                    self.input_batch.req_ids,
+                    num_reqs,
+                    self.requests,
+                    self.mamba_state_idx,
+                    run_prefix_state_migration=self._needs_prefix_state_migration,
+                )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -6671,25 +6749,15 @@ class GPUModelRunner(
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
             self.kv_caches.clear()
+        if hasattr(self, "replayssm_block_copy_tensors"):
+            self.replayssm_block_copy_tensors.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
         self.cache_config.num_gpu_blocks = None
 
-        for layer in self.compilation_config.static_forward_context.values():
-            if hasattr(layer, "kv_cache"):
-                kv_cache = layer.kv_cache
-                layer.kv_cache = (
-                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-                )
-            # Clean up quantized KV cache scale views
-            # (int8_per_token_head, fp8_per_token_head)
-            if hasattr(layer, "impl"):
-                if hasattr(layer.impl, "_k_scale_cache"):
-                    layer.impl._k_scale_cache = None
-                if hasattr(layer.impl, "_v_scale_cache"):
-                    layer.impl._v_scale_cache = None
+        clear_layer_kv_caches(self.compilation_config.static_forward_context.values())
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -7442,6 +7510,7 @@ class GPUModelRunner(
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
+            replayssm_caches = allocate_replayssm_caches(kv_cache_config, self.device)
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -7457,6 +7526,12 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
             kv_cache_groups=kv_cache_config.kv_cache_groups,
+            replayssm_caches=replayssm_caches,
+        )
+        # Validate and cache optional ReplaySSM-owned state once cache binding
+        # has populated every layer. Block copies are a per-step hot path.
+        self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
+            self.compilation_config.static_forward_context
         )
         return kv_caches
 

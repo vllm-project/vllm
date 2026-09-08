@@ -16,7 +16,11 @@ from types import SimpleNamespace
 
 import torch
 
-from tests.v1.attention.utils import MockMambaBuilder
+from tests.v1.attention.utils import (
+    BatchSpec,
+    MockMambaBuilder,
+    create_common_attn_metadata,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -319,6 +323,37 @@ def test_block_idx_prev_step_persistent_buffer_allocated():
     assert hasattr(builder, "block_idx_last_scheduled_token_prev_step")
     assert builder.block_idx_last_scheduled_token_prev_step.shape == (max_num_seqs,)
     assert builder.block_idx_last_scheduled_token_prev_step.dtype == torch.int32
+
+
+def test_all_spec_decode_without_previous_anchor_leaves_metadata_unset():
+    """A step without a previous-step anchor keeps the optional field unset."""
+    block_size = 16
+    seq_lens = [33, 49]
+    config = _make_vllm_config(
+        max_model_len=256,
+        max_num_seqs=len(seq_lens),
+        num_speculative_tokens=3,
+    )
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+        num_speculative_blocks=2,
+    )
+    builder = MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=[1, 1]),
+        block_size,
+        torch.device("cpu"),
+        arange_block_indices=True,
+    ).replace(is_prefilling=torch.zeros(len(seq_lens), dtype=torch.bool))
+
+    metadata = builder.build(0, common)
+
+    assert metadata.num_decodes == len(seq_lens)
+    assert metadata.block_idx_last_scheduled_token_prev_step is None
 
 
 def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():

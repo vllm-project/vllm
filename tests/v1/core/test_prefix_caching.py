@@ -4296,6 +4296,69 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
+@pytest.mark.parametrize(
+    ("prompt_length", "hash_block_size"),
+    [(40, 16), (32, 16), (32, 8)],
+    ids=("non-exact-coarse-hash", "exact-coarse-hash", "exact-fine-hash"),
+)
+def test_mamba_sparse_retention_keeps_hybrid_eagle_replay_boundary(
+    prompt_length, hash_block_size
+):
+    """The first prompt must retain the state that a sibling MTP group can hit.
+
+    The full-attention draft group drops its last matching block. The Mamba
+    group is not itself an EAGLE group, but its sparse retention boundary must
+    still shift by the same scheduler block or the first repeated prompt misses.
+    """
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_mtp"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=0,
+        use_eagle=True,
+    )
+
+    prompt = [i // hash_block_size for i in range(prompt_length)]
+    prime = make_request("prime", prompt, hash_block_size, sha256)
+    assert manager.allocate_slots(prime, block_size) is not None
+    prime.num_computed_tokens = block_size
+    assert manager.allocate_slots(prime, len(prompt) - block_size) is not None
+    prime.num_computed_tokens = len(prompt)
+    manager.free(prime)
+
+    repeated = make_request("repeated", [*prompt, 999], hash_block_size, sha256)
+    blocks, num_computed_tokens, _ = manager.get_computed_blocks(repeated)
+    assert num_computed_tokens == block_size
+    assert all(len(group_blocks) == 1 for group_blocks in blocks.blocks)
+
+
 def test_mamba_shared_prefix_survives_zero_retention():
     """Manager-level check of the full wiring: a pinned shared-prefix boundary
     (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style

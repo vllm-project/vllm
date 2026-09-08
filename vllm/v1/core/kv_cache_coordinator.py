@@ -667,8 +667,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     ", ".join(sorted(unsupported_partial_hit_managers)),
                 )
         cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
-        for manager in self.single_type_managers:
+        for manager, group in zip(
+            self.single_type_managers,
+            kv_cache_config.kv_cache_groups,
+            strict=True,
+        ):
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
+            if self.eagle_group_ids and isinstance(group.kv_cache_spec, MambaSpec):
+                # The draft attention group drops one scheduler block from a
+                # cache hit. Preserve the matching state in sparse Mamba
+                # retention without reclassifying the Mamba group as EAGLE.
+                manager._sparse_replay_boundary_shift = self.scheduler_block_size
         self.verify_and_split_kv_cache_groups()
 
     @property
