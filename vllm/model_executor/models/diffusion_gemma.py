@@ -162,7 +162,7 @@ class DiffusionGemmaForConditionalGeneration(
     set by DiffusionGemmaModelState.prepare_inputs().
     """
 
-    hf_to_vllm_mapper = Gemma4Model.hf_to_vllm_mapper | WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.decoder.self_conditioning.": "self_conditioning.",
             "model.decoder.": "model.",

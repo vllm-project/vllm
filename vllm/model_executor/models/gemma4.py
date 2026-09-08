@@ -65,6 +65,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -1000,7 +1001,7 @@ class Gemma4CrossDecoderLayers(nn.Module):
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
-class Gemma4Model(nn.Module, EagleModelMixin):
+class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
             re.compile(r"(?<!\.moe)\.experts(?=\.|$)"): ".moe.experts",
