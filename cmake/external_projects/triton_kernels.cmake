@@ -12,8 +12,10 @@ if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
 else()
   if (VLLM_TARGET_DEVICE STREQUAL "rocm")
     set(TRITON_GIT "https://github.com/ROCm/triton.git")
-    # Pinned from release/internal/3.6.x
-    set(TRITON_KERNELS_TAG "0f380657dbf3ee86eb57558ff71df24f03b5d4e7")
+    # Pinned from release/internal/3.8.x. The 3.6.x tag OutOfResources on gfx950
+    # (mxfp4 MoE tile > 160KB LDS) once built against the triton 3.8 compiler;
+    # the 3.8 matmul API is what the version-gated LDS opt_flags fix targets.
+    set(TRITON_KERNELS_TAG "669b31acc1dd1b3fd93286afd5db67f65d9f7557")
   else()
     set(TRITON_GIT "https://github.com/triton-lang/triton.git")
     set(TRITON_KERNELS_TAG "v3.5.1")
