@@ -249,6 +249,30 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             )
         super().validate_num_items(modality, num_items)
 
+    def get_mm_feature_token_count(
+        self,
+        modality: str,
+        kwargs_item: MultiModalKwargsItem | None,
+    ) -> int | None:
+        # Replicates the audio tower's sequence-length arithmetic
+        # (two Conv2d subsampling layers over the mel frames, i.e.
+        # ceil(frames / 4)) so that a prompt splice which disagrees with
+        # the processed features fails the request at P0 instead of
+        # escalating to a fatal engine error during model execution.
+        if modality != "audio" or kwargs_item is None:
+            return None
+
+        field = kwargs_item.get("input_features_padded")
+        if field is None:
+            return None
+
+        data = field.data
+        if not isinstance(data, torch.Tensor) or data.ndim < 2:
+            return None
+
+        batch_size = math.prod(data.shape[:-2])
+        return batch_size * math.ceil(data.shape[-2] / 4)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {"image": None}
         if self.get_hf_config().audio_config is not None:

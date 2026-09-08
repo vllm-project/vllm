@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
+    from vllm.inputs import MultiModalKwargsItem
     from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object
@@ -390,6 +391,24 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    def get_mm_feature_token_count(
+        self,
+        modality: str,
+        kwargs_item: "MultiModalKwargsItem | None",
+    ) -> int | None:
+        """
+        Number of feature tokens the model's multimodal encoder will
+        produce for a processed item.
+
+        Used by :meth:`BaseMultiModalProcessor.apply` to check that the
+        prompt splice reserves exactly this many placeholder positions,
+        so a count mismatch fails the request at P0 instead of escalating
+        to a fatal engine error during model execution. ``None`` (the
+        default) means the count cannot be cheaply determined and the
+        check is skipped.
+        """
+        return None
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""

@@ -6,11 +6,13 @@ from contextlib import nullcontext
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.inputs import MultiModalKwargsItem, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
@@ -19,6 +21,7 @@ from vllm.multimodal.processing.context import (
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalProcessingInfo,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
@@ -1142,6 +1145,121 @@ class _TextFallbackProcessor(BaseMultiModalProcessor):
 
 def _text_fallback_processor() -> BaseMultiModalProcessor:
     return _TextFallbackProcessor(_FakeTokenizer())
+
+
+class _CountingProcessingInfo(_FakeProcessingInfo):
+    def __init__(self, tokenizer, feature_tokens: int | None) -> None:
+        super().__init__(tokenizer)
+        self.feature_tokens = feature_tokens
+
+    def get_mm_feature_token_count(self, modality: str, kwargs_item) -> int | None:
+        return self.feature_tokens
+
+
+class _CountValidatingProcessor(BaseMultiModalProcessor):
+    """Only the validator surface: a controllable feature count and cache."""
+
+    def __init__(self, tokenizer, feature_tokens: int | None, cache) -> None:
+        self.info = _CountingProcessingInfo(tokenizer, feature_tokens)
+        self.cache = cache
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        raise NotImplementedError
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        raise NotImplementedError
+
+
+class _RecordingCache:
+    def __init__(self) -> None:
+        self.invalidated: list[str] = []
+
+    def invalidate(self, mm_hash: str) -> None:
+        self.invalidated.append(mm_hash)
+
+
+def _feature_count_mm_info(n_placeholders: int, is_embed: torch.Tensor | None = None):
+    mm_info = MultiModalProcessingInfo(
+        kwargs=MultiModalKwargsItems({"audio": [MultiModalKwargsItem.dummy()]}),
+        hashes={"audio": ["audio-hash-1"]},
+        prompt_updates={},
+    )
+    placeholders = {
+        "audio": [
+            [
+                PlaceholderFeaturesInfo(
+                    modality="audio",
+                    item_idx=0,
+                    start_idx=0,
+                    tokens=[7] * n_placeholders,
+                    is_embed=is_embed,
+                )
+            ]
+        ]
+    }
+    return mm_info, placeholders
+
+
+@pytest.mark.parametrize("feature_tokens", [None, 8])
+def test_validate_mm_feature_counts_passes(feature_tokens):
+    """Matching (or unknown) feature counts pass; the cache is untouched."""
+    mm_info, placeholders = _feature_count_mm_info(8)
+    cache = _RecordingCache()
+    processor = _CountValidatingProcessor(_FakeTokenizer(), feature_tokens, cache)
+
+    processor._validate_mm_feature_counts(mm_info, placeholders)
+
+    assert cache.invalidated == []
+
+
+def test_validate_mm_feature_counts_mismatch_fails_request_and_invalidates():
+    """A splice/features count mismatch fails the request at P0 — instead of
+    a fatal engine error at model execution (#55546) — and evicts the stale
+    entry so a client retry reprocesses it."""
+    mm_info, placeholders = _feature_count_mm_info(8)
+    cache = _RecordingCache()
+    processor = _CountValidatingProcessor(_FakeTokenizer(), 5, cache)
+
+    with pytest.raises(ValueError, match="5 feature tokens but .* 8 placeholder"):
+        processor._validate_mm_feature_counts(mm_info, placeholders)
+
+    assert cache.invalidated == ["audio-hash-1"]
+
+
+def test_validate_mm_feature_counts_counts_embed_positions_only():
+    """Only positions marked by ``is_embed`` receive feature embeddings."""
+    is_embed = torch.tensor([True] * 5 + [False] * 5)
+    mm_info, placeholders = _feature_count_mm_info(10, is_embed=is_embed)
+    cache = _RecordingCache()
+    ok = _CountValidatingProcessor(_FakeTokenizer(), 5, cache)
+    ok._validate_mm_feature_counts(mm_info, placeholders)
+    assert cache.invalidated == []
+
+    bad = _CountValidatingProcessor(_FakeTokenizer(), 10, _RecordingCache())
+    with pytest.raises(ValueError, match="10 feature tokens but .* 5 placeholder"):
+        bad._validate_mm_feature_counts(mm_info, placeholders)
+
+
+def test_gemma4_audio_feature_token_count():
+    """Gemma4's hook must replicate the audio tower's sequence-length
+    arithmetic (two /2 conv subsamplings over the mel frames) exactly."""
+    from vllm.model_executor.models.gemma4_mm import Gemma4ProcessingInfo
+    from vllm.multimodal.inputs import MultiModalFieldElem, MultiModalSharedField
+
+    info = object.__new__(Gemma4ProcessingInfo)
+    frames = 2999  # 30 s of 16 kHz audio -> 750 tokens
+    item = MultiModalKwargsItem(
+        {
+            "input_features_padded": MultiModalFieldElem(
+                data=torch.zeros((1, frames, 80)),
+                field=MultiModalSharedField(batch_size=1),
+            )
+        }
+    )
+
+    assert info.get_mm_feature_token_count("audio", item) == 750
+    assert info.get_mm_feature_token_count("audio", None) is None
+    assert info.get_mm_feature_token_count("image", item) is None
 
 
 def test_apply_prompt_updates_falls_back_to_text_matching():

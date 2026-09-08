@@ -1741,6 +1741,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_prompt_updates=mm_info.prompt_updates,
             )
 
+        self._validate_mm_feature_counts(mm_info, mm_placeholders)
+
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
             for modality, placeholders in mm_placeholders.items()
@@ -1752,6 +1754,61 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+    def _validate_mm_feature_counts(
+        self,
+        mm_info: MultiModalProcessingInfo,
+        mm_placeholders: Mapping[str, Sequence[PlaceholderFeaturesInfo]],
+    ) -> None:
+        """Check that each item's prompt splice reserves exactly as many
+        placeholder positions as the encoder will produce feature tokens.
+
+        A mismatch previously surfaced during model execution in
+        ``_merge_multimodal_embeddings``, which V1 treats as a fatal
+        engine error: one bad item tears down the whole engine tree
+        (#55546). Common causes are a stale multimodal cache entry (a
+        UUID reused for a different payload, #55547) or a prompt-splice
+        formula that disagrees with the HF processor output. Failing
+        here is request-scoped, and the offending item's cache entry is
+        invalidated so a client retry reprocesses it.
+        """
+        for modality, placeholders in mm_placeholders.items():
+            hashes = mm_info.hashes.get(modality, [])
+            kwargs_items = mm_info.kwargs.get(modality, [])
+
+            for item_idx, item_placeholders in enumerate(placeholders):
+                if item_idx >= len(kwargs_items) or item_idx >= len(hashes):
+                    continue
+
+                n_placeholders = sum(
+                    (
+                        int(ph.is_embed.sum().item())
+                        if ph.is_embed is not None
+                        else ph.length
+                    )
+                    for ph in item_placeholders
+                )
+                n_features = self.info.get_mm_feature_token_count(
+                    modality, kwargs_items[item_idx]
+                )
+                if n_features is None or n_features == n_placeholders:
+                    continue
+
+                mm_hash = hashes[item_idx]
+                if self.cache is not None:
+                    self.cache.invalidate(mm_hash)
+
+                raise ValueError(
+                    f"Multimodal '{modality}' item {mm_hash!r} produces "
+                    f"{n_features} feature tokens but its prompt replacement "
+                    f"reserves {n_placeholders} placeholder positions. This "
+                    "usually means the multimodal processor cache served a "
+                    "stale entry (e.g. a UUID reused for a different "
+                    "payload) or the model's prompt-splice arithmetic "
+                    "disagrees with the processor output. The cache entry "
+                    "has been invalidated; retrying the request reprocesses "
+                    "the item."
+                )
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
