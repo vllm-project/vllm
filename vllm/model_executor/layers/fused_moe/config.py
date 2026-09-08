@@ -1277,30 +1277,6 @@ class FusedMoEParallelConfig:
         )
 
 
-@dataclass(frozen=True)
-class MoETPWeightShard:
-    """Checkpoint bounds and allocation for one rank, in intermediate channels."""
-
-    start: int
-    size: int
-    allocated_size: int
-    block_size: int
-
-    @classmethod
-    def block_aligned(
-        cls, intermediate_size: int, block_size: int, tp_size: int, tp_rank: int
-    ) -> "MoETPWeightShard":
-        assert intermediate_size % block_size == 0
-        assert 0 <= tp_rank < tp_size
-        blocks, remainder = divmod(intermediate_size // block_size, tp_size)
-        return cls(
-            start=(tp_rank * blocks + min(tp_rank, remainder)) * block_size,
-            size=(blocks + int(tp_rank < remainder)) * block_size,
-            allocated_size=(blocks + int(remainder > 0)) * block_size,
-            block_size=block_size,
-        )
-
-
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class FusedMoEConfig:
@@ -1363,8 +1339,8 @@ class FusedMoEConfig:
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
-    # None preserves ordinary equal-channel TP loading.
-    tp_weight_shard: MoETPWeightShard | None = None
+    # Use the allocated width as the checkpoint TP stride, including for scales.
+    tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 

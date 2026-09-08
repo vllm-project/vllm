@@ -362,29 +362,33 @@ class RoutedExperts(PluggableLayer):
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
             load_full_w2: whether or not the w2 loaded should be sharded.
-            is_scale: whether checkpoint bounds are expressed in quantization blocks.
+            is_scale: whether padding should use unit scales instead of zero weights.
         """
-        shard = self.moe_config.tp_weight_shard
-        if shard is not None:
+        padded_tp = self.moe_config.tp_shard_with_padding
+        if padded_tp:
             if load_full_w2:
-                raise ValueError("A TP weight shard cannot load replicated w2 scales.")
-            divisor = shard.block_size if is_scale else 1
-            expected_size = self.moe_config.intermediate_size // divisor
-            if loaded_weight.shape[shard_dim] != expected_size:
-                raise ValueError(
-                    "Block-aligned TP loading expects an unsharded checkpoint "
-                    f"projection of size {expected_size}, got "
-                    f"{loaded_weight.shape[shard_dim]}."
-                )
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard.start // divisor, shard.size // divisor
-            )
+                raise ValueError("Padded TP loading cannot load replicated w2 scales.")
             destination = expert_data
             if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
                 half = destination.shape[shard_dim] // 2
                 destination = destination.narrow(
                     shard_dim, 0 if shard_id == "w1" else half, half
                 )
+            shard_size = destination.shape[shard_dim]
+            expected_size = (
+                self.moe_config.intermediate_size
+                * shard_size
+                // self.moe_config.intermediate_size_per_partition
+            )
+            if loaded_weight.shape[shard_dim] != expected_size:
+                raise ValueError(
+                    "Block-aligned TP loading expects an unsharded checkpoint "
+                    f"projection of size {expected_size}, got "
+                    f"{loaded_weight.shape[shard_dim]}."
+                )
+            start = min(tp_rank * shard_size, expected_size)
+            size = min(shard_size, expected_size - start)
+            loaded_weight = loaded_weight.narrow(shard_dim, start, size)
             destination.fill_(1 if is_scale else 0)
 
         if shard_id == "w2":
@@ -395,7 +399,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=load_full_w2 or shard is not None,
+                load_full=load_full_w2 or padded_tp,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -404,7 +408,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=shard is not None,
+                load_full=padded_tp,
             )
 
     def _load_per_channel_weight_scale(

@@ -92,9 +92,7 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
     }
     reconstructed: dict[str, list[torch.Tensor]] = {name: [] for name in weights}
     num_blocks = intermediate_size // 128
-    for rank, blocks in enumerate(
-        torch.tensor_split(torch.arange(num_blocks), tp_size)
-    ):
+    for rank in range(tp_size):
         layer = _make_fp8_tp_experts(
             monkeypatch, tp_size, rank, intermediate_size=intermediate_size
         )
@@ -135,7 +133,7 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
                 w = w.chunk(2, dim=1)[half]
                 s = s.chunk(2, dim=1)[half]
             dim = 2 if name == "w2" else 1
-            valid = blocks.numel() * 128
+            valid = max(0, min(width, intermediate_size - rank * width))
             assert torch.count_nonzero(w.narrow(dim, valid, width - valid)) == 0
             assert torch.all(s.narrow(dim, valid // 128, (width - valid) // 128) == 1)
             dequant = w * s.repeat_interleave(128, dim=1).repeat_interleave(128, dim=2)
@@ -173,7 +171,7 @@ def test_fp8_block_aligned_tp_rejects_unsupported_layout(monkeypatch, field, val
 def test_fp8_aligned_tp_keeps_original_layout(monkeypatch, tp_size):
     layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0)
     assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
-    assert layer.moe_config.tp_weight_shard is None
+    assert not layer.moe_config.tp_shard_with_padding
     assert layer.quant_method.weight_scale_refine is None
 
 
@@ -188,7 +186,7 @@ def test_fp8_skipped_layer_keeps_original_tp_layout(monkeypatch, default_vllm_co
             ignored_layers=["model.layers.0.mlp.experts"],
         ),
     )
-    assert layer.moe_config.tp_weight_shard is None
+    assert not layer.moe_config.tp_shard_with_padding
     assert layer.moe_config.intermediate_size_per_partition == 160
 
 
