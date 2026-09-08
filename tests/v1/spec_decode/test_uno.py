@@ -8,6 +8,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -299,9 +301,40 @@ def test_native_dense_probabilities_remain_request_major(
     assert forward_model[-1] is None
 
 
+@pytest.mark.parametrize(
+    "slot_mappings",
+    [None, {}, {"attention": torch.arange(8)}],
+    ids=["before-allocation-none", "before-allocation-empty", "allocated"],
+)
 def test_dummy_profile_samples_full_draft_batch_with_noise_only_adapter(
-    proposer, forward_model, sampling_metadata
+    proposer, forward_model, sampling_metadata, slot_mappings, monkeypatch
 ):
+    cache_update = Mock()
+    layer = SimpleNamespace(
+        kv_cache=torch.empty(1, 1, 4, 2) if slot_mappings else torch.empty(0),
+        impl=SimpleNamespace(do_kv_cache_update=cache_update),
+    )
+    contexts = []
+
+    def forward_context(attn_metadata, _config, *, slot_mapping, **kwargs):
+        context = ForwardContext(
+            no_compile_layers={"attention": layer},
+            attn_metadata=attn_metadata,
+            slot_mapping=slot_mapping,
+        )
+        contexts.append(context)
+        return override_forward_context(context)
+
+    monkeypatch.setattr("vllm.v1.spec_decode.uno.set_forward_context", forward_context)
+    model = proposer.model
+
+    def forward_with_cache_update(**kwargs):
+        key = torch.empty(len(kwargs["input_ids"]), 1, 1)
+        unified_kv_cache_update(key, key, "attention")
+        return model(**kwargs)
+
+    proposer.model = Mock(side_effect=forward_with_cache_update)
+    proposer.model.compute_logits = model.compute_logits
     proposer.runner = SimpleNamespace(
         input_batch=SimpleNamespace(sampling_metadata=sampling_metadata)
     )
@@ -309,8 +342,19 @@ def test_dummy_profile_samples_full_draft_batch_with_noise_only_adapter(
     sample = Mock(wraps=proposer._sample_from_logits)
     proposer._sample_from_logits = sample
 
-    proposer.dummy_run(8, use_cudagraphs=True)
+    proposer.dummy_run(8, use_cudagraphs=True, slot_mappings=slot_mappings)
 
+    assert len(contexts) == 1
+    if slot_mappings:
+        assert set(contexts[0].slot_mapping) == {"attention"}
+        cache_update.assert_called_once()
+        assert cache_update.call_args.args[-2] is layer.kv_cache
+        torch.testing.assert_close(
+            cache_update.call_args.args[-1], torch.full((6,), PADDING_SLOT_ID)
+        )
+    else:
+        assert contexts[0].slot_mapping == {}
+        cache_update.assert_not_called()
     sample.assert_called_once()
     logits, metadata = sample.call_args.args
     assert logits.shape == (6, 32)

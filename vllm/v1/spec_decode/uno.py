@@ -320,7 +320,10 @@ class UnoProposer(SpecDecodeBaseProposer):
                 self.vllm_config,
                 num_tokens=num_queries,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                slot_mapping=self._get_slot_mapping(num_queries),
+                # Profiling runs before the shared target KV cache is allocated.
+                slot_mapping=(
+                    self._get_slot_mapping(num_queries) if slot_mappings else {}
+                ),
             ):
                 hidden_states = self.model(
                     input_ids=self.input_ids[:num_queries],
