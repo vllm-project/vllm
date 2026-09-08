@@ -1056,18 +1056,15 @@ class OpenPanguVLForConditionalGeneration(
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
     ) -> torch.Tensor:
-        if multimodal_embeddings is None:
-            return self.language_model.embed_input_ids(input_ids)
-
-        mm_token_ids = input_ids.new_tensor(
-            [self.config.image_token_id, self.config.video_token_id]
-        )
-        is_multimodal = torch.isin(input_ids, mm_token_ids)
-        return self.embed_input_ids(
-            input_ids,
-            multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
+        inputs_embeds = self.language_model.embed_input_ids(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = self.embed_input_ids(  # type: ignore[call-overload]
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                [self.config.image_token_id, self.config.video_token_id],
+            )
+        return inputs_embeds
 
     def _process_image_input(
         self, image_input: OpenPanguVLImageInputs
