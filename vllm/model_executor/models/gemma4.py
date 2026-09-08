@@ -76,20 +76,14 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-_GEMMA4_EXPERTS_MAPPER = WeightsMapper(
-    orig_to_new_regex={
-        re.compile(r"(?<!\.moe)\.experts(?=\.|$)"): ".moe.experts",
-    }
-)
 
+def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
+    """Stack each decoder layer's projections the way its modules are built.
 
-def _gemma4_attention_weights_mapper(config) -> WeightsMapper:
-    """Route each layer's attention tensors onto the projections it has.
-
-    Layers with a qkv_proj pack q/k/v into it. `attention_k_eq_v`
-    full-attention layers ship k_proj only, so K is also loaded as V.
-    KV-shared layers only have q_proj; the K/V tensors original checkpoints
-    still ship for them are dropped.
+    gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
+    into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
+    is also loaded as V. KV-shared layers only have q_proj; the K/V tensors
+    original checkpoints still ship for them are dropped.
     """
     num_layers = config.num_hidden_layers
     first_kv_shared = num_layers - getattr(config, "num_kv_shared_layers", 0)
@@ -101,6 +95,10 @@ def _gemma4_attention_weights_mapper(config) -> WeightsMapper:
             for name in ("k_proj", "v_proj", "k_norm")
         },
         orig_to_new_stacked={
+            ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+            ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
+        }
+        | {
             f"layers.{i}.self_attn.{shard}_proj.": (
                 f"layers.{i}.self_attn.qkv_proj.",
                 shard,
@@ -108,7 +106,7 @@ def _gemma4_attention_weights_mapper(config) -> WeightsMapper:
             for i in range(first_kv_shared)
             for shard in ("q", "k", "v")
         },
-        orig_to_new_duplicate={
+        src_to_dst_copy={
             f"layers.{i}.self_attn.k_proj.": f"layers.{i}.self_attn.v_proj."
             for i, layer_type in enumerate(config.layer_types[:first_kv_shared])
             if k_eq_v and layer_type == "full_attention"
@@ -1003,6 +1001,13 @@ class Gemma4CrossDecoderLayers(nn.Module):
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma4Model(nn.Module, EagleModelMixin):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"(?<!\.moe)\.experts(?=\.|$)"): ".moe.experts",
+        },
+        orig_to_new_substr={".router.per_expert_scale": ".moe.per_expert_scale"},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1010,6 +1015,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | _gemma4_layer_weights_mapper(
+            config
+        )
 
         # PLE config values (default to 0 if not present — disables PLE)
         self.hidden_size_per_layer_input = getattr(
@@ -1408,11 +1416,15 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
 
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
-    hf_to_vllm_mapper = _GEMMA4_EXPERTS_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = Gemma4Model.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_regex={
             # Gemma4ForConditionalGeneration names MoE adapter targets under
             # `...moe.experts.*`, while the text-only model exposes them
@@ -1422,7 +1434,6 @@ class Gemma4ForCausalLM(
             ),
         },
         orig_to_new_substr={
-            ".router.per_expert_scale": ".moe.per_expert_scale",
             # Multimodal weights are handled by the multimodal wrapper.
             "audio_tower.": None,
             "vision_tower.": None,
@@ -1435,10 +1446,6 @@ class Gemma4ForCausalLM(
             # and adapter naming for the text-only Gemma4ForCausalLM path,
             # so LoRA keys from the conditional wrapper map onto `model.*`.
             "model.language_model.": "model.",
-        },
-        orig_to_new_stacked={
-            ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
-            ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
         },
     )
     # KV-shared layers only have q_proj, so qkv_proj packing applies to
@@ -1455,11 +1462,6 @@ class Gemma4ForCausalLM(
         ],
     }
 
-    @classmethod
-    def build_hf_to_vllm_mapper(cls, text_config) -> WeightsMapper:
-        """The class mapper plus `text_config`'s per-layer attention rules."""
-        return cls.hf_to_vllm_mapper | _gemma4_attention_weights_mapper(text_config)
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
@@ -1467,7 +1469,6 @@ class Gemma4ForCausalLM(
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.hf_to_vllm_mapper = self.build_hf_to_vllm_mapper(config)
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

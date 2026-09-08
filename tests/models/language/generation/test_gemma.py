@@ -14,7 +14,11 @@ from vllm.model_executor.models.gemma3n import (
     Gemma3nTextModel,
     _kv_sharing_weights_mapper,
 )
-from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4 import (
+    Gemma4ForCausalLM,
+    Gemma4Model,
+    _gemma4_layer_weights_mapper,
+)
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
 
@@ -71,9 +75,9 @@ def test_gemma4_attention_mapper() -> None:
         (f"model.layers.{i}.self_attn.{tensor}.weight", torch.full((2, 2), i + 1.0))
         for i in range(3)
         for tensor in ("q_proj", "k_proj", "k_norm")
-    ]
+    ] + [("model.layers.0.mlp.up_proj.weight", torch.empty(0))]
 
-    mapper = Gemma4ForCausalLM.build_hf_to_vllm_mapper(config)
+    mapper = Gemma4Model.hf_to_vllm_mapper | _gemma4_layer_weights_mapper(config)
     mapped = list(mapper.apply(weights))
 
     assert [(name, getattr(w, "shard_id", None)) for name, w in mapped] == [
@@ -85,6 +89,7 @@ def test_gemma4_attention_mapper() -> None:
         ("model.layers.1.self_attn.qkv_proj.weight", "v"),
         ("model.layers.1.self_attn.k_norm.weight", None),
         ("model.layers.2.self_attn.q_proj.weight", None),
+        ("model.layers.0.mlp.gate_up_proj.weight", 1),
     ]
     k_weight, v_weight = weights[4][1], mapped[5][1]
     assert torch.equal(v_weight, k_weight) and v_weight is not k_weight
@@ -101,7 +106,6 @@ def test_gemma4_expert_names_map_onto_moe() -> None:
             "experts.gate_up_proj",
             "experts.3.down_proj.weight_packed",
             "router.per_expert_scale",
-            "mlp.gate_proj.weight",
         )
     ]
 
@@ -114,7 +118,6 @@ def test_gemma4_expert_names_map_onto_moe() -> None:
         ("model.layers.0.moe.experts.gate_up_proj", None),
         ("model.layers.0.moe.experts.3.down_proj.weight_packed", None),
         ("model.layers.0.moe.per_expert_scale", None),
-        ("model.layers.0.mlp.gate_up_proj.weight", 0),
     ]
 
 

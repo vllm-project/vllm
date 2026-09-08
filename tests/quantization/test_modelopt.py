@@ -307,7 +307,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     expected_prefix = "language_model.model.layers.0.moe.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.moe.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 

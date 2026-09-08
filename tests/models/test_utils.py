@@ -204,7 +204,7 @@ def test_get_rename_mapper_keeps_only_renames():
         orig_to_new_stacked={".q_proj": (".qkv_proj", "q")},
         orig_to_new_prefix={"drop_prefix.": None, "keep_prefix.": "kept."},
         orig_to_new_suffix={".drop_suffix": None},
-        orig_to_new_duplicate={".k_proj": ".v_proj"},
+        src_to_dst_copy={".k_proj": ".v_proj"},
     )
     renames = mapper.get_rename_mapper()
 
@@ -213,7 +213,7 @@ def test_get_rename_mapper_keeps_only_renames():
     assert renames.orig_to_new_stacked == {}
     assert renames.orig_to_new_prefix == {"keep_prefix.": "kept."}
     assert renames.orig_to_new_suffix == {}
-    assert renames.orig_to_new_duplicate == {}
+    assert renames.src_to_dst_copy == {}
 
     # Names the full mapper drops now survive unchanged.
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
@@ -230,7 +230,7 @@ def test_weights_mapper_duplicate_is_mapped_like_any_other_weight():
             ".k_proj.": (".qkv_proj.", "k"),
             ".v_proj.": (".qkv_proj.", "v"),
         },
-        orig_to_new_duplicate={".k_proj.": ".v_proj."},
+        src_to_dst_copy={".k_proj.": ".v_proj."},
     )
     weight = torch.ones(2)
     weights = [(f"layers.{i}.k_proj.weight", weight) for i in (0, 1)]
