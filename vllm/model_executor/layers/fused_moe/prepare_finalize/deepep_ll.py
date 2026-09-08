@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
-import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -16,11 +15,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.utils.import_utils import import_deep_ep
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
 )
+
+deep_ep = import_deep_ep()
 
 logger = init_logger(__name__)
 

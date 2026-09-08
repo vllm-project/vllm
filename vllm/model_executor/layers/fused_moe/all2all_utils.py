@@ -86,7 +86,7 @@ def flashinfer_one_sided_dispatch_layout(
 
 logger = init_logger(__name__)
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
     if has_deep_ep():
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
         from .prepare_finalize.deepep_ll import (

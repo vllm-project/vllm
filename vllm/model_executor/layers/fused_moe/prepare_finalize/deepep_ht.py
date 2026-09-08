@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
-import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -13,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import import_deep_ep
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -24,6 +24,8 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+deep_ep = import_deep_ep()
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -94,11 +96,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return torch.int64
 
     def _get_dispatch_config(self) -> deep_ep.Config | None:
+        if current_platform.is_xpu():
+            return deep_ep.Config(8, 128, 256)
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_dispatch_config(self.num_dispatchers_)
 
     def _get_combine_config(self) -> deep_ep.Config | None:
+        if current_platform.is_xpu():
+            return deep_ep.Config(8, 128, 256)
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_combine_config(self.num_dispatchers_)

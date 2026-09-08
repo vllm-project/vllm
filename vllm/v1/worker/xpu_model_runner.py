@@ -6,7 +6,11 @@ from functools import partial
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.torch_utils import supports_xpu_graph
+from vllm.utils.torch_utils import (
+    make_current_stream_tracking_context,
+    make_current_stream_tracking_setter,
+    supports_xpu_graph,
+)
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
 )
@@ -46,9 +50,10 @@ def _torch_cuda_wrapper():
     # asserts on duplicate registration when cuda aliases xpu directly).
     torch.cuda.Stream = torch.xpu.Stream
     torch.cuda.default_stream = partial(torch.xpu.current_stream)
-    torch.cuda.current_stream = partial(torch.xpu.current_stream)
-    torch.cuda.stream = partial(torch.xpu.stream)
-    torch.cuda.set_stream = partial(torch.xpu.set_stream)
+    torch.cuda.current_stream = torch.xpu.current_stream
+    torch.cuda.stream = make_current_stream_tracking_context(torch.xpu.set_stream)
+    torch.cuda.mem_get_info = torch.xpu.mem_get_info
+    torch.cuda.set_stream = make_current_stream_tracking_setter(torch.xpu.set_stream)
 
     # torch.xpu.Event does not accept the ``blocking`` kwarg that
     # torch.cuda.Event supports, so drop it here.

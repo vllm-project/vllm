@@ -59,9 +59,11 @@ class SMControlContextManager:
                 A function that sets the number of SMs for computation.
         """
 
-        assert current_platform.is_cuda() or current_platform.is_rocm(), (
-            "SM/CU control is supported on CUDA and ROCm platforms"
-        )
+        assert (
+            current_platform.is_cuda()
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        ), "SM/CU control is supported on CUDA and ROCm platforms"
         device = torch.accelerator.current_device_index()
         total_sms = num_compute_units(device)
 
