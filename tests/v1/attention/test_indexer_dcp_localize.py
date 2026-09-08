@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
@@ -962,3 +963,138 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize("req_lens", [[7], [8, 8], [1, 9], [256, 1, 2730], [5, 0, 6]])
+def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
+    """The index gather must undo DCP sharding per request"""
+    from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
+
+    scheduled = np.array(req_lens, dtype=np.int64)
+    rows = np.arange(len(scheduled), dtype=np.int32)
+    plan = build_pcp_global_chunk_plan(
+        rows, scheduled, dcp_world_size, torch.device("cpu")
+    )
+
+    starts = np.concatenate([[0], np.cumsum(scheduled)])
+    expected = torch.arange(plan.total, dtype=torch.float32).unsqueeze(1)
+
+    # Build each rank's padded shard exactly as the cache gather would.
+    padded_cu = plan.padded_local_cu.tolist()
+    shards = torch.zeros(dcp_world_size, plan.padded_local_total, 1)
+    for r in range(dcp_world_size):
+        for i, g in enumerate(req_lens):
+            for t in range(r, g, dcp_world_size):
+                shards[r, padded_cu[i] + t // dcp_world_size, 0] = starts[i] + t
+
+    gathered = shards.reshape(dcp_world_size * plan.padded_local_total, 1)
+    torch.testing.assert_close(gathered[plan.deinterleave_idx], expected)
+
+
+def test_pcp_plan_pads_each_request_independently():
+    """Per-request padding is what makes every PCP rank's layout identical."""
+    from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
+
+    plan = build_pcp_global_chunk_plan(
+        np.array([0, 1, 2]), np.array([5, 8, 1]), 4, torch.device("cpu")
+    )
+    # ceil(5/4), ceil(8/4), ceil(1/4) = 2, 2, 1 -> cumsum 0, 2, 4, 5.
+    assert plan.padded_local_cu.tolist() == [0, 2, 4, 5]
+    assert plan.padded_local_total == 5
+    assert plan.total == 14
+
+
+def _rank_prefill_rows(
+    manager, num_scheduled_tokens, num_computed_tokens, is_prefilling
+):
+    """This rank's prefill rows as (global_req, local_seq_len, local_query_len)."""
+    query_start_loc_np = np.concatenate([[0], np.cumsum(num_scheduled_tokens)]).astype(
+        np.int32
+    )
+    segments = manager._get_rank_segments(
+        manager.pcp_rank,
+        num_scheduled_tokens,
+        is_prefilling,
+        query_start_loc_np,
+    )
+    rows = []
+    for segment in segments:
+        req = segment.global_batch_req_idx
+        if not is_prefilling[req]:
+            continue
+        chunk_offset = segment.global_batch_slice.start - query_start_loc_np[req]
+        rows.append(
+            (
+                req,
+                int(num_computed_tokens[req] + chunk_offset + segment.num_tokens),
+                segment.num_tokens,
+            )
+        )
+    return rows
+
+
+@pytest.mark.parametrize(
+    ("num_scheduled_tokens", "num_computed_tokens", "workspace"),
+    [
+        ([64, 64], [0, 0], 100),
+        ([32, 32], [0, 0], 200),
+        ([64, 48, 64], [0, 0, 512], 200),
+        ([128], [0], 200),
+    ],
+)
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
+def test_indexer_chunk_list_is_identical_across_pcp_ranks(
+    num_scheduled_tokens, num_computed_tokens, workspace, pcp_world_size
+):
+    """Each chunk issues a DCP all-gather, so the chunk list must not be rank-local."""
+    from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+    num_computed_tokens = np.array(num_computed_tokens, dtype=np.int32)
+    is_prefilling = np.ones(len(num_scheduled_tokens), dtype=np.bool_)
+    max_logits_bytes = 1 << 30
+    num_chunks = 2 * pcp_world_size
+    scheduled = num_computed_tokens + num_scheduled_tokens
+    nominal = -(-num_scheduled_tokens // num_chunks)
+
+    invariant_specs, local_specs = [], []
+    for rank in range(pcp_world_size):
+        manager = PCPManager(
+            pcp_world_size=pcp_world_size, pcp_rank=rank, device=torch.device("cpu")
+        )
+        rows = _rank_prefill_rows(
+            manager, num_scheduled_tokens, num_computed_tokens, is_prefilling
+        )
+        reqs = np.array([req for req, _, _ in rows], dtype=np.int64)
+        invariant_specs.append(
+            split_indexer_prefill_chunks(
+                torch.from_numpy(scheduled[reqs]),
+                torch.from_numpy(nominal[reqs]),
+                workspace,
+                max_logits_bytes,
+            )
+        )
+        local_specs.append(
+            split_indexer_prefill_chunks(
+                torch.tensor([seq for _, seq, _ in rows]),
+                torch.tensor([q for _, _, q in rows]),
+                workspace,
+                max_logits_bytes,
+            )
+        )
+
+    for rank, specs in enumerate(invariant_specs[1:], start=1):
+        assert specs == invariant_specs[0], (
+            f"rank {rank} planned {specs}, rank 0 planned {invariant_specs[0]}"
+        )
+    if (num_scheduled_tokens.tolist(), workspace, pcp_world_size) == (
+        [64, 64],
+        100,
+        2,
+    ):
+        assert local_specs[0] != local_specs[1], (
+            "expected rank-local packing to diverge for this shape; if it no "
+            "longer does, pick another one or the test guards nothing"
+        )

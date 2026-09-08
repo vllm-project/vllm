@@ -64,12 +64,13 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size: int
         dcp_rank: int
         dcp_interleave: int
+        workspace_rank_major: bool
         num_warps: int
         num_topk_tokens: int
         block_table_stride: int
 
     @staticmethod
-    @triton.jit(do_not_specialize=["max_num_blocks_per_req"])
+    @triton.jit(do_not_specialize=["max_num_blocks_per_req", "workspace_rank_stride"])
     def kernel(
         req_id_ptr,  # int32 [num_tokens]
         block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
@@ -78,6 +79,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         valid_count_ptr,  # int32 [num_tokens] - output valid count per row
         prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
         workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
+        workspace_rank_stride,  # int32, rows per DCP rank; 0 unless rank-major
         # shapes (compile-time where possible)
         max_num_blocks_per_req,
         BLOCK_SIZE: tl.constexpr,
@@ -94,6 +96,9 @@ class ConvertReqIndexToGlobalIndexKernel(
         # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
         # prefix is unspecified (only the selected set matters).
         COMPACT_TO_FRONT: tl.constexpr,
+        # The prefill workspace holds the DCP all-gather of every rank's KV
+        # shard - rank-major blocks of `workspace_rank_stride` row.
+        WORKSPACE_RANK_MAJOR: tl.constexpr,
         # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
         DCP_SIZE: tl.constexpr,
         DCP_RANK: tl.constexpr,
@@ -155,8 +160,14 @@ class ConvertReqIndexToGlobalIndexKernel(
             workspace_start = tl.load(
                 workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
             )
-            prefill_out = workspace_start + tok
+            if WORKSPACE_RANK_MAJOR:
+                prefill_out = (
+                    owning_rank * workspace_rank_stride + workspace_start + local_idx
+                )
+            else:
+                prefill_out = workspace_start + tok
             out_val = tl.where(is_prefill, prefill_out, out_val)
+            is_invalid_tok = tl.where(is_prefill, tok < 0, is_invalid_tok)
         out_val = tl.where(is_invalid_tok, -1, out_val)
 
         if COMPACT_TO_FRONT:
@@ -203,6 +214,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
+        WORKSPACE_RANK_MAJOR: bool,
         max_num_blocks_per_req: int,
     ) -> CompileKey:
         tiling = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID)
@@ -217,6 +229,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             dcp_size=DCP_SIZE,
             dcp_rank=DCP_RANK,
             dcp_interleave=DCP_INTERLEAVE,
+            workspace_rank_major=WORKSPACE_RANK_MAJOR,
             num_warps=tiling[3],
             num_topk_tokens=NUM_TOPK_TOKENS,
             block_table_stride=triton_scalar_specialization_rep(max_num_blocks_per_req),
@@ -238,49 +251,73 @@ class ConvertReqIndexToGlobalIndexKernel(
             block_size * dcp_size,
         )
         max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    HAS_PREFILL_WORKSPACE=False,
-                    COUNT_VALID=False,
-                    COMPACT_TO_FRONT=False,
-                    DCP_SIZE=1,
-                    DCP_RANK=0,
-                    DCP_INTERLEAVE=1,
-                ),
-                dict(
-                    HAS_PREFILL_WORKSPACE=False,
-                    COUNT_VALID=True,
-                    COMPACT_TO_FRONT=True,
-                    DCP_SIZE=1,
-                    DCP_RANK=0,
-                    DCP_INTERLEAVE=1,
-                ),
+        combos = [
+            dict(
+                HAS_PREFILL_WORKSPACE=False,
+                COUNT_VALID=False,
+                COMPACT_TO_FRONT=False,
+                DCP_SIZE=1,
+                DCP_RANK=0,
+                DCP_INTERLEAVE=1,
+                WORKSPACE_RANK_MAJOR=False,
+            ),
+            dict(
+                HAS_PREFILL_WORKSPACE=False,
+                COUNT_VALID=True,
+                COMPACT_TO_FRONT=True,
+                DCP_SIZE=1,
+                DCP_RANK=0,
+                DCP_INTERLEAVE=1,
+                WORKSPACE_RANK_MAJOR=False,
+            ),
+            dict(
+                HAS_PREFILL_WORKSPACE=True,
+                COUNT_VALID=True,
+                COMPACT_TO_FRONT=True,
+                DCP_SIZE=1,
+                DCP_RANK=0,
+                DCP_INTERLEAVE=1,
+                WORKSPACE_RANK_MAJOR=False,
+            ),
+            dict(
+                HAS_PREFILL_WORKSPACE=False,
+                COUNT_VALID=True,
+                COMPACT_TO_FRONT=False,
+                DCP_SIZE=dcp_size,
+                DCP_RANK=dcp_rank,
+                DCP_INTERLEAVE=dcp_interleave,
+                WORKSPACE_RANK_MAJOR=False,
+            ),
+            dict(
+                HAS_PREFILL_WORKSPACE=False,
+                COUNT_VALID=True,
+                COMPACT_TO_FRONT=dcp_size > 1,
+                DCP_SIZE=dcp_size,
+                DCP_RANK=dcp_rank,
+                DCP_INTERLEAVE=dcp_interleave,
+                WORKSPACE_RANK_MAJOR=False,
+            ),
+        ]
+        if (
+            vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and dcp_size > 1
+        ):
+            # PCP + DCP gathers each rank's KV shard into a rank-major workspace.
+            # The combos above never pair a prefill workspace with DCP > 1, so
+            # without this the first PCP+DCP prefill pays a JIT compile.
+            combos.append(
                 dict(
                     HAS_PREFILL_WORKSPACE=True,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=True,
-                    DCP_SIZE=1,
-                    DCP_RANK=0,
-                    DCP_INTERLEAVE=1,
-                ),
-                dict(
-                    HAS_PREFILL_WORKSPACE=False,
-                    COUNT_VALID=True,
-                    COMPACT_TO_FRONT=False,
                     DCP_SIZE=dcp_size,
                     DCP_RANK=dcp_rank,
                     DCP_INTERLEAVE=dcp_interleave,
-                ),
-                dict(
-                    HAS_PREFILL_WORKSPACE=False,
-                    COUNT_VALID=True,
-                    COMPACT_TO_FRONT=dcp_size > 1,
-                    DCP_SIZE=dcp_size,
-                    DCP_RANK=dcp_rank,
-                    DCP_INTERLEAVE=dcp_interleave,
-                ),
-            ),
+                    WORKSPACE_RANK_MAJOR=True,
+                )
+            )
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(*combos),
             BLOCK_SIZE=block_size,
             BLOCK_STRIDE_ROWS=block_stride_rows,
             BLOCK_N=128,
@@ -316,6 +353,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 int32_ptr if compile_key.has_prefill_workspace else None
             ),
             max_num_blocks_per_req=1,
+            workspace_rank_stride=1,
             BLOCK_SIZE=compile_key.block_size,
             BLOCK_STRIDE_ROWS=compile_key.block_stride_rows,
             BLOCK_N=compile_key.block_n,
@@ -326,6 +364,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             DCP_SIZE=compile_key.dcp_size,
             DCP_RANK=compile_key.dcp_rank,
             DCP_INTERLEAVE=compile_key.dcp_interleave,
+            WORKSPACE_RANK_MAJOR=compile_key.workspace_rank_major,
         )
 
     @kernel_launcher
@@ -339,6 +378,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         prefill_workspace_request_ids: torch.Tensor | None,
         prefill_workspace_starts: torch.Tensor | None,
         *,
+        workspace_rank_stride: int,
         max_num_blocks_per_req: int,
         BLOCK_SIZE: int,
         BLOCK_STRIDE_ROWS: int,
@@ -350,6 +390,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
+        WORKSPACE_RANK_MAJOR: bool,
     ) -> LaunchSpec:
         single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
             NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID
@@ -406,6 +447,10 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    prefill_workspace_rank_stride: int | None = None,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
     return_valid_counts: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
@@ -480,6 +525,16 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
 
+    workspace_rank_major = prefill_workspace_rank_stride is not None
+    if workspace_rank_major:
+        assert HAS_PREFILL_WORKSPACE, (
+            "prefill_workspace_rank_stride describes the prefill workspace, "
+            "but HAS_PREFILL_WORKSPACE is False"
+        )
+        assert prefill_workspace_rank_stride is not None  # for mypy
+        assert prefill_workspace_rank_stride > 0
+        assert dcp_size > 1, "the rank-major layout needs a DCP group to gather"
+
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
         block_table_c,
@@ -489,6 +544,7 @@ def triton_convert_req_index_to_global_index(
         prefill_workspace_request_ids,
         prefill_workspace_starts,
         # shapes / constexprs
+        workspace_rank_stride=prefill_workspace_rank_stride or 0,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_STRIDE_ROWS=(
@@ -499,10 +555,10 @@ def triton_convert_req_index_to_global_index(
         HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
         COUNT_VALID=return_valid_counts,
         COMPACT_TO_FRONT=return_valid_counts,
-        # DCP disabled (no-op de-interleave)
-        DCP_SIZE=1,
-        DCP_RANK=0,
-        DCP_INTERLEAVE=1,
+        WORKSPACE_RANK_MAJOR=workspace_rank_major,
+        DCP_SIZE=dcp_size,
+        DCP_RANK=dcp_rank,
+        DCP_INTERLEAVE=cp_kv_cache_interleave_size,
     )
 
     if return_valid_counts:
@@ -596,6 +652,7 @@ def triton_filter_and_convert_dcp_index(
         # No prefill workspace on the DCP decode path.
         None,
         None,
+        workspace_rank_stride=0,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_STRIDE_ROWS=(
@@ -606,6 +663,7 @@ def triton_filter_and_convert_dcp_index(
         HAS_PREFILL_WORKSPACE=False,
         COUNT_VALID=count_valid,
         COMPACT_TO_FRONT=compact_valid_to_front,
+        WORKSPACE_RANK_MAJOR=False,
         DCP_SIZE=dcp_size,
         DCP_RANK=dcp_rank,
         DCP_INTERLEAVE=cp_kv_cache_interleave_size,

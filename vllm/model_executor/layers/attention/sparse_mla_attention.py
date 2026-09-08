@@ -135,7 +135,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             device=device,
         )
         parallel_config = vllm_config.parallel_config
-        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.use_pcp = self.pcp_world_size > 1
         try:
             self.dcp_world_size = get_dcp_group().world_size
         except AssertionError:
@@ -307,6 +308,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 use_dense_mha=(
                     prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
+                    # Dense MHA cannot be used under PCP+DCP.
+                    and not (self.use_pcp and self.dcp_world_size > 1)
                 ),
                 topk_mask_workspace=self.topk_mask_workspace,
             )

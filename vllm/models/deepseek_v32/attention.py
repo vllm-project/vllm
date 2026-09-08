@@ -536,8 +536,9 @@ class DeepseekV32Attention(MLAAttention):
             seq_lens: torch.Tensor | None
             query_start_loc: torch.Tensor | None
             if self.use_pcp:
-                if attn_metadata.decode is not None:
-                    seq_lens = attn_metadata.decode.seq_lens
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if decode_metadata is not None:
+                    seq_lens = decode_metadata.seq_lens
                 else:
                     all_seq_lens = cast(
                         torch.Tensor,
@@ -552,12 +553,33 @@ class DeepseekV32Attention(MLAAttention):
                 # PCP-only empty-shard metadata is needed.
                 seq_lens = None
                 query_start_loc = None
-            attn_out = self.dcp_manager.combine(
-                attn_out,
-                lse,
-                seq_lens=seq_lens,  # type: ignore[arg-type]
-                query_start_loc=query_start_loc,  # type: ignore[arg-type]
+
+            num_merge_rows = lse.shape[0]
+            assert num_merge_rows <= attn_out.shape[0], (
+                f"backend returned {num_merge_rows} LSE rows for "
+                f"{attn_out.shape[0]} attention rows"
             )
+            if num_merge_rows < attn_out.shape[0]:
+                assert getattr(attn_metadata, "pcp_dcp_kv_gather", False), (
+                    f"{attn_out.shape[0] - num_merge_rows} of "
+                    f"{attn_out.shape[0]} MQA rows were left out of the DCP "
+                    "merge by a backend that did not gather the KV for them"
+                )
+                if num_merge_rows > 0:
+                    merged = self.dcp_manager.combine(
+                        attn_out[:num_merge_rows].contiguous(),
+                        lse.contiguous(),
+                        seq_lens=None,  # type: ignore[arg-type]
+                        query_start_loc=None,  # type: ignore[arg-type]
+                    )
+                    attn_out[:num_merge_rows] = merged
+            else:
+                attn_out = self.dcp_manager.combine(
+                    attn_out,
+                    lse,
+                    seq_lens=seq_lens,  # type: ignore[arg-type]
+                    query_start_loc=query_start_loc,  # type: ignore[arg-type]
+                )
             if self.use_pcp:
                 attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
