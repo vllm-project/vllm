@@ -9,8 +9,20 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, zip_inputs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
@@ -892,6 +904,13 @@ _SPLIT_ROUNDS = 5
 _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
 
 
+def _topp_split_count(batch_size: int, num_sm: int) -> int:
+    splits = 1
+    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
+        splits *= 2
+    return splits
+
+
 @triton.jit
 def _topp_sb_stats_kernel(
     LOGITS,
@@ -1313,6 +1332,419 @@ def _topp_sb_mask_kernel(
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
 
+class TopKTopPKernel(VllmTritonJitKernel["TopKTopPKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        logits_stride: int
+        batch_size: int
+        vocab_size: int
+        mask_value: float
+        block_size: int
+        block_size_trunc: int
+        topk_enabled: bool
+        topp_enabled: bool
+        split_covers_ponly: bool
+        num_warps: int
+
+    kernel = staticmethod(_topk_topp_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        logits_stride: int,
+        batch_size: int,
+        vocab_size: int,
+        topk_enabled: bool,
+        topp_enabled: bool,
+        use_large_tiles: bool,
+        split_enabled: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            logits_stride=triton_scalar_specialization_rep(logits_stride),
+            batch_size=triton_scalar_specialization_rep(batch_size),
+            vocab_size=vocab_size,
+            mask_value=float("-inf"),
+            block_size=8192 if use_large_tiles else 4096,
+            block_size_trunc=4096 if use_large_tiles else 2048,
+            topk_enabled=topk_enabled,
+            topp_enabled=topp_enabled,
+            split_covers_ponly=split_enabled
+            and topp_enabled
+            and batch_size <= _SPLIT_MAX_BATCH,
+            num_warps=8 if use_large_tiles else 4,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        vocab_size = vllm_config.model_config.get_vocab_size()
+        split_enabled = current_platform.is_cuda()
+        use_large_tiles = not current_platform.is_xpu()
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(topk_enabled=True, topp_enabled=False),
+                dict(topk_enabled=True, topp_enabled=True),
+                dict(topk_enabled=False, topp_enabled=True),
+            ),
+            logits_stride=(16, 2),
+            batch_size=WarmupIntRange(1, max_batch_size + 1),
+            vocab_size=vocab_size,
+            use_large_tiles=use_large_tiles,
+            split_enabled=split_enabled,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, compile_key.vocab_size),
+            strides=(compile_key.logits_stride, 1),
+        )
+        return dict(
+            logits=logits,
+            logits_stride=compile_key.logits_stride,
+            buffer=TritonWarmupTensor(torch.float32),
+            percentile_to_std_table=TritonWarmupTensor(torch.float32),
+            normal_cdf_to_sigma_table=TritonWarmupTensor(torch.float32),
+            k=TritonWarmupTensor(torch.int32)
+            if compile_key.topk_enabled
+            else logits,
+            p=TritonWarmupTensor(torch.float32)
+            if compile_key.topp_enabled
+            else logits,
+            batch_size=compile_key.batch_size,
+            mask_value=compile_key.mask_value,
+            vocab_size=compile_key.vocab_size,
+            block_size=compile_key.block_size,
+            block_size_trunc=compile_key.block_size_trunc,
+            topk_enabled=compile_key.topk_enabled,
+            topp_enabled=compile_key.topp_enabled,
+            split_covers_ponly=compile_key.split_covers_ponly,
+            num_warps=compile_key.num_warps,
+            num_programs=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        logits_stride: int,
+        buffer: torch.Tensor,
+        percentile_to_std_table: torch.Tensor,
+        normal_cdf_to_sigma_table: torch.Tensor,
+        k: torch.Tensor,
+        p: torch.Tensor,
+        *,
+        batch_size: int,
+        mask_value: float,
+        vocab_size: int,
+        block_size: int,
+        block_size_trunc: int,
+        topk_enabled: bool,
+        topp_enabled: bool,
+        split_covers_ponly: bool,
+        num_warps: int,
+        num_programs: int,
+    ) -> LaunchSpec:
+        return (num_programs,), dict(
+            LOGITS=logits,
+            LOGITS_STRIDE_0=logits_stride,
+            BUFFER=buffer,
+            PERCENTILE_TO_STD_TABLE=percentile_to_std_table,
+            NORMAL_CDF_TO_SIGMA_TABLE=normal_cdf_to_sigma_table,
+            K=k,
+            P=p,
+            BATCH_SIZE=batch_size,
+            MASK_VALUE=mask_value,
+            VOCAB_SIZE=vocab_size,
+            BLOCK_SIZE=block_size,
+            BLOCK_SIZE_TRUNC=block_size_trunc,
+            TOPK_ENABLED=topk_enabled,
+            TOPP_ENABLED=topp_enabled,
+            SPLIT_COVERS_PONLY=split_covers_ponly,
+            num_warps=num_warps,
+        )
+
+
+class TopPSplitStatsKernel(
+    VllmTritonJitKernel["TopPSplitStatsKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        logits_stride: int
+        has_k: bool
+        vocab_size: int
+        splits: int
+
+    kernel = staticmethod(_topp_sb_stats_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        logits_stride: int,
+        batch_size: int,
+        num_sm: int,
+        has_k: bool,
+        vocab_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            logits_stride=triton_scalar_specialization_rep(logits_stride),
+            has_k=has_k,
+            vocab_size=vocab_size,
+            splits=_topp_split_count(batch_size, num_sm),
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        vocab_size = vllm_config.model_config.get_vocab_size()
+        return self._trace_dispatch(self.dispatch)(
+            logits_stride=(16, 2),
+            batch_size=WarmupIntRange(
+                1,
+                min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1,
+            ),
+            num_sm=num_compute_units(),
+            has_k=(False, True),
+            vocab_size=vocab_size,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, compile_key.vocab_size),
+            strides=(compile_key.logits_stride, 1),
+        )
+        return dict(
+            logits=logits,
+            logits_stride=compile_key.logits_stride,
+            stats=TritonWarmupTensor(torch.float32),
+            k=TritonWarmupTensor(torch.int32) if compile_key.has_k else logits,
+            p=TritonWarmupTensor(torch.float32),
+            has_k=compile_key.has_k,
+            vocab_size=compile_key.vocab_size,
+            splits=compile_key.splits,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        logits_stride: int,
+        stats: torch.Tensor,
+        k: torch.Tensor,
+        p: torch.Tensor,
+        *,
+        has_k: bool,
+        vocab_size: int,
+        splits: int,
+    ) -> LaunchSpec:
+        return (logits.shape[0] * splits,), dict(
+            LOGITS=logits,
+            LOGITS_STRIDE_0=logits_stride,
+            STATS=stats,
+            K=k,
+            P=p,
+            HAS_K=has_k,
+            VOCAB_SIZE=vocab_size,
+            S=splits,
+            BLOCK=8192,
+            num_warps=8,
+        )
+
+
+class TopPSplitStepKernel(VllmTritonJitKernel["TopPSplitStepKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        logits_stride: int
+        round: int
+        has_k: bool
+        vocab_size: int
+        splits: int
+
+    kernel = staticmethod(_topp_sb_step_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        logits_stride: int,
+        batch_size: int,
+        num_sm: int,
+        round: int,
+        has_k: bool,
+        vocab_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            logits_stride=triton_scalar_specialization_rep(logits_stride),
+            round=triton_scalar_specialization_rep(round),
+            has_k=has_k,
+            vocab_size=vocab_size,
+            splits=_topp_split_count(batch_size, num_sm),
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        vocab_size = vllm_config.model_config.get_vocab_size()
+        return self._trace_dispatch(self.dispatch)(
+            logits_stride=(16, 2),
+            batch_size=WarmupIntRange(
+                1,
+                min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1,
+            ),
+            num_sm=num_compute_units(),
+            round=WarmupIntRange(0, _SPLIT_ROUNDS),
+            has_k=(False, True),
+            vocab_size=vocab_size,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, compile_key.vocab_size),
+            strides=(compile_key.logits_stride, 1),
+        )
+        return dict(
+            logits=logits,
+            logits_stride=compile_key.logits_stride,
+            stats=TritonWarmupTensor(torch.float32),
+            parts=TritonWarmupTensor(torch.float32),
+            k=TritonWarmupTensor(torch.int32) if compile_key.has_k else logits,
+            p=TritonWarmupTensor(torch.float32),
+            round=compile_key.round,
+            has_k=compile_key.has_k,
+            vocab_size=compile_key.vocab_size,
+            splits=compile_key.splits,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        logits_stride: int,
+        stats: torch.Tensor,
+        parts: torch.Tensor,
+        k: torch.Tensor,
+        p: torch.Tensor,
+        round: int,
+        *,
+        has_k: bool,
+        vocab_size: int,
+        splits: int,
+    ) -> LaunchSpec:
+        return (logits.shape[0] * splits,), dict(
+            LOGITS=logits,
+            LOGITS_STRIDE_0=logits_stride,
+            STATS=stats,
+            PARTS=parts,
+            K=k,
+            P=p,
+            ROUND=round,
+            HAS_K=has_k,
+            S=splits,
+            F=_SPLIT_FANOUT,
+            NUM_ROUNDS=_SPLIT_ROUNDS,
+            VOCAB_SIZE=vocab_size,
+            BLOCK=2048,
+            num_warps=8,
+        )
+
+
+class TopPSplitMaskKernel(VllmTritonJitKernel["TopPSplitMaskKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        logits_stride: int
+        has_k: bool
+        vocab_size: int
+        splits: int
+        mask_value: float
+
+    kernel = staticmethod(_topp_sb_mask_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        logits_stride: int,
+        batch_size: int,
+        num_sm: int,
+        has_k: bool,
+        vocab_size: int,
+        mask_value: float,
+    ) -> CompileKey:
+        return self.CompileKey(
+            logits_stride=triton_scalar_specialization_rep(logits_stride),
+            has_k=has_k,
+            vocab_size=vocab_size,
+            splits=_topp_split_count(batch_size, num_sm),
+            mask_value=mask_value,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        vocab_size = vllm_config.model_config.get_vocab_size()
+        return self._trace_dispatch(self.dispatch)(
+            logits_stride=(16, 2),
+            batch_size=WarmupIntRange(
+                1,
+                min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1,
+            ),
+            num_sm=num_compute_units(),
+            has_k=(False, True),
+            vocab_size=vocab_size,
+            mask_value=float("-inf"),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, compile_key.vocab_size),
+            strides=(compile_key.logits_stride, 1),
+        )
+        return dict(
+            logits=logits,
+            logits_stride=compile_key.logits_stride,
+            stats=TritonWarmupTensor(torch.float32),
+            parts=TritonWarmupTensor(torch.float32),
+            k=TritonWarmupTensor(torch.int32) if compile_key.has_k else logits,
+            p=TritonWarmupTensor(torch.float32),
+            has_k=compile_key.has_k,
+            mask_value=compile_key.mask_value,
+            vocab_size=compile_key.vocab_size,
+            splits=compile_key.splits,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        logits_stride: int,
+        stats: torch.Tensor,
+        parts: torch.Tensor,
+        k: torch.Tensor,
+        p: torch.Tensor,
+        *,
+        has_k: bool,
+        mask_value: float,
+        vocab_size: int,
+        splits: int,
+    ) -> LaunchSpec:
+        return (logits.shape[0] * splits,), dict(
+            LOGITS=logits,
+            LOGITS_STRIDE_0=logits_stride,
+            STATS=stats,
+            PARTS=parts,
+            K=k,
+            P=p,
+            HAS_K=has_k,
+            MASK_VALUE=mask_value,
+            S=splits,
+            F=_SPLIT_FANOUT,
+            NUM_ROUNDS=_SPLIT_ROUNDS,
+            VOCAB_SIZE=vocab_size,
+            BLOCK=8192,
+            num_warps=8,
+        )
+
+
+_TOPK_TOPP_KERNEL = TopKTopPKernel()
+_TOPP_SPLIT_STATS_KERNEL = TopPSplitStatsKernel()
+_TOPP_SPLIT_STEP_KERNEL = TopPSplitStepKernel()
+_TOPP_SPLIT_MASK_KERNEL = TopPSplitMaskKernel()
+
+
 def _apply_topp_split(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -1322,9 +1754,7 @@ def _apply_topp_split(
 ) -> None:
     """Split-row top-p pipeline for small batches; masks logits in place."""
     batch_size, vocab_size = logits.shape
-    splits = 1
-    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
-        splits *= 2
+    splits = _topp_split_count(batch_size, num_sm)
 
     ws = _TRITON_SPLIT_CACHE.get(logits.device)
     if ws is None:
@@ -1339,20 +1769,18 @@ def _apply_topp_split(
     k_ptr = k if k is not None else logits  # dummy pointer when HAS_K=False
     has_k = k is not None
 
-    _topp_sb_stats_kernel[(batch_size * splits,)](
+    _TOPP_SPLIT_STATS_KERNEL(
         logits,
         logits.stride(0),
         ws["stats"],
         k_ptr,
         p,
-        HAS_K=has_k,
-        VOCAB_SIZE=vocab_size,
-        S=splits,
-        BLOCK=8192,
-        num_warps=8,
+        has_k=has_k,
+        vocab_size=vocab_size,
+        splits=splits,
     )
     for round_i in range(_SPLIT_ROUNDS):
-        _topp_sb_step_kernel[(batch_size * splits,)](
+        _TOPP_SPLIT_STEP_KERNEL(
             logits,
             logits.stride(0),
             ws["stats"],
@@ -1360,29 +1788,21 @@ def _apply_topp_split(
             k_ptr,
             p,
             round_i,
-            HAS_K=has_k,
-            S=splits,
-            F=_SPLIT_FANOUT,
-            NUM_ROUNDS=_SPLIT_ROUNDS,
-            VOCAB_SIZE=vocab_size,
-            BLOCK=2048,
-            num_warps=8,
+            has_k=has_k,
+            vocab_size=vocab_size,
+            splits=splits,
         )
-    _topp_sb_mask_kernel[(batch_size * splits,)](
+    _TOPP_SPLIT_MASK_KERNEL(
         logits,
         logits.stride(0),
         ws["stats"],
         ws["parts"],
         k_ptr,
         p,
-        HAS_K=has_k,
-        MASK_VALUE=mask_value,
-        S=splits,
-        F=_SPLIT_FANOUT,
-        NUM_ROUNDS=_SPLIT_ROUNDS,
-        VOCAB_SIZE=vocab_size,
-        BLOCK=8192,
-        num_warps=8,
+        has_k=has_k,
+        mask_value=mask_value,
+        vocab_size=vocab_size,
+        splits=splits,
     )
 
 
@@ -1493,7 +1913,7 @@ def apply_top_k_top_p_triton(
         # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
         launch_kwargs["num_warps"] = 8
 
-    _topk_topp_kernel[(NUM_PROGRAMS,)](
+    _TOPK_TOPP_KERNEL(
         logits,
         logits.stride(0),
         buffer,
@@ -1501,15 +1921,16 @@ def apply_top_k_top_p_triton(
         normal_cdf_to_sigma_table,
         k_ptr,
         p_ptr,
-        BATCH_SIZE=batch_size,
-        MASK_VALUE=mask_value,
-        VOCAB_SIZE=vocab_size,
-        BLOCK_SIZE=block_size,
-        BLOCK_SIZE_TRUNC=block_size_trunc,
-        TOPK_ENABLED=topk_enabled,
-        TOPP_ENABLED=topp_enabled,
-        SPLIT_COVERS_PONLY=use_split,
-        **launch_kwargs,
+        batch_size=batch_size,
+        mask_value=mask_value,
+        vocab_size=vocab_size,
+        block_size=block_size,
+        block_size_trunc=block_size_trunc,
+        topk_enabled=topk_enabled,
+        topp_enabled=topp_enabled,
+        split_covers_ponly=use_split,
+        num_warps=launch_kwargs.get("num_warps", 4),
+        num_programs=NUM_PROGRAMS,
     )
     if use_split:
         _apply_topp_split(logits, k_ptr, p_ptr, mask_value, num_sm)
