@@ -106,8 +106,8 @@ def _get_backend_priorities(
                 # BF16 KV Cache
                 # Low head counts: FA4 first (decode batches on its own kernel,
                 # batches with prefill on FlashInfer's; faster than FlashInfer
-                # at every measured decode batch), then FlashInfer (FlashMLA
-                # pads heads).
+                # at every measured decode batch, with and without DCP 2 on
+                # GLM-5.2 at TP4/TP8), then FlashInfer (FlashMLA pads heads).
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
                         AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,

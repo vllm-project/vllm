@@ -13,6 +13,7 @@ the sparse KV by completely different routes:
   ``fa_version`` switch inside a shared ``forward_mqa``.
 """
 
+import math
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, ClassVar
@@ -36,10 +37,14 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import _get_workspace_buffer
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
+    _get_workspace_buffer,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
@@ -359,9 +364,6 @@ class FlashAttnMLASparseFA4Backend(AttentionBackend):
         if vllm_config is None or vllm_config.model_config is None:
             return None
 
-        if vllm_config.parallel_config.decode_context_parallel_size > 1:
-            return "FA4 sparse MLA does not support DCP yet"
-
         hf_config = vllm_config.model_config.hf_text_config
         topk = getattr(hf_config, "index_topk", None)
         if topk is None:
@@ -389,14 +391,28 @@ class FlashAttnMLASparseFA4Backend(AttentionBackend):
             )
 
         # The gather kernel tiles the query heads of one token; it has no
-        # layout for other per-rank head counts.
+        # layout for other per-rank head counts. Under DCP the query is
+        # all-gathered across the DCP ranks before ``forward_mqa``, so the
+        # kernel sees ``num_heads * dcp_size`` heads, not the per-rank count.
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        if num_heads not in (8, 16, 32, 64, 128):
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        # 128 heads run on FA's 128-head prefill kernel rather than the decode
+        # kernel; that path is not validated under DCP, so 128 gathered heads
+        # are left to FlashInfer.
+        head_counts = (8, 16, 32, 64) if dcp_size > 1 else (8, 16, 32, 64, 128)
+        if num_heads * dcp_size not in head_counts:
+            counts = ", ".join(str(h) for h in head_counts)
+            if dcp_size == 1:
+                return (
+                    f"FA4 sparse MLA requires {counts} query heads per rank, "
+                    f"got {num_heads}"
+                )
             return (
-                "FA4 sparse MLA requires 8, 16, 32, 64 or 128 query heads per "
-                f"rank, got {num_heads}"
+                "FA4 sparse MLA requires the DCP-gathered head count "
+                f"(num_heads * dcp_size) to be one of {counts}, got "
+                f"{num_heads} * {dcp_size} = {num_heads * dcp_size}"
             )
         return None
 
@@ -424,7 +440,13 @@ class FlashAttnMLASparseFA4MetadataBuilder(
         threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
             num_q_heads, 1024
         )
-        self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
+        # Each query token is its own kernel row and the DCP index filter is
+        # per token, so a multi-token decode row is fine under DCP.
+        self._init_reorder_batch_threshold(
+            threshold,
+            supports_spec_as_decode=True,
+            supports_dcp_with_varlen=True,
+        )
 
 
 @cache
@@ -444,6 +466,11 @@ def _fa4_varlen_scalars(
 
 
 class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
+    can_return_lse_for_decode: bool = True
+    # FA4's decode kernel emits a natural-log LSE; the trtllm-gen prefill lane
+    # emits log2 and is converted in ``_prefill``.
+    lse_base_on_e: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -504,13 +531,22 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Uniform decode batches run on the FA4 kernel; any batch with prefill
         rows runs on FlashInfer's sparse kernel, as FLASHINFER_MLA_SPARSE does.
+
+        Under DCP both lanes return the per-token natural-log LSE for
+        ``dcp_manager.combine``.
         """
-        if not isinstance(q, tuple):
-            raise NotImplementedError(
-                "FlashAttnMLASparseFA4Impl expects the split (ql_nope, q_pe) "
-                "query; the qv kernel never sees a fused 576-dim head."
-            )
-        ql_nope, q_pe = q
+        q_fused: torch.Tensor | None = None
+        if isinstance(q, tuple):
+            ql_nope, q_pe = q
+        else:
+            # mla_attention fuses the query before the DCP all-gather, so under
+            # DCP the qv kernel's two halves arrive as one 576-dim head. The
+            # slices keep a contiguous last dimension and 16B-aligned strides,
+            # which is all FA4 asks of them, so neither is copied.
+            assert q.shape[-1] == self.kv_lora_rank + self.qk_rope_head_dim
+            q_fused = q
+            ql_nope = q[..., : self.kv_lora_rank]
+            q_pe = q[..., self.kv_lora_rank :]
         num_actual_toks = q_pe.shape[0]
         num_decode_toks = attn_metadata.num_decode_tokens
 
@@ -518,30 +554,46 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            self.topk_indices_buffer[:num_actual_toks],
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
-            return_valid_counts=True,
-        )
+        if self.dcp_world_size > 1:
+            # This rank's own slots, compacted to a contiguous prefix with -1
+            # padding: exactly the contract of ``gather_kv_valid_length`` and
+            # of trtllm's ``seq_lens``.
+            topk_indices, valid_counts = triton_filter_and_convert_dcp_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                self.topk_indices_buffer[:num_actual_toks],
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
+                return_valid_counts=True,
+            )
+        else:
+            topk_indices, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                self.topk_indices_buffer[:num_actual_toks],
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
+                return_valid_counts=True,
+            )
 
         if num_decode_toks >= num_actual_toks:
-            out = self._decode(ql_nope, q_pe, kv_rows, topk_indices, valid_counts)
-            return out, None
-
-        # Any batch with prefill rows runs whole on FlashInfer's kernel, as
-        # FLASHINFER_MLA_SPARSE does.
-        out = self._prefill(
-            ql_nope,
-            q_pe,
-            kv_c_and_k_pe_cache,
-            topk_indices,
-            valid_counts,
-        )
-        return out, None
+            out, lse = self._decode(ql_nope, q_pe, kv_rows, topk_indices, valid_counts)
+        else:
+            # Any batch with prefill rows runs whole on FlashInfer's kernel, as
+            # FLASHINFER_MLA_SPARSE does.
+            out, lse = self._prefill(
+                q_fused if q_fused is not None else torch.cat((ql_nope, q_pe), dim=-1),
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                valid_counts,
+            )
+        assert lse is None or lse.shape == (out.shape[0], out.shape[1])
+        return out, lse
 
     def _decode(
         self,
@@ -550,15 +602,17 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
         kv_rows: torch.Tensor,
         topk_indices: torch.Tensor,
         valid_counts: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q_pe.shape[0]
         num_kv_rows = kv_rows.shape[0]
         cu_seqlens_q, cu_seqlens_k, seqused_k = _fa4_varlen_scalars(
             self.max_varlen_tokens, num_kv_rows, kv_rows.device
         )
-        # A row whose top-k list is entirely -1 comes back as exact zeros: the
-        # kernel's sentinel bitmask masks every column, so the epilogue writes 0.
-        return flash_attn_varlen_func(
+        # A row whose top-k list is entirely -1 comes back as exact zeros with a
+        # -inf LSE: the kernel's sentinel bitmask masks every column, so the
+        # epilogue writes (0, -inf), which is the DCP merge identity. No
+        # post-masking is needed here.
+        kernel_out = flash_attn_varlen_func(
             q=q_pe,
             k=kv_rows[:, self.kv_lora_rank :].unsqueeze(1),
             v=kv_rows[:, : self.kv_lora_rank].unsqueeze(1),
@@ -577,24 +631,29 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
             # here would instead clamp the *flat cache row* index space.
             causal=False,
             fa_version=4,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
         )
+        if self.need_to_return_lse_for_decode:
+            assert isinstance(kernel_out, tuple)
+            out, lse = kernel_out
+            return out, lse
+        assert isinstance(kernel_out, torch.Tensor)
+        return kernel_out, None
 
     def _prefill(
         self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        query: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         valid_counts: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q_pe.device)
-        # BF16 KV only, so bmm1 is the plain softmax scale and bmm2 is 1.0; no
-        # DCP, so no LSE is needed.
-        out = trtllm_batch_decode_with_kv_cache_mla(
-            query=torch.cat((ql_nope, q_pe), dim=-1).unsqueeze(1),
+            self._workspace_buffer = _get_workspace_buffer(query.device)
+        # BF16 KV only, so bmm1 is the plain softmax scale and bmm2 is 1.0.
+        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
+            query=query.unsqueeze(1),
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
@@ -606,5 +665,26 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
             sparse_mla_top_k=topk_indices.shape[1],
+            return_lse=self.need_to_return_lse_for_decode,
         )
-        return out.view(-1, self.num_heads, self.kv_lora_rank)
+        if self.need_to_return_lse_for_decode:
+            assert isinstance(kernel_out, tuple)
+            o, lse = kernel_out
+        else:
+            assert isinstance(kernel_out, torch.Tensor)
+            o, lse = kernel_out, None
+
+        # Under DCP the query is all-gathered first, so the kernel sees more
+        # heads than this rank's ``num_heads``.
+        out = o.view(-1, o.shape[-2], self.kv_lora_rank)
+        if lse is not None:
+            lse = FlashInferMLASparseImpl._normalize_lse(
+                lse, out.shape[0], out.shape[1]
+            )
+            # trtllm-gen returns a base-2 LSE; this impl declares base e.
+            lse = lse * math.log(2.0)
+            # Rows this rank owns no slot for: the DCP merge identity.
+            empty_rows = valid_counts == 0
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        return out, lse
