@@ -42,17 +42,10 @@ def async_copy_to_gpu(
 
 
 class UvaBuffer:
-    def __init__(
-        self,
-        size: int | Sequence[int],
-        dtype: torch.dtype,
-        *,
-        zero_initialize: bool = True,
-    ):
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         if not is_uva_available():
             raise RuntimeError("UVA is not available")
-        allocate = torch.zeros if zero_initialize else torch.empty
-        self.cpu = allocate(size, dtype=dtype, device="cpu", pin_memory=True)
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
         self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
 
@@ -119,8 +112,7 @@ class GrowableUvaBufferPool:
         buf = self._uva_bufs[self._curr]
         if buf is None or buf.cpu.numel() < n:
             capacity = 1 << (max(1, n) - 1).bit_length()
-            # Fully overwrite the exposed prefix below; the capacity tail is unused.
-            buf = UvaBuffer(capacity, self.dtype, zero_initialize=False)
+            buf = UvaBuffer(capacity, self.dtype)
             self._uva_bufs[self._curr] = buf
 
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
