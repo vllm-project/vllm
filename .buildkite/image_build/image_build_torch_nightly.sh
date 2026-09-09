@@ -45,10 +45,10 @@ if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
 fi
 echo "Image not found, proceeding with build..."
 
-# --- CUDA 13.0 for nightly builds ---
-# Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
-NIGHTLY_CUDA_VERSION="13.0.2"
-NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
+# --- CUDA 13.2 for nightly builds ---
+# Nightly CI tracks the same CUDA version as the default build
+NIGHTLY_CUDA_VERSION="13.2.1"
+NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e"
 NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu22.04"
 
 echo "--- :docker: Building torch nightly image (CUDA ${NIGHTLY_CUDA_VERSION})"
