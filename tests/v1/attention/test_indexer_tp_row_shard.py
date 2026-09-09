@@ -256,7 +256,16 @@ def _run_rank(
     return buffer, len(gathers)
 
 
-def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None, **kwargs):
+def _run_group(
+    monkeypatch,
+    world,
+    chunks,
+    num_tokens,
+    logits,
+    split=None,
+    exchange_observations=None,
+    **kwargs,
+):
     """Collect every rank's slice, then replay the concatenation each rank
     would receive. There is exactly one exchange per forward."""
     rows = num_tokens - _DECODE_ROWS
@@ -271,6 +280,10 @@ def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None, **kwa
                 assert local.is_contiguous()
                 assert sizes == split
                 assert local.shape[0] == sizes[rank]
+                if exchange_observations is not None:
+                    exchange_observations.append(
+                        (rank, replay, tuple(local.shape), tuple(sizes))
+                    )
                 slices[rank] = local.clone()
                 if not replay:
                     return torch.zeros(sum(sizes), local.shape[1], dtype=torch.int32)
@@ -291,6 +304,50 @@ def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None, **kwa
                     )
                 )
     return results
+
+
+def test_kpool_sharded_prefill_exchanges_expanded_tail_and_excludes_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The k-pool path gathers expanded token indices, including the tail.
+
+    This directly exercises ``sparse_attn_indexer_kpool`` with the same
+    row-shard metadata used by V2.  ``num_prefill_tokens`` intentionally counts
+    graph padding, while ``row_shard_sizes`` counts only real rows; the gather
+    must use the latter and must exchange ``topk + kpool - 1`` columns.
+    """
+    chunks, num_tokens = _build_chunks([19, 11, 13, 3])
+    logits = torch.randn(
+        num_tokens, _NUM_KV, generator=torch.Generator().manual_seed(54952)
+    )
+    observations = []
+    outputs = _run_group(
+        monkeypatch,
+        4,
+        chunks,
+        num_tokens,
+        logits,
+        split=[7, 17, 9, 13],
+        exchange_observations=observations,
+        index_kpool=4,
+        padded_rows=13,
+        metadata_includes_padding=True,
+    )
+
+    # Two passes are used by the CPU collective replay: one to collect each
+    # rank's shard and one to replay the all-gather for every rank.
+    assert len(observations) == 8
+    assert {entry[2] for entry in observations} == {
+        (7, _TOPK + 4 - 1),
+        (17, _TOPK + 4 - 1),
+        (9, _TOPK + 4 - 1),
+        (13, _TOPK + 4 - 1),
+    }
+    assert all(entry[3] == (7, 17, 9, 13) for entry in observations)
+    for output, _ in outputs:
+        # The metadata advertises 13 extra rows, but prefill_end must stop at
+        # the real shard total. Padding remains untouched by the collective.
+        assert torch.all(output[num_tokens:] == -1)
 
 
 @pytest.mark.parametrize("index_kpool", [1, 4])
