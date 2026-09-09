@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend selector."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -549,58 +550,19 @@ class TestAiterAsmValidation:
 
 
 class TestAiterAsmIsAvailable:
-    """is_available gates on the aiter#3606 chunked-prefill final_lse fix.
+    """AITER_ASM is a gfx950-only backend.
 
-    The fix shipped the `max_kvlen` kwarg on get_ps_metadata_info_v1 alongside
-    the kernel-side LSE correction, so the kwarg's presence is the marker that a
-    fixed aiter is installed.
+    The chunked-prefill final_lse fix (ROCm/aiter#3606) is assumed present in
+    the installed aiter, so the architecture is the whole availability contract.
     """
 
-    def _patch_aiter(self, monkeypatch, info_fn):
-        """Install a fake `aiter` module exposing the four required symbols."""
-        import sys
+    @pytest.mark.parametrize("on_gfx950", [True, False])
+    def test_tracks_gfx950(self, aiter_asm_cls, on_gfx950):
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950):
+            assert aiter_asm_cls.is_available() is on_gfx950
 
-        fake_aiter = MagicMock()
-        fake_aiter.get_ps_metadata_info_v1 = info_fn
-        monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
-
-    def test_available_when_max_kvlen_present(self, aiter_asm_cls, monkeypatch):
-        def info_fn(
-            batch_size,
-            num_head_k,
-            max_qlen,
-            qlen_granularity=256,
-            max_kvlen=None,
-            kvlen_granularity=128,
-        ):
-            return None
-
-        self._patch_aiter(monkeypatch, info_fn)
-        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
-            assert aiter_asm_cls.is_available()
-
-    def test_unavailable_when_max_kvlen_absent(self, aiter_asm_cls, monkeypatch):
-        # Pre-fix aiter: no max_kvlen kwarg.
-        def info_fn(batch_size, num_head_k, max_qlen, qlen_granularity=256):
-            return None
-
-        self._patch_aiter(monkeypatch, info_fn)
-        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
-            assert not aiter_asm_cls.is_available()
-
-    def test_unavailable_when_not_gfx950(self, aiter_asm_cls, monkeypatch):
-        def info_fn(
-            batch_size,
-            num_head_k,
-            max_qlen,
-            qlen_granularity=256,
-            max_kvlen=None,
-            kvlen_granularity=128,
-        ):
-            return None
-
-        self._patch_aiter(monkeypatch, info_fn)
-        with patch("vllm.platforms.rocm.on_gfx950", return_value=False):
+    def test_unavailable_when_rocm_platform_unimportable(self, aiter_asm_cls):
+        with patch.dict(sys.modules, {"vllm.platforms.rocm": None}):
             assert not aiter_asm_cls.is_available()
 
 
@@ -608,9 +570,8 @@ class TestAsmPrefillBackendActiveGate:
     """`_asm_prefill_backend_active` gates the in-impl FP8 PS path.
 
     The AITER MLA builder/impl keep their exact main-branch FP8 PS behavior
-    until the AITER ASM prefill backend is the active prefill backend (which
-    only happens once aiter is upgraded past ROCm/aiter#3606). When it is
-    active, the in-impl path is dead and must be disabled to avoid its
+    until the AITER ASM prefill backend is the active prefill backend. When it
+    is active, the in-impl path is dead and must be disabled to avoid its
     multi-TB workspace reservation OOM at startup.
     """
 
