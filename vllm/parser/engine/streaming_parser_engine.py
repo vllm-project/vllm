@@ -34,6 +34,7 @@ from vllm.parser.engine.token_id_scanner import (
 class _DropInfo:
     lexer_shape: LexerShape
     extra_token_ids: dict[int, str]
+    drop_texts: frozenset[str]
 
 
 def _build_drop_info(
@@ -51,7 +52,7 @@ def _build_drop_info(
 
     configured_texts = (
         set(config.token_id_terminals.values())
-        | set(config.terminals.values())
+        | config.terminal_literals
         | config.preserve_tokens
     )
 
@@ -83,6 +84,7 @@ def _build_drop_info(
     return _DropInfo(
         lexer_shape=lexer_shape,
         extra_token_ids=extra_token_ids,
+        drop_texts=frozenset(drop_texts),
     )
 
 
@@ -148,6 +150,15 @@ class StreamingParserEngine:
         self._token_id_terminal_names: frozenset[str] = frozenset(
             resolved_token_ids.values()
         )
+        # Demote only spellings backed by special token IDs;
+        # text-only aliases remain terminals.
+        self._token_id_terminal_texts: dict[str, frozenset[str]] = {
+            name: frozenset({text})
+            for name, text in config.token_id_terminals.items()
+            if name in self._token_id_terminal_names
+        }
+        if drop_info is not None:
+            self._token_id_terminal_texts[DROP_TERMINAL] = drop_info.drop_texts
 
         self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
 
@@ -346,7 +357,11 @@ class StreamingParserEngine:
         events: list[SemanticEvent] = []
         strict = self._token_id_terminal_names if self._ever_had_token_ids else None
         for tok in tokens:
-            if tok.terminal == CONTENT_TERMINAL or (strict and tok.terminal in strict):
+            if tok.terminal == CONTENT_TERMINAL or (
+                strict
+                and tok.terminal in strict
+                and tok.value in self._token_id_terminal_texts.get(tok.terminal, ())
+            ):
                 events.extend(self._on_content(tok.value, tok.token_count))
             else:
                 events.extend(
