@@ -511,7 +511,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 attn_metadata = self._build_draft_attn_metadata(
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    num_tokens_padded=batch_desc.num_tokens,
+                    # One query per request; exclude DP-only model padding.
+                    num_tokens_padded=batch_desc.num_reqs or num_reqs,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
                 )
@@ -559,7 +560,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                # One query per request; exclude DP-only model padding.
+                num_tokens_padded=batch_desc.num_reqs or num_reqs,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
             )
