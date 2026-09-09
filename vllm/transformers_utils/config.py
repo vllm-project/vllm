@@ -541,7 +541,8 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):
         for rope_parameters_layer_type in rope_parameters.values():
-            _patch_legacy_rope_type(rope_parameters_layer_type)
+            if rope_parameters_layer_type is not None:
+                _patch_legacy_rope_type(rope_parameters_layer_type)
     else:
         _patch_legacy_rope_type(rope_parameters)
 
@@ -573,7 +574,10 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
     if rope_parameters is None:
         return False
 
-    return "mrope_section" in rope_parameters
+    return "mrope_section" in rope_parameters or any(
+        isinstance(params, dict) and "mrope_section" in params
+        for params in rope_parameters.values()
+    )
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
