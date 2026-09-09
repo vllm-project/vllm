@@ -175,6 +175,15 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
 class Glm47MoeParser(ParserEngine):
     """GLM-4.7 parser backed by the declarative parser engine."""
 
+    structural_tag_model = "glm_4_7"
+    supports_required_and_named = False
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
+        return super().adjust_request(request)
+
     def __init__(
         self,
         tokenizer: TokenizerLike,

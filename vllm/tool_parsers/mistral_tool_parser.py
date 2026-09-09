@@ -18,13 +18,6 @@ class MistralToolParser(MistralParserToolAdapter):  # type: ignore[valid-type, m
     # on grammar-capable Mistral tokenizers.
     IS_MISTRAL_TOOL_PARSER = True
 
-    # Mistral emits tool calls in the [TOOL_CALLS]name[ARGS]{...} format, not the
-    # plain JSON array / bare-args that the serving layer's generic required and
-    # named handlers expect. Route required/named through this parser's own
-    # extraction (treated like "auto") so the [TOOL_CALLS] format is parsed
-    # correctly instead of crashing or dumping the raw envelope into arguments.
-    supports_required_and_named = False
-
     @property
     def bot_token(self) -> str:
         """Return the Mistral tool-call marker exposed by the legacy parser."""

@@ -23,17 +23,23 @@ from vllm.parser.seed_oss import SeedOssParser
 (
     DeepSeekV32ParserReasoningAdapter,
     DeepSeekV32ParserToolAdapter,
-) = make_adapters(DeepSeekV32Parser)
+) = make_adapters(
+    DeepSeekV32Parser,
+)
 
 (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
-) = make_adapters(DeepSeekV4Parser)
+) = make_adapters(
+    DeepSeekV4Parser,
+)
 
 (
     MinimaxM2ParserReasoningAdapter,
     MinimaxM2ParserToolAdapter,
-) = make_adapters(MinimaxM2Parser)
+) = make_adapters(
+    MinimaxM2Parser,
+)
 
 (
     Gemma4ParserReasoningAdapter,
@@ -58,7 +64,9 @@ from vllm.parser.seed_oss import SeedOssParser
 (
     Glm47MoeParserReasoningAdapter,
     Glm47MoeParserToolAdapter,
-) = make_adapters(Glm47MoeParser)
+) = make_adapters(
+    Glm47MoeParser,
+)
 
 (
     KimiK2ParserReasoningAdapter,

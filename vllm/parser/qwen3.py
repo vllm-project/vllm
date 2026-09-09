@@ -213,6 +213,15 @@ class Qwen3Parser(ParserEngine):
     below; everything else is inherited unchanged.
     """
 
+    structural_tag_model: str | None = "qwen_3_coder"
+    supports_required_and_named = False
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
+        return super().adjust_request(request)
+
     CONFIG_NAME = "qwen3"
     THINK_START = THINK_START
     THINK_END = THINK_END
