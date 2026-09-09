@@ -1297,19 +1297,57 @@ class TestMalformedDsmlNoise:
         )
         assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Fullwidth bars, DSML namespace, but not a registered spelling.
+            "see <｜DSML｜foo> and <｜DSML｜tool_call> here",
+            # Unclosed prefix.
+            "see <｜DSML｜ here\nnext line",
+            # ASCII pipes are not the DSML sigil.
+            "see <|DSML|tool> and <|DSML|toolcalls> there",
+        ],
+    )
     def test_unregistered_markup_is_ordinary_content(
-        self, mock_tokenizer, mock_request
+        self, mock_tokenizer, mock_request, text
     ):
         """Only the registered spellings are treated as wrappers."""
-        text = "see <｜DSML｜ here and <|DSML|tool> there\nnext line"
-
         result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        assert result.tools_called is False
         assert result.content == text
 
         results = simulate_tool_streaming(
             self._parser(mock_tokenizer), mock_request, list(text)
         )
         assert collect_content(results) == text
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    def test_prose_mention_matches_canonical_wrapper(
+        self, mock_tokenizer, mock_request, wrapper
+    ):
+        """A registered spelling mentioned in prose behaves exactly like a
+        prose mention of the real wrapper: the opener starts a tool block and
+        the rest of the message is dropped. That is pre-existing behavior of
+        ``<｜DSML｜tool_calls>``; the variants must not differ from it either
+        way."""
+        template = "The opener looks like {} and then params follow. Done."
+        text = template.format(wrapper)
+        reference = template.format(DSML_TOOL_START)
+
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        expected = self._parser(mock_tokenizer).extract_tool_calls(
+            reference, mock_request
+        )
+        assert result.tools_called == expected.tools_called
+        assert result.content == expected.content
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        expected_results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(reference)
+        )
+        assert collect_content(results) == collect_content(expected_results)
 
     @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
     @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
