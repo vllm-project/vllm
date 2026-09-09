@@ -63,6 +63,7 @@ def test_request_finished_producer_emits_params(monkeypatch):
 
     delay, params = s.request_finished(_Request([_Feature("h1", length=2)]))
     assert delay is False
+    assert entry.evictable
     assert params == {
         "h1": {
             "metadata": {},
