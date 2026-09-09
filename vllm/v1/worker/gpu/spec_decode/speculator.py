@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from dataclasses import replace
-from typing import Any
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Protocol
 
 import numpy as np
 import torch
@@ -43,6 +43,38 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
     target_cls = get_model_cls(vllm_config.model_config)
     return hasattr(target_cls, "get_mtp_target_hidden_states")
+
+
+@dataclass(frozen=True)
+class DraftPrefillContext:
+    input_batch: InputBatch
+    input_ids: torch.Tensor
+    positions: torch.Tensor
+    hidden_states: torch.Tensor
+    is_padding: torch.Tensor | None = None
+    hidden_state_restorer: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+    def restore_hidden_states(
+        self,
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.hidden_state_restorer is None:
+            return last_hidden_states, hidden_states
+        local_last_hidden_states = last_hidden_states
+        last_hidden_states = self.hidden_state_restorer(local_last_hidden_states)
+        if local_last_hidden_states is hidden_states:
+            return last_hidden_states, last_hidden_states
+        return last_hidden_states, self.hidden_state_restorer(hidden_states)
+
+
+class DraftPrefillAdapter(Protocol):
+    def prepare_draft_prefill(
+        self,
+        input_batch: InputBatch,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> DraftPrefillContext | None: ...
 
 
 class BaseSpeculator(ABC):
@@ -166,6 +198,7 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.supports_mm_inputs = False
+        self.draft_prefill_adapter: DraftPrefillAdapter | None = None
 
     @abstractmethod
     def load_draft_model(
@@ -210,6 +243,33 @@ class DraftModelSpeculator(BaseSpeculator):
     def set_eplb_state(self, eplb_state: EplbState) -> None:
         """Inject EPLB state after construction."""
         self.eplb_state = eplb_state
+
+    def set_draft_prefill_adapter(self, adapter: DraftPrefillAdapter) -> None:
+        self.draft_prefill_adapter = adapter
+
+    def prepare_draft_prefill(
+        self,
+        input_batch: InputBatch,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> DraftPrefillContext:
+        if self.draft_prefill_adapter is not None:
+            context = self.draft_prefill_adapter.prepare_draft_prefill(
+                input_batch, input_ids, hidden_states
+            )
+            if context is not None:
+                return context
+        return DraftPrefillContext(
+            input_batch=input_batch,
+            input_ids=input_ids,
+            positions=self.input_buffers.positions,
+            hidden_states=hidden_states,
+        )
+
+    def draft_decode_is_prefilling(self, num_reqs: int) -> torch.Tensor | None:
+        if self.draft_prefill_adapter is None:
+            return None
+        return torch.zeros(num_reqs, dtype=torch.bool)
 
     def _prepare_eplb_forward(self, num_unpadded_tokens: int) -> None:
         """Call EPLB prepare_forward if EPLB is active for the draft model."""
