@@ -161,6 +161,20 @@ class ToolParser:
                         strict=True,
                     )
                 )
+        elif request.tool_choice in ("auto", None):
+            # Note(arpera): corner case here!
+            #
+            # In case tool_choice is auto AND there is response_format constraint
+            # then we MUST drop response_format because there is onle one
+            # constraint slot and we prioritize tool call in this case
+            # Otherwise model is unable to emit tool calls.
+            # See more info in bug report #39929
+            # https://github.com/vllm-project/vllm/issues/39929
+            #
+            if isinstance(request, ChatCompletionRequest):
+                request.response_format = None
+            elif request.text is not None:
+                request.text.format = None
 
         return request
 
