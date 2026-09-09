@@ -94,6 +94,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor? fp8_out_scale,"
       "                str mfma_type) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+#ifdef VLLM_ROCM_RDNA35_GDN_CHUNKED
+  rocm_ops.def(
+      "rdna35_gdn_chunked(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
+      "Tensor? initial_state, Tensor cu_seqlens, Tensor! out, "
+      "Tensor! final_state, float scale) -> ()");
+  rocm_ops.impl("rdna35_gdn_chunked", torch::kCUDA, &rdna35_gdn_chunked);
+#endif
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
