@@ -19,6 +19,8 @@ e2m1 payload (2 elements/byte) + per-16 E4M3 scale, n/2 + n/16 wire
 bytes (54.5% of e4m3); quality-sensitive, opt-in.
 """
 
+import os
+
 import torch
 import torch.distributed as dist
 import triton
@@ -110,23 +112,6 @@ def _e2m1_code(v: tl.tensor) -> tl.tensor:
 
 
 @triton.jit
-def _e2m1_value(code: tl.tensor) -> tl.tensor:
-    # e2m1 value for the 4-bit code (bit 3 = sign, bits 2..0 = magnitude
-    # index into {0, 0.5, 1, 1.5, 2, 3, 4, 6}).
-    idx = code & 7
-    mag = (
-        (idx == 1).to(tl.float32) * 0.5
-        + (idx == 2).to(tl.float32) * 1.0
-        + (idx == 3).to(tl.float32) * 1.5
-        + (idx == 4).to(tl.float32) * 2.0
-        + (idx == 5).to(tl.float32) * 3.0
-        + (idx == 6).to(tl.float32) * 4.0
-        + (idx == 7).to(tl.float32) * 6.0
-    )
-    return tl.where((code & 8) != 0, -1.0, 1.0) * mag
-
-
-@triton.jit
 def _quant_nvfp4_kernel(
     x_ptr, payload_ptr, scale_ptr,
     BLOCK: tl.constexpr, GROUP: tl.constexpr,
@@ -160,39 +145,30 @@ def _quant_nvfp4_kernel(
     )
 
 
-@triton.jit
-def _dequant_add_nvfp4_kernel(
-    p0_ptr, s0_ptr, p1_ptr, s1_ptr, out_ptr,
-    BLOCK: tl.constexpr, GROUP: tl.constexpr,
-):
-    # out = dequant(p0, s0) + dequant(p1, s1) for the NVFP4 wire. Each
-    # dequantized side is rounded to BF16 before the FP32 add, the same
-    # commutativity protection as the E4M3 path.
-    pid = tl.program_id(0)
-    NG: tl.constexpr = BLOCK // GROUP
-    G2: tl.constexpr = GROUP // 2
-    g = tl.arange(0, NG)[:, None]
-    b = tl.arange(0, G2)[None, :]
-    yb = pid * (BLOCK // 2) + g * G2 + b
-    y0 = tl.load(p0_ptr + yb).to(tl.int32)
-    y1 = tl.load(p1_ptr + yb).to(tl.int32)
-    s0 = tl.load(s0_ptr + pid * NG + tl.arange(0, NG)[:, None]).to(tl.float32)
-    s1 = tl.load(s1_ptr + pid * NG + tl.arange(0, NG)[:, None]).to(tl.float32)
-    v0_lo = _e2m1_value(y0 & 0xF) * s0
-    v0_hi = _e2m1_value(y0 >> 4) * s0
-    v1_lo = _e2m1_value(y1 & 0xF) * s1
-    v1_hi = _e2m1_value(y1 >> 4) * s1
-    el = pid * BLOCK + g * GROUP + b * 2
-    out_lo = (
-        v0_lo.to(tl.bfloat16).to(tl.float32)
-        + v1_lo.to(tl.bfloat16).to(tl.float32)
-    ).to(tl.bfloat16)
-    out_hi = (
-        v0_hi.to(tl.bfloat16).to(tl.float32)
-        + v1_hi.to(tl.bfloat16).to(tl.float32)
-    ).to(tl.bfloat16)
-    tl.store(out_ptr + el, out_lo)
-    tl.store(out_ptr + el + 1, out_hi)
+def _load_fp4_cuda():
+    """Build (once, cached) or load the sm_120a hardware-FP4 extension.
+
+    The NVFP4 payload unpacks with the F2FP hardware instruction
+    (cvt.rn.f16x2.e2m1x2), which ptxas only accepts on the
+    architecture-specific sm_120a target, so force it for the build.
+    """
+    from torch.utils import cpp_extension
+
+    src = os.path.join(os.path.dirname(__file__), "fp4_ar_cuda.cu")
+    old = os.environ.get("TORCH_CUDA_ARCH_LIST")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0a"
+    try:
+        return cpp_extension.load(
+            name="fp4_ar_cuda",
+            sources=[src],
+            # torch 2.11 headers (c10::List) fail under nvcc's c++17 default.
+            extra_cuda_cflags=["-O3", "-std=c++20"],
+        )
+    finally:
+        if old is None:
+            os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+        else:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = old
 
 
 class Fp8HostStagedAllReduce:
@@ -221,6 +197,9 @@ class Fp8HostStagedAllReduce:
         self.device = device
         self._cpu_group = cpu_group
         self._codec = codec
+        # NVFP4 dequant runs on the sm_120a F2FP extension; build it up
+        # front so a broken toolchain fails the startup, not the first AR.
+        self._fp4_cuda = _load_fp4_cuda() if codec == "nvfp4" else None
         self._cap = 0
         self._wire: torch.Tensor | None = None
         self.disabled = False
@@ -310,11 +289,7 @@ class Fp8HostStagedAllReduce:
         packed NVFP4 (two elements per byte).
         """
         if p0.dtype == torch.uint8:
-            n = 2 * p0.numel()
-            _dequant_add_nvfp4_kernel[(n // KERNEL_BLOCK,)](
-                p0, s0, p1, s1, out,
-                BLOCK=KERNEL_BLOCK, GROUP=NVFP4_SCALE_BLOCK, num_warps=4
-            )
+            self._fp4_cuda.dequant_add_nvfp4(p0, s0, p1, s1, out)
         else:
             n = p0.numel()
             _dequant_add_kernel[(n // KERNEL_BLOCK,)](

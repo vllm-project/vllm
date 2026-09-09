@@ -16,6 +16,7 @@ from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
     Fp8HostStagedAllReduce,
     _quant_fp8_kernel,
     _quant_nvfp4_kernel,
+    _load_fp4_cuda,
 )
 from vllm.distributed.parallel_state import get_tp_group
 
@@ -103,6 +104,7 @@ def _uninitialized_comm(device: torch.device) -> Fp8HostStagedAllReduce:
     comm.device = device
     comm._cpu_group = None
     comm._codec = "e4m3"
+    comm._fp4_cuda = None
     comm._cap = 0
     comm._wire = None
     comm.disabled = False
@@ -228,6 +230,7 @@ def test_dequant_add_nvfp4_bitexact(dev):
         )
     out = torch.empty_like(x0)
     comm = _uninitialized_comm(dev)
+    comm._fp4_cuda = _load_fp4_cuda()
     comm.dequant_add(
         payload_buf[0],
         scale_buf[0].view(torch.float8_e4m3fn),
