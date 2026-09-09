@@ -688,6 +688,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_group_semantics: bool = False,
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
+        group_participates: Sequence[bool] | None = None,
     ):
         super().__init__(
             store,
@@ -702,6 +703,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
+        self.group_participates = (
+            list(group_participates)
+            if group_participates is not None
+            else [True] * len(token_databases)
+        )
         # req_id -> ids of its store jobs that are still queued or running.
         # Keying by store_job_id, which never repeats for the engine's lifetime,
         # rather than counting jobs per request id makes the ledger immune to id
@@ -933,6 +939,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         saved = self._saved_offset.get(req_meta.req_id, 0)
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
+            if not self.group_participates[g_idx]:
+                continue
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
@@ -1212,6 +1220,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             store_shard_ids: list[StoreShardId] = []
             failed_starts: list[int | None] = [None] * len(self.token_databases)
             for g_idx, db in enumerate(self.token_databases):
+                if not self.group_participates[g_idx]:
+                    continue
                 group_token_len = group_token_lens[g_idx]
                 group_save_start = group_save_starts[g_idx]
                 if group_token_len <= group_save_start:
@@ -1238,7 +1248,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             or not store_mask[mask_idx]
                         ):
                             continue
-                    group_blocks = block_ids_per_group[g_idx]
                     if block_idx >= len(group_blocks) or (
                         group_blocks[block_idx] == NULL_BLOCK_ID
                     ):
@@ -1267,12 +1276,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return [
                     max(
                         group_save_starts[group_idx],
-                        min(
-                            group_token_len,
-                            failed_start
-                            if failed_start is not None
-                            else group_token_len,
-                        ),
+                        group_token_len if failed_start is None else failed_start,
                     )
                     for group_idx, (group_token_len, failed_start) in enumerate(
                         zip(group_token_lens, failed_starts, strict=True)
@@ -1531,6 +1535,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         disk_offload_buffer_budget_bytes: int | None = None,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
+        group_participates: Sequence[bool] | None = None,
     ):
         super().__init__(
             store,
@@ -1541,6 +1546,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
             request_queue=request_queue,
+        )
+        self.group_participates = (
+            list(group_participates)
+            if group_participates is not None
+            else [True] * len(token_databases)
         )
         # _invalid_block_ids can be access by both the Worker and RecvingThread
         self._invalid_block_ids_lock = threading.Lock()
@@ -1589,6 +1599,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         key_list: list[str] = []
         block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
+            if not self.group_participates[g_idx]:
+                continue
             mask = load_mask_per_group[g_idx]
             chunks: list[tuple[int, int]] = []
             store_shard_ids: list[StoreShardId] = []
@@ -2117,7 +2129,11 @@ class MooncakeStoreWorker:
                         ),
                     ),
                     group.kv_cache_spec.block_size,
-                    hash_block_size=self.hash_block_size,
+                    hash_block_size=(
+                        self.hash_block_size
+                        if group.kv_cache_spec.prefix_cacheable
+                        else group.kv_cache_spec.block_size
+                    ),
                 )
                 for g_idx, group in enumerate(self._kv_cache_groups)
             ]
@@ -2125,6 +2141,10 @@ class MooncakeStoreWorker:
         assert self.store_tp_size is not None
         token_dbs: list[ChunkedTokenDatabase] = []
         for group_idx, plan in enumerate(plans):
+            spec = self._kv_cache_groups[group_idx].kv_cache_spec
+            hash_block_size = (
+                self.hash_block_size if spec.prefix_cacheable else spec.block_size
+            )
             group_namespace = (
                 f"@store_tp:{self.store_tp_size}@store_pp:{self.pp_size}"
                 f"@store_format:{plan.layout_cls.store_format}"
@@ -2141,7 +2161,7 @@ class MooncakeStoreWorker:
                 store_layout: StoreLayout = attention_layout_cls(
                     group_metadata,
                     plan.local_block_size,
-                    self.hash_block_size,
+                    hash_block_size,
                     local_tp_size=plan.local_tp_size,
                     store_tp_size=plan.store_shard_count,
                     tp_rank=plan.tp_rank,
@@ -2152,7 +2172,7 @@ class MooncakeStoreWorker:
                 store_layout = MambaStoreLayout(
                     group_metadata,
                     plan.local_block_size,
-                    self.hash_block_size,
+                    hash_block_size,
                     local_tp_size=plan.local_tp_size,
                     store_tp_size=plan.store_shard_count,
                     tp_rank=plan.tp_rank,
@@ -2162,7 +2182,7 @@ class MooncakeStoreWorker:
                 ChunkedTokenDatabase(
                     group_metadata,
                     plan.store_chunk_size or plan.local_block_size,
-                    hash_block_size=self.hash_block_size,
+                    hash_block_size=hash_block_size,
                     store_layout=store_layout,
                 )
             )
@@ -2352,6 +2372,10 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
+                group_participates=[
+                    group.kv_cache_spec.prefix_cacheable
+                    for group in self._kv_cache_groups
+                ],
             )
             self.kv_send_thread.start()
 
@@ -2369,6 +2393,10 @@ class MooncakeStoreWorker:
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
+                group_participates=[
+                    group.kv_cache_spec.prefix_cacheable
+                    for group in self._kv_cache_groups
+                ],
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()
@@ -2541,6 +2569,8 @@ class MooncakeStoreWorker:
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
+            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+                continue
             spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
             if fine_grained:
@@ -2651,6 +2681,9 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
+            if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
+                # Scratch groups are never stored, so they have no tail key.
+                continue
             chunk_id = cdiv(hit_length, db.chunk_size) - 1
             boundary_tokens = hit_length
             contains_hit_boundary = cached_block_pool.contains(

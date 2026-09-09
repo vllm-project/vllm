@@ -15,7 +15,10 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_sliding_window,
+)
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
@@ -177,6 +180,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
+
+        # FlashAttention's AOT split schedule is wrong for a windowed drafter,
+        # and `_get_sliding_window_configs` leaves it on or off depending on
+        # whether the target also runs FlashAttention. Decide it here instead.
+        for groups in self.attn_groups:
+            for group in groups:
+                builder = group.get_metadata_builder()
+                if getattr(
+                    builder, "aot_schedule", False
+                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                    # `aot_schedule` belongs to FlashAttention's builder, not
+                    # to the base class this loop is typed against.
+                    builder.aot_schedule = False  # type: ignore[attr-defined]
 
         self.draft_kv_cache_group_ids = [
             gid for gid, g in enumerate(self.attn_groups) if g
@@ -367,9 +383,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_query_tokens,
                 attn_metadata=None,
                 slot_mappings=None,
-                num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
-                ),
+                num_tokens_across_dp=None,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             return self.draft_tokens[:num_reqs]
@@ -429,17 +443,22 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+        batch_sync, num_batch_tokens = (
+            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
+            if dp_sync is not None
+            else (None, num_query_tokens)
+        )
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
             num_reqs,
-            num_query_tokens,
+            num_batch_tokens,
             uniform_token_count=self.num_query_per_req,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            dp_sync=batch_sync,
         )
-
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (

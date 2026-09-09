@@ -215,6 +215,9 @@ remain rank-local. Each group namespace records its Store value format and
 normalized value schema. Incompatible configurations use an isolated rank-local
 namespace.
 
+Cache groups marked `prefix_cacheable=False` are excluded from Store transfers
+and prefix lookup. Unsupported group layouts use the rank-local fallback.
+
 When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
 
 **Proxy:**
