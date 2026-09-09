@@ -12,8 +12,15 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
-from vllm.models.kimi_k3.nvidia import dspark_mla
-from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+from vllm.models.kimi_k3 import K3DSparkForCausalLM
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.kimi_k3.amd import dspark_mla
+else:
+    from vllm.models.kimi_k3.nvidia import dspark_mla
+
+K3DSparkModel = dspark_mla.K3DSparkModel
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
