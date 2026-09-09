@@ -48,14 +48,6 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     return hasattr(target_cls, "get_mtp_target_hidden_states")
 
 
-DraftPrefillInputs = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor | None,
-]
-
-
 class BaseSpeculator(ABC):
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -178,7 +170,6 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
-        self._draft_prefill_inputs: DraftPrefillInputs | None = None
 
     @abstractmethod
     def load_draft_model(

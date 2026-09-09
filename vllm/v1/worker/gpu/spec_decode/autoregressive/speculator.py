@@ -270,15 +270,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs,
         )
 
-        self._draft_prefill_inputs = None
         if self.pcp_manager is not None:
-            self._draft_prefill_inputs = self.pcp_manager.prepare_draft_prefill(
+            hidden_states = self.pcp_manager.prepare_draft_prefill(
                 input_batch,
                 self.input_buffers.input_ids[:num_tokens_padded],
                 hidden_states,
             )
-            if self._draft_prefill_inputs is not None:
-                hidden_states = self._draft_prefill_inputs[2]
         self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         # When all requests are decoding (no true prefills), each has
@@ -396,7 +393,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prefill = getattr(self, "_draft_prefill_inputs", None)
+        pcp_manager = getattr(self, "pcp_manager", None)
+        prefill = getattr(pcp_manager, "draft_prefill_inputs", None)
         input_ids = self.input_buffers.input_ids if prefill is None else prefill[0]
         positions = self.input_buffers.positions if prefill is None else prefill[1]
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
@@ -476,12 +474,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
-        if self._draft_prefill_inputs is not None:
-            assert self.pcp_manager is not None
+        if self.pcp_manager is not None:
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
                 last_hidden_states, hidden_states
             )
-            self._draft_prefill_inputs = None
 
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(

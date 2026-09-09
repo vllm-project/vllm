@@ -16,9 +16,15 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftPrefillInputs
 
 logger = init_logger(__name__)
+
+DraftPrefillInputs = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+]
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,7 @@ class PCPManager:
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
+        self.draft_prefill_inputs: DraftPrefillInputs | None = None
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -699,24 +706,28 @@ class PCPManager:
         input_batch: InputBatch,
         input_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> DraftPrefillInputs | None:
+    ) -> torch.Tensor:
+        self.draft_prefill_inputs = None
         local_batch = self.local_batch_for(input_batch)
         if local_batch is None:
-            return None
+            return hidden_states
         assert hidden_states.shape[0] == local_batch.num_tokens_after_padding
         input_ids = self.localize_input_ids_for_draft(input_ids, local_batch)
-        return (
+        self.draft_prefill_inputs = (
             input_ids,
             local_batch.positions,
             hidden_states,
             local_batch.is_padding,
         )
+        return hidden_states
 
     def restore_draft_prefill(
         self,
         last_hidden_states: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.draft_prefill_inputs is None:
+            return last_hidden_states, hidden_states
         local_last_hidden_states = last_hidden_states
         last_hidden_states = self.restore_hidden_states(local_last_hidden_states)
         hidden_states = (
@@ -724,6 +735,7 @@ class PCPManager:
             if local_last_hidden_states is hidden_states
             else self.restore_hidden_states(hidden_states)
         )
+        self.draft_prefill_inputs = None
         return last_hidden_states, hidden_states
 
     def restore_for_sampling(

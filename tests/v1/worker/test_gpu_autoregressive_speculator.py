@@ -29,10 +29,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import (
-    DraftModelSpeculator,
-    DraftPrefillInputs,
-)
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
@@ -344,7 +341,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         positions=torch.arange(2),
         is_padding=padding,
     )
-    prefill: DraftPrefillInputs = (
+    prefill = (
         local_batch.input_ids,
         local_batch.positions,
         torch.empty(2, 1),
@@ -352,8 +349,8 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     )
     manager = object.__new__(PCPManager)
     manager.restore_hidden_states = restorer
+    manager.draft_prefill_inputs = prefill
     speculator.pcp_manager = manager
-    speculator._draft_prefill_inputs = prefill
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
     speculator.last_token_indices = torch.tensor([1, 3])
     speculator.idx_mapping = torch.tensor([0, 1])
@@ -384,7 +381,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     assert torch.equal(
         speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
     )
-    assert speculator._draft_prefill_inputs is None
+    assert manager.draft_prefill_inputs is None
 
 
 def test_pcp_manager_prepares_local_draft_prefill():
@@ -401,15 +398,15 @@ def test_pcp_manager_prepares_local_draft_prefill():
     manager._local_batch = local_batch
     hidden_states = torch.arange(2).view(2, 1)
 
-    prefill = manager.prepare_draft_prefill(
+    prepared_hidden_states = manager.prepare_draft_prefill(
         global_batch,  # type: ignore[arg-type]
         torch.tensor([10, 11, 12]),
         hidden_states,
     )
 
-    assert prefill is not None
-    assert prefill[0].tolist() == [12, 10]
-    assert prefill[2] is hidden_states
+    assert manager.draft_prefill_inputs is not None
+    assert manager.draft_prefill_inputs[0].tolist() == [12, 10]
+    assert prepared_hidden_states is hidden_states
 
 
 @pytest.mark.parametrize(
