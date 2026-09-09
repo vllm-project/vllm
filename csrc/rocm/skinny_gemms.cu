@@ -18,7 +18,6 @@
 #include "core/batch_invariant.hpp"
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
-// Past this, allocation falls back to per-stream.
 static constexpr int64_t kWvSlots = 8;
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
@@ -1907,7 +1906,8 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   // workspace. Solution: pre-allocate up to kWvSlots = 8 slots per device. On
   // first use, a stream takes one of the slots if any are still available. On
   // subsequent uses, it re-uses the slot. If no slots are available, fall back
-  // to allocating per-invocation, which is safe but adds overhead.
+  // to allocating on-demand and caching in overflow, which is safe but adds
+  // overhead (the zero-ing might be graph captured).
   struct WvSplitKrcPool {
     torch::Tensor glbl, cntr;
     int64_t glbl_stride = 0, cntr_stride = 0;

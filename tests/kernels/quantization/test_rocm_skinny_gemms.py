@@ -250,6 +250,59 @@ def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
+@pytest.mark.parametrize("n_streams", [8, 12])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
+    """Test that wvSplitKrc works as expected under concurrent multi-stream usage.
+
+    The split-K reduction stages fp32 partials and a counter in a workspace that
+    is cleared by protocol rather than per invocation, so two streams sharing one
+    workspace corrupt each other's reduction and produce wrong results rather
+    than failing.
+
+    n_streams > 8 additionally forces the overflow path, since slots are handed
+    out only to the first 8 distinct streams.
+    """
+    torch.manual_seed(seed)
+
+    n, k, m = 16, 2048, 1024
+    iters = 4
+    xavier = math.sqrt(2 / k)
+
+    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
+    As = [
+        torch.randn(n, k, dtype=dtype, device="cuda") * xavier for _ in range(n_streams)
+    ]
+    refs = [torch.nn.functional.linear(A, B, None) for A in As]
+    torch.accelerator.synchronize()
+
+    streams = [torch.Stream() for _ in range(n_streams)]
+    # Gate every stream on one event so the launches overlap instead of draining
+    # one stream before the next is enqueued.
+    start = torch.Event()
+    start.record()
+
+    outs: list[list[torch.Tensor]] = [[] for _ in range(n_streams)]
+    for s in streams:
+        s.wait_event(start)
+    # Round-robin the enqueues so kernels from different streams are in flight
+    # at the same time.
+    for _ in range(iters):
+        for i, s in enumerate(streams):
+            with torch.accelerator.stream(s):
+                outs[i].append(ops.wvSplitKrc(As[i], B, num_compute_units(), None))
+    for s in streams:
+        torch.accelerator.current_stream().wait_stream(s)
+    torch.accelerator.synchronize()
+
+    for i in range(n_streams):
+        for out in outs[i]:
+            torch.testing.assert_close(out, refs[i], atol=1e-3, rtol=1e-2)
+
+
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
