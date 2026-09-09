@@ -372,7 +372,7 @@ class KVCacheManager:
         reserved_blocks: int,
         apply_admission_cap: bool = False,
     ) -> bool:
-        """Check capacity, reclaiming resident HiSparse pages if needed."""
+        """Check that the request's device and host blocks fit."""
         hisparse = self.hisparse_coordinator
         if hisparse.has_host_cache:
             host_blocks = hisparse.get_num_host_blocks_to_allocate(
@@ -387,28 +387,17 @@ class KVCacheManager:
             if not hisparse.has_host_capacity(host_blocks):
                 return False
 
-        for attempt in range(2):
-            required = self.coordinator.get_num_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                num_encoder_tokens,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
-            )
-            shortage = (
-                required + reserved_blocks - self.block_pool.get_num_free_blocks()
-            )
-            if shortage <= 0:
-                return True
-            if attempt or not hisparse.has_host_cache:
-                return False
-            # Reclamation can require a hot buffer, so recompute demand before
-            # admitting the request against the newly available device blocks.
-            hisparse.reclaim_resident_blocks(shortage)
-        return False
+        required = self.coordinator.get_num_blocks_to_allocate(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            num_encoder_tokens,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap=apply_admission_cap,
+        )
+        return required + reserved_blocks <= self.block_pool.get_num_free_blocks()
 
     def allocate_slots(
         self,
@@ -610,7 +599,7 @@ class KVCacheManager:
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
+        if delay_cache_blocks:
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens

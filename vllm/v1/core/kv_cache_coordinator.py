@@ -104,6 +104,7 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
         )
 
+        self.enable_caching = enable_caching
         host_block_pool = HiSparseCoordinator.create_host_block_pool(
             kv_cache_config,
             enable_caching=enable_caching,
@@ -373,7 +374,10 @@ class KVCacheCoordinator(ABC):
             0, num_computed_tokens - self.num_reprefillable_tokens
         )
         for manager in self.single_type_managers:
-            if manager is self.hisparse_coordinator.host_manager:
+            if (
+                not self.enable_caching
+                or manager is self.hisparse_coordinator.host_manager
+            ):
                 continue
             manager.cache_blocks(
                 request,
@@ -386,6 +390,7 @@ class KVCacheCoordinator(ABC):
             num_tokens_to_cache,
             self.retention_interval,
             replay_boundary=replay_boundary,
+            publish=self.enable_caching,
         )
 
     def free(self, request_id: str) -> None:
@@ -818,7 +823,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         replay_boundary = self.get_replay_boundary(request)
         for manager in self.single_type_managers:
-            if manager is self.hisparse_coordinator.host_manager:
+            if (
+                not self.enable_caching
+                or manager is self.hisparse_coordinator.host_manager
+            ):
                 continue
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -852,6 +860,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             cached_num_computed_tokens,
             self.retention_interval,
             replay_boundary=replay_boundary,
+            publish=self.enable_caching,
         )
 
     def find_longest_cache_hit(
