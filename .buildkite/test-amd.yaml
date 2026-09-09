@@ -659,8 +659,8 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: ":amd: (MI300) Distributed Compile" # TBD
-  timeout_in_minutes: 95
+- label: ":amd: (MI300) Distributed Compile (Inductor Partition)" # TBD
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -679,7 +679,7 @@ steps:
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "inductor_partition"
 
 - label: ":amd: (MI300) Distributed Compile (Dynamo Partition)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
