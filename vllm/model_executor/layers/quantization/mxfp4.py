@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import torch
 
 from vllm.logger import init_logger
@@ -16,6 +18,11 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    is_flashinfer_moe_ep_backend,
+    make_mxfp4_flashinfer_moe_ep,
+    validate_flashinfer_moe_ep_config,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -484,7 +491,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
 
         self.weight_dtype = "mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
+        self.use_flashinfer_moe_ep = is_flashinfer_moe_ep_backend(moe.moe_backend)
+        if self.use_flashinfer_moe_ep:
+            validate_flashinfer_moe_ep_config(moe, "mxfp4")
+            self.mxfp4_backend = Mxfp4MoeBackend.NONE
+            self.experts_cls = None
+        else:
+            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
+                moe
+            )
 
         self.max_capture_size = moe.max_capture_size
 
@@ -497,7 +512,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self) -> bool:
-        return True
+        return not self.use_flashinfer_moe_ep
 
     @property
     def skip_forward_padding(self) -> bool:
@@ -526,6 +541,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
+        if self.use_flashinfer_moe_ep:
+            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,
@@ -781,7 +798,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if self.use_flashinfer_moe_ep:
+            if is_weights_pre_processed():
+                raise RuntimeError(
+                    "pre-processed weights are not supported with the FlashInfer "
+                    "MoE-EP backends"
+                )
+            self._process_flashinfer_moe_ep_weights(
+                layer,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            )
+            return
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 
@@ -803,10 +834,40 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
+    def _process_flashinfer_moe_ep_weights(
+        self,
+        layer: RoutedExperts,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        self.direct_kernel = make_mxfp4_flashinfer_moe_ep(
+            self.moe,
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+        )
+        self.moe_quant_config = FusedMoEQuantConfig.make(
+            "nvfp4",
+            weight_dtype="mxfp4",
+        )
+        for name in (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        ):
+            delattr(layer, name)
+
     def get_fused_moe_quant_config(
         self,
         layer: RoutedExperts,
     ) -> FusedMoEQuantConfig | None:
+        if self.use_flashinfer_moe_ep:
+            return cast(FusedMoEQuantConfig, self.moe_quant_config)
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
@@ -861,6 +922,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.direct_kernel is not None:
+            return self.direct_kernel(x, topk_ids, topk_weights)
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(

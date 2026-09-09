@@ -46,10 +46,12 @@ if current_platform.is_cuda():
         routed_scaling_factor,
         input_ids_ptr,
         bias_vl_ptr,
+        is_padding_ptr,
         image_sentinel_lo,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
         HAS_VL: tl.constexpr,
+        HAS_PADDING: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -103,6 +105,10 @@ if current_platform.is_cuda():
         selected_weights *= routed_scaling_factor / tl.where(
             weight_sum > 0.0, weight_sum, 1.0
         )
+        if HAS_PADDING:
+            is_padding = tl.load(is_padding_ptr + row)
+            selected_weights = tl.where(is_padding, 0.0, selected_weights)
+            selected_ids = tl.where(is_padding, -1, selected_ids)
         output_mask = topk_offsets < 6
         output_offsets = row * 6 + topk_offsets
 
@@ -120,6 +126,7 @@ def dsv4_topk(
     routed_scaling_factor: float,
     input_ids: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
@@ -129,6 +136,9 @@ def dsv4_topk(
         assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
         assert bias_vl.shape == (num_experts,)
         assert input_ids.is_contiguous()
+    if is_padding is not None:
+        assert is_padding.dtype == torch.bool and is_padding.is_contiguous()
+        assert is_padding.shape == (num_tokens,)
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
@@ -141,10 +151,12 @@ def dsv4_topk(
             routed_scaling_factor,
             input_ids,
             bias_vl,
+            is_padding,
             image_sentinel_lo,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
             HAS_VL=has_vl,
+            HAS_PADDING=is_padding is not None,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )

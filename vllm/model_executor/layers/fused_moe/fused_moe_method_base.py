@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.direct_kernel import (
+    FusedMoEDirectKernel,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
@@ -26,25 +29,60 @@ logger = init_logger(__name__)
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
+    # Exactly one of these executes the routed experts.
+    _moe_kernel: mk.FusedMoEKernel | None = None
+    _direct_kernel: FusedMoEDirectKernel | None = None
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.moe_kernel: mk.FusedMoEKernel | None = None
+        self.moe_kernel = None
+        self.direct_kernel = None
+
+    @property
+    def moe_kernel(self) -> mk.FusedMoEKernel | None:
+        return self._moe_kernel
+
+    @moe_kernel.setter
+    def moe_kernel(self, kernel: mk.FusedMoEKernel | None) -> None:
+        assert kernel is None or self._direct_kernel is None, (
+            "moe_kernel and direct_kernel are alternatives; direct_kernel is set"
+        )
+        self._moe_kernel = kernel
+
+    @property
+    def direct_kernel(self) -> FusedMoEDirectKernel | None:
+        return self._direct_kernel
+
+    @direct_kernel.setter
+    def direct_kernel(self, kernel: FusedMoEDirectKernel | None) -> None:
+        assert kernel is None or self._moe_kernel is None, (
+            "moe_kernel and direct_kernel are alternatives; moe_kernel is set"
+        )
+        self._direct_kernel = kernel
 
     @property
     def supports_internal_mk(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
-        return self.moe_kernel is not None
+        return self.direct_kernel is not None or self.moe_kernel is not None
 
     @property
     def mk_can_overlap_shared_experts(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
+        if self.direct_kernel is not None:
+            return self.direct_kernel.can_overlap_shared_experts
         return (
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
+
+    @property
+    def output_is_reduced(self) -> bool:
+        if self.direct_kernel is not None:
+            return self.direct_kernel.output_is_reduced
+        return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
 
     @abstractmethod
     def create_weights(
@@ -108,6 +146,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.direct_kernel is not None:
+            return self.direct_kernel.topk_indices_dtype
         if self.moe_kernel is not None:
             return self.moe_kernel.prepare_finalize.topk_indices_dtype()
         return None
@@ -135,11 +175,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
+        if self.direct_kernel is not None:
+            return self.direct_kernel.is_monolithic
         if self.moe_kernel is None:
-            if hasattr(self, "experts_cls"):
-                return self.experts_cls.is_monolithic()
-            else:
-                return False
+            experts_cls = getattr(self, "experts_cls", None)
+            return experts_cls is not None and experts_cls.is_monolithic()
         return self.moe_kernel.is_monolithic
 
     def apply(
