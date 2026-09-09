@@ -42,12 +42,14 @@ def _prepare_dflash_inputs_to_capture(
     attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        maybe_prepare_dcp_local_seq_lens(
-            input_batch,
-            input_buffers,
+        input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
             block_tables.cp_size,
             block_tables.cp_rank,
             block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

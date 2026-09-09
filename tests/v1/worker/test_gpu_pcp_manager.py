@@ -198,8 +198,14 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     # What execute_model does next: derive DCP metadata from the final batch
     # on the PCP-owned buffers.
-    gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
-        local_batch, manager.input_buffers, dcp_size=2, dcp_rank=0, cp_interleave=1
+    local_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+        manager.input_buffers.dcp_local_seq_lens,
+        local_batch.seq_lens,
+        local_batch.num_reqs,
+        dcp_size=2,
+        dcp_rank=0,
+        cp_interleave=1,
+        num_reqs_padded=local_batch.num_reqs_after_padding,
     )
     expected = get_dcp_local_seq_lens(
         torch.tensor([17, 25], dtype=torch.int32), 2, 0, 1

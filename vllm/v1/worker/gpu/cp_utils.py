@@ -1,26 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
-
 import torch
 
 from vllm.triton_utils import tl, triton
 
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
-
-def prepare_dcp_local_seq_lens(
+def maybe_prepare_dcp_local_seq_lens(
     dcp_local_seq_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     num_reqs: int,
     dcp_size: int,
     dcp_rank: int,
     cp_interleave: int,
-) -> None:
-    """Populate the persistent DCP local seq_lens buffer (CUDA graph safe)."""
+    *,
+    num_reqs_padded: int | None = None,
+) -> torch.Tensor | None:
+    """Populate caller-owned storage and return its padded view, or None without DCP."""
     if dcp_size == 1:
-        return
+        return None
 
     max_num_reqs = dcp_local_seq_lens.shape[0]
     BLOCK_SIZE = 128
@@ -35,30 +32,7 @@ def prepare_dcp_local_seq_lens(
         max_num_reqs,
         BLOCK_SIZE,
     )
-
-
-def maybe_prepare_dcp_local_seq_lens(
-    input_batch: "InputBatch",
-    input_buffers: "InputBuffers",
-    dcp_size: int,
-    dcp_rank: int,
-    cp_interleave: int,
-) -> None:
-    if dcp_size == 1:
-        input_batch.dcp_local_seq_lens = None
-        return
-
-    prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        dcp_size,
-        dcp_rank,
-        cp_interleave,
-    )
-    input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
-        : input_batch.num_reqs_after_padding
-    ]
+    return dcp_local_seq_lens[:num_reqs_padded]
 
 
 @triton.jit

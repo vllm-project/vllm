@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
@@ -148,15 +148,15 @@ def _slice_input_batch(
     dcp_local_seq_lens = None
     if dcp_size > 1:
         assert dcp_local_seq_lens_buf is not None
-        prepare_dcp_local_seq_lens(
+        dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
             dcp_local_seq_lens_buf,
             seq_lens,
             num_reqs,
             dcp_size,
             dcp_rank,
             cp_interleave,
+            num_reqs_padded=num_reqs_padded,
         )
-        dcp_local_seq_lens = dcp_local_seq_lens_buf[:num_reqs_padded]
 
     return replace(
         input_batch,

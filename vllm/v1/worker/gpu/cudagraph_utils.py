@@ -699,12 +699,14 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    maybe_prepare_dcp_local_seq_lens(
-        input_batch,
-        input_buffers,
+    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
         block_tables.cp_size,
         block_tables.cp_rank,
         block_tables.cp_interleave,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
     )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention

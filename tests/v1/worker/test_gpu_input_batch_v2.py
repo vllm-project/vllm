@@ -68,21 +68,37 @@ def test_maybe_prepare_dcp_local_seq_lens_uses_shared_buffer(monkeypatch):
     batch = InputBatch.make_dummy(2, 4, buffers)
     batch.num_reqs_after_padding = 4
 
-    def fake_prepare(
-        output: torch.Tensor,
-        seq_lens: torch.Tensor,
-        num_reqs: int,
-        dcp_size: int,
-        dcp_rank: int,
-        cp_interleave: int,
-    ) -> None:
+    def fake_kernel(
+        output,
+        seq_lens,
+        dcp_size,
+        dcp_rank,
+        cp_interleave,
+        num_reqs,
+        max_num_reqs,
+        block_size,
+    ):
         assert output is buffers.dcp_local_seq_lens
         assert seq_lens is batch.seq_lens
         assert (num_reqs, dcp_size, dcp_rank, cp_interleave) == (2, 4, 1, 16)
+        assert (max_num_reqs, block_size) == (4, 128)
         output[:] = torch.tensor([1, 2, 0, 0], dtype=output.dtype)
 
-    monkeypatch.setattr(cp_utils, "prepare_dcp_local_seq_lens", fake_prepare)
-    cp_utils.maybe_prepare_dcp_local_seq_lens(batch, buffers, 4, 1, 16)
+    class FakeKernel:
+        def __getitem__(self, grid):
+            assert grid == (1,)
+            return fake_kernel
+
+    monkeypatch.setattr(cp_utils, "_dcp_local_seq_lens_kernel", FakeKernel())
+    batch.dcp_local_seq_lens = cp_utils.maybe_prepare_dcp_local_seq_lens(
+        buffers.dcp_local_seq_lens,
+        batch.seq_lens,
+        batch.num_reqs,
+        4,
+        1,
+        16,
+        num_reqs_padded=batch.num_reqs_after_padding,
+    )
 
     assert batch.dcp_local_seq_lens is not None
     assert batch.dcp_local_seq_lens.data_ptr() == buffers.dcp_local_seq_lens.data_ptr()
@@ -102,8 +118,16 @@ def test_maybe_prepare_dcp_local_seq_lens_clears_stale_metadata(monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("kernel must not run with dcp_size == 1")
 
-    monkeypatch.setattr(cp_utils, "prepare_dcp_local_seq_lens", fail_if_called)
-    cp_utils.maybe_prepare_dcp_local_seq_lens(batch, buffers, 1, 0, 1)
+    monkeypatch.setattr(cp_utils, "_dcp_local_seq_lens_kernel", fail_if_called)
+    batch.dcp_local_seq_lens = cp_utils.maybe_prepare_dcp_local_seq_lens(
+        buffers.dcp_local_seq_lens,
+        batch.seq_lens,
+        batch.num_reqs,
+        1,
+        0,
+        1,
+        num_reqs_padded=batch.num_reqs_after_padding,
+    )
 
     assert batch.dcp_local_seq_lens is None
 
@@ -123,8 +147,14 @@ def test_maybe_prepare_dcp_local_seq_lens_matches_reference(
 
     for dcp_rank in range(dcp_size):
         buffers.dcp_local_seq_lens.fill_(-1)
-        cp_utils.maybe_prepare_dcp_local_seq_lens(
-            batch, buffers, dcp_size, dcp_rank, cp_interleave
+        batch.dcp_local_seq_lens = cp_utils.maybe_prepare_dcp_local_seq_lens(
+            buffers.dcp_local_seq_lens,
+            batch.seq_lens,
+            batch.num_reqs,
+            dcp_size,
+            dcp_rank,
+            cp_interleave,
+            num_reqs_padded=batch.num_reqs_after_padding,
         )
         expected = get_dcp_local_seq_lens(
             torch.from_numpy(seq_lens_np), dcp_size, dcp_rank, cp_interleave

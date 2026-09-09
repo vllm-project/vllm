@@ -1686,16 +1686,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            maybe_prepare_dcp_local_seq_lens(
-                input_batch,
+            input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
                 (
                     self.pcp_manager.input_buffers
                     if self.pcp_manager is not None
                     else self.input_buffers
-                ),
+                ).dcp_local_seq_lens,
+                input_batch.seq_lens,
+                input_batch.num_reqs,
                 self.dcp_size,
                 self.dcp_rank,
                 self.cp_interleave,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
             )
         ubatch_state: UBatchState | None = None
         if batch_desc.num_ubatches > 1:
