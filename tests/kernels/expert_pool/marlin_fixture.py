@@ -15,6 +15,7 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.model_loader.utils import device_loading_context
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
@@ -90,8 +91,10 @@ def make_layer(
     cfg: VllmConfig, params: dict[str, torch.Tensor], host_source: bool = False
 ):
     """Build the layer; with host_source the per-expert tensors are
-    registered as pinned CPU tensors, the layout the loader restores when
-    the pool is enabled."""
+    registered as pinned CPU tensors and post-load processing runs under the
+    loader's device_loading_context, as in the real load: the layer is moved
+    to the device for the Marlin conversion and the converted tensors are
+    restored to pinned host memory, which the pool takes as its source."""
     with set_current_vllm_config(cfg):
         # Any construction error is a failure: the Marlin capability gate is
         # the module-level skip in the test, and the backend is pinned.
@@ -123,7 +126,16 @@ def make_layer(
             layer.routed_experts.register_parameter(
                 name, torch.nn.Parameter(data, requires_grad=False)
             )
-        layer._quant_method.process_weights_after_loading(layer.routed_experts)
+        if host_source:
+            device = torch.accelerator.current_accelerator()
+            assert device is not None
+            with device_loading_context(layer.routed_experts, device):
+                layer._quant_method.process_weights_after_loading(layer.routed_experts)
+            for name in EXPERT_TENSORS:
+                p = getattr(layer.routed_experts, name)
+                assert p.device.type == "cpu" and p.is_pinned(), name
+        else:
+            layer._quant_method.process_weights_after_loading(layer.routed_experts)
     return layer
 
 

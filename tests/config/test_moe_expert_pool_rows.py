@@ -26,12 +26,17 @@ def test_negative_rows_are_rejected():
         OffloadConfig(moe_expert_pool_rows=-1)
 
 
-def test_cli_reaches_engine_args():
-    # Checks the CLI flag and the OffloadConfig field only; it does not
-    # exercise EngineArgs.create_engine_config (needs a model).
+def test_cli_flag_and_field():
+    # Checks the CLI flag and the OffloadConfig field only. EngineArgs
+    # construction and create_engine_config resolve a model (network or a
+    # local snapshot), so they are out of scope here.
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--moe-expert-pool-rows", "16"])
-    engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.moe_expert_pool_rows == 16
-    offload = OffloadConfig(moe_expert_pool_rows=engine_args.moe_expert_pool_rows)
-    assert offload.moe_expert_pool_rows == 16
+    assert args.moe_expert_pool_rows == 16
+    assert EngineArgs.moe_expert_pool_rows == 0
+    assert (
+        OffloadConfig(
+            moe_expert_pool_rows=args.moe_expert_pool_rows
+        ).moe_expert_pool_rows
+        == 16
+    )
