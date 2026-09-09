@@ -1782,10 +1782,9 @@ class SupportsMRoPE(Protocol):
             mm_features: Information about each multi-modal data item
 
         Returns:
-            Tuple of `(llm_positions, mrope_position_delta)`
-            - llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
-              per M-RoPE position channel (e.g. T/H/W)
-            - mrope_position_delta: Delta for position calculations
+            llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
+                per M-RoPE position channel (e.g. T/H/W).
+            mrope_position_delta: Delta for position calculations.
         """
         ...
 
