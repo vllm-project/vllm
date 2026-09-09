@@ -9,7 +9,7 @@ import torch
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-    prepare_dflash_inputs,
+    _PREPARE_DFLASH_INPUTS_KERNEL,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -43,7 +43,7 @@ def _run_prepare(
         num_scheduled_tokens=np.array([4], dtype=np.int32),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
-        idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
+        idx_mapping=torch.tensor([2], dtype=torch.int64, device=device),
     )
     query_slot_mapping = torch.full(
         (max_num_tokens,), -2, dtype=torch.int64, device=device
@@ -74,7 +74,7 @@ def _run_prepare(
     next_prefill_tokens = torch.zeros_like(last_sampled)
     block_table = torch.tensor([block_table_values], dtype=torch.int32, device=device)
 
-    prepare_dflash_inputs(
+    _PREPARE_DFLASH_INPUTS_KERNEL(
         input_buffers,
         query_slot_mapping,
         context_positions,

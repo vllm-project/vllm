@@ -7,6 +7,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DeclarativeTritonJitKernel,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -129,6 +133,9 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
+        _SELECTOR_WALK_KERNEL.register_warmup(speculator=self)
+        if self.draft_logits is not None:
+            _CACHE_DRAFT_LOGITS_KERNEL.register_warmup(speculator=self)
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -143,7 +150,7 @@ class DFlash2Speculator(DFlashSpeculator):
         num_reqs: int,
     ) -> None:
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _selector_walk_kernel[(num_reqs,)](
+        _SELECTOR_WALK_KERNEL(
             scores.contiguous(),
             candidate_ids.contiguous(),
             self.sample_pos,
@@ -153,6 +160,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self._selector_scores,
             num_steps=self.num_speculative_steps,
+            num_reqs=num_reqs,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=self.draft_logits is not None,
@@ -164,7 +172,7 @@ class DFlash2Speculator(DFlashSpeculator):
         draft_logits = self.draft_logits
         assert draft_logits is not None
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _cache_draft_logits_kernel[(num_sample,)](
+        _CACHE_DRAFT_LOGITS_KERNEL(
             draft_logits,
             self._cached_candidate_ids,
             candidate_ids,
@@ -172,6 +180,7 @@ class DFlash2Speculator(DFlashSpeculator):
             self.sample_idx_mapping,
             draft_logits.stride(0),
             draft_logits.stride(1),
+            num_sample=num_sample,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
@@ -215,3 +224,108 @@ class DFlash2Speculator(DFlashSpeculator):
         self._sample_path(candidate_ids, scores, num_reqs)
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)
+
+
+class SelectorWalkKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_selector_walk_kernel)
+
+    def warmup_cases(self, *, speculator: DFlash2Speculator) -> dict[str, Any]:
+        top_k = speculator.selector_top_k
+        return dict(
+            scores=TritonWarmupTensor(torch.float32),
+            candidate=TritonWarmupTensor(torch.int64),
+            sample_pos=TritonWarmupTensor(torch.int64),
+            req_state=TritonWarmupTensor(torch.int32),
+            temperature=TritonWarmupTensor(torch.float32),
+            seeds=TritonWarmupTensor(torch.int64),
+            tokens=TritonWarmupTensor(torch.int64),
+            realized_scores=TritonWarmupTensor(torch.float32),
+            num_steps=speculator.num_speculative_steps,
+            num_reqs=1,
+            top_k=top_k,
+            BLOCK_K=triton.next_power_of_2(top_k),
+            SAMPLE_PROBABILISTIC=speculator.draft_logits is not None,
+            USE_FP64=speculator.use_fp64_gumbel,
+        )
+
+    def launch_spec(
+        self,
+        scores: torch.Tensor,
+        candidate: torch.Tensor,
+        sample_pos: torch.Tensor,
+        req_state: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        tokens: torch.Tensor,
+        realized_scores: torch.Tensor,
+        *,
+        num_steps: int,
+        num_reqs: int,
+        top_k: int,
+        BLOCK_K: int,
+        SAMPLE_PROBABILISTIC: bool,
+        USE_FP64: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_reqs,), dict(
+            num_steps=num_steps,
+            top_k=top_k,
+            BLOCK_K=BLOCK_K,
+            SAMPLE_PROBABILISTIC=SAMPLE_PROBABILISTIC,
+            USE_FP64=USE_FP64,
+            num_warps=1,
+        )
+
+
+class CacheDraftLogitsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_cache_draft_logits_kernel)
+
+    def warmup_cases(self, *, speculator: DFlash2Speculator) -> dict[str, Any]:
+        draft_logits = speculator.draft_logits
+        assert draft_logits is not None
+        stride_0 = draft_logits.stride(0)
+        stride_1 = draft_logits.stride(1)
+        top_k = speculator.selector_top_k
+        warmup_draft_logits = TritonWarmupTensor(
+            torch.float32,
+            shape=(1, 1, 1),
+            strides=(stride_0, stride_1, 1),
+        )
+        return dict(
+            draft_logits=warmup_draft_logits,
+            cached_candidate=TritonWarmupTensor(torch.int64),
+            candidate=TritonWarmupTensor(torch.int64),
+            scores=TritonWarmupTensor(torch.float32),
+            req_state=TritonWarmupTensor(torch.int32),
+            draft_logits_stride_0=stride_0,
+            draft_logits_stride_1=stride_1,
+            num_sample=1,
+            num_steps=speculator.num_speculative_steps,
+            top_k=top_k,
+            BLOCK_K=triton.next_power_of_2(top_k),
+        )
+
+    def launch_spec(
+        self,
+        draft_logits: torch.Tensor,
+        cached_candidate: torch.Tensor,
+        candidate: torch.Tensor,
+        scores: torch.Tensor,
+        req_state: torch.Tensor,
+        draft_logits_stride_0: int,
+        draft_logits_stride_1: int,
+        *,
+        num_sample: int,
+        num_steps: int,
+        top_k: int,
+        BLOCK_K: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_sample,), dict(
+            num_steps=num_steps,
+            top_k=top_k,
+            BLOCK_K=BLOCK_K,
+            num_warps=1,
+        )
+
+
+_SELECTOR_WALK_KERNEL = SelectorWalkKernel()
+_CACHE_DRAFT_LOGITS_KERNEL = CacheDraftLogitsKernel()

@@ -9,6 +9,11 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DeclarativeTritonJitKernel,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -68,6 +73,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+        _PREPARE_INPUT_BUFFERS_KERNEL.register_warmup(speculator=self)
+        _PREPARE_INPUT_HIDDEN_STATES_AND_EMBEDDINGS_KERNEL.register_warmup(
+            speculator=self
+        )
+        _PAD_TRAILING_DRAFT_SLOTS_KERNEL.register_warmup(
+            slot_mappings_stride0=self.max_num_tokens
+        )
+        _CACHE_INPUTS_KERNEL.register_warmup(speculator=self)
+        _SHIFT_INPUT_IDS_KERNEL.register_warmup()
+        _SHIFT_INPUT_EMBEDS_KERNEL.register_warmup(speculator=self)
 
     def load_draft_model(
         self,
@@ -614,7 +630,8 @@ def prepare_input_buffers(
     max_num_reqs: int,
     num_speculative_steps: int,
 ) -> None:
-    _prepare_input_buffers_kernel[(num_reqs,)](
+    cached_draft_input_ids_stride0 = cached_draft_input_ids.stride(0)
+    _PREPARE_INPUT_BUFFERS_KERNEL(
         last_token_indices,
         input_buffers.input_ids,
         input_buffers.positions,
@@ -622,7 +639,7 @@ def prepare_input_buffers(
         input_batch.input_ids,
         input_batch.positions,
         cached_draft_input_ids,
-        cached_draft_input_ids.stride(0) if cached_draft_input_ids is not None else 0,
+        cached_draft_input_ids_stride0,
         draft_input_id_overrides,
         draft_input_id_overrides.stride(0),
         input_batch.idx_mapping,
@@ -635,6 +652,7 @@ def prepare_input_buffers(
         input_buffers.query_start_loc,
         max_num_reqs,
         num_speculative_steps,
+        num_reqs=num_reqs,
         BLOCK_SIZE=1024,
     )
 
@@ -767,12 +785,7 @@ def prepare_input_hidden_states_and_embeddings(
     hidden_size = target_hidden_states.shape[-1]
     query_block_size = 16
     hidden_block_size = 256
-    grid = (
-        num_reqs,
-        triton.cdiv(max_query_len, query_block_size),
-        triton.cdiv(hidden_size, hidden_block_size),
-    )
-    _prepare_input_hidden_states_and_embeddings_kernel[grid](
+    _PREPARE_INPUT_HIDDEN_STATES_AND_EMBEDDINGS_KERNEL(
         hidden_states,
         hidden_states.stride(0),
         target_hidden_states,
@@ -798,6 +811,8 @@ def prepare_input_hidden_states_and_embeddings(
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,
+        num_reqs=num_reqs,
+        max_query_len=max_query_len,
         BLOCK_SIZE_Q=query_block_size,
         BLOCK_SIZE_H=hidden_block_size,
         USE_INPUT_EMBEDS=use_input_embeds,
@@ -837,12 +852,14 @@ def pad_trailing_draft_slots(
     num_reqs: int,
 ) -> None:
     num_groups = slot_mappings.shape[0]
-    _pad_trailing_draft_slots_kernel[(num_groups, num_reqs)](
+    _PAD_TRAILING_DRAFT_SLOTS_KERNEL(
         slot_mappings,
         slot_mappings.stride(0),
         query_start_loc,
         last_token_indices,
         PAD_SLOT_ID,
+        num_groups=num_groups,
+        num_reqs=num_reqs,
         BLOCK_SIZE=256,
     )
 
@@ -949,7 +966,7 @@ def cache_inputs(
 ) -> None:
     hidden_size = draft_input_hidden_states.shape[-1]
     hidden_block_size = 1024
-    _cache_inputs_kernel[(num_reqs, triton.cdiv(hidden_size, hidden_block_size))](
+    _CACHE_INPUTS_KERNEL(
         input_buffers.input_ids,
         draft_input_embeds,
         draft_input_embeds.stride(0) if draft_input_embeds is not None else 0,
@@ -972,6 +989,7 @@ def cache_inputs(
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,
+        num_reqs=num_reqs,
         BLOCK_SIZE=hidden_block_size,
         USE_INPUT_EMBEDS=use_input_embeds,
     )
@@ -1075,21 +1093,20 @@ def update_draft_inputs(
     idx_mapping: torch.Tensor,
     num_reqs: int,
 ) -> None:
-    _shift_input_ids_kernel[(num_reqs,)](
+    _SHIFT_INPUT_IDS_KERNEL(
         input_buffers.input_ids,
         idx_mapping,
         input_buffers.query_start_loc,
         last_token_indices,
         draft_tokens,
+        num_reqs=num_reqs,
         BLOCK_SIZE=1024,
     )
     if input_embeds is not None:
         assert draft_embeds is not None
         hidden_size = input_embeds.shape[-1]
         hidden_block_size = 256
-        _shift_input_embeds_kernel[
-            (num_reqs, triton.cdiv(hidden_size, hidden_block_size))
-        ](
+        _SHIFT_INPUT_EMBEDS_KERNEL(
             input_embeds,
             input_embeds.stride(0),
             draft_embeds,
@@ -1098,6 +1115,326 @@ def update_draft_inputs(
             input_buffers.query_start_loc,
             last_token_indices,
             hidden_size,
+            num_reqs=num_reqs,
             BLOCK_SIZE_Q=16,
             BLOCK_SIZE_H=hidden_block_size,
         )
+
+
+def _strided_ptr(dtype: torch.dtype, *strides: int) -> TritonWarmupTensor:
+    shape = (1,) * len(strides)
+    return TritonWarmupTensor(dtype, shape=shape, strides=strides)
+
+
+class PrepareInputBuffersKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_prepare_input_buffers_kernel)
+
+    def warmup_cases(self, *, speculator: MultiModuleMTPSpeculator) -> dict[str, Any]:
+        num_steps = speculator.num_speculative_steps
+        max_num_reqs = speculator.max_num_reqs
+        step_stride = num_steps - 1
+        return dict(
+            last_token_indices=TritonWarmupTensor(torch.int64),
+            draft_input_ids=TritonWarmupTensor(torch.int32),
+            draft_positions=TritonWarmupTensor(torch.int64),
+            draft_seq_lens=TritonWarmupTensor(torch.int32),
+            target_input_ids=TritonWarmupTensor(torch.int32),
+            target_positions=TritonWarmupTensor(torch.int64),
+            cached_draft_input_ids=_strided_ptr(torch.int64, step_stride, 1),
+            cached_draft_input_ids_stride0=step_stride,
+            draft_input_id_overrides=_strided_ptr(torch.int64, step_stride, 1),
+            draft_input_id_overrides_stride0=step_stride,
+            idx_mapping=TritonWarmupTensor(torch.int32),
+            last_sampled=TritonWarmupTensor(torch.int64),
+            next_prefill_tokens=_strided_ptr(torch.int32, max_num_reqs, 1),
+            next_prefill_tokens_stride0=max_num_reqs,
+            num_sampled=TritonWarmupTensor(torch.int32),
+            num_rejected=TritonWarmupTensor(torch.int32),
+            target_seq_lens=TritonWarmupTensor(torch.int32),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            max_num_reqs=max_num_reqs,
+            num_speculative_steps=num_steps,
+            num_reqs=1,
+            BLOCK_SIZE=1024,
+        )
+
+    def launch_spec(
+        self,
+        last_token_indices: torch.Tensor,
+        draft_input_ids: torch.Tensor,
+        draft_positions: torch.Tensor,
+        draft_seq_lens: torch.Tensor,
+        target_input_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        cached_draft_input_ids: torch.Tensor,
+        cached_draft_input_ids_stride0: int,
+        draft_input_id_overrides: torch.Tensor,
+        draft_input_id_overrides_stride0: int,
+        idx_mapping: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        next_prefill_tokens_stride0: int,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        target_seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        max_num_reqs: int,
+        num_speculative_steps: int,
+        *,
+        num_reqs: int,
+        BLOCK_SIZE: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_reqs,), dict(BLOCK_SIZE=BLOCK_SIZE)
+
+
+class PrepareInputHiddenStatesAndEmbeddingsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_prepare_input_hidden_states_and_embeddings_kernel)
+
+    def warmup_cases(self, *, speculator: MultiModuleMTPSpeculator) -> dict[str, Any]:
+        hidden_size = speculator.hidden_size
+        num_steps = speculator.num_speculative_steps
+        dtype = speculator.dtype
+        cached_stride0 = (num_steps - 1) * hidden_size
+        use_input_embeds = WarmupChoices(False, True)
+        hidden = _strided_ptr(dtype, hidden_size, 1)
+        cached = _strided_ptr(dtype, cached_stride0, hidden_size, 1)
+        return dict(
+            hidden_states=hidden,
+            hidden_states_stride0=hidden_size,
+            target_hidden_states=hidden,
+            target_hidden_states_stride0=hidden_size,
+            cached_target_hidden_states=cached,
+            cached_target_hidden_states_stride0=cached_stride0,
+            cached_target_hidden_states_stride1=hidden_size,
+            input_embeds=hidden if use_input_embeds else None,
+            input_embeds_stride0=hidden_size if use_input_embeds else 0,
+            cached_draft_input_embeds=cached if use_input_embeds else None,
+            cached_draft_input_embeds_stride0=(
+                cached_stride0 if use_input_embeds else 0
+            ),
+            cached_draft_input_embeds_stride1=(hidden_size if use_input_embeds else 0),
+            idx_mapping=TritonWarmupTensor(torch.int32),
+            num_rejected=TritonWarmupTensor(torch.int32),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            num_speculative_steps=num_steps,
+            hidden_size=hidden_size,
+            num_reqs=1,
+            max_query_len=1,
+            BLOCK_SIZE_Q=16,
+            BLOCK_SIZE_H=256,
+            USE_INPUT_EMBEDS=use_input_embeds,
+        )
+
+    def launch_spec(
+        self,
+        hidden_states: torch.Tensor,
+        hidden_states_stride0: int,
+        target_hidden_states: torch.Tensor,
+        target_hidden_states_stride0: int,
+        cached_target_hidden_states: torch.Tensor | None,
+        cached_target_hidden_states_stride0: int,
+        cached_target_hidden_states_stride1: int,
+        input_embeds: torch.Tensor | None,
+        input_embeds_stride0: int,
+        cached_draft_input_embeds: torch.Tensor | None,
+        cached_draft_input_embeds_stride0: int,
+        cached_draft_input_embeds_stride1: int,
+        idx_mapping: torch.Tensor,
+        num_rejected: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_speculative_steps: int,
+        hidden_size: int,
+        *,
+        num_reqs: int,
+        max_query_len: int,
+        BLOCK_SIZE_Q: int,
+        BLOCK_SIZE_H: int,
+        USE_INPUT_EMBEDS: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        grid = (
+            num_reqs,
+            triton.cdiv(max_query_len, BLOCK_SIZE_Q),
+            triton.cdiv(hidden_size, BLOCK_SIZE_H),
+        )
+        return grid, dict(
+            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            BLOCK_SIZE_H=BLOCK_SIZE_H,
+            USE_INPUT_EMBEDS=USE_INPUT_EMBEDS,
+        )
+
+
+class PadTrailingDraftSlotsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_pad_trailing_draft_slots_kernel)
+
+    def warmup_cases(self, *, slot_mappings_stride0: int) -> dict[str, Any]:
+        return dict(
+            slot_mappings=_strided_ptr(torch.int64, slot_mappings_stride0, 1),
+            slot_mappings_stride0=slot_mappings_stride0,
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            last_token_indices=TritonWarmupTensor(torch.int64),
+            PAD_ID=PAD_SLOT_ID,
+            num_groups=1,
+            num_reqs=1,
+            BLOCK_SIZE=256,
+        )
+
+    def launch_spec(
+        self,
+        slot_mappings: torch.Tensor,
+        slot_mappings_stride0: int,
+        query_start_loc: torch.Tensor,
+        last_token_indices: torch.Tensor,
+        PAD_ID: int,
+        *,
+        num_groups: int,
+        num_reqs: int,
+        BLOCK_SIZE: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_groups, num_reqs), dict(BLOCK_SIZE=BLOCK_SIZE)
+
+
+class CacheInputsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_cache_inputs_kernel)
+
+    def warmup_cases(self, *, speculator: MultiModuleMTPSpeculator) -> dict[str, Any]:
+        hidden_size = speculator.hidden_size
+        num_steps = speculator.num_speculative_steps
+        dtype = speculator.dtype
+        cached_ids_stride0 = num_steps - 1
+        cached_hidden_stride0 = cached_ids_stride0 * hidden_size
+        use_input_embeds = WarmupChoices(False, True)
+        hidden = _strided_ptr(dtype, hidden_size, 1)
+        cached_hidden = _strided_ptr(dtype, cached_hidden_stride0, hidden_size, 1)
+        return dict(
+            draft_input_ids=TritonWarmupTensor(torch.int32),
+            draft_input_embeds=hidden if use_input_embeds else None,
+            draft_input_embeds_stride0=hidden_size if use_input_embeds else 0,
+            draft_input_hidden_states=hidden,
+            draft_input_hidden_states_stride0=hidden_size,
+            cached_draft_input_ids=_strided_ptr(torch.int64, cached_ids_stride0, 1),
+            cached_draft_input_ids_stride0=cached_ids_stride0,
+            cached_draft_input_embeds=cached_hidden if use_input_embeds else None,
+            cached_draft_input_embeds_stride0=(
+                cached_hidden_stride0 if use_input_embeds else 0
+            ),
+            cached_draft_input_embeds_stride1=(hidden_size if use_input_embeds else 0),
+            cached_target_hidden_states=cached_hidden,
+            cached_target_hidden_states_stride0=cached_hidden_stride0,
+            cached_target_hidden_states_stride1=hidden_size,
+            idx_mapping=TritonWarmupTensor(torch.int32),
+            last_token_indices=TritonWarmupTensor(torch.int64),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            num_speculative_steps=num_steps,
+            hidden_size=hidden_size,
+            num_reqs=1,
+            BLOCK_SIZE=1024,
+            USE_INPUT_EMBEDS=use_input_embeds,
+        )
+
+    def launch_spec(
+        self,
+        draft_input_ids: torch.Tensor,
+        draft_input_embeds: torch.Tensor | None,
+        draft_input_embeds_stride0: int,
+        draft_input_hidden_states: torch.Tensor,
+        draft_input_hidden_states_stride0: int,
+        cached_draft_input_ids: torch.Tensor,
+        cached_draft_input_ids_stride0: int,
+        cached_draft_input_embeds: torch.Tensor | None,
+        cached_draft_input_embeds_stride0: int,
+        cached_draft_input_embeds_stride1: int,
+        cached_target_hidden_states: torch.Tensor,
+        cached_target_hidden_states_stride0: int,
+        cached_target_hidden_states_stride1: int,
+        idx_mapping: torch.Tensor,
+        last_token_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_speculative_steps: int,
+        hidden_size: int,
+        *,
+        num_reqs: int,
+        BLOCK_SIZE: int,
+        USE_INPUT_EMBEDS: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        grid = (num_reqs, triton.cdiv(hidden_size, BLOCK_SIZE))
+        return grid, dict(
+            BLOCK_SIZE=BLOCK_SIZE,
+            USE_INPUT_EMBEDS=USE_INPUT_EMBEDS,
+        )
+
+
+class ShiftInputIdsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_shift_input_ids_kernel)
+
+    def warmup_cases(self) -> dict[str, Any]:
+        return dict(
+            input_ids=TritonWarmupTensor(torch.int32),
+            idx_mapping=TritonWarmupTensor(torch.int32),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            last_token_indices=TritonWarmupTensor(torch.int64),
+            draft_tokens=TritonWarmupTensor(torch.int64),
+            num_reqs=1,
+            BLOCK_SIZE=1024,
+        )
+
+    def launch_spec(
+        self,
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        last_token_indices: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        *,
+        num_reqs: int,
+        BLOCK_SIZE: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (num_reqs,), dict(BLOCK_SIZE=BLOCK_SIZE)
+
+
+class ShiftInputEmbedsKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_shift_input_embeds_kernel)
+
+    def warmup_cases(self, *, speculator: MultiModuleMTPSpeculator) -> dict[str, Any]:
+        hidden_size = speculator.hidden_size
+        dtype = speculator.dtype
+        return dict(
+            input_embeds=_strided_ptr(dtype, hidden_size, 1),
+            input_embeds_stride0=hidden_size,
+            draft_embeds=_strided_ptr(dtype, hidden_size, 1),
+            draft_embeds_stride0=hidden_size,
+            idx_mapping=TritonWarmupTensor(torch.int32),
+            query_start_loc=TritonWarmupTensor(torch.int32),
+            last_token_indices=TritonWarmupTensor(torch.int64),
+            hidden_size=hidden_size,
+            num_reqs=1,
+            BLOCK_SIZE_Q=16,
+            BLOCK_SIZE_H=256,
+        )
+
+    def launch_spec(
+        self,
+        input_embeds: torch.Tensor,
+        input_embeds_stride0: int,
+        draft_embeds: torch.Tensor,
+        draft_embeds_stride0: int,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        last_token_indices: torch.Tensor,
+        hidden_size: int,
+        *,
+        num_reqs: int,
+        BLOCK_SIZE_Q: int,
+        BLOCK_SIZE_H: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        grid = (num_reqs, triton.cdiv(hidden_size, BLOCK_SIZE_H))
+        return grid, dict(BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_H=BLOCK_SIZE_H)
+
+
+_PREPARE_INPUT_BUFFERS_KERNEL = PrepareInputBuffersKernel()
+_PREPARE_INPUT_HIDDEN_STATES_AND_EMBEDDINGS_KERNEL = (
+    PrepareInputHiddenStatesAndEmbeddingsKernel()
+)
+_PAD_TRAILING_DRAFT_SLOTS_KERNEL = PadTrailingDraftSlotsKernel()
+_CACHE_INPUTS_KERNEL = CacheInputsKernel()
+_SHIFT_INPUT_IDS_KERNEL = ShiftInputIdsKernel()
+_SHIFT_INPUT_EMBEDS_KERNEL = ShiftInputEmbedsKernel()
