@@ -1,0 +1,393 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Uno shared-model parallel drafting for Model Runner V2."""
+
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.spec_decode.uno_noise import fill_uno_noise
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+    prepare_inputs_to_capture,
+)
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.uno_prepare import prepare_uno_inputs_fused
+from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
+UNO_LORA_ID = 1_000_003
+
+
+def prepare_uno_inputs_reference(
+    buffers: InputBuffers,
+    slot_mapping: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    seeds: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    k: int,
+    max_model_len: int,
+    noise_seed: int,
+    noise_high: int,
+    step: int,
+) -> None:
+    """CPU reference oracle for the fused seed/noise preparation kernel.
+
+    Temporary suffix KV starts after the last verified row. The target overwrites
+    it on verification; neither request progress nor prefix ownership advances here.
+    """
+    n = input_batch.num_reqs
+    count = n * k
+    state_idx = input_batch.idx_mapping.long()
+    valid_end = input_batch.query_start_loc[1 : n + 1] - num_rejected
+    first_pos = input_batch.positions[valid_end.long() - 1] + 1
+    offsets = torch.arange(k, dtype=torch.int64, device=buffers.device)
+    positions = first_pos[:, None] + offsets
+    seed_tokens = torch.where(
+        num_sampled > 0,
+        last_sampled.reshape(-1)[state_idx],
+        next_prefill_tokens.reshape(-1, seeds.shape[0])[0, state_idx],
+    )
+    buffers.input_ids[:count].copy_(seed_tokens.repeat_interleave(k))
+    is_noise = (offsets != 0).repeat(n)
+    req_seeds = (seeds[state_idx] + noise_seed).repeat_interleave(k)
+    fill_uno_noise(buffers.input_ids[:count], is_noise, req_seeds, step, 1, noise_high)
+    # Keep unused, out-of-context rows in range for the model. Their KV writes
+    # are suppressed below; native verification bounds usable candidates.
+    buffers.positions[:count].copy_(positions.clamp(max=max_model_len - 1).flatten())
+    buffers.seq_lens[:n].copy_((first_pos + k).clamp(max=max_model_len))
+    buffers.seq_lens[n:].zero_()
+    torch.arange(n + 1, out=buffers.query_start_loc[: n + 1])
+    buffers.query_start_loc[: n + 1].mul_(k)
+    buffers.query_start_loc[n + 1 :].fill_(count)
+    buffers.input_ids[count:].zero_()
+    buffers.positions[count:].zero_()
+    sample_idx_mapping[:count].copy_(state_idx.repeat_interleave(k))
+    sample_idx_mapping[count:].fill_(-1)
+
+    block_numbers = positions // block_size
+    block_ids = (
+        block_table[:n]
+        .gather(1, block_numbers.clamp(max=block_table.shape[1] - 1))
+        .long()
+    )
+    valid = (
+        (positions < max_model_len)
+        & (block_numbers < block_table.shape[1])
+        & (block_ids > 0)
+    )
+    slots = block_ids * block_size + positions % block_size
+    slot_mapping[:count].copy_(torch.where(valid, slots, PAD_SLOT_ID).flatten())
+    slot_mapping[count:].fill_(PAD_SLOT_ID)
+
+
+class UnoSpeculator(DraftModelSpeculator):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        if device.type != "cuda" or not current_platform.is_cuda():
+            raise ValueError("Uno currently requires an NVIDIA CUDA device")
+        super().__init__(vllm_config, device)
+        self.k = self.num_speculative_steps
+        if self.max_num_reqs * self.k > self.max_num_tokens:
+            raise ValueError(
+                "Uno requires max_num_batched_tokens >= "
+                "max_num_seqs * num_speculative_tokens"
+            )
+        assert self.speculative_config.uno_lora_path is not None
+        self.lora_request = LoRARequest(
+            "uno", UNO_LORA_ID, self.speculative_config.uno_lora_path
+        )
+        self._lora_hook: Callable[[tuple[int, int] | None], None] | None = None
+        self.sample_idx_mapping = torch.full(
+            (self.max_num_reqs * self.k,), -1, dtype=torch.int32, device=device
+        )
+        self.sample_col = torch.arange(self.k, dtype=torch.int32, device=device).repeat(
+            self.max_num_reqs
+        )
+        self.cudagraph_manager: CudaGraphManager | None = None
+        self._graph_attn_metadata: dict[BatchExecutionDescriptor, dict[str, Any]] = {}
+        self._step = 0
+        self.num_graph_replays = 0
+        self.num_eager_proposals = 0
+
+    def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
+        self._lora_hook = hook
+
+    @contextmanager
+    def _draft_lora(self, num_reqs: int, num_tokens: int) -> Iterator[None]:
+        if self._lora_hook is None:
+            raise RuntimeError("Uno adapter routing has not been initialized")
+        try:
+            self._lora_hook((num_reqs, num_tokens))
+            yield
+        finally:
+            self._lora_hook(None)
+
+    def load_draft_model(
+        self, target_model: nn.Module, target_attn_layer_names: set[str]
+    ) -> nn.Module:
+        return target_model
+
+    def load_model(self, target_model: nn.Module) -> None:
+        self.model = target_model
+        self._validate_local_argmax_reduction()
+        layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        self.draft_attn_layer_names = {
+            name
+            for name, layer in layers.items()
+            if layer.get_kv_cache_spec(self.vllm_config) is not None
+        }
+        if not self.draft_attn_layer_names:
+            raise ValueError("Uno requires shared target attention with a KV cache")
+        for name in self.draft_attn_layer_names:
+            if layers[name].get_attn_backend().get_name() != "FLASH_ATTN":
+                raise ValueError("Uno currently requires the FLASH_ATTN backend")
+        self.supports_mm_inputs = False
+
+    def set_attn(
+        self,
+        model_state: ModelState,
+        kv_cache_config: KVCacheConfig,
+        block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
+    ) -> None:
+        groups = kv_cache_config.kv_cache_groups
+        if len(groups) != 1:
+            raise ValueError("Uno requires one homogeneous full-attention KV group")
+        spec = groups[0].kv_cache_spec
+        if (
+            type(spec) is not FullAttentionSpec
+            or spec.sliding_window is not None
+            or spec.attention_chunk_size is not None
+        ):
+            raise ValueError("Uno requires homogeneous full attention")
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
+        if any(
+            not group.supports_draft_decode_metadata_update
+            for groups in self.attn_groups
+            for group in groups
+        ):
+            raise ValueError(
+                "Uno requires attention metadata builders supporting "
+                "native draft decode updates"
+            )
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        self._graph_attn_metadata.clear()
+        can_capture = (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and self.attn_cg_support.min_cg_support.value
+            >= AttentionCGSupport.UNIFORM_BATCH.value
+        )
+        if not can_capture and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            logger.warning_once(
+                "Uno draft CUDA graphs require uniform-batch attention support; "
+                "using eager drafting."
+            )
+        self.cudagraph_manager = CudaGraphManager(
+            self.vllm_config,
+            self.device,
+            CUDAGraphMode.FULL_DECODE_ONLY if can_capture else CUDAGraphMode.NONE,
+            decode_query_len=self.k,
+            lora_capture_cases=[2 if self.k > 1 else 0],
+        )
+
+    def capture(self) -> None:
+        assert self.cudagraph_manager is not None
+        self.sample_idx_mapping.fill_(-1)
+        self.input_buffers.input_ids.zero_()
+        self.input_buffers.positions.zero_()
+
+        def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
+            assert desc.num_reqs is not None
+            attn_metadata, slots = prepare_inputs_to_capture(
+                desc.num_reqs,
+                desc.num_tokens,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                full_cudagraph=True,
+                max_query_len=self.k,
+            )
+            assert attn_metadata is not None
+            if not warmup:
+                self._graph_attn_metadata[desc] = attn_metadata
+            assert self._lora_hook is not None
+            self._lora_hook((desc.num_reqs, desc.num_tokens))
+            return lambda mode: self._generate_draft(
+                desc.num_reqs, desc.num_tokens, attn_metadata, slots
+            )
+
+        try:
+            self.cudagraph_manager.capture(
+                create_forward_fn, "Capturing Uno CUDA graphs"
+            )
+        finally:
+            if self._lora_hook is not None:
+                self._lora_hook(None)
+
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor],
+    ) -> None:
+        with set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            slot_mapping=slot_mappings,
+        ):
+            hidden_states = self.model(
+                input_ids=self.input_buffers.input_ids[:num_tokens],
+                positions=self.input_buffers.positions[:num_tokens],
+                inputs_embeds=None,
+            )
+        count = num_reqs * self.k
+        tokens = self.sample_draft(
+            hidden_states[:count],
+            self.input_buffers.positions[:count],
+            self.sample_idx_mapping[:count],
+            self.temperature,
+            self.seeds,
+            self.sample_col[:count],
+            self.draft_logits,
+        )
+        self.draft_tokens[:num_reqs].copy_(tokens.view(num_reqs, self.k))
+
+    @torch.inference_mode()
+    def propose(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dp_sync: DPSyncState | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
+    ) -> torch.Tensor:
+        n = input_batch.num_reqs
+        if n == 0:
+            return self.draft_tokens[:0]
+        count = n * self.k
+        self._copy_request_inputs(n, input_batch.idx_mapping, temperature, seeds)
+        if dummy_run and skip_attn_for_dummy_run:
+            self.input_buffers.input_ids.zero_()
+            self.input_buffers.positions.zero_()
+            self.sample_idx_mapping.fill_(-1)
+            with self._draft_lora(n, count):
+                self._generate_draft(n, count, None, {})
+            return self.draft_tokens[:n]
+
+        self._step += 1
+        assert self.speculative_config.uno_mask_token_id is not None
+        prepare_uno_inputs_fused(
+            self.input_buffers,
+            self.block_tables.slot_mappings[0],
+            self.sample_idx_mapping,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            seeds,
+            self.block_tables.input_block_tables[0],
+            self.block_tables.kernel_block_sizes[0],
+            self.k,
+            self.max_model_len,
+            self.speculative_config.uno_noise_seed,
+            self.speculative_config.uno_mask_token_id,
+            self._step,
+        )
+        if dummy_run:
+            self.block_tables.slot_mappings.fill_(PAD_SLOT_ID)
+            self.sample_idx_mapping.fill_(-1)
+        assert self.cudagraph_manager is not None
+        desc = self.cudagraph_manager.dispatch(n, count, self.k, 2 if self.k > 1 else 0)
+        if is_profile:
+            desc = BatchExecutionDescriptor(CUDAGraphMode.NONE, count, n)
+        with self._draft_lora(n, desc.num_tokens):
+            if desc.cg_mode == CUDAGraphMode.FULL:
+                # The graph already owns the metadata and slot-buffer views.
+                # Refresh native backend scheduling state (needed by FA3) using
+                # the updated persistent input buffers, without rebuilding the
+                # eager metadata or its temporary CPU tensors.
+                captured_attn = self._graph_attn_metadata[desc]
+                for attn_groups in self.attn_groups:
+                    for attn_group in attn_groups:
+                        attn_group.update_draft_decode_metadata(captured_attn)
+                self.cudagraph_manager.run_fullgraph(desc)
+                if not dummy_run:
+                    self.num_graph_replays += 1
+                    if self.num_graph_replays == 1:
+                        logger.info("Uno draft CUDA graph replay is active.")
+            else:
+                self.draft_max_seq_len = min(
+                    int(input_batch.seq_lens_cpu_upper_bound[:n].max()) + self.k,
+                    self.max_model_len,
+                )
+                draft_attn = self._build_draft_attn_metadata(
+                    n,
+                    desc.num_reqs or n,
+                    desc.num_tokens,
+                    input_batch.seq_lens_cpu_upper_bound,
+                    step=self.k,
+                    num_query_per_req=self.k,
+                )
+                slots = build_slot_mappings_by_layer(
+                    self.block_tables.slot_mappings[:, : desc.num_tokens],
+                    self.kv_cache_config,
+                )
+                self._generate_draft(n, desc.num_tokens, draft_attn, slots)
+                if not dummy_run:
+                    self.num_eager_proposals += 1
+                    if self.num_eager_proposals == 1:
+                        logger.info("Uno drafting is using eager execution.")
+        return self.draft_tokens[:n]

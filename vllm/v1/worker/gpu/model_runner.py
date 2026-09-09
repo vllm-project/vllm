@@ -164,6 +164,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+from vllm.v1.worker.gpu.spec_decode.uno_lora import UnoLoRAState
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -419,6 +421,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
+                    if isinstance(self.speculator, UnoSpeculator):
+                        self._install_uno_lora(self.speculator)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
@@ -522,6 +526,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def _install_uno_lora(self, speculator: UnoSpeculator) -> None:
+        self._ensure_lora_enabled()
+        self.uno_lora_state = UnoLoRAState(self.lora_manager, speculator.lora_request)
+        self.uno_lora_state.ensure_adapter()
+        active_shape = (0, 0)
+
+        def set_draft_mapping(shape: tuple[int, int] | None) -> None:
+            nonlocal active_shape
+            if shape is None:
+                num_reqs, num_model_tokens = active_shape
+                self.uno_lora_state.install_base(
+                    num_model_tokens, num_reqs * speculator.k
+                )
+                return
+            active_shape = shape
+            num_reqs, num_model_tokens = shape
+            self.uno_lora_state.install_draft(num_model_tokens, num_reqs, speculator.k)
+
+        speculator.set_lora_hook(set_draft_mapping)
 
     def get_draft_model(self) -> nn.Module | None:
         speculator = self.speculator
@@ -1685,7 +1709,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.num_computed_tokens.gpu,
             )
 
-            if self.lora_config:
+            if isinstance(self.speculator, UnoSpeculator):
+                self.uno_lora_state.install_base(
+                    input_batch.num_tokens_after_padding,
+                    input_batch.logits_indices.numel(),
+                )
+            elif self.lora_config:
                 # Activate LoRA adapters.
                 lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,

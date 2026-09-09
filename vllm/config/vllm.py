@@ -630,6 +630,10 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
+        if speculative_config.use_uno():
+            # After verification, the next draft writes one seed and K-1
+            # noisy rows beyond the target's scheduled query rows.
+            return self.num_speculative_tokens
         if speculative_config.use_dflash():
             # DFlash requires an extra lookahead slot since it uses in-fill-style
             # decoding instead of standard next-token sampling, so it has a query
@@ -1168,6 +1172,54 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _validate_uno_config(self) -> None:
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_uno():
+            return
+
+        if not self.use_v2_model_runner:
+            raise ValueError("Uno requires Model Runner V2")
+        if self.lora_config is None:
+            raise ValueError(
+                "Uno requires --enable-lora and --max-lora-rank large enough "
+                "for the Uno adapter"
+            )
+        if self.lora_config.max_loras < 2:
+            raise ValueError(
+                "Uno requires max_loras >= 2 for shared-adapter "
+                "warmup and graph capture"
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError("Uno does not support dual batch overlap")
+        if any(
+            getattr(self.parallel_config, name) != 1
+            for name in (
+                "tensor_parallel_size",
+                "pipeline_parallel_size",
+                "data_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            )
+        ):
+            raise ValueError("Uno currently supports only single-GPU execution")
+        if (
+            self.kv_transfer_config is not None
+            or self.cache_config.kv_offloading_size is not None
+        ):
+            raise ValueError("Uno does not support KV cache transfer")
+        if not self.scheduler_config.async_scheduling:
+            raise ValueError("Uno requires asynchronous scheduling")
+
+        required_tokens = (
+            self.scheduler_config.max_num_seqs
+            * speculative_config.num_speculative_tokens
+        )
+        if self.scheduler_config.max_num_batched_tokens < required_tokens:
+            raise ValueError(
+                "Uno requires max_num_batched_tokens >= max_num_seqs * "
+                f"num_speculative_tokens ({required_tokens}) for draft LoRA routing"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1337,10 +1389,11 @@ class VllmConfig:
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
+                    and self.speculative_config.method != "uno"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark kind of "
+                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/Uno kind of "
                         "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -1370,6 +1423,7 @@ class VllmConfig:
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
+                and self.speculative_config.method != "uno"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -1402,6 +1456,8 @@ class VllmConfig:
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
+
+        self._validate_uno_config()
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
@@ -1733,6 +1789,13 @@ class VllmConfig:
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
+
+        # Platform validation can change scheduler settings after the generic
+        # speculative checks above (the CPU platform, for example, disables
+        # async scheduling).  Uno has no synchronous or V1 fallback, so rerun
+        # its narrow contract check after platform-specific updates and fail
+        # at initialization with the actionable reason.
+        self._validate_uno_config()
 
         self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
@@ -2724,6 +2787,7 @@ class VllmConfig:
                 "dflash",
                 "dspark",
                 "extract_hidden_states",
+                "uno",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -2732,7 +2796,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "uno")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -2767,6 +2831,8 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
+            if self.speculative_config.use_uno():
+                unsupported.append("Uno speculative decoding")
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:

@@ -1515,6 +1515,65 @@ def test_hash_block_correct_reuse():
     assert manager.block_pool.blocks[blocks.blocks[0][0].block_id].block_hash is None
 
 
+@pytest.mark.parametrize("num_accepted", [0, 3, 4])
+def test_uno_suffix_reservation_does_not_cache_unverified_tokens(num_accepted):
+    """Reserved and rejected suffix blocks must never become prefix-cache hits."""
+    block_size = 4
+    num_draft_tokens = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 9),
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    initial_free_blocks = manager.block_pool.get_num_free_blocks()
+    prompt_ids = [1, 2, 3]
+    request = make_request("draft", prompt_ids, block_size, sha256)
+
+    blocks = manager.allocate_slots(
+        request, len(prompt_ids), num_lookahead_tokens=num_draft_tokens
+    )
+    assert blocks is not None and len(blocks.blocks[0]) == 2
+    assert all(block.block_hash is None for block in blocks.blocks[0])
+    request.num_computed_tokens = len(prompt_ids)
+    request.append_output_token_ids([10])
+    draft_ids = [11, 12, 13, 14]
+    request.spec_token_ids = draft_ids
+
+    # Reserve verification and the next draft; only the seed is committed.
+    blocks = manager.allocate_slots(
+        request,
+        1 + num_draft_tokens,
+        num_lookahead_tokens=num_draft_tokens,
+    )
+    assert blocks is not None
+    allocated = manager.get_blocks(request.request_id).blocks[0]
+    assert len(allocated) == 3
+    assert all(block.block_hash is None for block in allocated[1:])
+    draft_probe = make_request(
+        "draft-probe", prompt_ids + [10] + draft_ids + [99], block_size, sha256
+    )
+    _, hit_tokens, _ = manager.get_computed_blocks(draft_probe)
+    assert hit_tokens == block_size
+
+    request.append_output_token_ids(draft_ids[:num_accepted] + [20])
+    request.num_computed_tokens += 1 + num_accepted
+    request.spec_token_ids = []
+    manager.cache_blocks(request, request.num_computed_tokens)
+    num_cached_blocks = request.num_computed_tokens // block_size
+    assert all(block.block_hash is None for block in allocated[num_cached_blocks:])
+    manager.free(request)
+    assert manager.block_pool.get_num_free_blocks() == initial_free_blocks
+
+    accepted_probe = make_request(
+        "accepted-probe", list(request.all_token_ids) + [99], block_size, sha256
+    )
+    _, accepted_hit_tokens, _ = manager.get_computed_blocks(accepted_probe)
+    _, draft_hit_tokens, _ = manager.get_computed_blocks(draft_probe)
+    assert accepted_hit_tokens == num_cached_blocks * block_size
+    assert draft_hit_tokens == num_cached_blocks * block_size
+
+
 def test_computed_blocks_not_evicted():
     """
     Test that the computed blocks are not evicted when getting new blocks
