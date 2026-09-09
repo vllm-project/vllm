@@ -2696,11 +2696,9 @@ def _can_use_aiter_sparse_prefill_opus(
 ) -> bool:
     return (
         on_gfx950
-        and q.ndim == 3
-        and kv.ndim == 2
-        and output.shape == q.shape
         and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
-        and q.shape[-1] == 512
+        and q.is_cuda
+        and output.shape == q.shape
         and kv.shape[-1] == q.shape[-1]
         and q.dtype in (torch.bfloat16, torch.float16)
         and kv.dtype == q.dtype
@@ -3252,10 +3250,9 @@ def rocm_sparse_attn_prefill(
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
-    kv_flat = kv.squeeze(1)
-    sliced_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
+    opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
     if (
-        _can_use_aiter_sparse_prefill_opus(q, kv_flat, sliced_attn_sink, output)
+        _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
         and _get_aiter_sparse_prefill_opus() is not None
     ):
         if ragged_indices is None or ragged_indptr is None:
@@ -3268,14 +3265,14 @@ def rocm_sparse_attn_prefill(
                 else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
                 num_rows=kv.shape[0],
             )
-        assert sliced_attn_sink is not None
+        assert opus_attn_sink is not None
         if _rocm_sparse_attn_prefill_ragged_aiter_opus(
             q=q,
-            kv=kv_flat,
+            kv=kv.squeeze(1),
             indices=ragged_indices,
             indptr=ragged_indptr,
             scale=scale,
-            attn_sink=sliced_attn_sink,
+            attn_sink=opus_attn_sink,
             output=output,
         ):
             return
@@ -3283,11 +3280,11 @@ def rocm_sparse_attn_prefill(
     if ragged_indices is not None and ragged_indptr is not None:
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
             q=q,
-            kv=kv_flat,
+            kv=kv.squeeze(1),
             indices=ragged_indices,
             indptr=ragged_indptr,
             scale=scale,
-            attn_sink=sliced_attn_sink,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
         )
@@ -3296,10 +3293,10 @@ def rocm_sparse_attn_prefill(
         indices_2d = indices.reshape(indices.shape[0], -1)
         output_chunk = _rocm_sparse_attn_prefill_triton(
             q=q,
-            kv=kv_flat,
+            kv=kv.squeeze(1),
             indices=indices_2d,
             scale=scale,
-            attn_sink=sliced_attn_sink,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
