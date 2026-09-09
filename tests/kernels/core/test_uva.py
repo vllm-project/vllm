@@ -90,20 +90,69 @@ def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("input_type", ["list", "numpy", "tensor"])
-def test_growable_uva_pool_overwrites_exposed_prefix(input_type):
+@pytest.mark.parametrize("size", [(4,), (4, 3)])
+def test_uva_pool_overwrites_exposed_prefix(input_type, size):
     """Both slots expose only current contents across growth and shorter reuse."""
-    pool = buffer_utils.GrowableUvaBufferPool(torch.int32, max_concurrency=2)
-    lengths = [3, 3, 4, 4, 5, 5, 1024, 1024, 1025, 1025, 2, 2]
+    pool = buffer_utils.UvaBufferPool(size, torch.int32, max_concurrency=2)
+    for buf in pool._uva_bufs:
+        assert tuple(buf.cpu.shape) == size
+        assert buf.cpu.is_pinned()
+        assert torch.count_nonzero(buf.cpu).item() == 0
+    lengths = [0, 0, 3, 3, 4, 4, 5, 3, 3, 5, 1024, 1024, 1025, 1025, 2, 2]
     for step, length in enumerate(lengths):
-        expected = torch.arange(length, dtype=torch.int32, device="cpu") - step
+        if input_type == "list" and len(size) > 1 and length == 0:
+            # An empty list has no trailing shape; preserve NumPy's rejection.
+            with pytest.raises(ValueError, match="could not broadcast"):
+                pool.copy_to_uva([])
+            continue
+        shape = (length, *size[1:])
+        expected = (
+            torch.arange(int(np.prod(shape)), dtype=torch.int32, device="cpu").reshape(
+                shape
+            )
+            - step
+        )
         values = expected.tolist()
         if input_type == "numpy":
-            values = np.asarray(values, dtype=np.int32)
+            values = expected.numpy()
         elif input_type == "tensor":
             values = expected
+        before = list(pool._uva_bufs)
+        slot = (pool._curr + 1) % pool.max_concurrency
         result = pool.copy_to_uva(values)
-        assert result.shape == (length,)
+        assert tuple(result.shape) == shape
+        assert pool._curr == slot
+        assert pool._uva_bufs[1 - slot] is before[1 - slot]
+        if length <= before[slot].cpu.shape[0]:
+            assert pool._uva_bufs[slot] is before[slot]
+        else:
+            assert tuple(pool._uva_bufs[slot].cpu.shape) == (
+                1 << (length - 1).bit_length(),
+                *size[1:],
+            )
+        assert pool.size == size
         # Blocking read also retires GPU readers before the next slot reuse.
+        torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("use_out", [False, True])
+@pytest.mark.parametrize("input_type", ["numpy", "tensor"])
+def test_uva_pool_copy_to_gpu_preserves_shape_and_out(use_out, input_type):
+    pool = buffer_utils.UvaBufferPool((2, 3), torch.int32, max_concurrency=2)
+    for length in (2, 5, 3, 6):
+        expected = torch.arange(length * 3, dtype=torch.int32, device="cpu").reshape(
+            length, 3
+        )
+        values = expected.numpy() if input_type == "numpy" else expected
+        out = (
+            torch.empty(expected.shape, dtype=torch.int32, device="cuda")
+            if use_out
+            else None
+        )
+        result = pool.copy_to_gpu(values, out=out)
+        if use_out:
+            assert result is out
         torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
 
 

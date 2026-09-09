@@ -51,6 +51,11 @@ class UvaBuffer:
 
 
 class UvaBufferPool:
+    """Preallocate each slot at size, growing its first dimension as needed.
+
+    Callers must retire a slot's GPU readers before reuse, including growth.
+    """
+
     def __init__(
         self,
         size: int | Sequence[int],
@@ -72,9 +77,13 @@ class UvaBufferPool:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
+        n = len(x)
+        if n > buf.cpu.shape[0]:
+            capacity = 1 << (n - 1).bit_length()
+            buf = UvaBuffer((capacity, *buf.cpu.shape[1:]), self.dtype)
+            self._uva_bufs[self._curr] = buf
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
-        n = len(x)
         dst[:n] = x
         return buf.uva[:n]
 
@@ -86,38 +95,6 @@ class UvaBufferPool:
         uva = self.copy_to_uva(x)
         # CPU-to-GPU copy
         return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
-
-
-class GrowableUvaBufferPool:
-    """Grow each slot lazily; callers must retire GPU readers before reuse.
-
-    Like UvaBufferPool, this relies on the runner's in-flight batch bound.
-    """
-
-    def __init__(
-        self,
-        dtype: torch.dtype,
-        max_concurrency: int | None = None,
-    ):
-        if max_concurrency is None:
-            max_concurrency = _DEFAULT_MAX_CONCURRENCY
-        self.dtype = dtype
-        self.max_concurrency = max_concurrency
-        self._uva_bufs: list[UvaBuffer | None] = [None] * max_concurrency
-        self._curr = 0
-
-    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
-        self._curr = (self._curr + 1) % self.max_concurrency
-        n = len(x)
-        buf = self._uva_bufs[self._curr]
-        if buf is None or buf.cpu.numel() < n:
-            capacity = 1 << (max(1, n) - 1).bit_length()
-            buf = UvaBuffer(capacity, self.dtype)
-            self._uva_bufs[self._curr] = buf
-
-        dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
-        dst[:n] = x
-        return buf.uva[:n]
 
 
 class UvaBackedTensor:
@@ -183,11 +160,7 @@ class StagedWriteTensor:
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
-        self.write_contents = (
-            GrowableUvaBufferPool(dtype, max_concurrency)
-            if uva_instead_of_gpu
-            else None
-        )
+        self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
 
     def stage_write(
         self, index: int, start: int, x: Iterable[int] | Iterable[float]
