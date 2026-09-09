@@ -21,8 +21,38 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+
+    from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
+    )
+
+
+def align_mtp_quant_config(
+    quant_config: QuantizationConfig | None, config: PretrainedConfig
+) -> None:
+    """Re-key the quant config's MTP entries onto the draft module prefixes.
+
+    ``_make_deepseek_v4_weights_mapper`` renames the checkpoint's ``mtp.{i}.``
+    layers to ``model.mtp.{i}.``, but the draft modules are built under
+    ``model.layers.{num_hidden_layers + i}.``. Without this remap no per-layer
+    entry matches, so every MTP linear falls back to the global scheme. On a
+    mixed checkpoint (FP8 attention and shared experts, NVFP4 routed experts)
+    that builds NVFP4 parameters for FP8 weights and the load then fails a
+    shape assertion.
+    """
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    if quant_config is None:
+        return
+    quant_config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={
+                f"model.mtp.{i}.": f"model.layers.{config.num_hidden_layers + i}."
+                for i in range(config.num_nextn_predict_layers)
+            }
+        )
     )
 
 
