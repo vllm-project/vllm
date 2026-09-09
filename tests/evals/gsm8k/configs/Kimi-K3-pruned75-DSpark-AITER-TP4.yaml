@@ -12,6 +12,7 @@ server_args: >-
   --max-model-len 1048576
   --max-num-batched-tokens 16384
   --max-num-seqs 128
+  --kda-prefill-backend flashkda
   --kv-cache-dtype fp8
   --moe-backend aiter
   --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_FA"}'
@@ -26,3 +27,4 @@ server_args: >-
   "rejection_sample_method":"block"}'
 env:
   VLLM_ROCM_USE_AITER: "1"
+  CHUNK_DELTA_ATTN_FLASH_KDA_SEG: "8"

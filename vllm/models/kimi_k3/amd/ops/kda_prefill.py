@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KDA prefill backend selection for ROCm.
+"""KDA prefill backends for ROCm.
 
 The Kimi-K3 KDA layer calls :func:`chunk_kda_prefill`, which either runs the
 fused HIP kernels in ``kda_chunk`` or falls back to the vendored Triton chunk
+path. The AITER entry points provide an additional fused Conv1D and FlashKDA
 path.
 """
 
+from collections.abc import Callable
+from typing import Literal
+
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -18,10 +23,18 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     fused_kda_chunk,
     fused_kda_prologue,
 )
+from vllm.models.kimi_k3.amd.ops.kda_decode import (
+    make_decode_conv1d_weight_loader,
+)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import chunk_kda_with_fused_gate
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
 logger = init_logger(__name__)
+
+KDAPrefillBackend = Literal["auto", "triton", "flashkda", "fused"]
+
+# Match vLLM's Kimi-K3 causal-Conv metadata, which is prepared for BLOCK_M=8.
+_CAUSAL_CONV1D_BLOCK_M = 8
 
 
 def chunk_kda_prefill(
@@ -177,3 +190,120 @@ def chunk_kda_prefill(
         scatter_to[state_indices.long()] = final_state
         return o, None
     return o, final_state
+
+
+def resolve_kda_prefill_backend(backend: str) -> KDAPrefillBackend:
+    """Resolve the Kimi-K3 ROCm prefill backend."""
+    if backend not in ("auto", "triton", "flashkda", "fused"):
+        raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if backend == "auto" and bool(rocm_aiter_ops.is_enabled()):
+        return "flashkda"
+    return backend
+
+
+def make_kda_conv1d_weight_loader(
+    dims: list[int],
+    tp_size: int,
+    tp_rank: int,
+    decode_conv1d_weight: torch.Tensor | None,
+    prefill_conv1d_weight: torch.Tensor,
+) -> Callable[..., None]:
+    """Load Conv1D weights and stage the BF16 AITER prefill layout."""
+    base_loader = make_decode_conv1d_weight_loader(
+        dims,
+        tp_size,
+        tp_rank,
+        decode_conv1d_weight,
+    )
+    sharded_dims = [dim // tp_size for dim in dims]
+
+    def weight_loader(
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: int,
+    ) -> None:
+        base_loader(param, loaded_weight, loaded_shard_id)
+        if param.is_meta:
+            return
+        if loaded_weight.dim() == 2:
+            loaded_weight = loaded_weight.unsqueeze(1)
+        shard_size = sharded_dims[loaded_shard_id]
+        source_start = tp_rank * shard_size
+        target_start = sum(sharded_dims[:loaded_shard_id])
+        loaded_shard = loaded_weight[source_start : source_start + shard_size]
+        prefill_conv1d_weight[target_start : target_start + shard_size].copy_(
+            loaded_shard.squeeze(1)
+        )
+
+    return weight_loader
+
+
+def aiter_causal_conv1d_prefill(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    projection_size: int,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    metadata: object | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run AITER's fused QKV causal Conv1D prefill kernel."""
+    from aiter.ops.causal_conv1d_fwd_split_qkv import (
+        causal_conv1d_split_qkv_hip_fn,
+    )
+
+    return causal_conv1d_split_qkv_hip_fn(
+        x=x.transpose(0, 1),
+        weight=weight,
+        bias=bias,
+        conv_states=conv_state,
+        query_start_loc=query_start_loc,
+        k_dim=projection_size,
+        v_dim=projection_size,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        activation="silu",
+        block_m=_CAUSAL_CONV1D_BLOCK_M,
+        metadata=metadata,
+    )
+
+
+def aiter_kda_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    raw_gate: torch.Tensor,
+    raw_beta: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    lower_bound: float,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run AITER FlashKDA with the Kimi-K3 state and gate conventions."""
+    from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
+
+    output, final_state = chunk_kimi_delta_attn(
+        q=q,
+        k=k,
+        v=v,
+        g=raw_gate,
+        beta=raw_beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=q.shape[-1] ** -0.5,
+        initial_state=initial_state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        safe_gate=True,
+        lower_bound=lower_bound,
+        state_v_first=True,
+        chunk_size=None,
+        cu_seqlens=cu_seqlens,
+    )
+    assert final_state is not None
+    return output, final_state

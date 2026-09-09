@@ -1648,6 +1648,11 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/models/kimi_k3/amd/kda.py
+  - vllm/models/kimi_k3/amd/kda_metadata.py
+  - vllm/models/kimi_k3/amd/ops/kda_decode.py
+  - vllm/models/kimi_k3/amd/ops/kda_prefill.py
+  - vllm/model_executor/warmup/kimi_k3_triton_warmup.py
   - vllm/third_party/flash_linear_attention/ops/kda.py
   - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
   - vllm/third_party/flash_linear_attention/ops/l2norm.py
@@ -1655,10 +1660,11 @@ steps:
   - vllm/models/kimi_k3/nvidia/kda_metadata.py
   - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
   - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_amd_kda_prefill.py
   - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_amd_kda_prefill.py models/kimi_k3/test_kda_metadata.py
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 50

@@ -35,6 +35,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
@@ -46,7 +49,13 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
 )
-from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
+from vllm.models.kimi_k3.amd.ops.kda_prefill import (
+    aiter_causal_conv1d_prefill,
+    aiter_kda_prefill,
+    chunk_kda_prefill,
+    make_kda_conv1d_weight_loader,
+    resolve_kda_prefill_backend,
+)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
@@ -103,6 +112,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
         self.use_full_rank_gate = True
+        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
+        if self.gate_lower_bound is not None:
+            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
+                "KDA gate lower bound must be in "
+                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
+                f"Got {self.gate_lower_bound}."
+            )
+        self.use_safe_gate = self.gate_lower_bound is not None
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
@@ -155,6 +172,43 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
         conv_state_dtype, _ = self.get_state_dtype()
+        additional_config = vllm_config.additional_config
+        requested_prefill_backend = (
+            additional_config.get("kda_prefill_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        backend = resolve_kda_prefill_backend(requested_prefill_backend)
+        if backend == "fused" and not is_fused_kda_chunk_supported():
+            raise RuntimeError(
+                "The fused KDA chunk kernel requires gfx950 and a build that "
+                "includes it."
+            )
+        self.use_fused_chunk = backend == "fused" or (
+            backend == "auto" and is_fused_kda_chunk_supported()
+        )
+        if backend == "flashkda":
+            self.kda_prefill_backend = "flashkda"
+        elif self.use_fused_chunk:
+            self.kda_prefill_backend = "fused"
+        else:
+            self.kda_prefill_backend = "triton"
+        logger.info_once(
+            "Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend
+        )
+
+        prefill_conv1d_weight = None
+        if self.kda_prefill_backend == "flashkda":
+            prefill_conv1d_weight = torch.empty(
+                3 * self.local_projection_size,
+                self.conv_size,
+                dtype=torch.bfloat16,
+                device=self.conv1d.weight.device,
+            )
+        self.register_buffer(
+            "prefill_conv1d_weight", prefill_conv1d_weight, persistent=False
+        )
+
         decode_conv1d_weight = None
         if is_fused_kda_decode_supported(
             self.local_num_heads,
@@ -175,18 +229,28 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.register_buffer(
             "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
-        if decode_conv1d_weight is None:
-            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-            )
+        conv_dims = [self.projection_size] * 3
+        if prefill_conv1d_weight is None:
+            if decode_conv1d_weight is None:
+                conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+                    conv_dims,
+                    self.tp_size,
+                    self.tp_rank,
+                )
+            else:
+                conv1d_weight_loader = make_decode_conv1d_weight_loader(
+                    conv_dims,
+                    self.tp_size,
+                    self.tp_rank,
+                    decode_conv1d_weight,
+                )
         else:
-            conv1d_weight_loader = make_decode_conv1d_weight_loader(
-                [self.projection_size] * 3,
+            conv1d_weight_loader = make_kda_conv1d_weight_loader(
+                conv_dims,
                 self.tp_size,
                 self.tp_rank,
                 decode_conv1d_weight,
+                prefill_conv1d_weight,
             )
         set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
@@ -194,38 +258,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             torch.empty(self.local_num_heads, dtype=torch.float32)
         )
         set_weight_attrs(self.A_log, {"weight_loader": a_log_weight_loader(0)})
-
-        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
-        if self.gate_lower_bound is not None:
-            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
-                "KDA gate lower bound must be in "
-                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
-                f"Got {self.gate_lower_bound}."
-            )
-        self.use_safe_gate = self.gate_lower_bound is not None
-
-        additional_config = vllm_config.additional_config
-        backend = (
-            additional_config.get("kda_prefill_backend", "auto")
-            if isinstance(additional_config, dict)
-            else "auto"
-        )
-        assert backend in ("auto", "triton", "fused"), (
-            "The ROCm Kimi-K3 KDA prefill backend must be one of "
-            f"'auto', 'triton' or 'fused', got {backend!r}."
-        )
-        if backend == "fused" and not is_fused_kda_chunk_supported():
-            raise RuntimeError(
-                "The fused KDA chunk kernel requires gfx950 and a build that "
-                "includes it."
-            )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
-        )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
@@ -466,35 +498,47 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                q_ns, k_ns, v_ns = mixed_qkv_ns.split(
-                    self.local_projection_size, dim=-1
-                )
-
-                # Packed prefill conv would require copying V solely to make
-                # it dense for KDA. Separate calls accept the strided inputs
-                # and produce dense Q/K/V without that extra traffic.
-                # TODO: Use packed conv once every KDA prefill backend accepts
-                # row-strided Q/K/V directly.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
-                        None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
+                if self.kda_prefill_backend == "flashkda":
+                    assert self.prefill_conv1d_weight is not None
+                    assert non_spec_query_start_loc is not None
+                    q_ns, k_ns, v_ns = aiter_causal_conv1d_prefill(
+                        x=mixed_qkv_ns,
+                        weight=self.prefill_conv1d_weight,
+                        bias=self.conv1d.bias,
+                        conv_state=conv_state,
                         query_start_loc=non_spec_query_start_loc,
+                        projection_size=self.local_projection_size,
+                        cache_indices=non_spec_state_indices_tensor,
+                        has_initial_state=has_initial_state,
                         metadata=m,
-                    ).transpose(0, 1)
+                    )
+                else:
+                    q_ns, k_ns, v_ns = mixed_qkv_ns.split(
+                        self.local_projection_size, dim=-1
+                    )
 
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                    # Separate calls accept row-strided packed inputs and
+                    # produce dense Q/K/V without an additional V copy.
+                    def _prefill_conv(
+                        x: torch.Tensor,
+                        state: torch.Tensor,
+                        weight: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return causal_conv1d_fn(
+                            x.transpose(0, 1),
+                            weight,
+                            None,
+                            activation="silu",
+                            conv_states=state,
+                            has_initial_state=has_initial_state,
+                            cache_indices=non_spec_state_indices_tensor,
+                            query_start_loc=non_spec_query_start_loc,
+                            metadata=m,
+                        ).transpose(0, 1)
+
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
@@ -551,28 +595,60 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_has_initial_state = has_initial_state
                     nd_tok = 0
 
-                (
-                    core_attn_out_non_spec,
-                    _,
-                ) = chunk_kda_prefill(
-                    q=q_ns,
-                    k=k_ns,
-                    v=v_ns,
-                    raw_g=g1_ns,
-                    raw_beta=beta_ns,
-                    A_log=self.A_log,
-                    g_bias=self.dt_bias,
-                    lower_bound=self.gate_lower_bound,
-                    state_cache=recurrent_state,
-                    state_indices=prefill_state_indices,
-                    has_initial_state=prefill_has_initial_state,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=prefill_query_start_loc,
-                    chunk_indices=m.chunk_indices,
-                    chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=use_fused_chunk,
-                    out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
-                )
+                if self.kda_prefill_backend == "flashkda":
+                    assert self.gate_lower_bound is not None
+                    initial_state = gather_initial_states(
+                        recurrent_state,
+                        prefill_state_indices,
+                        prefill_has_initial_state,
+                    )
+                    (
+                        core_attn_out_non_spec,
+                        last_recurrent_state,
+                    ) = aiter_kda_prefill(
+                        q=q_ns,
+                        k=k_ns,
+                        v=v_ns,
+                        raw_gate=g1_ns,
+                        raw_beta=beta_ns,
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=initial_state,
+                        cu_seqlens=prefill_query_start_loc,
+                    )
+                    recurrent_state[prefill_state_indices] = last_recurrent_state
+                    if direct:
+                        core_attn_out[:, nd_tok:num_actual_tokens].copy_(
+                            core_attn_out_non_spec
+                        )
+                else:
+                    (
+                        core_attn_out_non_spec,
+                        _,
+                    ) = chunk_kda_prefill(
+                        q=q_ns,
+                        k=k_ns,
+                        v=v_ns,
+                        raw_g=g1_ns,
+                        raw_beta=beta_ns,
+                        A_log=self.A_log,
+                        g_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        state_cache=recurrent_state,
+                        state_indices=prefill_state_indices,
+                        has_initial_state=prefill_has_initial_state,
+                        use_qk_l2norm_in_kernel=True,
+                        cu_seqlens=prefill_query_start_loc,
+                        chunk_indices=m.chunk_indices,
+                        chunk_offsets=m.chunk_offsets,
+                        use_fused_chunk=use_fused_chunk,
+                        out=(
+                            core_attn_out[:, nd_tok:num_actual_tokens]
+                            if direct
+                            else None
+                        ),
+                    )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
                 # there is no final state to write back here.
 
