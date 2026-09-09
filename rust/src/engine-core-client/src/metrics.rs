@@ -576,7 +576,7 @@ mod tests {
             &metrics.scheduler,
             "test-model",
             &[ConnectedEngine {
-                engine_id: EngineId::from(b"engine-0"),
+                engine_id: EngineId::from_engine_index(0),
                 ready_response: ready,
             }],
         );
@@ -585,7 +585,7 @@ mod tests {
         let line = rendered
             .lines()
             .find(|l| l.starts_with("vllm:max_gpu_lora_adapters{"))
-            .expect("slot capacity gauge rendered");
+            .unwrap_or_else(|| panic!("slot capacity gauge missing from:\n{rendered}"));
         assert!(line.ends_with(" 4"), "{line}");
         assert!(
             line.contains("model_name=\"test-model\"") && line.contains("engine=\"0\""),
