@@ -119,7 +119,7 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor,
+        gate: torch.Tensor | None,
     ):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
@@ -131,7 +131,8 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        x = x * nn.functional.silu(gate.to(torch.float32))
+        if gate is not None:
+            x = x * nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
@@ -176,10 +177,12 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_cuda(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor,
+        gate: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
+            if gate is None:
+                return x
             # Keep gate in float32 for numerical stability during silu
             return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
 
@@ -615,7 +618,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
         gate = projected_states[..., : self.tped_intermediate_size]
-        hidden_states = self.norm(ssm_output, gate)
+        # In batch-invariant mode the scan kernel already multiplied its output
+        # by silu(gate) in fp32, the order of the fused training path; the norm
+        # then runs ungated.
+        hidden_states = self.norm(ssm_output, None if self.exact_replay else gate)
 
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states)
@@ -730,6 +736,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
+        gate = (
+            projected_states[..., : self.tped_intermediate_size]
+            if self.exact_replay
+            else None
+        )
 
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
@@ -813,6 +824,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             [num_decode_tokens, num_prefill_tokens],
             dim=0,
         )
+        gate_d = gate_p = None
+        if gate is not None:
+            gate_d, gate_p = torch.split(
+                gate[:num_actual_tokens].view(
+                    num_actual_tokens, self.num_heads // self.tp_size, self.head_dim
+                ),
+                [num_decode_tokens, num_prefill_tokens],
+                dim=0,
+            )
 
         if is_mamba_cache_all:
             # If prefix caching is enabled, retrieve the relevant variables
@@ -946,6 +966,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     meta=exact_replay_p,
                     chunk_size=chunk_size,
                     buffers=replay_bufs,
+                    z=gate_p,
                 )
             else:
                 # NOTE: final output is an in-place update of out tensor
@@ -1158,6 +1179,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     pos=exact_replay_pos_d,
                     chunk_size=chunk_size,
                     buffers=replay_bufs,
+                    z=gate_d,
                 )
             else:
                 # 3. State Space Model sequence transformation
