@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -22,6 +23,14 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
+
+
+def run_length_regions(row_global_req_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Group adjacent rows sharing a request into regions."""
+    starts_region = np.empty(row_global_req_idx.shape, dtype=bool)
+    starts_region[0] = True
+    np.not_equal(row_global_req_idx[1:], row_global_req_idx[:-1], out=starts_region[1:])
+    return np.cumsum(starts_region) - 1, np.flatnonzero(starts_region)
 
 
 def flat_kv_row_view(

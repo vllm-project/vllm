@@ -34,6 +34,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
+from vllm.v1.attention.backends.mla.sparse_utils import run_length_regions
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -302,7 +303,8 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 class PCPRegionPacking:
     """This rank's prefill rows collapsed to one entry per global request."""
 
-    # [num_regions] scheduled (compressed) context of each region.
+    # [num_regions] scheduled (compressed) context of each region, rounded up
+    # to a whole number of DCP shards.
     seq_lens: np.ndarray
     # [num_regions] total query length the region's rows contribute.
     query_lens: np.ndarray
@@ -314,6 +316,7 @@ def plan_pcp_region_packing(
     row_global_req_idx: np.ndarray,
     row_seq_lens: np.ndarray,
     row_query_lens: np.ndarray,
+    dcp_world_size: int,
 ) -> PCPRegionPacking:
     """Group prefill rows by the request whose context they share.
 
@@ -322,12 +325,13 @@ def plan_pcp_region_packing(
     that context once: charging it per row halves the usable logits budget.
     """
     assert row_global_req_idx.size > 0, "no prefill rows to pack"
-    starts_region = np.empty(row_global_req_idx.shape, dtype=bool)
-    starts_region[0] = True
-    np.not_equal(row_global_req_idx[1:], row_global_req_idx[:-1], out=starts_region[1:])
-    region_first_row = np.flatnonzero(starts_region)
+    _, region_first_row = run_length_regions(row_global_req_idx)
+    region_seq_lens = row_seq_lens[region_first_row].astype(np.int64)
+    gathered_seq_lens = (
+        (region_seq_lens + dcp_world_size - 1) // dcp_world_size
+    ) * dcp_world_size
     return PCPRegionPacking(
-        seq_lens=row_seq_lens[region_first_row].astype(np.int32),
+        seq_lens=gathered_seq_lens.astype(np.int32),
         query_lens=np.add.reduceat(row_query_lens, region_first_row).astype(np.int32),
         row_bounds=np.append(region_first_row, row_global_req_idx.shape[0]),
     )
@@ -362,13 +366,12 @@ def build_pcp_global_chunk_plan(
     assert req_idx.shape == scheduled.shape
     num_rows = len(scheduled)
 
-    starts_region = np.empty(num_rows, dtype=bool)
-    starts_region[0] = True
-    np.not_equal(req_idx[1:], req_idx[:-1], out=starts_region[1:])
-    region_of_row = np.cumsum(starts_region) - 1
-    region_first_row = np.flatnonzero(starts_region)
+    region_of_row, region_first_row = run_length_regions(req_idx)
 
     region_extent = scheduled[region_first_row]
+    assert np.all(region_extent > 0), (
+        f"PCP+DCP prefill got an empty scheduled context: {region_extent.tolist()}"
+    )
     region_padded = (region_extent + dcp_world_size - 1) // dcp_world_size
     region_start = np.zeros(len(region_first_row) + 1, dtype=np.int64)
     np.cumsum(region_extent, out=region_start[1:])
@@ -390,8 +393,6 @@ def build_pcp_global_chunk_plan(
     idx = np.empty(total, dtype=np.int64)
     for i in range(len(region_first_row)):
         g = int(region_extent[i])
-        if g == 0:
-            continue
         t = np.arange(g, dtype=np.int64)
         idx[region_start[i] : region_start[i] + g] = (
             (t % dcp_world_size) * padded_total
@@ -407,22 +408,6 @@ def build_pcp_global_chunk_plan(
         total=total,
         deinterleave_idx=torch.from_numpy(idx).to(device),
     )
-
-
-@dataclass(frozen=True)
-class PCPGlobalChunkView:
-    """The same prefill chunk addressed in the PCP-invariant global KV space.
-
-    Two coordinate systems are needed, because the cache gather must be
-    rank-local because the KV cache is DCP-sharded, while the top-k must be
-    global.
-    """
-
-    # Per-token causal bounds against the all-gathered buffer.
-    cu_seqlen_ks: torch.Tensor
-    cu_seqlen_ke: torch.Tensor
-    # Rank-major gathered position for each global row.
-    deinterleave_idx: torch.Tensor
 
 
 @dataclass
@@ -443,7 +428,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
 
-    pcp_global: PCPGlobalChunkView | None = None
+    pcp_deinterleave_idx: torch.Tensor | None = None
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -1245,12 +1230,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     num_decodes:
                 ]
                 row_seq_lens = pcp_schedule.seq_lens_np[prefill_global_reqs]
-                if self.compress_ratio > 1:
-                    row_seq_lens = row_seq_lens // self.compress_ratio
                 packing = plan_pcp_region_packing(
                     prefill_global_reqs,
                     row_seq_lens,
                     pcp_schedule.nominal_chunk_query_lens_np[prefill_global_reqs],
+                    self.dcp_world_size,
                 )
                 region_row_bounds = packing.row_bounds
                 packer_seq_lens = torch.from_numpy(packing.seq_lens)
@@ -1281,8 +1265,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         req_slice.start : req_slice.stop
                     ]
                     scheduled = pcp_schedule.seq_lens_np[global_req_idx]
-                    if self.compress_ratio > 1:
-                        scheduled = scheduled // self.compress_ratio
                     pcp_plan = build_pcp_global_chunk_plan(
                         global_req_idx, scheduled, self.dcp_world_size, self.device
                     )
@@ -1561,57 +1543,32 @@ def build_prefill_chunk_metadata(
     cu_seq_len_ks = torch.empty(output_query_len, dtype=torch.int32, device=device)
     cu_seq_len_ke = torch.empty(output_query_len, dtype=torch.int32, device=device)
 
-    # Under DCP the kernel writes this rank's local row bounds into
-    # cu_seq_len_ks/ke; otherwise local_cu_seq_lens aliases cu_seq_lens.
+    if pcp_plan is not None:
+        row_start_cu = pcp_plan.row_start_cu
+        kernel_dcp_rank, kernel_dcp_world = 0, 1
+    else:
+        # Under DCP the kernel writes this rank's local row bounds into
+        # cu_seq_len_ks/ke; otherwise local_cu_seq_lens aliases cu_seq_lens.
+        row_start_cu = local_cu_seq_lens
+        kernel_dcp_rank, kernel_dcp_world = dcp_rank, dcp_world_size
     _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
-        local_cu_seq_lens,
+        row_start_cu,
         token_to_seq,
         cu_seq_len_ks,
         cu_seq_len_ke,
         qs_start,
         qs_stop,
-        dcp_rank,
-        dcp_world_size,
+        kernel_dcp_rank,
+        kernel_dcp_world,
         cp_kv_cache_interleave_size,
         num_reqs=num_reqs,
         COMPRESS_RATIO=compress_ratio,
     )
 
-    pcp_global = None
-    if pcp_plan is not None:
-        global_cu_seqlen_ks = torch.empty(
-            output_query_len, dtype=torch.int32, device=device
-        )
-        global_cu_seqlen_ke = torch.empty(
-            output_query_len, dtype=torch.int32, device=device
-        )
-        global_token_to_seq = torch.empty(
-            max(total_seq_lens, 1), dtype=torch.int32, device=device
-        )
-        _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
-            query_start_loc,
-            uncompressed_seq_lens[start_idx:end_idx],
-            cu_seq_lens,
-            pcp_plan.row_start_cu,
-            global_token_to_seq,
-            global_cu_seqlen_ks,
-            global_cu_seqlen_ke,
-            qs_start,
-            qs_stop,
-            0,
-            1,
-            cp_kv_cache_interleave_size,
-            num_reqs=num_reqs,
-            COMPRESS_RATIO=compress_ratio,
-        )
-        pcp_global = PCPGlobalChunkView(
-            cu_seqlen_ks=global_cu_seqlen_ks,
-            cu_seqlen_ke=global_cu_seqlen_ke,
-            deinterleave_idx=pcp_plan.deinterleave_idx,
-        )
+    pcp_deinterleave_idx = pcp_plan.deinterleave_idx if pcp_plan is not None else None
 
     token_start = query_start_loc_cpu[start_idx].item()
     if query_slice is not None:
@@ -1622,7 +1579,7 @@ def build_prefill_chunk_metadata(
         token_end = query_start_loc_cpu[end_idx].item()
 
     return DeepseekV32IndexerPrefillChunkMetadata(
-        pcp_global=pcp_global,
+        pcp_deinterleave_idx=pcp_deinterleave_idx,
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
         cu_seq_lens=cu_seq_lens,

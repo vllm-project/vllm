@@ -1838,7 +1838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                pcp_moe_rows_replicated=pcp.moe_rows_are_replicated(),
+                pcp_moe_run_all_reduce=pcp.moe_run_all_reduce(batch_desc.cg_mode),
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if ubatch_state is not None:

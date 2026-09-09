@@ -131,17 +131,6 @@ def test_chunks_rebase_workspace_starts_and_respect_the_budget():
         assert rows_per_rank * 2 <= 512
 
 
-def test_request_too_large_for_the_workspace_is_rejected():
-    """Fail loudly: a truncated region would silently drop context."""
-    with pytest.raises(ValueError, match="contiguous KV rows"):
-        plan_gathered_prefill(
-            np.zeros(1, dtype=np.int64),
-            np.array([4096], dtype=np.int64),
-            dcp_world_size=2,
-            max_gathered_rows=1024,
-        )
-
-
 def test_unordered_rows_are_rejected():
     """The layout keys on run-length dedup, so it needs grouped rows."""
     with pytest.raises(AssertionError, match="ascending global request"):

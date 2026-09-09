@@ -42,7 +42,9 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.pcp_manager import (
-    moe_rows_are_replicated,
+    maybe_get_pcp_dummy_block_tables,
+    maybe_get_pcp_dummy_slot_mappings,
+    moe_run_all_reduce,
     set_replicated_pcp_schedule,
 )
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -615,7 +617,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
-                    pcp_moe_rows_replicated=moe_rows_are_replicated(),
+                    pcp_moe_run_all_reduce=moe_run_all_reduce(cg_mode),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
@@ -691,12 +693,14 @@ def prepare_inputs_to_capture(
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
-    dummy_provider: BlockTables | PCPManager = block_tables
     if pcp_manager is not None:
-        dummy_provider = pcp_manager
         set_replicated_pcp_schedule(input_batch)
-    input_block_tables = dummy_provider.get_dummy_block_tables(num_reqs)
-    slot_mappings = dummy_provider.get_dummy_slot_mappings(num_tokens)
+    input_block_tables = maybe_get_pcp_dummy_block_tables(
+        pcp_manager, block_tables, num_reqs
+    )
+    slot_mappings = maybe_get_pcp_dummy_slot_mappings(
+        pcp_manager, block_tables, num_tokens
+    )
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )

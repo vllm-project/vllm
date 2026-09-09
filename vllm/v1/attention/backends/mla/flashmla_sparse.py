@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    run_length_regions,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -221,11 +222,9 @@ def plan_gathered_prefill(
         f"{row_global_req_idx.tolist()}. _reorder_segments should guarantee it."
     )
 
-    starts_region = np.empty(row_global_req_idx.shape, dtype=bool)
-    starts_region[0] = True
-    np.not_equal(row_global_req_idx[1:], row_global_req_idx[:-1], out=starts_region[1:])
-    region_of_row = (np.cumsum(starts_region) - 1).astype(np.int32)
-    region_first_row = np.flatnonzero(starts_region).astype(np.int32)
+    region_of_row, region_first_row = run_length_regions(row_global_req_idx)
+    region_of_row = region_of_row.astype(np.int32)
+    region_first_row = region_first_row.astype(np.int32)
 
     extents = scheduled_seq_lens[row_global_req_idx[region_first_row]].astype(np.int64)
     assert np.all(extents > 0), (
@@ -234,14 +233,6 @@ def plan_gathered_prefill(
     rows_per_rank = (extents + dcp_world_size - 1) // dcp_world_size
 
     per_rank_budget = max_gathered_rows // dcp_world_size
-    if np.any(rows_per_rank > per_rank_budget):
-        largest = int(extents[np.argmax(rows_per_rank)])
-        raise ValueError(
-            f"PCP+DCP sparse prefill needs {largest} contiguous KV rows for one "
-            f"request but the gathered workspace holds {max_gathered_rows} "
-            f"({per_rank_budget} per DCP rank). Lower --max-model-len or raise "
-            "the prefill workspace."
-        )
     chunk_bounds = split_prefill_chunks(
         torch.from_numpy(rows_per_rank.astype(np.int32)), per_rank_budget
     )
@@ -269,7 +260,6 @@ class GatheredPrefillMetadata:
         tokens_slice: slice
         block_table: torch.Tensor
         workspace_starts: torch.Tensor
-        num_regions: int
         shard_rows: int
 
     region_ids: torch.Tensor
@@ -466,6 +456,25 @@ class FlashMLASparseMetadataBuilder(
             )
 
         if parallel_config.decode_context_parallel_size > 1:
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "DCP for FlashMLA sparse is only validated with the "
+                    "default 'ag_rs' DCP comm backend; got "
+                    f"'{parallel_config.dcp_comm_backend}'"
+                )
+            if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
+                raise NotImplementedError(
+                    "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
+                    f"upconvert; got a {cache_config.cache_dtype} cache"
+                )
+            if not self.fp8_use_mixed_batch and not self.pcp_dcp_kv_gather:
+                raise NotImplementedError(
+                    "DCP for FlashMLA sparse is only supported on the "
+                    "mixed-batch fp8 path (num_heads < "
+                    f"{MIN_HEADS_FOR_BF16_PREFILL}); the separate "
+                    "prefill/decode path returns the LSE for decode tokens "
+                    "only, while the DCP merge needs it for every token"
+                )
             if self.use_pcp:
                 gathered_num_heads = (
                     self.num_heads * parallel_config.tensor_parallel_size
@@ -479,39 +488,14 @@ class FlashMLASparseMetadataBuilder(
             gathered_padded_heads = FlashMLASparseImpl._compute_fp8_decode_padded_heads(
                 gathered_num_heads
             )
-            violations = []
-            if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
-                violations.append(
-                    "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
-                    f"upconvert; got a {cache_config.cache_dtype} cache"
-                )
-            if not self.fp8_use_mixed_batch and not self.pcp_dcp_kv_gather:
-                violations.append(
-                    "DCP for FlashMLA sparse is only supported on the "
-                    "mixed-batch fp8 path (num_heads < "
-                    f"{MIN_HEADS_FOR_BF16_PREFILL}); the separate "
-                    "prefill/decode path returns the LSE for decode tokens "
-                    "only, while the DCP merge needs it for every token"
-                )
             if self.fp8_decode_padded_heads != gathered_padded_heads:
-                violations.append(
+                raise NotImplementedError(
                     "DCP for FlashMLA sparse requires the local and "
                     "DCP-gathered head counts to pad to the same fp8 decode "
                     f"kernel envelope; got {self.num_heads} local heads "
                     f"(pad to {self.fp8_decode_padded_heads}) vs "
                     f"{gathered_num_heads} gathered heads (pad to "
                     f"{gathered_padded_heads})"
-                )
-            if parallel_config.dcp_comm_backend != "ag_rs":
-                violations.append(
-                    "DCP for FlashMLA sparse is only validated with the "
-                    "default 'ag_rs' DCP comm backend; got "
-                    f"'{parallel_config.dcp_comm_backend}'"
-                )
-            if violations:
-                raise NotImplementedError(
-                    "FlashMLA-sparse DCP does not support this configuration:\n"
-                    + "\n".join(f"  - {v}" for v in violations)
                 )
 
     def _build_gathered_prefill(
@@ -580,7 +564,6 @@ class FlashMLASparseMetadataBuilder(
                     ),
                     block_table=region_block_tables[chunk_start:chunk_stop],
                     workspace_starts=workspace_starts[chunk_start:chunk_stop],
-                    num_regions=chunk_stop - chunk_start,
                     shard_rows=int(plan.rows_per_rank[chunk_start:chunk_stop].sum()),
                 )
             )
@@ -877,8 +860,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 "the bf16 sparse path is not supported under DCP."
             )
 
-        self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
-            (q_concat_shape, torch.bfloat16)
+        # (name, spec) rather than a bare list: _refresh_workspaces looks the
+        # buffers up by name, so inserting a spec cannot silently rebind another
+        # buffer to the wrong slice.
+        self.workspace_slots: list[tuple[str, tuple[tuple[int, ...], torch.dtype]]] = [
+            ("q_concat", (q_concat_shape, torch.bfloat16))
         ]
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             # Reserve workspace during initialization
@@ -897,22 +883,26 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 else prefill_workspace_size
             )
             self.prefill_workspace_shape = (shard_rows, head_size)
-            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
+            self.workspace_slots.append(
+                ("prefill_bf16", (self.prefill_workspace_shape, torch.bfloat16))
+            )
             if gathers_kv:
-                self.workspace_specs.append(
-                    ((prefill_workspace_size, head_size), torch.bfloat16)
+                self.workspace_slots.append(
+                    (
+                        "gathered_kv",
+                        ((prefill_workspace_size, head_size), torch.bfloat16),
+                    )
                 )
         self.prefill_bf16_workspace: torch.Tensor | None = None
         self.gathered_kv_workspace: torch.Tensor | None = None
         self._refresh_workspaces()
 
     def _refresh_workspaces(self) -> None:
-        buffers = current_workspace_manager().get_simultaneous(*self.workspace_specs)
-        self.q_concat_buffer = buffers[0]
-        if len(buffers) > 1:
-            self.prefill_bf16_workspace = buffers[1]
-        if len(buffers) > 2:
-            self.gathered_kv_workspace = buffers[2]
+        names, specs = zip(*self.workspace_slots)
+        buffers = dict(zip(names, current_workspace_manager().get_simultaneous(*specs)))
+        self.q_concat_buffer = buffers["q_concat"]
+        self.prefill_bf16_workspace = buffers.get("prefill_bf16")
+        self.gathered_kv_workspace = buffers.get("gathered_kv")
 
     def _forward_bf16_kv(
         self,
@@ -946,53 +936,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             actual_num_heads,
         )
 
-    def _decode_from_local_shard(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-        attn_out: torch.Tensor,
-        lse: torch.Tensor,
-        num_decode_tokens: int,
-    ) -> None:
-        """Attend the decode rows over this rank's DCP shard, in place.
-
-        Their queries are PCP-replicated, so the partial results merge; the
-        LSE this writes is what the caller returns for the cross-rank merge.
-        """
-        if num_decode_tokens > 0:
-            # The indexer emits global token ids; keep this rank's shard and
-            # convert to local slots.
-            decode_indices = triton_filter_and_convert_dcp_index(
-                attn_metadata.req_id_per_token[:num_decode_tokens],
-                attn_metadata.block_table,
-                topk_indices[:num_decode_tokens],
-                dcp_size=self.dcp_world_size,
-                dcp_rank=self.dcp_rank,
-                cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                compact_valid_to_front=False,
-            )
-            assert isinstance(decode_indices, torch.Tensor)
-            fp8_metadata = attn_metadata.fp8_extra_metadata
-            assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8KernelMetadata), (
-                "PCP+DCP sizes the fp8 tile scheduler for the decode rows; "
-                f"got {type(fp8_metadata).__name__}"
-            )
-            decode_out, decode_lse = self._fp8_flash_mla_kernel(
-                q=q[:num_decode_tokens].unsqueeze(0),
-                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
-                topk_indices=decode_indices.unsqueeze(0),
-                kernel_metadata=fp8_metadata,
-            )
-            attn_out[:num_decode_tokens] = decode_out.squeeze(0)
-            lse.copy_(decode_lse.squeeze(0).transpose(0, 1))
-            _neutralize_rows_without_local_kv(
-                attn_out[:num_decode_tokens], lse, decode_indices
-            )
-
     def _prefill_over_gathered_context(
         self,
         q: torch.Tensor,
@@ -1001,18 +944,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         attn_metadata: FlashMLASparseMetadata,
         prefill_meta: GatheredPrefillMetadata,
         attn_out: torch.Tensor,
-        num_decode_tokens: int,
-    ) -> int:
+    ) -> None:
         """All-gather the KV and attend each prefill row over the whole context."""
-        covered_through = num_decode_tokens
-        assert prefill_meta is not None
         for chunk in prefill_meta.chunks:
-            assert chunk.tokens_slice.start == covered_through, (
-                f"prefill chunk starts at {chunk.tokens_slice.start}, "
-                f"leaving rows [{covered_through}, "
-                f"{chunk.tokens_slice.start}) unwritten"
-            )
-            covered_through = chunk.tokens_slice.stop
             assert self.prefill_bf16_workspace is not None
             shard = self.prefill_bf16_workspace[: chunk.shard_rows]
             ops.cp_gather_and_upconvert_fp8_kv_cache(
@@ -1020,7 +954,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 shard,
                 chunk.block_table,
                 chunk.workspace_starts,
-                chunk.num_regions,
+                len(chunk.block_table),
             )
             assert self.gathered_kv_workspace is not None
             gathered_kv = self.gathered_kv_workspace[
@@ -1052,7 +986,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 chunk_indices,
                 chunk_topk_length,
             )
-        return covered_through
 
     def _forward_fp8_kv_pcp_dcp(
         self,
@@ -1074,35 +1007,41 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
         has_prefill = num_rows > num_decode_tokens and prefill_meta is not None
 
+        decode_out: torch.Tensor | None = None
+        decode_lse: torch.Tensor | None = None
+        if num_decode_tokens > 0:
+            decode_out, decode_lse = self._forward_fp8_kv_mixed_batch(
+                q[:num_decode_tokens],
+                kv_c_and_k_pe_cache,
+                topk_indices[:num_decode_tokens],
+                attn_metadata,
+            )
+            assert decode_lse is not None, (
+                "PCP+DCP needs the decode LSE for the cross-rank merge, but "
+                "need_to_return_lse_for_decode is False"
+            )
+            if not has_prefill and num_decode_tokens == num_rows:
+                # Decode-only: the kernel already produced the whole answer, so
+                # skip allocating the combined buffer and copying into it.
+                return decode_out, decode_lse
+
         attn_out = q.new_empty((num_rows, q.shape[1], self.kv_lora_rank))
         lse = q.new_empty((num_decode_tokens, q.shape[1]), dtype=torch.float32)
+        if decode_out is not None:
+            assert decode_lse is not None
+            attn_out[:num_decode_tokens] = decode_out
+            lse.copy_(decode_lse)
 
-        if num_decode_tokens > 0:
-            self._decode_from_local_shard(
-                q,
-                kv_c_and_k_pe_cache,
-                topk_indices,
-                attn_metadata,
-                attn_out,
-                lse,
-                num_decode_tokens,
-            )
-
-        covered_through = num_decode_tokens
         if has_prefill:
             assert prefill_meta is not None
-            covered_through = self._prefill_over_gathered_context(
+            self._prefill_over_gathered_context(
                 q,
                 kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
                 prefill_meta,
                 attn_out,
-                num_decode_tokens,
             )
-
-        if covered_through < num_rows:
-            attn_out[covered_through:].zero_()
 
         return attn_out, lse
 

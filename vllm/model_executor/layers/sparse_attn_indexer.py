@@ -128,18 +128,12 @@ def _merge_dcp_topk_global(
 def dcp_gather_kv_rows(
     local_padded: torch.Tensor,
     deinterleave_idx: torch.Tensor,
-    expected_local_rows: int,
     gathered_buf: torch.Tensor,
     out_buf: torch.Tensor,
 ) -> torch.Tensor:
     """All-gather this rank's KV shard and return it in global token order."""
 
-    assert local_padded.shape[0] == expected_local_rows, (
-        f"KV shard has {local_padded.shape[0]} rows but the PCP chunk plan was "
-        f"built for {expected_local_rows}; the gathered buffer would not match "
-        "deinterleave_idx and the other ranks will hang waiting on this gather"
-    )
-    gathered = gathered_buf[: get_dcp_group().world_size * expected_local_rows]
+    gathered = gathered_buf[: get_dcp_group().world_size * local_padded.shape[0]]
     dist.all_gather_into_tensor(
         gathered, local_padded.contiguous(), group=get_dcp_group().device_group
     )
@@ -360,13 +354,11 @@ def sparse_attn_indexer(
         ]
         if use_pcp and dcp_world_size > 1:
             # The PCP+DCP path takes an all-gather destination and a
-            # de-interleaved result, both bounded by the same total context.
-            for _ in range(2):
-                profile_specs.extend(
-                    _gather_workspace_shapes(
-                        total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
-                    )
-                )
+            # de-interleaved result.
+            gather_spec = _gather_workspace_shapes(
+                total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            )
+            profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
@@ -477,18 +469,18 @@ def sparse_attn_indexer(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         # PCP + DCP needs two more pairs: the rank-major all-gather destination
-        # and the de-interleaved result. 
-        pcp_chunks = [c for c in prefill_metadata.chunks if c.pcp_global is not None]
+        # and the de-interleaved result.
+        pcp_chunks = [
+            (c, c.pcp_deinterleave_idx)
+            for c in prefill_metadata.chunks
+            if c.pcp_deinterleave_idx is not None
+        ]
         gather_specs: list[tuple[tuple[int, int], torch.dtype]] = []
         if pcp_chunks:
             gathered_rows = max(
-                dcp_world_size * c.local_total_seq_lens for c in pcp_chunks
+                dcp_world_size * c.local_total_seq_lens for c, _ in pcp_chunks
             )
-            deinterleaved_rows = max(
-                c.pcp_global.deinterleave_idx.shape[0]
-                for c in pcp_chunks
-                if c.pcp_global is not None
-            )
+            deinterleaved_rows = max(idx.shape[0] for _, idx in pcp_chunks)
             for rows in (gathered_rows, deinterleaved_rows):
                 gather_specs.extend(
                     _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
@@ -514,28 +506,21 @@ def sparse_attn_indexer(
                 )
 
             # PCP + DCP KV all-gather.
-            pcp_global = chunk.pcp_global
-            if pcp_global is not None:
+            deinterleave_idx = chunk.pcp_deinterleave_idx
+            if deinterleave_idx is not None:
                 # local_total_seq_lens is the PCP-padded extent here, so every
                 # rank contributes an identically shaped shard.
                 gathered_values, gathered_scales, out_values, out_scales = gather_bufs
                 shard = k_quant[: chunk.local_total_seq_lens]
                 k_quant = dcp_gather_kv_rows(
-                    shard,
-                    pcp_global.deinterleave_idx,
-                    chunk.local_total_seq_lens,
-                    gathered_values,
-                    out_values,
+                    shard, deinterleave_idx, gathered_values, out_values
                 )
                 k_scale = dcp_gather_kv_rows(
                     k_scale[: chunk.local_total_seq_lens],
-                    pcp_global.deinterleave_idx,
-                    chunk.local_total_seq_lens,
+                    deinterleave_idx,
                     gathered_scales,
                     out_scales,
                 )
-                cu_seqlen_ks = pcp_global.cu_seqlen_ks
-                cu_seqlen_ke = pcp_global.cu_seqlen_ke
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
@@ -547,7 +532,7 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            if chunk.local_total_seq_lens == 0:
+            if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
             else:
@@ -593,7 +578,7 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-            if pcp_global is None:
+            if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
                 # context.
                 _merge_dcp_topk_global(
@@ -906,6 +891,10 @@ class SparseAttnIndexer(CustomOp):
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
+            if self.use_pcp and self.dcp_world_size > 1:
+                raise NotImplementedError(
+                    "The ROCm sparse-indexer path does not support PCP+DCP."
+                )
             return self.forward_hip(hidden_states, q_quant, k, weights)
         else:
             raise NotImplementedError(

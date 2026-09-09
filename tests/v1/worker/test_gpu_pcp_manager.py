@@ -127,7 +127,9 @@ def _schedule_for_rank(pcp_rank: int, pcp_world_size: int, monkeypatch):
         is_prefilling=np.ones(2, dtype=np.bool_),
         query_start_loc_np=np.array([0, 32, 64], dtype=np.int32),
     )
-    return manager.schedule_seq_lens_np
+    schedule = pcp_manager_module.get_current_pcp_schedule()
+    assert schedule is not None
+    return schedule.seq_lens_np
 
 
 def test_schedule_context_lens_are_identical_across_pcp_ranks(monkeypatch):

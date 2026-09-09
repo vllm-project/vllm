@@ -104,7 +104,6 @@ class PCPManager:
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
-        self._schedule_seq_lens_np: np.ndarray | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
@@ -198,10 +197,6 @@ class PCPManager:
                 "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
                 f"'{parallel_config.dcp_comm_backend}'."
             )
-
-    @property
-    def schedule_seq_lens_np(self) -> np.ndarray | None:
-        return self._schedule_seq_lens_np
 
     @staticmethod
     def _reorder_segments(
@@ -356,7 +351,7 @@ class PCPManager:
             segments_by_rank.append(segments)
             per_rank_num_tokens.append(num_rank_tokens)
 
-        self._schedule_seq_lens_np = self._compute_schedule_seq_lens(
+        schedule_seq_lens_np = self._compute_schedule_seq_lens(
             num_computed_tokens,
             query_start_loc_np,
         )
@@ -374,7 +369,7 @@ class PCPManager:
         # must size their DCP collectives PCP-invariantly.
         set_current_pcp_schedule(
             PCPSchedule(
-                seq_lens_np=self._schedule_seq_lens_np,
+                seq_lens_np=schedule_seq_lens_np,
                 nominal_chunk_query_lens_np=self._nominal_chunk_query_lens(
                     num_scheduled_tokens, replicated
                 ),
@@ -589,7 +584,7 @@ class PCPManager:
             local_query_start_loc,
             local_start_pos,
             input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
+            input_buffers.seq_lens,
         )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
@@ -785,8 +780,10 @@ def set_replicated_pcp_schedule(input_batch: InputBatch) -> None:
     )
 
 
-def moe_rows_are_replicated() -> bool:
-    """Whether every row of this step is PCP-replicated rather than split."""
+def moe_run_all_reduce(cudagraph_mode: CUDAGraphMode) -> bool:
+    """Whether the MoE should all-reduce instead of gather/reduce-scatter."""
+    if cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        return False
     schedule = get_current_pcp_schedule()
     if schedule is None:
         return False

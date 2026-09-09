@@ -565,21 +565,18 @@ class DeepseekV32Attention(MLAAttention):
                     f"{attn_out.shape[0]} MQA rows were left out of the DCP "
                     "merge by a backend that did not gather the KV for them"
                 )
-                if num_merge_rows > 0:
-                    merged = self.dcp_manager.combine(
-                        attn_out[:num_merge_rows].contiguous(),
-                        lse.contiguous(),
-                        seq_lens=None,  # type: ignore[arg-type]
-                        query_start_loc=None,  # type: ignore[arg-type]
-                    )
-                    attn_out[:num_merge_rows] = merged
-            else:
-                attn_out = self.dcp_manager.combine(
-                    attn_out,
+            if num_merge_rows > 0:
+                merged = self.dcp_manager.combine(
+                    attn_out[:num_merge_rows],
                     lse,
                     seq_lens=seq_lens,  # type: ignore[arg-type]
                     query_start_loc=query_start_loc,  # type: ignore[arg-type]
                 )
+                if num_merge_rows == attn_out.shape[0]:
+                    attn_out = merged
+                else:
+                    # Only the decode rows merge.
+                    attn_out[:num_merge_rows] = merged
             if self.use_pcp:
                 attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
