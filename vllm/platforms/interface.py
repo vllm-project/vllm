@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.v1.worker.gpu.runner_components import V2RunnerComponents
 else:
     FlexibleArgumentParser = object
 
@@ -378,6 +379,34 @@ class Platform:
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
+
+    @classmethod
+    def get_v2_runner_components(cls) -> "V2RunnerComponents":
+        """Return the component bundle used by GPUModelRunner V2.
+
+        Out-of-tree platforms override this to supply custom subclasses of any
+        of the six bundled components.  The runner calls this exactly once
+        during ``__init__`` and stores the result, so this method never runs on
+        a hot path.
+
+        Lazy imports are used to avoid circular dependencies between
+        ``vllm.platforms`` and the worker implementation modules.
+        """
+        from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+        from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+        from vllm.v1.worker.gpu.pcp_manager import PCPManager
+        from vllm.v1.worker.gpu.runner_components import V2RunnerComponents
+        from vllm.v1.worker.gpu.sample.sampler import Sampler
+        from vllm.v1.worker.gpu.states import RequestState
+
+        return V2RunnerComponents(
+            request_state_cls=RequestState,
+            input_buffers_cls=InputBuffers,
+            input_batch_cls=InputBatch,
+            cudagraph_manager_cls=ModelCudaGraphManager,
+            sampler_cls=Sampler,
+            pcp_manager_cls=PCPManager,
+        )
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
