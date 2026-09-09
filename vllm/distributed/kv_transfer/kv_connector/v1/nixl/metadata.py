@@ -182,12 +182,11 @@ def compute_nixl_compatibility_hash(
         "nixl_connector_version": NIXL_CONNECTOR_VERSION,
         # Model identity and architecture
         "model": model_config.model,
-        # ResolvedRevision stringifies as its requested ref (for example,
-        # "main"), while .resolved holds the immutable commit actually loaded.
+        # The model's ResolvedRevision stringifies as the requested ref (e.g.
+        # "main"); .resolved holds the immutable model commit actually loaded.
         "revision": getattr(model_config.revision, "resolved", model_config.revision),
-        "code_revision": getattr(
-            model_config.code_revision, "resolved", model_config.code_revision
-        ),
+        # Compare the supplied code revision; vLLM does not resolve it.
+        "code_revision": model_config.code_revision,
         "dtype": str(model_config.dtype),
         "num_kv_heads": model_config.get_total_num_kv_heads(),
         "head_size": model_config.get_head_size(),
