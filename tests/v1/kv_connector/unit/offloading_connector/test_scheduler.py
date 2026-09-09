@@ -3487,7 +3487,6 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
     job_id = next(iter(runner.connector_scheduler._jobs))
     runner.manager.complete_store.reset_mock()
 
-    # Step 1: one worker fails. The job is not complete yet.
     runner.connector_scheduler.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=OffloadingWorkerMetadata(
@@ -3497,8 +3496,6 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
     )
     assert runner.manager.complete_store.call_count == 0
 
-    # Step 2: the other two succeed and the job completes. This batch carries
-    # no failure flag, so the verdict must come from the job's sticky state.
     runner.connector_scheduler.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=OffloadingWorkerMetadata(
