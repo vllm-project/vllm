@@ -461,7 +461,6 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
     nn.Module.__init__(embedding)
     embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
     embedding._output_dim = 6
-    embedding.layer_name = "test.ple"
     hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
     expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
 
@@ -474,7 +473,7 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
 
     monkeypatch.setattr(
         embedding,
-        "_finalize_prefetch_impl",
+        "_finalize_prefetch",
         finalize_prefetched,
     )
 

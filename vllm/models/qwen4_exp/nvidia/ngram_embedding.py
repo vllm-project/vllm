@@ -66,7 +66,6 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
-        layer_name: str = "",
     ) -> None:
         del num_ngram_heads, max_total_tokens
         super().__init__(
@@ -80,7 +79,6 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         )
         self.embedding_method = embedding_method
         self.data_parallel_rank = data_parallel_rank
-        self.layer_name = layer_name
         tp_size = get_tp_group().world_size
         if self.tp_size % tp_size:
             raise ValueError(
@@ -403,7 +401,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
-        layer_name: str = "",
     ) -> None:
         if not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
@@ -417,7 +414,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             num_ngram_heads=num_ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
-            layer_name=layer_name,
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._block_d = triton.next_power_of_2(self.embedding_dim)
@@ -510,7 +506,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             self._lookup(gathered_ids, output=active_output)
 
     @eager_break_during_capture
-    def _finalize_prefetch_impl(
+    def _finalize_prefetch(
         self,
         prefetch_output: torch.Tensor,
         output: torch.Tensor,
@@ -527,17 +523,13 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
         output.copy_(embeddings.flatten(-2))
 
-    def finalize_prefetch(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Finish the pinned lookup into graph-owned output storage."""
         output = self._prefetch_buffer.new_empty(
             (hidden_states.shape[0], self._output_dim)
         )
-        self._finalize_prefetch_impl(self._prefetch_buffer, output)
+        self._finalize_prefetch(self._prefetch_buffer, output)
         return output
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Finish the prefetched lookup and return flattened embeddings."""
-        return self.finalize_prefetch(hidden_states)
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -646,12 +638,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         *,
         data_parallel_rank: int,
         prefix: str,
-        layer_name: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        self.layer_name = layer_name
         self.embedding_dim = embedding_dim
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
@@ -725,7 +715,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             num_ngram_heads=self.ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
-            layer_name=layer_name,
         )
         weight = self.ngram_embedding.weight
         logger.info(

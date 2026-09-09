@@ -100,7 +100,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             vllm_config.scheduler_config.max_num_batched_tokens,
             data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
             prefix=f"{prefix}.ple_embedding",
-            layer_name=prefix,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
