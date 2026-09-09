@@ -48,11 +48,31 @@ def _percentile_summary(
     return mean(numbers), median(numbers), max(numbers)
 
 
-def _positive_int(row: dict[str, Any], key: str) -> int | None:
-    value = row.get(key)
+def _scheduler_value(
+    row: dict[str, Any], key: str
+) -> tuple[bool, int | None]:
+    if key not in row:
+        # Default-reference sweep candidates omit scheduler keys entirely.
+        return True, None
+    value = row[key]
+    if value is None:
+        return True, None
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
+        return False, None
+    return True, value
+
+
+def _scheduler_sort_value(value: int | None) -> int:
+    return -1 if value is None else value
+
+
+def _scheduler_preference_key(value: object) -> tuple[int, int]:
+    """Prefer vLLM default, then the smaller explicit value on exact ties."""
+    if value is None:
+        return (1, 0)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (0, -value)
+    return (0, 0)
 
 
 def _resolve(script_dir: Path, value: str | None) -> Path | None:
@@ -84,17 +104,26 @@ def _aggregate_candidates(
     tpot_sla_ms: float | None = None,
     minimum_compliance: float = DEFAULT_MINIMUM_COMPLIANCE,
 ) -> list[dict[str, Any]]:
-    grouped: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[int | None, int | None], list[dict[str, Any]]] = defaultdict(
+        list
+    )
 
     for row in rows:
-        seqs = _positive_int(row, "max_num_seqs")
-        batch = _positive_int(row, "max_num_batched_tokens")
-        if seqs is None or batch is None:
+        seqs_valid, seqs = _scheduler_value(row, "max_num_seqs")
+        batch_valid, batch = _scheduler_value(row, "max_num_batched_tokens")
+        if not seqs_valid or not batch_valid:
             continue
         grouped[(seqs, batch)].append(row)
 
     candidates: list[dict[str, Any]] = []
-    for (seqs, batch), runs in sorted(grouped.items()):
+    sorted_groups = sorted(
+        grouped.items(),
+        key=lambda item: (
+            _scheduler_sort_value(item[0][0]),
+            _scheduler_sort_value(item[0][1]),
+        ),
+    )
+    for (seqs, batch), runs in sorted_groups:
         failed_requests = sum(int(_number(run.get("failed")) or 0) for run in runs)
         output_throughput = _mean(runs, "output_throughput")
         request_throughput = _mean(runs, "request_throughput")
@@ -153,6 +182,14 @@ def _aggregate_candidates(
                 "max_num_seqs": seqs,
                 "max_num_batched_tokens": batch,
                 "run_count": len(runs),
+                "vllm_default_parameters": [
+                    name
+                    for name, value in (
+                        ("max_num_seqs", seqs),
+                        ("max_num_batched_tokens", batch),
+                    )
+                    if value is None
+                ],
                 "failed_requests": failed_requests,
                 "mean_request_goodput": request_goodput,
                 "mean_request_throughput": request_throughput,
@@ -204,8 +241,8 @@ def _select_candidate(
                 candidate["mean_request_goodput"],
                 candidate["combined_compliance_ratio"] or 0.0,
                 candidate["mean_output_throughput"],
-                -candidate["max_num_batched_tokens"],
-                -candidate["max_num_seqs"],
+                _scheduler_preference_key(candidate["max_num_batched_tokens"]),
+                _scheduler_preference_key(candidate["max_num_seqs"]),
             ),
         )
         if best_effort["mean_request_goodput"] <= 0:
@@ -221,8 +258,8 @@ def _select_candidate(
                     candidate["mean_output_throughput"],
                     candidate["combined_compliance_ratio"],
                     candidate["mean_request_goodput"],
-                    -candidate["max_num_batched_tokens"],
-                    -candidate["max_num_seqs"],
+                    _scheduler_preference_key(candidate["max_num_batched_tokens"]),
+                    _scheduler_preference_key(candidate["max_num_seqs"]),
                 ),
             )
             if eligible
@@ -234,8 +271,8 @@ def _select_candidate(
             valid,
             key=lambda candidate: (
                 candidate["mean_output_throughput"],
-                -candidate["max_num_batched_tokens"],
-                -candidate["max_num_seqs"],
+                _scheduler_preference_key(candidate["max_num_batched_tokens"]),
+                _scheduler_preference_key(candidate["max_num_seqs"]),
             ),
         )
         best_effort = winner
@@ -248,6 +285,29 @@ def _load_config(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{path} does not contain a YAML configuration object.")
     return data
+
+
+def _build_recommended_config(
+    initial_config: dict[str, Any],
+    winner: dict[str, Any],
+) -> dict[str, Any]:
+    recommended_config = dict(initial_config)
+    for config_key, result_key in (
+        ("max-num-seqs", "max_num_seqs"),
+        ("max-num-batched-tokens", "max_num_batched_tokens"),
+    ):
+        value = winner[result_key]
+        if value is None:
+            recommended_config.pop(config_key, None)
+        else:
+            recommended_config[config_key] = value
+    return recommended_config
+
+
+def _format_scheduler_value(value: object) -> str:
+    if value is None:
+        return "vLLM default"
+    return str(value)
 
 
 def _write_config(
@@ -368,9 +428,7 @@ def main() -> int:
 
     initial_config = _load_config(config_path)
     if winner is not None:
-        recommended_config = dict(initial_config)
-        recommended_config["max-num-seqs"] = winner["max_num_seqs"]
-        recommended_config["max-num-batched-tokens"] = winner["max_num_batched_tokens"]
+        recommended_config = _build_recommended_config(initial_config, winner)
         _write_config(
             output_config,
             source_path=config_path,
@@ -386,6 +444,7 @@ def main() -> int:
         recommended = {
             "max_num_seqs": winner["max_num_seqs"],
             "max_num_batched_tokens": winner["max_num_batched_tokens"],
+            "vllm_default_parameters": winner["vllm_default_parameters"],
         }
         measured = {
             key: winner[key]
@@ -426,6 +485,7 @@ def main() -> int:
         "best_effort": {
             "max_num_seqs": best_effort["max_num_seqs"],
             "max_num_batched_tokens": best_effort["max_num_batched_tokens"],
+            "vllm_default_parameters": best_effort["vllm_default_parameters"],
             "mean_request_goodput": best_effort["mean_request_goodput"],
             "combined_compliance_ratio": best_effort["combined_compliance_ratio"],
             "p99_sla_eligible": best_effort["p99_sla_eligible"],
@@ -445,8 +505,14 @@ def main() -> int:
 
     print("Recommended runtime configuration")
     print()
-    print(f"  max-num-seqs:           {winner['max_num_seqs']}")
-    print(f"  max-num-batched-tokens: {winner['max_num_batched_tokens']}")
+    print(
+        "  max-num-seqs:           "
+        + _format_scheduler_value(winner["max_num_seqs"])
+    )
+    print(
+        "  max-num-batched-tokens: "
+        + _format_scheduler_value(winner["max_num_batched_tokens"])
+    )
     print()
     print(f"Selection objective: {objective}")
     if use_goodput:

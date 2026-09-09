@@ -23,6 +23,7 @@ The optional package is:
 
 ```text
 sweep/
+├── sweep_config.yml
 ├── serve_params.json
 ├── bench_params.json
 ├── run_sweep.sh
@@ -30,11 +31,28 @@ sweep/
 └── SWEEP.md
 ```
 
-The sweep varies only `max-num-seqs` and `max-num-batched-tokens`. It uses an
-eight-point directed design: a batch-budget curve at the initial sequence count
-plus lower/higher batch interactions at three-quarters and one-half of that
-count. This gives broader coverage than a one-parameter-at-a-time sweep without
-the cost of a full Cartesian grid.
+The sweep varies only `max-num-seqs` and `max-num-batched-tokens`. It keeps the
+eight-point directed tuned design: a batch-budget curve at the initial sequence
+count plus lower/higher batch interactions at three-quarters and one-half of
+that count. It also adds three default-reference candidates:
+
+| Reference candidate | `max-num-seqs` | `max-num-batched-tokens` |
+| --- | --- | --- |
+| `vllm_default_max_num_seqs` | vLLM default | initial generated value |
+| `vllm_default_max_num_batched_tokens` | initial generated value | vLLM default |
+| `vllm_defaults` | vLLM default | vLLM default |
+
+The default references are intentionally **not** hard-coded to values such as
+128 or 2048. The generated `sweep_config.yml` copies the initial `config.yml`
+but removes `max-num-seqs` and `max-num-batched-tokens`. Tuned candidates add
+explicit CLI values, while default-reference candidates omit one or both CLI
+arguments so `vllm serve` resolves its normal runtime defaults.
+
+This keeps the comparison platform-, parallel-world-size-, model-, and
+usage-context-aware, and avoids passing the literal string `None` through the
+generic sweep CLI. If a default-reference candidate wins,
+`recommended-config.yml` omits that scheduler key so the deployed server
+continues to use the vLLM runtime default.
 
 The serving benchmark scales request count with workload concurrency, following
 vLLM's `PROMPTS_PER_CONCURRENCY` model:

@@ -11,6 +11,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from runtime_tuning import WorkloadHints
 
 PROMPTS_PER_CONCURRENCY = 10
@@ -57,9 +59,11 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Build a diverse, bounded sweep around the initial suggestion.
 
     The initial five-point sweep changed only one parameter at a time and
-    skipped the useful middle sequence count.  Eight directed points cover the
-    batch-budget curve at full concurrency plus interactions at 3/4 and 1/2 of
-    the initial scheduler concurrency without paying for a full Cartesian grid.
+    skipped the useful middle sequence count. Eight directed tuned points cover
+    the batch-budget curve at full concurrency plus interactions at 3/4 and 1/2
+    of the initial scheduler concurrency. Three additional reference points
+    compare those tuned values with vLLM-resolved defaults without paying for a
+    full Cartesian grid.
     """
     initial_seqs = _positive_int(config, "max-num-seqs")
     initial_batch = _positive_int(config, "max-num-batched-tokens")
@@ -90,24 +94,26 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[int, int]] = set()
+    seen: set[tuple[int | None, int | None]] = set()
 
-    def add(name: str, max_num_seqs: int, max_num_batched_tokens: int) -> None:
-        max_num_batched_tokens = max(
-            max_num_batched_tokens,
-            max_num_seqs,
-        )
+    def add(
+        name: str,
+        max_num_seqs: int | None,
+        max_num_batched_tokens: int | None,
+    ) -> None:
+        if max_num_seqs is not None and max_num_batched_tokens is not None:
+            max_num_batched_tokens = max(max_num_batched_tokens, max_num_seqs)
         signature = (max_num_seqs, max_num_batched_tokens)
         if signature in seen:
             return
         seen.add(signature)
-        candidates.append(
-            {
-                "_benchmark_name": name,
-                "max_num_seqs": max_num_seqs,
-                "max_num_batched_tokens": max_num_batched_tokens,
-            }
-        )
+
+        candidate: dict[str, Any] = {"_benchmark_name": name}
+        if max_num_seqs is not None:
+            candidate["max_num_seqs"] = max_num_seqs
+        if max_num_batched_tokens is not None:
+            candidate["max_num_batched_tokens"] = max_num_batched_tokens
+        candidates.append(candidate)
 
     # Keep the exact initial suggestion as the measured baseline. Additional
     # values exist only in the optional sweep package.
@@ -119,6 +125,13 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     add("middle_seqs_higher_batch", middle_seqs, higher_batch)
     add("lower_seqs_lower_batch", lower_seqs, lower_batch)
     add("lower_seqs_higher_batch", lower_seqs, higher_batch)
+
+    # Default-reference candidates intentionally omit one or both scheduler
+    # keys. The sweep server starts from sweep_config.yml, where both keys are
+    # removed, so omission lets vLLM resolve its normal runtime default.
+    add("vllm_default_max_num_seqs", None, initial_batch)
+    add("vllm_default_max_num_batched_tokens", initial_seqs, None)
+    add("vllm_defaults", None, None)
 
     return candidates
 
@@ -167,6 +180,25 @@ def _write_json(path: Path, value: object) -> None:
         json.dumps(value, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_sweep_config(path: Path, config: dict[str, Any]) -> None:
+    sweep_config = dict(config)
+    sweep_config.pop("max-num-seqs", None)
+    sweep_config.pop("max-num-batched-tokens", None)
+
+    body = yaml.safe_dump(
+        sweep_config,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    header = (
+        "# Generated for runtime sweep only.\n"
+        "# Scheduler values are supplied per candidate; omitted values use "
+        "vLLM defaults.\n"
+    )
+    path.write_text(header + body, encoding="utf-8")
 
 
 def _write_run_script(
@@ -279,6 +311,20 @@ deployed directly. The sweep benchmarks nearby values for:
 - `max-num-seqs`
 - `max-num-batched-tokens`
 
+In addition to nearby tuned values, the sweep includes three vLLM-default
+references:
+
+- vLLM default `max-num-seqs` with the initial batch-token budget
+- initial `max-num-seqs` with vLLM default `max-num-batched-tokens`
+- vLLM defaults for both parameters
+
+The sweep runs every server from a generated `sweep_config.yml` that copies the
+initial `config.yml` but removes these two scheduler keys. Tuned candidates add
+explicit CLI values; a default-reference candidate simply omits the selected
+key, allowing `vllm serve` to resolve its normal runtime default. This avoids
+passing the literal string `None` and keeps defaults platform-, world-size-,
+model-, and usage-context-aware.
+
 ## Run
 
 ```bash
@@ -332,7 +378,9 @@ objectives it selects highest mean output-token throughput. Configurations with
 failed requests are excluded.
 
 `recommended-config.yml` copies the initial configuration and changes only
-`max-num-seqs` and `max-num-batched-tokens`.
+`max-num-seqs` and `max-num-batched-tokens`. If a vLLM-default reference wins,
+the corresponding key is removed from `recommended-config.yml`, allowing
+`vllm serve` to resolve that parameter from its normal runtime default policy.
 """
     path.write_text(content, encoding="utf-8")
 
@@ -351,6 +399,7 @@ def write_sweep_files(
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
+    sweep_config = directory / "sweep_config.yml"
     serve_params = directory / "serve_params.json"
     bench_params = directory / "bench_params.json"
     run_script = directory / "run_sweep.sh"
@@ -358,14 +407,16 @@ def write_sweep_files(
     guide = directory / "SWEEP.md"
 
     config_rel = _relative_to(directory, config_path)
+    sweep_config_rel = _relative_to(directory, str(sweep_config))
     env_rel = _relative_to(directory, env_path)
 
+    _write_sweep_config(sweep_config, config)
     _write_json(serve_params, build_serve_params(config))
     _write_json(bench_params, build_bench_params(workload))
     request_model, tokenizer = _benchmark_models(config)
     _write_run_script(
         run_script,
-        config_rel=config_rel,
+        config_rel=sweep_config_rel,
         env_rel=env_rel,
         request_model=request_model,
         tokenizer=tokenizer,
@@ -379,4 +430,11 @@ def write_sweep_files(
     )
     _write_guide(guide, workload)
 
-    return [serve_params, bench_params, run_script, recommend_script, guide]
+    return [
+        sweep_config,
+        serve_params,
+        bench_params,
+        run_script,
+        recommend_script,
+        guide,
+    ]
