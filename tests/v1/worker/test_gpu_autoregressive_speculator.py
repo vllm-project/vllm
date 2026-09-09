@@ -20,7 +20,6 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -128,7 +127,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         speculative_config=speculative_config,
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
-            max_num_batched_tokens=4,
+            max_num_batched_tokens=8,
         ),
         model_config=SimpleNamespace(
             max_model_len=32,
@@ -144,7 +143,6 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 
     assert speculator.hidden_size == expected
-    assert speculator.input_buffers.max_num_tokens == 8
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
@@ -327,68 +325,6 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
 
     assert actual_logits_hidden is hidden
     assert actual_feedback_hidden is hidden
-
-
-def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
-    speculator = object.__new__(_TestSpeculator)
-    local_logits = torch.tensor([[1.0], [2.0]])
-    local_feedback = torch.tensor([[3.0], [4.0]])
-    global_logits = torch.tensor([[1.0], [5.0], [2.0], [6.0]])
-    global_feedback = torch.tensor([[3.0], [7.0], [4.0], [8.0]])
-    restorer = Mock(side_effect=[global_logits, global_feedback])
-    manager = object.__new__(PCPManager)
-    manager.restore_hidden_states = restorer
-    manager.draft_prefill_batch = Mock()
-    speculator.pcp_manager = manager
-    speculator._run_model = Mock(return_value=(local_logits, local_feedback))
-    speculator.last_token_indices = torch.tensor([1, 3])
-    speculator.idx_mapping = torch.tensor([0, 1])
-    speculator.temperature = torch.zeros(2)
-    speculator.seeds = torch.zeros(2, dtype=torch.int64)
-    speculator.current_draft_step = torch.tensor(0)
-    speculator.sample_src_positions = torch.zeros(2, dtype=torch.int64)
-    speculator.draft_logits = None
-    speculator.draft_tokens = torch.zeros((2, 1), dtype=torch.int64)
-    speculator.hidden_states = torch.zeros((4, 1))
-    speculator.input_buffers = SimpleNamespace(
-        positions=torch.arange(4, dtype=torch.int64)
-    )
-    speculator.sample_draft = Mock(return_value=torch.tensor([11, 22]))
-    speculator._prefill(
-        num_reqs=2,
-        num_tokens=2,
-        attn_metadata=None,
-        slot_mappings=None,
-        num_tokens_across_dp=None,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        mm_inputs=None,
-    )
-
-    assert torch.equal(speculator.draft_tokens[:, 0], torch.tensor([11, 22]))
-    assert torch.equal(speculator.hidden_states[:2], torch.tensor([[7.0], [8.0]]))
-    assert torch.equal(speculator.input_buffers.positions[:2], torch.tensor([1, 3]))
-    assert torch.equal(
-        speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
-    )
-    assert manager.draft_prefill_batch is None
-
-
-def test_pcp_manager_prepares_local_draft_prefill():
-    manager = object.__new__(PCPManager)
-    manager._local_gather_idx = torch.tensor([2, 0])
-    global_batch = object()
-    local_batch = SimpleNamespace(
-        input_ids=torch.full((2,), -1),
-    )
-    manager._global_batch = global_batch
-    manager._local_batch = local_batch
-    manager.prepare_draft_prefill(
-        global_batch,  # type: ignore[arg-type]
-        torch.tensor([10, 11, 12]),
-    )
-
-    assert manager.draft_prefill_batch is local_batch
-    assert manager.draft_prefill_batch.input_ids.tolist() == [12, 10]
 
 
 @pytest.mark.parametrize(

@@ -2071,10 +2071,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
-            kv_config = self.vllm_config.kv_transfer_config
-            if kv_config is not None and kv_config.is_kv_producer:
-                self.output_copy_stream.wait_stream(self.main_stream)
-                async_output.copy_event.record(self.output_copy_stream)
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

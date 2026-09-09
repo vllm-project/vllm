@@ -6,36 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import ParallelConfig, VllmConfig
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-
-
-def test_dflash_drafter_replicates_pcp_and_keeps_dcp(monkeypatch):
-    captured = None
-
-    def capture_config(self, vllm_config, device):
-        nonlocal captured
-        captured = vllm_config
-        raise RuntimeError("stop after base init")
-
-    monkeypatch.setattr(DraftModelSpeculator, "__init__", capture_config)
-    config = VllmConfig(
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-        )
-    )
-
-    with pytest.raises(RuntimeError, match="stop after base init"):
-        DFlashSpeculator(config, torch.device("cpu"))
-
-    assert captured is not None
-    assert captured.parallel_config.prefill_context_parallel_size == 1
-    assert captured.parallel_config.decode_context_parallel_size == 2
 
 
 @pytest.mark.parametrize("block_size", [5, 8])

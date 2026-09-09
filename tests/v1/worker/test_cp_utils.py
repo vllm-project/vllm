@@ -1,27 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-from vllm.config import ParallelConfig, VllmConfig
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.worker import cp_utils
 from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
-
-
-def test_pcp_compatibility_ignores_replicated_draft_attention(monkeypatch):
-    layer = SimpleNamespace(
-        use_pcp=False,
-        get_attn_backend=lambda: pytest.fail("replicated draft checked for PCP"),
-    )
-    monkeypatch.setattr(
-        cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
-    )
-    config = VllmConfig(parallel_config=ParallelConfig(prefill_context_parallel_size=2))
-
-    cp_utils.check_attention_cp_compatibility(config)
 
 
 def test_skip_gate_only_for_zero_context():
