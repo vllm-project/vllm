@@ -233,7 +233,7 @@ def test_etp_lookup_gathers_and_returns_dp_local_rows(
         "forward",
         forward,
     )
-    output = embedding.fetch_etp_embeddings(local_ids)
+    output = embedding(local_ids)
 
     expected = embeddings[dp_rank * 3 : dp_rank * 3 + local_tokens]
     assert torch.equal(output, expected)

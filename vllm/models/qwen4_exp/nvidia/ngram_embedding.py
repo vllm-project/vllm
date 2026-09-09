@@ -344,7 +344,7 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Resident embedding prefetch is a no-op."""
         return None
 
-    def fetch_etp_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         """Gather ETP inputs, look up embeddings, and select local rows."""
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
@@ -354,11 +354,6 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
             ngram_ids.shape[0],
             slot_offset,
         )
-
-    def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        if self.etp_data_parallel_size == 1:
-            return super().forward(ngram_ids)
-        return self.fetch_etp_embeddings(ngram_ids)
 
 
 @triton.jit
