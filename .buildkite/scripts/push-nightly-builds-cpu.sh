@@ -22,11 +22,11 @@ TAG_NAME_COMMIT="nightly-${BUILDKITE_COMMIT}"
 
 # arch-dependent source images in ECR (pushed by the CPU release image build steps)
 X86_ORIG_TAG="public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:${BUILDKITE_COMMIT}-x86_64"
-ARM64_ORIG_TAG="public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${BUILDKITE_COMMIT}-aarch64"
+ARM64_ORIG_TAG="public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${BUILDKITE_COMMIT}-arm64"
 
 echo "Pushing CPU release images from ECR to Docker Hub as $TAG_NAME and $TAG_NAME_COMMIT"
 echo "  x86_64:  $X86_ORIG_TAG"
-echo "  aarch64: $ARM64_ORIG_TAG"
+echo "  arm64: $ARM64_ORIG_TAG"
 [[ "$DRY_RUN" == "1" ]] && echo "[DRY_RUN] Skipping push to Docker Hub"
 
 # Login to ECR and pull the arch-dependent images
@@ -36,10 +36,10 @@ docker pull "$ARM64_ORIG_TAG"
 
 # Tag arch-dependent images for Docker Hub
 docker tag "$X86_ORIG_TAG" vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64
-docker tag "$ARM64_ORIG_TAG" vllm/vllm-openai-cpu:"$TAG_NAME"-aarch64
+docker tag "$ARM64_ORIG_TAG" vllm/vllm-openai-cpu:"$TAG_NAME"-arm64
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  echo "[DRY_RUN] Would push vllm/vllm-openai-cpu:$TAG_NAME-x86_64 and vllm/vllm-openai-cpu:$TAG_NAME-aarch64"
+  echo "[DRY_RUN] Would push vllm/vllm-openai-cpu:$TAG_NAME-x86_64 and vllm/vllm-openai-cpu:$TAG_NAME-arm64"
   echo "[DRY_RUN] Would create and push manifests vllm/vllm-openai-cpu:$TAG_NAME and vllm/vllm-openai-cpu:$TAG_NAME_COMMIT"
   echo "[DRY_RUN] Local tags created. Exiting without push."
   exit 0
@@ -47,11 +47,11 @@ fi
 
 # Push arch-dependent images to Docker Hub
 docker push vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64
-docker push vllm/vllm-openai-cpu:"$TAG_NAME"-aarch64
+docker push vllm/vllm-openai-cpu:"$TAG_NAME"-arm64
 
 # Create and push the arch-independent manifests
-docker manifest create vllm/vllm-openai-cpu:"$TAG_NAME" vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64 vllm/vllm-openai-cpu:"$TAG_NAME"-aarch64 --amend
-docker manifest create vllm/vllm-openai-cpu:"$TAG_NAME_COMMIT" vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64 vllm/vllm-openai-cpu:"$TAG_NAME"-aarch64 --amend
+docker manifest create vllm/vllm-openai-cpu:"$TAG_NAME" vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64 vllm/vllm-openai-cpu:"$TAG_NAME"-arm64 --amend
+docker manifest create vllm/vllm-openai-cpu:"$TAG_NAME_COMMIT" vllm/vllm-openai-cpu:"$TAG_NAME"-x86_64 vllm/vllm-openai-cpu:"$TAG_NAME"-arm64 --amend
 docker manifest push vllm/vllm-openai-cpu:"$TAG_NAME"
 docker manifest push vllm/vllm-openai-cpu:"$TAG_NAME_COMMIT"
 

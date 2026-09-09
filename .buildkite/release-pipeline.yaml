@@ -478,9 +478,9 @@ steps:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64"
-          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64" release-images'
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64" release-images'
         env:
           DOCKER_BUILDKIT: "1"
 
