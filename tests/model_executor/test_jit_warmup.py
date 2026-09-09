@@ -431,6 +431,40 @@ def test_dispatch_can_forward_compile_key_fields() -> None:
         kernel.compile_key({"tokens": 5, "mode": 2, "extra": 1})
 
 
+def test_forwarded_compile_key_fields_exclude_predicate_only_inputs() -> None:
+    class ForwardingKernel(VllmJitKernel["ForwardingKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            mode: int
+            block_size: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            tokens: int,
+            **compile_key_fields: int,
+        ) -> CompileKey:
+            return self.CompileKey(
+                **compile_key_fields,
+                block_size=_round_up(tokens, multiple=4),
+            )
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return self._trace_dispatch(self.dispatch)(
+                tokens=(1, 5),
+                mode=2,
+                max_tokens=4,
+                _when=lambda *, tokens, max_tokens: tokens <= max_tokens,
+            )
+
+        def compile(self, compile_key: CompileKey) -> None:
+            pass
+
+    assert ForwardingKernel().get_warmup_keys() == [
+        ForwardingKernel.CompileKey(mode=2, block_size=4)
+    ]
+
+
 def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:
     class SubscriptKernel(VllmJitKernel["SubscriptKernel.CompileKey"]):
         @dataclass(frozen=True)
@@ -532,10 +566,12 @@ def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
 def test_registry_records_only_inside_model_setup_context() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
+    config = _config()
 
     kernel.register_warmup(3, _config())
     with registry.activate():
-        kernel.register_warmup(3, _config())
+        kernel.register_warmup(3, config)
+        kernel.register_warmup(3, config)
 
     assert len(registry) == 1
     assert kernel.compiled == []

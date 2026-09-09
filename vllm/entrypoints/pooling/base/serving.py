@@ -108,12 +108,15 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
-        model_name = self.models.model_name()
-        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        base_request_id = self._base_request_id(
+            raw_request, getattr(request, "request_id", None)
+        )
+        request_id = f"{self.request_id_prefix}-{base_request_id}"
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
         lora_request = self._maybe_get_adapters(request)
+        model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
         prompt_extras = {
             k: v
