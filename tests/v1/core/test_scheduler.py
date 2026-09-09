@@ -3588,6 +3588,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
+    scheduler.kv_capacity_error_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
@@ -6515,3 +6516,60 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+def test_request_that_never_fits_is_failed_not_respun():
+    """A lone request whose KV footprint exceeds the whole pool must be finished
+    with an error once it has preempted itself twice, not re-prefilled forever."""
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=64,
+        block_size=16,
+        num_blocks=11,  # 10 usable blocks = 160 tokens; block 0 is the null block.
+        max_model_len=1024,
+        enable_prefix_caching=False,
+    )
+    request = create_requests(num_requests=1, num_tokens=200, block_size=16)[0]
+
+    # Mimic a hybrid layout whose full-sequence admission estimate undercounts
+    # the blocks the chunked prefill really consumes: admit the request, then
+    # let each chunk allocate for real.
+    coordinator = scheduler.kv_cache_manager.coordinator
+    real_get_num_blocks_to_allocate = coordinator.get_num_blocks_to_allocate
+
+    def optimistic_admission(*args, **kwargs):
+        if kwargs.get("apply_admission_cap"):
+            return 0
+        return real_get_num_blocks_to_allocate(*args, **kwargs)
+
+    coordinator.get_num_blocks_to_allocate = optimistic_admission
+    scheduler.add_request(request)
+
+    error_output = None
+    for _ in range(40):
+        scheduler_output = scheduler.schedule()
+        req_ids = list(scheduler_output.num_scheduled_tokens)
+        model_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            sampled_token_ids=[[] for _ in req_ids],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        outputs = scheduler.update_from_output(scheduler_output, model_output)
+        for eco in outputs.values():
+            for out in eco.outputs:
+                if out.request_id == request.request_id and (
+                    out.finish_reason == FinishReason.ERROR
+                ):
+                    error_output = out
+        if error_output is not None:
+            break
+
+    assert error_output is not None, "request kept spinning instead of failing"
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.num_preemptions == 2
+    assert not scheduler.running
+    assert len(scheduler.waiting) == 0
+
