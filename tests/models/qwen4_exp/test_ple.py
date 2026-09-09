@@ -13,7 +13,7 @@ from torch.nn import functional as F
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
-import vllm.models.qwen4_exp.nvidia.ple_layer as ple_layer_module
+import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
@@ -24,15 +24,15 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
-from vllm.models.qwen4_exp.nvidia.ple_layer import (
+from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPinnedHostEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
-    Qwen4ExpPLELayer,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
+from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
@@ -49,9 +49,9 @@ def _mock_etp_group(
         world_size=world_size,
         all_reduce=all_reduce,
     )
-    monkeypatch.setattr(ple_layer_module, "get_etp_group", lambda: group)
+    monkeypatch.setattr(ngram_embedding_module, "get_etp_group", lambda: group)
     monkeypatch.setattr(
-        ple_layer_module,
+        ngram_embedding_module,
         "get_tp_group",
         lambda: SimpleNamespace(world_size=world_size),
     )
@@ -217,9 +217,9 @@ def test_etp_lookup_gathers_and_returns_dp_local_rows(
             num_tokens_across_dp_cpu=torch.tensor([2, 3]),
         )
     )
-    monkeypatch.setattr(ple_layer_module, "get_etp_dp_group", lambda: group)
+    monkeypatch.setattr(ngram_embedding_module, "get_etp_dp_group", lambda: group)
     monkeypatch.setattr(
-        ple_layer_module, "get_forward_context", lambda: forward_context
+        ngram_embedding_module, "get_forward_context", lambda: forward_context
     )
     local_ids = gathered_ids[dp_rank * 3 : dp_rank * 3 + local_tokens]
     embeddings = torch.arange(12).reshape(6, 2)
@@ -229,7 +229,7 @@ def test_etp_lookup_gathers_and_returns_dp_local_rows(
         return embeddings
 
     monkeypatch.setattr(
-        ple_layer_module.PLEVocabParallelEmbedding,
+        ngram_embedding_module.PLEVocabParallelEmbedding,
         "forward",
         forward,
     )
