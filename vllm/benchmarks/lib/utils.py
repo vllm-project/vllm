@@ -29,9 +29,9 @@ def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
     Check if the benchmark is run with torch.compile
     """
     return not (
-        extract_field(args, extra_info, "compilation_config.mode") == "0"
-        or "eager" in getattr(args, "output_json", "")
-        or "eager" in getattr(args, "result_filename", "")
+        extract_field(args, extra_info, "compilation_config.mode") in (0, "0")
+        or "eager" in (getattr(args, "output_json", None) or "")
+        or "eager" in (getattr(args, "result_filename", None) or "")
     )
 
 
