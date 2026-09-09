@@ -29,7 +29,12 @@ from .processing import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
+    from vllm.config import (
+        ModelConfig,
+        ObservabilityConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -114,11 +119,18 @@ class MultiModalRegistry:
         try:
             info = self._create_processing_info(model_config, tokenizer=None)
         except ValueError:
-            logger.warning_once(
-                "Model %s is treated as multimodal but has no registered "
-                "multimodal processor; running in text-only mode.",
-                model_config.model,
-            )
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if model_config.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    model_config.model,
+                )
             return False
 
         # Check if all supported modalities have limit == 0
@@ -236,6 +248,7 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
+        scheduler_config: "SchedulerConfig | None" = None,
     ) -> MultiModalInput:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -243,6 +256,8 @@ class MultiModalRegistry:
         The model is identified by `model_config`.
         """
         seq_len = model_config.max_model_len
+        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
+            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)

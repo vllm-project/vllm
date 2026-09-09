@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from pydantic import ValidationError
 
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponsesResponse,
 )
+from vllm.exceptions import VLLMValidationError
 
 SAMPLE_TOOL = {
     "type": "function",
@@ -58,13 +58,13 @@ def test_responses_request_required_without_tools(tools):
     if tools is not None:
         kwargs["tools"] = tools
     with pytest.raises(
-        ValidationError, match="Tool choice 'required' must be specified"
+        VLLMValidationError, match="Tool choice 'required' must be specified"
     ):
         ResponsesRequest.model_validate(kwargs)
 
 
 def test_responses_request_named_tool_choice_without_tools():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -107,7 +107,7 @@ def test_responses_request_named_tool_choice_matching():
 
 
 def test_responses_request_named_tool_choice_not_matching():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -164,7 +164,7 @@ def test_responses_request_empty_tools_tool_choice_auto():
     ],
 )
 def test_responses_request_named_tool_choice_missing_name(tool_choice):
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -176,7 +176,7 @@ def test_responses_request_named_tool_choice_missing_name(tool_choice):
 
 
 def test_responses_request_empty_tools_named_tool_choice():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",

@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.platforms import current_platform
 
 MiB = 1024 * 1024
 
@@ -52,23 +53,12 @@ except (ImportError, AttributeError):
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 
-@torch.compiler.assume_constant_result
-def _fi_ar_max_size_mb() -> dict[int, float]:
-    """Flashinfer all-reduce fusion size table for the current device.
-
-    Device capability is constant; marking the result constant keeps this out
-    of the traced graph. Otherwise the per-forward call reaches
-    ``current_platform.get_device_capability()`` inside ``torch.compile`` and
-    graph-breaks ("can't handle functions not implemented in python")."""
-    from vllm.config.compilation import PassConfig
-
-    return PassConfig.default_fi_allreduce_fusion_max_size_mb()
-
-
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
     current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
-    max_size_mb = _fi_ar_max_size_mb().get(tp_size)
+    from vllm.config.compilation import PassConfig
+
+    max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
     if not max_size_mb:
         return None
     element_size = torch.tensor([], dtype=dtype).element_size()
@@ -104,11 +94,46 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
         max_token_num=max_token_num,
         hidden_dim=hidden_size,
         dtype=hidden_states.dtype,
-        group=get_tp_group().device_group,
+        group=get_tp_group().cpu_group,
     )
     if workspace is None:
         return False, 0
+    # The token-count bound above uses the whole workspace budget, but a backend
+    # may use only a fraction of it per call (mnnvl rotates through three Lamport
+    # buffers). Ask the workspace so we don't admit tensors that the kernel will
+    # reject with "The buffer size in the given workspace is insufficient".
+    if not workspace.is_buffer_size_sufficient(
+        tp_size=tp_size,
+        num_tokens=num_tokens,
+        hidden_dim=hidden_size,
+        dtype=hidden_states.dtype,
+    ):
+        return False, 0
     return True, max_token_num
+
+
+def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_custom_all_reduce_enabled():
+        return False
+    if (
+        hidden_states.dim() != 2
+        or not hidden_states.is_contiguous()
+        or hidden_states.dtype not in _FI_SUPPORTED_DTYPES
+    ):
+        return False
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    if aiter_ar is None or aiter_ar.disabled:
+        return False
+    total_bytes = hidden_states.numel() * hidden_states.element_size()
+    if total_bytes > aiter_ar.effective_max_size():
+        return False
+    if not aiter_ar.should_custom_ar(hidden_states):
+        return False
+    return aiter_ar.use_1stage_fused_ar_rms(hidden_states)
 
 
 def fused_allreduce_gemma_rms_norm(
@@ -148,6 +173,17 @@ def fused_allreduce_gemma_rms_norm(
             norm_out=norm_out,
         )
         return norm_out, hidden_states
+
+    if _can_use_aiter_fused_ar_rms(hidden_states):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+            input_=hidden_states,
+            residual=residual,
+            weight=norm.weight,
+            epsilon=norm.variance_epsilon,
+            gemma_norm=True,
+        )
 
     # Fallback: explicit all-reduce + GemmaRMSNorm (matches the unfused model).
     reduced = tensor_model_parallel_all_reduce(hidden_states)

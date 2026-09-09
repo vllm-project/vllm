@@ -1,4 +1,5 @@
 include(FetchContent)
+include(CheckCXXCompilerFlag)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -15,6 +16,7 @@ endif()
 #
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
+set(ENABLE_ARM_I8MM $ENV{VLLM_CPU_ARM_I8MM})
 set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
@@ -96,12 +98,14 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
+    check_sysctl(hw.optional.arm.FEAT_I8MM ARM_I8MM_FOUND)
 else()
     find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+    find_isa(${CPUINFO} "i8mm" ARM_I8MM_FOUND) # Check for ARM I8MM support
     find_isa(${CPUINFO} "S390" S390_FOUND)
     find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
     find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
@@ -110,6 +114,11 @@ else()
     if (ENABLE_ARM_BF16)
         set(ARM_BF16_FOUND ON)
         message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
+    endif()
+    if (ENABLE_ARM_I8MM)
+        set(ARM_I8MM_FOUND ON)
+        message(STATUS
+            "ARM I8MM support enabled via VLLM_CPU_ARM_I8MM environment variable")
     endif()
     # Some kernels (e.g. Bianbu on Spacemit X100) do not report zvfbfmin
     # in /proc/cpuinfo despite hardware support. VLLM_CPU_RVV_BF16=1
@@ -126,6 +135,12 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
             CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3))
         message(FATAL_ERROR "X86 backend requires gcc/g++ >= 12.3")
     endif()
+    # Work around a GCC 15 optimizer crash in oneDNN (tree-ssa-pre pass).
+    # Keep this scoped to GCC 15+ so older toolchains are unaffected.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        list(APPEND CXX_COMPILE_FLAGS "-fno-tree-pre")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS "-mf16c")
     list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS})
     list(APPEND CXX_COMPILE_FLAGS_AVX2 ${CXX_COMPILE_FLAGS})
@@ -140,6 +155,24 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mamx-tile"
         "-mavx512bf16"
         "-mavx512vnni")
+    # Some packaged GCC 14 builds still do not accept -mamx-fp8, so gate on
+    # actual flag support rather than compiler version alone.
+    # Option to enable/disable AMX-FP8 support (default: ON)
+    option(ENABLE_AMX_FP8 "Enable AMX-FP8 support" ON)
+
+    if (ENABLE_AMX_FP8)
+        check_cxx_compiler_flag("-mamx-fp8" COMPILER_SUPPORTS_AMX_FP8_FLAG)
+        if (COMPILER_SUPPORTS_AMX_FP8_FLAG)
+            list(APPEND CXX_COMPILE_FLAGS_AVX512_AMX "-mamx-fp8")
+            set(AMX_FP8_SUPPORTED TRUE)
+        else()
+            set(AMX_FP8_SUPPORTED FALSE)
+            message(STATUS "AMX-FP8 disabled: compiler does not support -mamx-fp8 (compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+        endif()
+    else()
+        set(AMX_FP8_SUPPORTED FALSE)
+        message(STATUS "AMX-FP8 disabled by ENABLE_AMX_FP8=OFF")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
@@ -165,6 +198,11 @@ elseif (ASIMD_FOUND)
     else()
         message(WARNING "BF16 functionality is not available")
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+    endif()
+    if(ARM_I8MM_FOUND)
+        message(STATUS "I8MM extension detected")
+        string(APPEND MARCH_FLAGS "+i8mm")
+        add_compile_definitions(ARM_I8MM_SUPPORT)
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
 elseif (S390_FOUND)
@@ -244,7 +282,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND OR S390_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
@@ -332,7 +370,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             FetchContent_Declare(
                 oneDNN
                 GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-                GIT_TAG        v3.10
+                GIT_TAG        v3.13
                 GIT_PROGRESS   TRUE
                 GIT_SHALLOW    TRUE
             )
@@ -355,7 +393,23 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
 
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
-    FetchContent_MakeAvailable(oneDNN)
+
+    if(S390_FOUND)
+        FetchContent_GetProperties(oneDNN)
+        if(NOT onednn_POPULATED)
+            FetchContent_Populate(oneDNN)
+            # Patch s390x helpers.h: ALWAYS_INLINE on operator+= breaks C++20/GCC14
+            file(READ "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" _helpers_content)
+            string(REPLACE
+                "vec_type_t<T> &ALWAYS_INLINE operator+="
+                "ALWAYS_INLINE vec_type_t<T> &operator+="
+                _helpers_content "${_helpers_content}")
+            file(WRITE "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" "${_helpers_content}")
+            add_subdirectory("${onednn_SOURCE_DIR}" "${onednn_BINARY_DIR}")
+        endif()
+    else()
+        FetchContent_MakeAvailable(oneDNN)
+    endif()
     set(CMAKE_BUILD_TYPE ${VLLM_BUILD_TYPE})
     add_library(dnnl_ext OBJECT "csrc/cpu/dnnl_helper.cpp")
     target_include_directories(
@@ -432,6 +486,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
@@ -442,13 +497,23 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
         ${VLLM_EXT_SRC})
 endif()
 
+if (S390_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
         "csrc/cpu/cpu_tanhf_neon.hpp"
-        "csrc/cpu/cpu_fused_moe.cpp"
         ${VLLM_EXT_SRC})
+    if (ARM_BF16_FOUND)
+        if (ARM_I8MM_FOUND)
+            set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
+        endif()
+    endif()
 endif()
 
 if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	
@@ -479,7 +544,11 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
-        "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/bmm.cpp"
+        "csrc/cpu/sgl-kernels/decode.cpp"
+        "csrc/cpu/sgl-kernels/extend.cpp"
+        "csrc/cpu/sgl-kernels/mla_cache.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"
@@ -501,6 +570,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
@@ -536,6 +606,10 @@ if (ENABLE_X86_ISA)
 
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+    if (AMX_FP8_SUPPORTED)
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
+        message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
+    endif()
 
     # AVX512F 
     define_extension_target(

@@ -101,6 +101,7 @@ pub struct RequestFuncOutput {
     pub prompt_len: usize,
     pub error: String,
     pub start_time: f64,
+    pub num_input_sequences: usize,
 }
 
 impl Default for RequestFuncOutput {
@@ -116,6 +117,7 @@ impl Default for RequestFuncOutput {
             prompt_len: 0,
             error: String::new(),
             start_time: 0.0,
+            num_input_sequences: 1,
         }
     }
 }

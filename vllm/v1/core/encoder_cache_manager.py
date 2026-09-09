@@ -5,6 +5,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from vllm.config import VllmConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -64,6 +65,12 @@ class EncoderCacheManager:
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
+
+    @classmethod
+    def create_manager(
+        cls, *, cache_size: int, vllm_config: "VllmConfig"
+    ) -> "EncoderCacheManager":
+        return cls(cache_size=cache_size)
 
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
@@ -235,6 +242,17 @@ class EncoderCacheManager:
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
+        # `cached` counts referencing requests, not positions, so one request
+        # that repeats an item (an image carried across conversation turns) has
+        # a single reference covering every occurrence. Hold it until the last
+        # occurrence is freed: dropping it at the first makes the entry
+        # evictable while the request still needs it, and the encoder then
+        # recomputes an item it already has.
+        if any(
+            request.mm_features[other_id].identifier == mm_hash
+            for other_id in self.request_cached_ids.get(req_id, ())
+        ):
+            return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
             num_encoder_embeds = request.get_num_encoder_embeds(input_id)
@@ -262,7 +280,9 @@ class EncoderCacheManager:
             encoder outputs can be removed from their caches. The internal
             list is cleared after this call.
         """
-        freed = self.freed
+        # An entry evicted early in the scheduling pass can be allocated again
+        # later in the same pass. Keep its worker-side tensor in that case.
+        freed = [mm_hash for mm_hash in self.freed if mm_hash not in self.cached]
         self.freed = []
         return freed
 
