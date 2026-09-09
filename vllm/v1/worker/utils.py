@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -30,8 +30,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -363,17 +361,21 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    host_allocator: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
-    groups overlay each other, so tensors may address the same bytes.
+    groups overlay each other, so tensors may address the same bytes. Host-resident
+    tensors share a second backing, taken from ``host_allocator`` when given.
+    Layers whose spec has no per-layer view map to their backing tensor instead.
     """
-    if not kv_cache_config.kv_cache_tensors:
+    tensors = kv_cache_config.kv_cache_tensors
+    if not tensors:
         return {}
 
-    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+    sizes = {tensor.size for tensor in tensors if not tensor.host_resident}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
     # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
@@ -390,10 +392,21 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    backings = {False: torch.zeros(buf_size, dtype=torch.int8, device=device)}
+
+    host_sizes = {tensor.size for tensor in tensors if tensor.host_resident}
+    assert len(host_sizes) <= 1, "Host KV cache tensors must share one backing."
+    if host_sizes:
+        host_size = host_sizes.pop()
+        backings[True] = (
+            host_allocator(host_size)
+            if host_allocator is not None
+            else torch.zeros(host_size, dtype=torch.int8, device="cpu")
+        )
 
     kv_caches: dict[str, torch.Tensor] = {}
-    for tensor in kv_cache_config.kv_cache_tensors:
+    for tensor in tensors:
+        buf = backings[tensor.host_resident]
         layer_name = tensor.layers[0]
         group_id, group = next(
             (group_id, group)
@@ -403,8 +416,11 @@ def allocate_kv_cache(
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]
+        if not spec.has_layer_views:
+            kv_caches.update((name, buf) for name in tensor.layers)
+            continue
 
-        num_blocks = kv_cache_config.num_blocks
+        num_blocks = kv_cache_config.num_blocks_of(tensor)
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
@@ -449,7 +465,10 @@ def prepare_kernel_block_sizes(
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             continue
-        if isinstance(kv_cache_spec, AttentionSpec):
+        if not kv_cache_spec.has_layer_views:
+            # Raw storage groups have no backend to split their blocks for.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
@@ -459,8 +478,6 @@ def prepare_kernel_block_sizes(
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
-            kernel_block_sizes.append(kv_cache_spec.block_size)
-        elif isinstance(kv_cache_spec, (HiSparseHotSpec, HiSparseResidentSpec)):
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
             raise NotImplementedError(

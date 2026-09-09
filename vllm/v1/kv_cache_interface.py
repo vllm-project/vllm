@@ -168,6 +168,16 @@ class KVCacheSpec:
         return True
 
     @property
+    def has_layer_views(self) -> bool:
+        """Whether each layer's cache is a ``[B, H, N, C]`` view of its tensor.
+
+        Specs without a per-layer shape keep the raw backing tensor and lay it
+        out themselves. They also have no attention module of their own, so
+        they take no part in attention-backend or kernel-block selection.
+        """
+        return True
+
+    @property
     def num_heads(self) -> int:
         raise NotImplementedError
 
@@ -197,10 +207,6 @@ class KVCacheSpec:
         if self.tokens_per_state > 0:
             return kernel_block_size // self.tokens_per_state
         return 1
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return 128
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -405,12 +411,12 @@ class HiSparseHotSpec(KVCacheSpec):
         return False
 
     @property
-    def page_size_bytes(self) -> int:
-        return self.page_size
+    def has_layer_views(self) -> bool:
+        return False
 
     @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
+    def page_size_bytes(self) -> int:
+        return self.page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         return self.blocks_per_request * self.page_size
@@ -427,6 +433,10 @@ class HiSparseResidentSpec(KVCacheSpec):
 
     @property
     def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def has_layer_views(self) -> bool:
         return False
 
     @property
@@ -847,10 +857,6 @@ class CircularBufferSpec(AttentionSpec):
     reads the open group's committed keys from the ring.
     """
 
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
-
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # The ring occupies one block per request for its whole lifetime.
         del vllm_config
@@ -997,10 +1003,6 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -1175,10 +1177,6 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return next(iter(self.kv_cache_specs.values())).block_table_token_alignment
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
@@ -1475,6 +1473,13 @@ class KVCacheConfig:
             for group_id, group in enumerate(self.kv_cache_groups)
             if group.host_resident
         )
+
+    def num_blocks_of(self, tensor: KVCacheTensor) -> int:
+        """Number of blocks addressable by the pool backing ``tensor``."""
+        if not tensor.host_resident:
+            return self.num_blocks
+        assert self.hisparse_host_num_blocks is not None
+        return self.hisparse_host_num_blocks
 
     @property
     def has_mamba_layers(self) -> bool:

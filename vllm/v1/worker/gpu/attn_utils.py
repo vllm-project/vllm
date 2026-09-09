@@ -15,11 +15,9 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.hisparse.worker import init_hisparse_kv_cache
+from vllm.v1.hisparse.binding import HiSparseHostAllocator, bind_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
@@ -101,10 +99,8 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if isinstance(
-            kv_cache_group_spec.kv_cache_spec,
-            (HiSparseHotSpec, HiSparseResidentSpec),
-        ):
+        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+            # Raw storage groups are laid out by their owner, not by a backend.
             attn_groups.append([])
             continue
         if active_layer_names is not None:
@@ -232,23 +228,29 @@ def init_kv_cache(
     block_tables: "BlockTables | None" = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
+    host_allocator = None
+    if vllm_config.attention_config.hisparse_config is not None:
+        host_allocator = HiSparseHostAllocator(kv_cache_config)
     with allocation_context:
-        if vllm_config.attention_config.hisparse_config is not None:
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+            host_allocator=host_allocator,
+        )
+        if host_allocator is not None:
             assert block_tables is not None
-            kv_caches = init_hisparse_kv_cache(
-                kv_cache_config,
-                device,
-                kernel_block_sizes,
-                vllm_config,
-                forward_context,
-                block_tables,
-            )
-        else:
-            kv_caches = allocate_kv_cache(
-                kv_cache_config,
-                device,
-                vllm_config.cache_config.get_resolved_kv_cache_layout(),
-                kernel_block_sizes,
+            bind_hisparse_kv_caches(
+                forward_context=forward_context,
+                kv_cache_config=kv_cache_config,
+                kv_caches=kv_caches,
+                block_tables=block_tables,
+                pinned_host_pools=host_allocator.registered_pools,
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
             )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
