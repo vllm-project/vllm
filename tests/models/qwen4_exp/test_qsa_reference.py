@@ -17,6 +17,7 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.flashinfer import has_flashinfer
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -1039,7 +1040,21 @@ def test_qsa_sparse_paged_attention_correctness(
 
 @requires_qsa_kernels
 @pytest.mark.parametrize("decode_query_len", [1, 2, 3, 4])
-def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) -> None:
+@pytest.mark.parametrize(
+    "use_flashinfer_topk",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_flashinfer(), reason="FlashInfer is not installed"
+            ),
+        ),
+    ],
+)
+def test_qsa_split_selection_correctness(
+    workspace_init, decode_query_len: int, use_flashinfer_topk: bool
+) -> None:
     query_lens = [decode_query_len, decode_query_len, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     token_topk, compress_ratio = 2048, 4
@@ -1085,6 +1100,7 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         compress_ratio,
         decode_query_len,
         block_indices[decode_slice],
+        use_flashinfer_topk,
     )
     prefill_slice = slice(num_decode_tokens, rows)
     qsa_indexer_ops.qsa_select_paged_prefill(
@@ -1098,6 +1114,7 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
         query_lens[-1],
         block_indices[prefill_slice],
         max_seq_len=sequence_lengths.max().item(),
+        use_flashinfer_topk=use_flashinfer_topk,
     )
     # +1: the packed trailing count column (never a token index; excluded
     # from the comparison).

@@ -13,9 +13,13 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.model_executor.layers.sparse_attn_topk import (
+    flashinfer_tie_break_value,
+)
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
+from vllm.utils.flashinfer import has_flashinfer
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -117,6 +121,16 @@ class QSAIndexer(nn.Module):
         self.index_head_dim = int(config.indexer_head_dim)
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
+        kernel_config = vllm_config.kernel_config
+        self.use_flashinfer_topk = kernel_config.dsa_topk_backend == "flashinfer"
+        self.flashinfer_topk_tie_break = flashinfer_tie_break_value(
+            kernel_config.dsa_topk_tie_break
+        )
+        if self.use_flashinfer_topk and not has_flashinfer():
+            raise ValueError(
+                "The FlashInfer DSA TopK backend requires the flashinfer package "
+                "and either nvcc or FlashInfer cubins."
+            )
         self.rotary_emb = rotary_emb
         self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
@@ -424,6 +438,8 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                self.use_flashinfer_topk,
+                self.flashinfer_topk_tie_break,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
@@ -441,6 +457,8 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                self.use_flashinfer_topk,
+                self.flashinfer_topk_tie_break,
             )
         expand_qsa_block_indices(
             block_indices,
