@@ -165,12 +165,11 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
-            block_pool_id=None,
+            host_resident=True,
         ),
         KVCacheGroupSpec(
             ["indexer"],
             source_spec,
-            block_pool_id=0,
             enable_prefix_caching=True,
             enable_kv_transfer=transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_INDEXER,
@@ -183,7 +182,6 @@ def make_hisparse_kv_cache_config(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
             ),
-            block_pool_id=0,
             enable_prefix_caching=False,
             enable_kv_transfer=transfer_device_cache,
         )
@@ -196,7 +194,6 @@ def make_hisparse_kv_cache_config(
                 page_size=HISPARSE_BLOCK_SIZE * 4,
                 blocks_per_request=2,
             ),
-            block_pool_id=0,
             enable_prefix_caching=False,
             enable_kv_transfer=False,
         )
@@ -509,6 +506,25 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
     assert first[0].transfer_id != second[0].transfer_id
 
 
+def test_hisparse_free_blocks_preserves_host_and_device_ownership():
+    """Equal numeric block IDs must still be freed to their respective pools."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    host_pool = manager.hisparse_coordinator.get_host_block_pool()
+    assert host_pool is not None
+    device_pool = manager.block_pool
+    host_free = host_pool.get_num_free_blocks()
+    device_free = device_pool.get_num_free_blocks()
+    host_block = host_pool.get_new_blocks(1)[0]
+    device_block = device_pool.get_new_blocks(1)[0]
+    assert host_block.block_id == device_block.block_id
+
+    manager.free_blocks([host_block, device_block])
+
+    assert host_block.ref_cnt == device_block.ref_cnt == 0
+    assert host_pool.get_num_free_blocks() == host_free
+    assert device_pool.get_num_free_blocks() == device_free
+
+
 def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     """Host-only copy-on-write work must reach the worker copy queue."""
     manager = make_hisparse_kv_cache_manager(16, 16)
@@ -525,7 +541,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 
     assert new_blocks and new_block_ids == []
     assert len(copies) == 1
-    assert copies[0].block_pool_id is None
+    assert copies[0].host_resident
     assert copies[0].src_block_id == source_block.block_id
     assert copies[0].dst_block_id == new_blocks[0].block_id
     assert retained == [source_block, new_blocks[0]]
@@ -692,7 +708,7 @@ def test_hisparse_shadow_pages_free_under_pool_pressure():
     assert coordinator.shadow_pages
     pool = manager.block_pool
     free_before = pool.get_num_free_blocks()
-    reclaimed = coordinator.reclaim_resident_blocks(0, 2)
+    reclaimed = coordinator.reclaim_resident_blocks(2)
     assert reclaimed >= 2
     assert pool.get_num_free_blocks() == free_before + reclaimed
     assert not coordinator.spills_to_send

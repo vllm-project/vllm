@@ -1329,11 +1329,10 @@ class NixlBaseConnectorWorker:
                 // self._physical_blocks_per_logical_kv_block
             )
             group = self.kv_cache_config.transfer_groups[group_index]
-            if group.block_pool_id is None:
+            if group.host_resident:
                 logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
                 assert logical_num_blocks is not None
             else:
-                assert group.block_pool_id == 0
                 logical_num_blocks = self.kv_cache_config.num_blocks
             group_id = group_index
             num_blocks = (
@@ -1350,7 +1349,7 @@ class NixlBaseConnectorWorker:
             )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            is_host_resident = group.block_pool_id is None
+            is_host_resident = group.host_resident
             if cache.device.type == "cpu":
                 mem_type = "DRAM"
                 region_device_id = 0

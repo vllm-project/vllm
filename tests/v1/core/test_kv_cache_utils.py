@@ -90,20 +90,16 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.mark.parametrize(
-    ("group_pool", "tensor_pool", "host_capacity", "error"),
+    ("group_host", "tensor_host", "host_capacity", "error"),
     [
-        (-1, 0, 4, "Invalid group"),
-        (1, 0, 4, "Invalid group"),
-        (0, -1, 4, "Invalid tensor"),
-        (0, 1, 4, "Invalid tensor"),
-        (0, None, 4, "Tensor and cache group"),
-        (None, 0, 4, "Tensor and cache group"),
-        (None, None, None, "Invalid group"),
-        (0, None, None, "Invalid tensor"),
+        (False, True, 4, "Tensor and cache group"),
+        (True, False, 4, "Tensor and cache group"),
+        (True, True, None, "Host cache groups require"),
+        (False, True, None, "Host cache tensors require"),
     ],
 )
-def test_kv_cache_config_rejects_inconsistent_pool_references(
-    group_pool, tensor_pool, host_capacity, error
+def test_kv_cache_config_rejects_inconsistent_host_placement(
+    group_host, tensor_host, host_capacity, error
 ):
     """Allocation and copy routing must agree, with capacity for host references."""
     spec = MLAAttentionSpec(
@@ -114,7 +110,7 @@ def test_kv_cache_config_rejects_inconsistent_pool_references(
             num_blocks=4,
             hisparse_host_num_blocks=host_capacity,
             kv_cache_groups=[
-                KVCacheGroupSpec(["layer"], spec, block_pool_id=group_pool)
+                KVCacheGroupSpec(["layer"], spec, host_resident=group_host)
             ],
             kv_cache_tensors=[
                 KVCacheTensor(
@@ -122,7 +118,7 @@ def test_kv_cache_config_rejects_inconsistent_pool_references(
                     layers=["layer"],
                     layer_stride=4 * spec.page_size_bytes,
                     block_stride=spec.page_size_bytes,
-                    block_pool_id=tensor_pool,
+                    host_resident=tensor_host,
                 )
             ],
         )

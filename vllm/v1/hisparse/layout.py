@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -138,7 +138,6 @@ def create_hisparse_layout(
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
-        block_pool_id=0,
         enable_prefix_caching=True,
         enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
@@ -174,7 +173,6 @@ def create_hisparse_layout(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                block_pool_id=0,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
@@ -187,7 +185,6 @@ def create_hisparse_layout(
                     page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
                 ),
-                block_pool_id=0,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
@@ -213,10 +210,10 @@ def create_hisparse_layout(
     source_group = KVCacheGroupSpec(
         list(source_specs),
         source_group_spec,
-        block_pool_id=None,
+        host_resident=True,
         enable_kv_transfer=True,
     )
-    regular_groups = [replace(group, block_pool_id=0) for group in groups[1:]]
+    regular_groups = groups[1:]
     gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
 
     host_num_blocks = host_budget // sum(

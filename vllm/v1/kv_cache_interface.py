@@ -1342,7 +1342,7 @@ class KVCacheTensor:
     layer_stride: int
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
-    block_pool_id: int | None = 0
+    host_resident: bool = False
 
 
 class KVCacheGroupRole(str, Enum):
@@ -1363,11 +1363,8 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
-    # Physical block-pool domain used by this group. Groups in the same domain
-    # share block IDs and may overlap in a packed HMA layout. Groups in
-    # different domains have independent block-ID spaces. None identifies
-    # the dedicated HiSparse host pool.
-    block_pool_id: int | None = 0
+    # Host groups use the dedicated HiSparse pool; others share the device pool.
+    host_resident: bool = False
     # Whether this group participates in persistent prefix-cache lookup.
     # Ephemeral accelerator-side replicas set this to False; their source
     # group remains authoritative and they are rebuilt when a prefix is reused.
@@ -1447,25 +1444,26 @@ class KVCacheConfig:
             self.hisparse_host_num_blocks < 0
         ):
             raise ValueError("HiSparse host block-pool size must be non-negative.")
-        valid_pools = (0, None) if self.hisparse_host_num_blocks is not None else (0,)
-        layer_pools: dict[str, int | None] = {}
+        layer_placement: dict[str, bool] = {}
         for group in self.kv_cache_groups:
-            if group.block_pool_id not in valid_pools:
-                raise ValueError(f"Invalid group block_pool_id={group.block_pool_id}.")
+            if group.host_resident and self.hisparse_host_num_blocks is None:
+                raise ValueError("Host cache groups require configured host capacity.")
             for name in group.layer_names:
-                if name in layer_pools and layer_pools[name] != group.block_pool_id:
-                    raise ValueError(f"Conflicting block pools for layer {name}.")
-                layer_pools[name] = group.block_pool_id
+                if (
+                    name in layer_placement
+                    and layer_placement[name] != group.host_resident
+                ):
+                    raise ValueError(f"Conflicting placement for layer {name}.")
+                layer_placement[name] = group.host_resident
         for tensor in self.kv_cache_tensors:
-            if tensor.block_pool_id not in valid_pools:
-                raise ValueError(
-                    f"Invalid tensor block_pool_id={tensor.block_pool_id}."
-                )
+            if tensor.host_resident and self.hisparse_host_num_blocks is None:
+                raise ValueError("Host cache tensors require configured host capacity.")
             if any(
-                name not in layer_pools or layer_pools[name] != tensor.block_pool_id
+                name not in layer_placement
+                or layer_placement[name] != tensor.host_resident
                 for name in tensor.layers
             ):
-                raise ValueError("Tensor and cache group block pools must match.")
+                raise ValueError("Tensor and cache group placement must match.")
         if len(self.host_group_ids) > 1:
             raise ValueError("Only one host cache group is supported.")
 
@@ -1474,7 +1472,7 @@ class KVCacheConfig:
         return tuple(
             group_id
             for group_id, group in enumerate(self.kv_cache_groups)
-            if group.block_pool_id is None
+            if group.host_resident
         )
 
     @property
@@ -1490,7 +1488,7 @@ class KVCacheConfig:
         """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
-            if group.block_pool_id is None:
+            if group.host_resident:
                 continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)

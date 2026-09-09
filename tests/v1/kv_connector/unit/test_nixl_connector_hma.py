@@ -1241,8 +1241,8 @@ def _make_fake_kv_cache_manager():
     manager.coordinator = MagicMock()
     manager.kv_cache_config = MagicMock()
     manager.kv_cache_config.kv_cache_groups = (
-        MagicMock(block_pool_id=0),
-        MagicMock(block_pool_id=1),
+        MagicMock(host_resident=False),
+        MagicMock(host_resident=False),
     )
     manager.coordinator.single_type_managers = (
         _FakeSingleTypeManager(True, 16, [10, 11, 12, 13, 14, 15]),  # attention
@@ -1852,7 +1852,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
                 layers=["mla.host"],
                 layer_stride=host_num_blocks * spec.page_size_bytes,
                 block_stride=spec.page_size_bytes,
-                block_pool_id=None,
+                host_resident=True,
             ),
             KVCacheTensor(
                 size=gpu_num_blocks * spec.page_size_bytes,
@@ -1865,7 +1865,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
             KVCacheGroupSpec(
                 ["mla.host"],
                 spec,
-                block_pool_id=None,
+                host_resident=True,
             ),
             KVCacheGroupSpec(["mla.device"], spec),
         ],

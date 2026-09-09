@@ -91,7 +91,6 @@ class HiSparseCoordinator:
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
-            block_pool_id=None,
         )
 
     def __init__(
@@ -105,7 +104,6 @@ class HiSparseCoordinator:
 
         resident_managers: list[HiSparseResidentManager] = []
         hot_managers: list[HiSparseHotManager] = []
-        hisparse_pool_ids: set[int] = set()
         for group, manager in zip(groups, managers):
             if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
                 if not isinstance(manager, HiSparseResidentManager):
@@ -113,23 +111,15 @@ class HiSparseCoordinator:
                         "HiSparse resident specs require resident cache managers."
                     )
                 resident_managers.append(manager)
-                assert group.block_pool_id is not None
-                hisparse_pool_ids.add(group.block_pool_id)
+                assert not group.host_resident
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
-                assert group.block_pool_id is not None
-                hisparse_pool_ids.add(group.block_pool_id)
+                assert not group.host_resident
 
-        if len(hisparse_pool_ids) > 1:
-            raise ValueError(
-                "HiSparse resident and hot groups must share one GPU block pool."
-            )
-        self.block_pool_id = next(iter(hisparse_pool_ids), None)
         self.resident_managers = tuple(resident_managers)
         self.hot_managers = tuple(hot_managers)
         self.num_growing_managers = sum(
-            group.block_pool_id == self.block_pool_id
-            and not isinstance(manager, HiSparseHotManager)
+            not group.host_resident and not isinstance(manager, HiSparseHotManager)
             for group, manager in zip(groups, managers)
         )
         self.host_manager: SingleTypeKVCacheManager | None = None
@@ -289,7 +279,6 @@ class HiSparseCoordinator:
         pool = self.get_host_block_pool()
         return (
             pool is not None
-            and block.pool_id is None
             and 0 <= block.block_id < len(pool.blocks)
             and pool.blocks[block.block_id] is block
         )
@@ -356,13 +345,9 @@ class HiSparseCoordinator:
         pool = self.get_host_block_pool()
         return [] if pool is None else pool.take_events()
 
-    def reclaim_resident_blocks(self, block_pool_id: int, num_blocks: int) -> int:
+    def reclaim_resident_blocks(self, num_blocks: int) -> int:
         """Reclaim host-valid pages and enqueue copies for GPU-only pages."""
-        if (
-            block_pool_id != self.block_pool_id
-            or not self.resident_managers
-            or num_blocks <= 0
-        ):
+        if not self.resident_managers or num_blocks <= 0:
             return 0
         # Cheapest tier first: shadow pages are clean by construction (their
         # host copies were published), so unpinning them frees blocks with no

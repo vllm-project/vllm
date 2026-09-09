@@ -189,8 +189,6 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
-    # Device block-pool domain, or None for a dedicated non-device owner.
-    pool_id: int | None = 0
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -234,7 +232,7 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
-    block_pool_id: int | None = 0
+    host_resident: bool = False
 
 
 class FreeKVCacheBlockQueue:
@@ -1075,10 +1073,9 @@ def get_max_concurrency_for_kv_cache_config(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-        if group.block_pool_id is None:
+        if group.host_resident:
             host_blocks_per_request += required
         else:
-            assert group.block_pool_id == 0
             blocks_per_request += required
     limits = [kv_cache_config.num_blocks / blocks_per_request]
     if host_blocks_per_request:
@@ -1641,7 +1638,7 @@ def _build_kv_cache_tensors(
     layout: KVCacheLayout,
     bytes_per_block: int,
     *,
-    block_pool_id: int | None = 0,
+    host_resident: bool = False,
 ) -> list[KVCacheTensor]:
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
     tensors: list[KVCacheTensor] = []
@@ -1681,7 +1678,7 @@ def _build_kv_cache_tensors(
                     layer_stride=layer_stride,
                     block_stride=block_stride,
                     offset=offset,
-                    block_pool_id=block_pool_id,
+                    host_resident=host_resident,
                 )
             )
             byte_offset += len(layer_names) * spec.page_size_bytes
@@ -1822,7 +1819,7 @@ def get_kv_cache_config_from_groups(
             host_size,
             layout,
             host_bytes_per_block,
-            block_pool_id=None,
+            host_resident=True,
         )
         logger.info_once(
             "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "

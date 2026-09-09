@@ -4094,7 +4094,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
     source_group = KVCacheGroupSpec(
         ["source"],
         source_spec,
-        block_pool_id=None,
+        host_resident=True,
     )
     indexer_group = KVCacheGroupSpec(
         ["indexer"],
@@ -4110,7 +4110,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
                 layers=["source"],
                 layer_stride=host_num_blocks * page_size,
                 block_stride=page_size,
-                block_pool_id=None,
+                host_resident=True,
             ),
             KVCacheTensor(
                 size=gpu_num_blocks * page_size,

@@ -341,7 +341,7 @@ def test_hisparse_offloads_only_indexer_group():
     source = KVCacheGroupSpec(
         ["source"],
         _full_attention_spec(),
-        block_pool_id=None,
+        host_resident=True,
     )
     indexer = KVCacheGroupSpec(
         ["indexer"],

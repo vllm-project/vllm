@@ -94,7 +94,7 @@ class HiSparseConnectorScheduler:
         host_block_copies = tuple(
             copy
             for copy in scheduler_output.kv_cache_block_copies or ()
-            if copy.block_pool_id is None
+            if copy.host_resident
         )
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None

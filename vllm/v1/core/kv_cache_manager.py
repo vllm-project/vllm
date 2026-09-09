@@ -448,7 +448,7 @@ class KVCacheManager:
                 return False
             # Reclamation can require a hot buffer, so recompute demand before
             # admitting the request against the newly available device blocks.
-            hisparse.reclaim_resident_blocks(0, shortage)
+            hisparse.reclaim_resident_blocks(shortage)
         return False
 
     def allocate_slots(
@@ -965,7 +965,7 @@ class KVCacheManager:
             self.coordinator.single_type_managers,
         ):
             new_ids = mgr.take_new_block_ids()
-            if group.block_pool_id is not None:
+            if not group.host_resident:
                 ids.extend(new_ids)
         return ids
 
@@ -1001,22 +1001,22 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        pending_copies: list[tuple[int | None, KVCacheBlock, KVCacheBlock]] = []
+        pending_copies: list[tuple[bool, KVCacheBlock, KVCacheBlock]] = []
         for group, mgr in zip(
             self.kv_cache_config.kv_cache_groups,
             self.coordinator.single_type_managers,
         ):
             pending_copies.extend(
-                (group.block_pool_id, source, target)
+                (group.host_resident, source, target)
                 for source, target in mgr.take_pending_cow_copies()
             )
         copies = [
             KVCacheBlockCopy(
                 src_block_id=source_block.block_id,
                 dst_block_id=cow_block.block_id,
-                block_pool_id=pool_id,
+                host_resident=host_resident,
             )
-            for pool_id, source_block, cow_block in pending_copies
+            for host_resident, source_block, cow_block in pending_copies
         ]
         retained_blocks = [
             block

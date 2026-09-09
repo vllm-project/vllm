@@ -728,7 +728,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for cache_group, attn_groups in zip(
                     self.kv_cache_config.kv_cache_groups, self.attn_groups
                 )
-                if cache_group.block_pool_id is not None
+                if not cache_group.host_resident
                 for attn_group in attn_groups
             ),
             kernel_block_sizes=self.kernel_block_sizes,
@@ -1168,7 +1168,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 [
                     copy
                     for copy in scheduler_output.kv_cache_block_copies
-                    if copy.block_pool_id is not None
+                    if not copy.host_resident
                 ],
             )
 

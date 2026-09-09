@@ -1971,12 +1971,11 @@ class MooncakeStoreWorker:
             block_lens: list[int] = []
             for layer_name, value in group_caches:
                 cache = _repr_tensor(value)
-                is_host_resident = group.block_pool_id is None
+                is_host_resident = group.host_resident
                 if is_host_resident:
                     num_blocks = self._kv_cache_config.hisparse_host_num_blocks
                     assert num_blocks is not None
                 else:
-                    assert group.block_pool_id == 0
                     num_blocks = self._kv_cache_config.num_blocks
                 cache = group_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
