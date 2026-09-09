@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_attention_helpers import (
     compute_tile_loop_bounds,
 )
@@ -898,3 +899,76 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+def _patch_arch(
+    monkeypatch: pytest.MonkeyPatch,
+    gfx11: bool = False,
+    gfx1151: bool = False,
+) -> None:
+    """Pretend to be a given AMD architecture, so these tests need no GPU."""
+    monkeypatch.setattr(triton_ua, "_ON_GFX11", gfx11)
+    monkeypatch.setattr(triton_ua, "_ON_GFX1151", gfx1151)
+
+
+@pytest.mark.parametrize("is_prefill", [True, False])
+@pytest.mark.parametrize("head_size", [64, 80, 128, 256, 512])
+@pytest.mark.parametrize("block_size", [16, 32, 1056])
+def test_get_tile_size_off_gfx11_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    is_prefill: bool,
+    head_size: int,
+    block_size: int,
+) -> None:
+    """Off gfx11 the tile selection must match the pre-existing behaviour."""
+    _patch_arch(monkeypatch)
+    tile = triton_ua._get_tile_size(
+        head_size, -1, element_size=2, is_prefill=is_prefill, block_size=block_size
+    )
+    assert tile == (32 if is_prefill else 16)
+
+
+@pytest.mark.parametrize("head_size", [128, 256, 512])
+@pytest.mark.parametrize("block_size", [16, 32, 1056])
+def test_get_tile_size_gfx11_fits_lds(
+    monkeypatch: pytest.MonkeyPatch, head_size: int, block_size: int
+) -> None:
+    """One stage of K+V tiles must fit the 64KB gfx11 LDS budget.
+
+    Regression guard for ``OutOfResources: shared memory``: a KV cache
+    ``block_size`` of 1056 rounds up to a 2048-deep tile, which overflows by
+    a wide margin at every head size.
+    """
+    _patch_arch(monkeypatch, gfx11=True)
+    tile = triton_ua._get_tile_size(
+        head_size, -1, element_size=2, is_prefill=False, block_size=block_size
+    )
+    assert tile & (tile - 1) == 0, "AMD Triton requires a power-of-2 TILE_SIZE"
+    assert 2 * tile * head_size * 2 <= triton_ua._GFX11_LDS_BUDGET
+
+
+def test_get_tile_size_gfx11_preserves_gemma3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemma3's decode tile must survive the gfx11 power-of-2 rewrite."""
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=True)
+    for head_size in (128, 256):
+        tile = triton_ua._get_tile_size(
+            head_size, 1024, element_size=2, is_prefill=False, block_size=16
+        )
+        assert tile == 32
+
+
+def test_get_tile_size_gfx11_matches_block_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tile must match the KV block, or every load straddles two blocks.
+
+    A deeper tile than ``block_size`` spans blocks that are not contiguous in
+    the paged cache; on Qwen3-8B at an 8k prefill that cost 21% of TTFT.
+    """
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=True)
+    for head_size in (80, 128, 256):
+        for is_prefill in (True, False):
+            tile = triton_ua._get_tile_size(
+                head_size, -1, element_size=2, is_prefill=is_prefill, block_size=16
+            )
+            assert tile == 16

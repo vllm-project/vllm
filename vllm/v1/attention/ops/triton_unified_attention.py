@@ -30,6 +30,12 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX11, _ON_GFX1151
+else:
+    _ON_GFX11 = False
+    _ON_GFX1151 = False
+
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -786,13 +792,65 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+# gfx11 exposes 64KB of LDS per workgroup.
+_GFX11_LDS_BUDGET = 65536
+
+
+def _gfx11_tile_size(
+    head_size: int,
+    sliding_window: int,
+    element_size: int,
+    block_size: int,
+) -> int:
+    """Select the KV tile size on gfx11.
+
+    Match the tile to the KV cache block size. A tile deeper than the block
+    straddles two blocks, which are not contiguous in the paged cache, so
+    every tile load turns into a scatter; on Qwen3-8B at an 8k prefill a
+    32-deep tile over 16-token blocks costs 21% of end-to-end TTFT against
+    a matched tile. Gemma3 keeps its tuned decode tile of 32.
+
+    One software-pipeline stage holds a K and a V tile of
+    ``tile_size * head_size * element_size`` bytes each, so the tile is then
+    shrunk until that pair fits the LDS budget. Without it Triton aborts
+    engine startup with ``OutOfResources: shared memory`` — a ``block_size``
+    of 1056 rounds up to a 2048-deep tile, which overflows at every head size.
+
+    Args:
+        head_size: Attention head dimension.
+        sliding_window: Window size, used to recognise Gemma3.
+        element_size: Bytes per KV element.
+        block_size: KV cache block size.
+
+    Returns:
+        A power-of-2 tile size that fits the budget.
+    """
+    # Note: tile size must be at least 32 for fp8 (element_size == 1).
+    min_tile = 16 if element_size >= 2 else 32
+
+    if _is_gemma3_attention(head_size, sliding_window):
+        tile_size = 32
+    else:
+        tile_size = triton.next_power_of_2(block_size)
+
+    max_tile = _GFX11_LDS_BUDGET // (2 * head_size * element_size)
+    while tile_size > min_tile and tile_size > max_tile:
+        tile_size //= 2
+
+    return tile_size
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
     is_prefill: bool,
+    block_size: int,
 ) -> int:
     """Select tile size with Gemma3-specific optimization."""
+    if _ON_GFX11:
+        return _gfx11_tile_size(head_size, sliding_window, element_size, block_size)
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
@@ -981,10 +1039,18 @@ def unified_attention(
         chunk_lookback = -1
 
     TILE_SIZE_PREFILL = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=True
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_prefill=True,
+        block_size=block_size,
     )
     TILE_SIZE_DECODE = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=False
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_prefill=False,
+        block_size=block_size,
     )
 
     # Wider KV tile for the tuned large-head path (see above). Only the 2D
