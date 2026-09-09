@@ -5,7 +5,11 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.multimodal.parse import ImageProcessorItems, VideoProcessorItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataParser,
+    VideoProcessorItems,
+)
 
 H, W = 480, 640
 
@@ -49,3 +53,18 @@ def test_frame_size_hwc_chw(frame):
     items = VideoProcessorItems([[frame]])
 
     assert items.get_frame_size(0) == (W, H)
+
+
+@pytest.mark.parametrize(
+    "modality,processor_cls",
+    [
+        ("image", ImageProcessorItems),
+        ("video", VideoProcessorItems),
+    ],
+)
+def test_parse_mm_data_accepts_none_cached_item(modality, processor_cls):
+    mm_items = MultiModalDataParser().parse_mm_data({modality: [None]})
+    items = mm_items[modality]
+    assert isinstance(items, processor_cls)
+    assert len(items) == 1
+    assert items.get(0) is None

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
@@ -52,6 +52,21 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+_ST_POOLING_MODULE_TYPES = {
+    "sentence_transformers.models.Pooling",
+    "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+}
+_ST_NORMALIZE_MODULE_TYPES = {
+    "sentence_transformers.models.Normalize",
+    "sentence_transformers.base.modules.normalize.Normalize",
+    "sentence_transformers.sentence_transformer.modules.normalize.Normalize",
+}
+_DENSE_MODULE_TYPES = {
+    "sentence_transformers.models.Dense",
+    "sentence_transformers.base.modules.dense.Dense",
+    "pylate.models.Dense.Dense",
+}
+
 if Version(version("transformers")) < Version("5.0.0"):
     raise ImportError(
         "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
@@ -71,9 +86,8 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
-    arctic="ArcticConfig",
+    axk1="AXK1Config",
     bagel="BagelConfig",
-    umm="CheersConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
@@ -86,19 +100,26 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
-    flex_olmo="FlexOlmoConfig",
-    fireredlid="FireRedLIDConfig",
+    dots3_note="Dots3NoteConfig",
+    k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
+    glm5_next="Glm5NextConfig",
+    glm5_next_text="Glm5NextTextConfig",
+    glm5_next_vision="Glm5NextVisionConfig",
     hyperclovax="HyperCLOVAXConfig",
-    hyperclovax_vlm="HCXVisionConfig",
-    hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
+    muse_glimmer="MuseGlimmerConfig",
+    muse_glimmer_text="MuseGlimmerTextConfig",
+    muse_glimmer_vision="MuseGlimmerVisionConfig",
+    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
+    kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     mlp_speculator="MLPSpeculatorConfig",
@@ -122,8 +143,12 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen4_exp="Qwen4ExpConfig",
+    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
+    qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    qwen3_5_moe_text="Qwen3_5MoeTextConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
@@ -516,7 +541,8 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):
         for rope_parameters_layer_type in rope_parameters.values():
-            _patch_legacy_rope_type(rope_parameters_layer_type)
+            if rope_parameters_layer_type is not None:
+                _patch_legacy_rope_type(rope_parameters_layer_type)
     else:
         _patch_legacy_rope_type(rope_parameters)
 
@@ -543,12 +569,47 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.validate_rope()
 
 
-def _uses_mrope(config: PretrainedConfig) -> bool:
+def _iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
+    """Yield a config's rope parameters, one dict per layer type if nested."""
     rope_parameters = getattr(config, "rope_parameters", None)
-    if rope_parameters is None:
-        return False
+    if not isinstance(rope_parameters, dict):
+        return
 
-    return "mrope_section" in rope_parameters
+    if is_rope_parameters_nested(rope_parameters):
+        yield from (p for p in rope_parameters.values() if isinstance(p, dict))
+    else:
+        yield rope_parameters
+
+
+def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
+    """Return the M-RoPE section this config declares, if any.
+
+    `xdrope_section` is the legacy name HunYuan-VL checkpoints use for the same
+    field; upstream Transformers normalises it to `mrope_section`.
+    """
+    from vllm.config.utils import getattr_iter
+
+    names = ("mrope_section", "xdrope_section")
+
+    for params in _iter_rope_parameters(config):
+        for i, name in enumerate(names):
+            section = params.get(name)
+            if isinstance(section, (list, tuple)):
+                if i > 0:
+                    logger.warning_once(
+                        "rope_parameters contains a deprecated key '%s'. "
+                        "Please use the preferred key '%s' instead.",
+                        name,
+                        names[0],
+                    )
+                return section
+
+    section = getattr_iter(config, names, None, warn=True)
+    return section if isinstance(section, (list, tuple)) else None
+
+
+def _uses_mrope(config: PretrainedConfig) -> bool:
+    return _mrope_section(config) is not None
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
@@ -573,21 +634,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
-def uses_xdrope_dim(config: PretrainedConfig) -> int:
-    """Detect if the model with this config uses XD-ROPE."""
-    xdrope_section = getattr(config, "xdrope_section", None)
-    if xdrope_section is not None and isinstance(xdrope_section, list):
-        return len(xdrope_section)
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+def mrope_num_dims(config: PretrainedConfig) -> int:
+    """Number of M-RoPE position channels the model consumes.
+
+    Each section entry sizes one channel, so the section length is the channel
+    count. Interleaved M-RoPE also accepts a 2 section variant whose positions
+    are still 3D, so never return fewer than 3.
+    """
+    if not uses_mrope(config):
         return 0
 
-    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
-        xdrope_section = rope_scaling["xdrope_section"]
-        if xdrope_section is not None and isinstance(xdrope_section, list):
-            return len(xdrope_section)
+    for candidate in (config.get_text_config(), config):
+        mrope_section = _mrope_section(candidate)
+        if mrope_section is not None:
+            return max(len(mrope_section), 3)
 
-    return 0
+    # Custom configs may declare M-RoPE without exposing the sections.
+    return 3
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
@@ -597,16 +660,6 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
         return getattr(config, "is_encoder_decoder", False)
 
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
-
-
-def is_interleaved(config: PretrainedConfig) -> bool:
-    """
-    Detect if the model with this config is used with interleaved attention.
-    """
-    text_config = config.get_text_config()
-    if layer_types := getattr(text_config, "layer_types", None):
-        return len(set(layer_types)) > 1
-    return False
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
@@ -673,8 +726,14 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
+    speculators_method = speculative_config["method"]
 
-    # Set the draft model to the speculators model
+    # Apply user --speculative-config overrides (e.g. attention_backend).
+    if isinstance(vllm_speculative_config, dict):
+        speculative_config.update(vllm_speculative_config)
+
+    # Lock fields dictated by the speculators format
+    speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -849,11 +908,7 @@ def get_pooling_config(
     logger.info("Found sentence-transformers modules configuration.")
 
     pooling = next(
-        (
-            item
-            for item in modules_dict
-            if item["type"] == "sentence_transformers.models.Pooling"
-        ),
+        (item for item in modules_dict if item["type"] in _ST_POOLING_MODULE_TYPES),
         None,
     )
     normalize = bool(
@@ -861,7 +916,7 @@ def get_pooling_config(
             (
                 item
                 for item in modules_dict
-                if item["type"] == "sentence_transformers.models.Normalize"
+                if item["type"] in _ST_NORMALIZE_MODULE_TYPES
             ),
             False,
         )
@@ -877,14 +932,28 @@ def get_pooling_config(
 
         config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
-            if val is True:
-                pooling_type = parse_pooling_type(key)
-                if pooling_type in SEQ_POOLING_TYPES:
-                    config["seq_pooling_type"] = pooling_type
-                elif pooling_type in TOK_POOLING_TYPES:
-                    config["tok_pooling_type"] = pooling_type
-                else:
-                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_name = val
+            elif val is True:
+                pooling_name = key
+            else:
+                continue
+
+            pooling_type = parse_pooling_type(pooling_name)
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
+            else:
+                logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        if not {"seq_pooling_type", "tok_pooling_type"} & config.keys():
+            logger.warning(
+                "Unable to determine Sentence Transformers pooling type from %s; "
+                "unless configured explicitly, vLLM will fall back to the model "
+                "architecture default.",
+                pooling_file_name,
+            )
 
         return config
 
@@ -1076,6 +1145,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: str | None = None,
+    code_revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
@@ -1091,6 +1161,7 @@ def try_get_generation_config(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
+                code_revision=code_revision,
                 config_format=config_format,
                 token=hf_token,
             )
@@ -1110,7 +1181,9 @@ def try_get_safetensors_metadata(
 
     try:
         return with_retry(
-            get_safetensors_metadata_partial, "Error retrieving safetensors"
+            get_safetensors_metadata_partial,
+            "Error retrieving safetensors",
+            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
         )
     except Exception:
         return None
@@ -1144,10 +1217,6 @@ def try_get_dense_modules(
         if isinstance(modules, dict):
             modules = modules.get("modules", [])
 
-        _DENSE_MODULE_TYPES = {
-            "sentence_transformers.models.Dense",
-            "pylate.models.Dense.Dense",
-        }
         dense_modules = [m for m in modules if m.get("type") in _DENSE_MODULE_TYPES]
         if not dense_modules:
             return None
@@ -1214,6 +1283,24 @@ def get_safetensors_params_metadata(
         )
         return {}
     return _read_safetensors_metadata_in_dir(Path(local_dir))
+
+
+@cache
+def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool | None:
+    """Whether the checkpoint contains an `lm_head` tensor of its own.
+
+    Args:
+        model: Name or path of the model repository.
+        revision: The specific model version to use.
+
+    Returns:
+        `None` if the checkpoint contents could not be determined, for example
+        because it is not stored as safetensors.
+    """
+    metadata = get_safetensors_params_metadata(model, revision=revision)
+    if not metadata:
+        return None
+    return any(name.endswith("lm_head.weight") for name in metadata)
 
 
 def _download_mistral_config_file(model, revision) -> dict:

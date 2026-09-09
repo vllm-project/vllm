@@ -1,25 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from functools import partial
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import pybase64
+import torch
 from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+    safe_to_dense,
+)
 
 from ..video import VIDEO_LOADER_REGISTRY
-from .base import MediaIO
-from .image import ImageMediaIO
+from .base import MediaIO, MediaWithBytes
+from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
 
 
-class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
+class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -32,6 +39,11 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if runtime_kwargs:
+            # Decoder GPU memory is reserved from the startup value.
+            runtime_kwargs = dict(runtime_kwargs)
+            runtime_kwargs.pop("hw_decoders", None)
+            runtime_kwargs.pop("pool_size", None)
+
             # Block request-level selection of GPU video backends that
             # were not configured (and VRAM-reserved) at startup.
             for key in ("video_backend", "backend"):
@@ -87,14 +99,17 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(
+    def load_bytes(
+        self, data: bytes
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+        video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
+        return MediaWithBytes(video, data)
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -156,11 +171,13 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "frames_indices": frames_indices,
                 "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
-            return frames, metadata
+            return MediaWithBytes((frames, metadata), data.encode())
 
         return self.load_bytes(pybase64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_file(
+        self, filepath: Path
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         with filepath.open("rb") as f:
             data = f.read()
 
@@ -184,3 +201,45 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)
+
+
+class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Video embedding MediaIO implementation.
+
+    Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
+        buffer = BytesIO(data)
+        with check_sparse_tensor_invariants_threadsafe():
+            tensor = torch.load(buffer, weights_only=True)
+            return safe_to_dense(tensor, parameter="video_embeds")
+
+    def _load_numpy(self, data: bytes) -> torch.Tensor:
+        with BytesIO(data) as buffer:
+            return torch.from_numpy(np.load(buffer))
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        if data[:6] == MAGIC_NUMPY_PREFIX:
+            return self._load_numpy(data)
+
+        return self._load_pickled_torch(data)
+
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
+
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        if filepath.suffix == ".npy":
+            return torch.from_numpy(np.load(filepath))
+
+        with check_sparse_tensor_invariants_threadsafe():
+            tensor = torch.load(filepath, weights_only=True)
+            return safe_to_dense(tensor, parameter="video_embeds")
+
+    def encode_base64(self, media: torch.Tensor) -> str:
+        return tensor2base64(media)

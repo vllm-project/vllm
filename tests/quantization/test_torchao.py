@@ -1,17 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.metadata
 import importlib.util
 
 import pytest
 import torch
+from packaging import version
 
+from tests.quantization.utils import load_model_without_vllm_runner
+from vllm.config import set_current_vllm_config
+from vllm.config.load import LoadConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 DEVICE_TYPE = current_platform.device_type
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
+TORCHAO_VERSION_0_18_AVAILABLE = TORCHAO_AVAILABLE and version.parse(
+    importlib.metadata.version("torchao")
+) >= version.parse("0.18.0")
+
+
+# Fix for leaking `torch.set_float32_matmul_precision("high")`
+# https://github.com/pytorch/ao/blob/v0.17.0/torchao/quantization/utils.py#L696
+@pytest.fixture(autouse=True)
+def restore_float32_matmul_precision():
+    original_precision = torch.get_float32_matmul_precision()
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(original_precision)
 
 
 @pytest.mark.skipif(
@@ -19,15 +48,23 @@ TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
     reason="Only fp8_fnuz supported on CDNA3 architecture",
 )
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_pre_quantized_model(vllm_runner):
-    with vllm_runner(
+def test_pre_quantized_model(monkeypatch, dist_init, workspace_init):
+    model, vllm_config = load_model_without_vllm_runner(
         "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.15.0",
         quantization="torchao",
         dtype="bfloat16",
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-    assert output
+    )
+
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
@@ -38,35 +75,55 @@ def test_pre_quantized_model(vllm_runner):
         # {"": "cuda"},
     ],
 )
-def test_opt_125m_int8wo_model_loading_with_params(vllm_runner, pt_load_map_location):
+def test_opt_125m_int8wo_model_loading_with_params(
+    pt_load_map_location, monkeypatch, dist_init, workspace_init
+):
     torch._dynamo.reset()
     model_name = "jerryzh168/opt-125m-int8wo-partial-quant"
-    with vllm_runner(
-        model_name=model_name,
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
         quantization="torchao",
-        dtype="bfloat16",
-        pt_load_map_location=pt_load_map_location,
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        vllm_config_kwargs={
+            "load_config": LoadConfig(pt_load_map_location=pt_load_map_location)
+        },
+    )
 
-        assert output
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
+def test_qwenvl_int8wo_model_loading_with_params(
+    monkeypatch, dist_init, workspace_init
+):
     torch._dynamo.reset()
     model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
-    with vllm_runner(
-        model_name=model_name,
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
         quantization="torchao",
-        dtype="bfloat16",
-        pt_load_map_location=f"{DEVICE_TYPE}:0",
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        vllm_config_kwargs={
+            "load_config": LoadConfig(pt_load_map_location=f"{DEVICE_TYPE}:0")
+        },
+    )
 
-        assert output
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE).expand(3, -1)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
@@ -90,6 +147,10 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     """Testing online quantization, load_weights integration point,
     with config dict serialized to json string
@@ -135,6 +196,10 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_online_quant_config_file(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config file
@@ -170,6 +235,10 @@ def test_online_quant_config_file(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_reload_weights():
     import json
 

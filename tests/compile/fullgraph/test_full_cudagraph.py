@@ -9,7 +9,7 @@ import pytest
 from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -97,7 +97,9 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
-            compilation_config=CompilationConfig(cudagraph_mode="PIECEWISE"),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.PIECEWISE
+            ),
             generation_config="vllm",
             seed=42,
         )

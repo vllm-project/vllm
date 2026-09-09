@@ -37,14 +37,7 @@ do not need a transformers dependency for output parsing.
 
 import regex as re
 
-# Tool call delimiter tokens as they appear in decoded text.
-# Standard format: <|tool_call>call:name{args}<tool_call|>
-_TOOL_CALL_START_TAG = "<|tool_call>"
-_TOOL_CALL_END_TAG = "<tool_call|>"
 _TOOL_RESPONSE_START_TAG = "<|tool_response>"
-
-# Gemma4 escape token as it appears in decoded text.
-_ESCAPE_TOKEN = '<|"|>'
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:

@@ -8,8 +8,18 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    FusedTopKBiasRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    FusedTopKRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    GroupedTopKRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
@@ -19,13 +29,13 @@ from vllm.platforms import current_platform
 
 
 def _is_aiter_capable() -> bool:
-    """Check if the platform supports AITER (gfx942/gfx950)."""
+    """Check if the platform supports AITER (gfx942/gfx950/gfx1250)."""
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import _ON_MI3XX
+        from vllm.platforms.rocm import get_cdna_version
 
-        return _ON_MI3XX
+        return get_cdna_version() > 2
     except ImportError:
         return False
 
@@ -34,6 +44,112 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+def test_degenerate_grouped_config_uses_standard_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+    )
+
+    assert isinstance(router, FusedTopKRouter)
+    hidden_states, router_logits = make_test_data(32, 256, 128)
+
+    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+    baseline_weights, baseline_ids = baseline_fused_topk(
+        router_logits,
+        top_k=4,
+        renormalize=True,
+    )
+
+    assert_routing_results_close(
+        topk_weights,
+        topk_ids,
+        baseline_weights,
+        baseline_ids,
+    )
+
+
+def test_multiple_expert_groups_use_grouped_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="softmax",
+        renormalize=True,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+
+
+def test_degenerate_grouped_config_with_bias_uses_topk_bias() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+
+
+def test_degenerate_grouped_config_with_bias_keeps_routed_scale() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        routed_scaling_factor=1.1,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+    assert router.routed_scaling_factor == 1.1
+
+
+def test_degenerate_deepseek_v3_routing_stays_grouped() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+    assert router.routing_method_type == RoutingMethodType.DeepSeekV3
+
+
+def test_single_expert_group_with_non_unit_scale_uses_grouped_topk() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        renormalize=True,
+        routed_scaling_factor=1.1,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
 
 
 def setup_eplb_state(

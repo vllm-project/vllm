@@ -136,6 +136,19 @@ class TestRmsNormPerBlockQuantConfigPicker:
             {"hidden_size": 4096, "group_size": 128, "num_tokens": 32}
         )
 
+    def test_b200_configs_disable_reduction_warp_specialization(self):
+        config_set = ConfigManager.get_instance().load_config_set(
+            "rms_norm_per_block_quant"
+        )
+        configs = config_set.to_dict()["nvidia_b200"].values()
+
+        # TODO: Remove once the Triton pin includes
+        # https://github.com/triton-lang/triton/pull/9716. Tracked by
+        # https://github.com/triton-lang/triton/issues/10901.
+        assert all(
+            config["range_warp_specializes"][1] is not True for config in configs
+        )
+
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, FP8_DTYPE]
@@ -285,14 +298,3 @@ class TestRmsNormPerBlockQuantIntegration:
         assert kernel_wrapper.op_name == "rms_norm_per_block_quant"
         assert kernel_wrapper._config_picker is not None
         assert kernel_wrapper._mutates_args == ["result", "scale", "residual"]
-
-    def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported("rms_norm_per_block_quant")
-        from vllm.kernels.helion.register import get_registered_kernels
-
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["rms_norm_per_block_quant"]
-        fake_impl = kernel_wrapper._fake_impl
-
-        args = _generate_fake_input(16, 4096, 128)
-        assert fake_impl(*args) is None

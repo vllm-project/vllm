@@ -12,7 +12,6 @@ from tests.models.language.pooling.embed_utils import run_embedding_correctness_
 from tests.models.utils import EmbedModelInfo
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.platforms import current_platform
 
 MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
@@ -56,10 +55,6 @@ def server(model_info, dtype: str):
         args.extend(
             ["--trust_remote_code", "--hf_overrides", '{"matryoshka_dimensions":[256]}']
         )
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
         yield remote_server

@@ -1,7 +1,7 @@
 group: Rust Frontend Cargo
 depends_on: []
 steps:
-- label: Rust Frontend Cargo Style + Clippy
+- label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy"
   key: rust-frontend-cargo-style-clippy
   depends_on: []
   timeout_in_minutes: 20
@@ -15,7 +15,7 @@ steps:
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
-- label: Rust Frontend Cargo Tests
+- label: ":computer: (CPU) Rust Frontend Cargo"
   key: rust-frontend-cargo-tests
   depends_on: []
   timeout_in_minutes: 20

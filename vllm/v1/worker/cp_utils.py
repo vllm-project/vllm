@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
@@ -50,15 +49,6 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "Try a different backend by setting "
                     "--attention-backend or disable DCP."
                 )
-
-
-def get_kv_cache_shard_count() -> int:
-    try:
-        dcp_world_size = get_dcp_group().world_size
-    except AssertionError:
-        # DCP might not be initialized in testing
-        dcp_world_size = 1
-    return dcp_world_size
 
 
 def get_dcp_dummy_context_len(

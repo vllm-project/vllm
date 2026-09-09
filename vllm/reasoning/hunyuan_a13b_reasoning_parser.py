@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
@@ -129,18 +129,6 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             return reasoning, response_content
 
         return None, model_output
-
-    def _is_strict_increasing_subsequence(
-        self, subsequence: Sequence[int], sequence: Sequence[int]
-    ) -> bool:
-        if not subsequence:
-            return False
-
-        sub_idx = 0
-        for num in sequence:
-            if sub_idx < len(subsequence) and num == subsequence[sub_idx]:
-                sub_idx += 1
-        return sub_idx == len(subsequence)
 
     def extract_reasoning_streaming(
         self,

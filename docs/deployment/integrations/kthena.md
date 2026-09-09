@@ -117,7 +117,7 @@ Commands:
           - >
             bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
             leader --ray_cluster_size=2; python3 -m
-            vllm.entrypoints.openai.api_server --port 8080 --model
+            vllm.entrypoints.launchers.api_server.entry --port 8080 --model
             meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8
             --pipeline-parallel-size 2
         ```

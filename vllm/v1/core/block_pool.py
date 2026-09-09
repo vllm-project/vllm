@@ -368,6 +368,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            session_id=request.session_id,
         )
 
     def emit_cached_block_events(
@@ -449,6 +450,7 @@ class BlockPool:
         num_tokens: int,
         kv_cache_group_id: int,
         block_size: int,
+        replace_existing_hashes: bool = False,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -476,6 +478,9 @@ class BlockPool:
                 entry hash itself is always the prefix-chain hash at
                 ``num_tokens``; ``block_size`` is used to assert that the
                 entry is partial within the owning cache block.
+            replace_existing_hashes: Whether the block contents were replaced
+                and all existing cache entries must be removed before the new
+                entry is registered.
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
@@ -484,9 +489,10 @@ class BlockPool:
         if block.is_null:
             return None
 
-        assert block_size > self.hash_block_size
         assert block_size % self.hash_block_size == 0
-        assert num_tokens % block_size != 0
+        assert replace_existing_hashes or (
+            block_size > self.hash_block_size and num_tokens % block_size != 0
+        )
         block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
@@ -497,7 +503,11 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
-        if (
+        if replace_existing_hashes:
+            removed_hashes = self._remove_cached_block_hashes(block)
+            self._emit_block_removed_events(removed_hashes)
+            already_cached = False
+        elif (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
@@ -539,6 +549,7 @@ class BlockPool:
                     else None,
                     extra_keys=[extra_keys],
                     group_idx=kv_cache_group_id,
+                    session_id=request.session_id,
                 )
             )
         return block_hash_with_group_id
@@ -716,6 +727,10 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
+    def is_block_writable(self, block: KVCacheBlock) -> bool:
+        """Return whether a block can be mutated by its sole owner."""
+        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
+
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
@@ -724,20 +739,23 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
-        blocks_with_hash = []
-        blocks_without_hash = []
+        # Identify blocks with hash (LRU cache) and without it (never match APC)
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                if block.block_hash is None:
-                    blocks_without_hash.append(block)
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
                 else:
-                    blocks_with_hash.append(block)
+                    # FIFO reuse of cached blocks for LRU eviction behavior.
+                    blocks_to_evict_last.append(block)
 
-        # Blocks without hash always get evicted first - prepend them last to the tail
-        self.free_block_queue.prepend_n(blocks_without_hash)
-        self.free_block_queue.append_n(blocks_with_hash)
+        # Blocks to reuse first are prepended to the front of the free queue.
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse last are appended to the end of the free queue.
+        self.free_block_queue.append_n(blocks_to_evict_last)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

@@ -15,6 +15,7 @@ The component is organized as a Cargo workspace with several crates, layered bot
 │  vllm-cmd / vllm-rs             │  CLI entrypoint:
 │                                 │  Python vLLM frontend subprocess
 │                                 │  Rust managed-engine serve mode
+│                                 │  Engine-free render mode
 ├─────────────────────────────────┤
 │  vllm-server                    │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
@@ -74,9 +75,67 @@ To build the `vllm-rs` in isolation:
 ./build_rust.sh
 ```
 
+### Engine-free renderer
+
+`vllm-rs render` serves text-only request preprocessing without starting or
+connecting to a Python inference engine:
+
+```bash
+cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
+  render Qwen/Qwen3-32B \
+  --host 127.0.0.1 --max-model-len 32768
+```
+
+It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
+tokenizer and model configuration files are loaded; model weights, PyTorch,
+and vLLM kernels are not required.
+
+To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
+in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
+the certificate file. For mTLS, pass `--ssl-ca-certs` with a CA
+bundle and set `--ssl-cert-reqs` to `1` (optional) or `2` (required) to
+verify client certificates. Use `--ssl-ciphers` to override the default
+OpenSSL cipher list.
+
+```bash
+# Combined PEM (cert + key in one file):
+vllm-rs \
+  render Qwen/Qwen3-32B \
+  --host 127.0.0.1 --max-model-len 32768 \
+  --ssl-certfile /path/to/combined.pem
+
+# Separate cert and key files:
+vllm-rs \
+  render Qwen/Qwen3-32B \
+  --host 127.0.0.1 --max-model-len 32768 \
+  --ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem
+```
+
+The render endpoints return the public token-in `GenerateRequest` consumed by
+the Rust `/inference/v1/generate` endpoint. A chat render response, or one item
+from a completion render response, can be submitted to that endpoint without
+changing its fields.
+
+The render and inference paths use the same `vllm-chat` and `vllm-text`
+request-preparation logic; render mode stops before engine submission.
+Tool-call and reasoning parsers use model-based auto-detection by default. Use
+`--tool-call-parser` and `--reasoning-parser` to override either selection;
+unified parsers require the same selection for both options.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions/render \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-32B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 16
+  }'
+```
+
 ### Example Request
 
-After either startup path, you can use any OpenAI-compatible client:
+After either full-frontend startup path, you can use any OpenAI-compatible
+client against the inference endpoints:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \

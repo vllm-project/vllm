@@ -333,6 +333,54 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
 
 
+def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
+    """Handle an eager attention break inside a multi-stream overlap region."""
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+    from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
+    x = torch.zeros(1024, device="cuda")
+    output = torch.empty_like(x)
+    aux_stream = torch.cuda.Stream()
+    main_event = torch.cuda.Event()
+    aux_event = torch.cuda.Event()
+
+    @eager_break_during_capture
+    def attention(query: torch.Tensor, out: torch.Tensor) -> None:
+        torch.add(query, 3.0, out=out)
+
+    def attention_frontend() -> torch.Tensor:
+        query = x * 2.0
+        attention_output = torch.empty_like(x)
+        attention(query, attention_output)
+        return attention_output
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        attention_output, gate = maybe_execute_in_parallel(
+            attention_frontend,
+            lambda: x * 5.0,
+            main_event,
+            aux_event,
+            aux_stream,
+        )
+        torch.add(attention_output, gate, out=output)
+
+    assert cap.num_graphs == 2
+    assert cap.num_eager_breaks == 1
+
+    for value in (1.0, 7.0, 19.0):
+        x.fill_(value)
+        cap.replay()
+        cuda_capture_stream.synchronize()
+        torch.testing.assert_close(
+            output,
+            torch.full_like(output, value * 7.0 + 3.0),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Replay ordering
 # ---------------------------------------------------------------------------

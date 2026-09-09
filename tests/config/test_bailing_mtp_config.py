@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import get_args
+
 from transformers import PretrainedConfig
 
 from vllm.config.speculative import MTPModelTypes, SpeculativeConfig
@@ -34,7 +36,7 @@ def test_bailing_hybrid_mtp_hf_config_override():
     assert overridden.model_type == "bailing_hybrid_mtp"
     assert overridden.architectures == ["BailingMoeV25MTPModel"]
     assert overridden.n_predict == 1
-    assert "bailing_hybrid_mtp" in MTPModelTypes.__args__
+    assert "bailing_hybrid_mtp" in get_args(MTPModelTypes)
 
 
 def test_bailing_hybrid_mtp_model_arch_config():

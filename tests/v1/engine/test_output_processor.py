@@ -3,6 +3,7 @@
 
 import math
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,7 +15,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
-from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -26,8 +27,37 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_delta_output_without_new_tokens_returns_empty_logprobs(
+    flat_logprobs: bool,
+) -> None:
+    accumulated = FlatLogprobs() if flat_logprobs else []
+    accumulated.append({1: Logprob(logprob=-0.5, rank=1)})
+
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = accumulated
+    state.logprobs_processor.cumulative_logprob = -0.5
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([], None, None)
+
+    assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
+    assert len(output.logprobs) == 0
 
 
 def _ref_convert_id_to_token(
@@ -138,6 +168,82 @@ def test_incremental_detokenization(
         assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
 
     assert output_processor.get_num_unfinished_requests() == 0
+    assert not output_processor.has_unfinished_requests()
+
+
+def test_request_stream_interval_raises_but_not_below_engine_default(
+    dummy_test_vectors,
+):
+    """A per-request stream_interval can raise the interval above the engine
+    default but not below it (values under the default clamp up), without
+    altering the generated text."""
+    engine_stream_interval = 5
+    # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
+    request_stream_intervals = [1, 10]
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=engine_stream_interval,
+    )
+
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=[],
+                include_stop_str_in_output=False,
+                stream_interval=request_stream_intervals[idx],
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(
+            dummy_test_vectors.prompt_tokens[: len(request_stream_intervals)]
+        )
+    ]
+
+    num_requests = len(requests)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens[:num_requests],
+        prompts_list=dummy_test_vectors.prompt_tokens[:num_requests],
+        request_ids=[req.request_id for req in requests],
+    )
+
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_strings: dict[str, str] = {}
+    gen_tokens: dict[str, list[int]] = {}
+    while outputs := engine_core.get_outputs():
+        for request_output in output_processor.process_outputs(outputs).request_outputs:
+            request_id = request_output.request_id
+            new_tokens = request_output.outputs[0].token_ids
+            if request_id not in gen_strings:
+                gen_strings[request_id] = request_output.outputs[0].text
+                gen_tokens[request_id] = list(new_tokens)
+                assert len(new_tokens) == 1, f"{len(new_tokens)=}"
+                continue
+            gen_strings[request_id] += request_output.outputs[0].text
+            gen_tokens[request_id].extend(new_tokens)
+            if not request_output.finished:
+                requested = request_stream_intervals[int(request_id.split("-")[1])]
+                interval = max(requested, engine_stream_interval)
+                assert len(new_tokens) == interval, f"{len(new_tokens)=}, {interval=}"
+
+    for idx in range(num_requests):
+        request_id = f"request-{idx}"
+        assert gen_strings[request_id] == dummy_test_vectors.generation_strings[idx]
+        assert gen_tokens[request_id] == dummy_test_vectors.generation_tokens[idx]
+
     assert not output_processor.has_unfinished_requests()
 
 
@@ -335,7 +441,7 @@ def _validate_logprobs(
                 ref_prompt_logprob_toks,
                 ref_prompt_logprob_vals,
                 ref_prompt_token_ranks,
-                _,
+                *_,
             ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                 zip(prompt_token_ids[1:], prompt_logprobs[1:])

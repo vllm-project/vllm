@@ -6,6 +6,7 @@ Reasoning models return an additional `reasoning` field in their outputs, which 
 
 !!! warning
     `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
+    It is important that you also update your client code. Otherwise, your client code could silently read an empty `reasoning_content`, even when `reasoning` is populated.
 
 ## Supported Models
 
@@ -105,7 +106,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
     }
     ```
 
-OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning` attribute is present in the response. For example:
+OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `getattr` to check if the `reasoning` attribute is present in the response. For example:
 
 ??? code
 

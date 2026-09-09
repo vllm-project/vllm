@@ -31,7 +31,7 @@ def _get_attention_backend_params() -> list[str | None]:
               falls back to ROCM_AITER_UNIFIED_ATTN or TRITON_ATTN for
               cross-attention since ROCM_ATTN doesn't support ENCODER_DECODER)
       - TRITON_ATTN: always available on ROCm
-      - ROCM_AITER_UNIFIED_ATTN: only on gfx942/gfx950
+      - ROCM_AITER_UNIFIED_ATTN: only on gfx942/gfx950/gfx1250
 
     On non-ROCm platforms, we just run with the default backend.
     """
@@ -40,9 +40,9 @@ def _get_attention_backend_params() -> list[str | None]:
 
         if current_platform.is_rocm():
             backends: list[str | None] = [None, "TRITON_ATTN"]
-            from vllm.platforms.rocm import _ON_MI3XX
+            from vllm.platforms.rocm import get_cdna_version
 
-            if _ON_MI3XX:
+            if get_cdna_version() > 2:
                 backends.append("ROCM_AITER_UNIFIED_ATTN")
             return backends
     except Exception:
@@ -172,7 +172,7 @@ async def test_invalid_audio_file(whisper_client):
         )
 
     assert exc_info.value.status_code == 400
-    assert "Invalid or unsupported audio file" in exc_info.value.message
+    assert "Invalid or corrupted audio data" in exc_info.value.message
 
 
 @pytest.mark.asyncio

@@ -253,7 +253,7 @@ To run MoRI with RDMA, your environment must have the necessary RDMA userspace l
 
 The official image `vllm/vllm-openai-rocm:nightly` comes pre-installed with userspace libraries for the following NICs and kernel module versions:
 
-- AINIC (AMD Pensando Pollara): version `1.117.3-hydra`, tested with `ioinic-dkms=25.11.1.001`
+- AINIC (AMD Pensando Pollara): version `1.117.5`, ships `libionic1=54.0-187-1`, tested with `ionic-dkms=26.03.3.001`
 - Thor2 (Broadcom): version `235.2.86.0`, tested with `bnxt-en-dkms=1.10.3.235.2.86.0`, `bnxt-re-dkms=235.2.86.0`
 
 Refer to [Dockerfile.rocm](../../docker/Dockerfile.rocm) for more details. For users with NICs, kernel modules, and/or FW other than those stated above we refer to

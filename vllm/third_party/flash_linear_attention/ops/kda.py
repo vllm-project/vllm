@@ -166,6 +166,8 @@ def layer_norm_gated_fwd_kernel(
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
+    H: tl.constexpr,  # number of heads
+    g_stride_n: tl.constexpr,
     D: tl.constexpr,  # number of columns in x
     BT: tl.constexpr,
     BD: tl.constexpr,
@@ -221,8 +223,13 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_g = (o_t // H) * g_stride_n + (o_t % H) * D
+    b_g = tl.load(
+        g + o_g[:, None] + o_d[None, :],
+        mask=(o_t[:, None] < T) & m_d[None, :],
+        other=0.0,
+    ).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
@@ -320,10 +327,15 @@ def layer_norm_gated_fwd(
     out_dtype: torch.dtype = None,
     residual_dtype: torch.dtype = None,
     is_rms_norm: bool = False,
+    H: int = 1,
+    g_stride_n: int | None = None,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
     T, D = x.shape
+    if g_stride_n is None:
+        g_stride_n = D
+    assert T % H == 0
     if residual is not None:
         assert residual.shape == (T, D)
     if weight is not None:
@@ -349,10 +361,8 @@ def layer_norm_gated_fwd(
     BD = min(MAX_FUSED_SIZE, next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-
     if D <= 512:
-        BT = 32
+        BT = 16
         layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
             x=x,
             g=g,
@@ -365,12 +375,14 @@ def layer_norm_gated_fwd(
             rstd=rstd,
             eps=eps,
             T=T,
+            H=H,
+            g_stride_n=g_stride_n,
             D=D,
             BD=BD,
             BT=BT,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
-            num_warps=4,
+            num_warps=8,
         )
     else:
         layer_norm_gated_fwd_kernel1[(T,)](
@@ -408,7 +420,16 @@ def rms_norm_gated(
     x_shape_og = x.shape
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
-    g = g.contiguous().reshape(-1, g.shape[-1])
+    D = x.shape[-1]
+    # The tiled kernel supports row-strided gates; kernel1 does not.
+    if D <= 512:
+        H = 1 if g.ndim == 2 else g.shape[-2]
+        g = g.view(-1, H, D)
+        g_stride_n = g.stride(0)
+    else:
+        g = g.contiguous()
+        H = 1
+        g_stride_n = D
     if residual is not None:
         assert residual.shape == x_shape_og
         residual = residual.contiguous().reshape(-1, residual.shape[-1])
@@ -427,6 +448,8 @@ def rms_norm_gated(
         residual=residual,
         residual_dtype=residual_dtype,
         is_rms_norm=True,
+        H=H,
+        g_stride_n=g_stride_n,
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
@@ -1187,6 +1210,7 @@ def kda_gate_cumsum_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     cumsum_scale,
+    lower_bound,
     beta,
     threshold,
     T,
@@ -1196,6 +1220,7 @@ def kda_gate_cumsum_fwd_kernel(
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -1235,14 +1260,17 @@ def kda_gate_cumsum_fwd_kernel(
         b_bias = tl.load(g_bias + i_h * D + o_d, mask=o_d < D, other=0.0).to(tl.float32)
         b_g = b_g + b_bias[None, :]
 
-    b_a = -tl.exp(tl.load(A + i_h).to(tl.float32))
-    b_g_scaled = b_g * beta
-    b_softplus = tl.where(
-        b_g_scaled > threshold,
-        b_g,
-        (1.0 / beta) * log(1.0 + tl.exp(b_g_scaled)),
-    )
-    b_gate = b_a * b_softplus
+    b_a = tl.exp(tl.load(A + i_h).to(tl.float32))
+    if USE_LOWER_BOUND:
+        b_gate = lower_bound * tl.sigmoid(b_a * b_g)
+    else:
+        b_g_scaled = b_g * beta
+        b_softplus = tl.where(
+            b_g_scaled > threshold,
+            b_g,
+            (1.0 / beta) * log(1.0 + tl.exp(b_g_scaled)),
+        )
+        b_gate = -b_a * b_softplus
 
     # Out-of-bounds rows (load returns 0, but softplus/bias can still make
     # b_gate non-zero) participate in the dot product. They only contribute to
@@ -1260,6 +1288,7 @@ def fused_kda_gate_chunk_cumsum(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
+    lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
@@ -1293,15 +1322,16 @@ def fused_kda_gate_chunk_cumsum(
         # exp2-based kernels reproduce exp(g). Keep this in sync with the
         # `use_exp2=True` path in `_chunk_kda_fwd_with_cumulative_g`.
         cumsum_scale=RCP_LN2,
+        lower_bound=lower_bound or 0.0,
         beta=beta,
         threshold=threshold,
         T=T,
         H=H,
         D=D,
         BT=chunk_size,
+        USE_LOWER_BOUND=lower_bound is not None,
     )
     return y
-
 
 def _chunk_kda_fwd_with_cumulative_g(
     q: torch.Tensor,
@@ -1424,6 +1454,7 @@ def chunk_kda_with_fused_gate_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
@@ -1439,6 +1470,7 @@ def chunk_kda_with_fused_gate_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        lower_bound=lower_bound,
     )
     return _chunk_kda_fwd_with_cumulative_g(
         q=q,
@@ -1500,6 +1532,7 @@ def chunk_kda_with_fused_gate(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     **kwargs,
@@ -1523,6 +1556,7 @@ def chunk_kda_with_fused_gate(
         scale=scale,
         initial_state=initial_state.contiguous() if initial_state is not None else None,
         output_final_state=output_final_state,
+        lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
     )
     return o, final_state
@@ -1543,6 +1577,7 @@ def kda_gate_fwd_kernel(
     A,
     y,
     g_bias,
+    lower_bound,
     beta: tl.constexpr,
     threshold: tl.constexpr,
     T,
@@ -1551,12 +1586,12 @@ def kda_gate_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
 
-    b_a = tl.load(A + i_h).to(tl.float32)
-    b_a = -tl.exp(b_a)
+    b_a = tl.exp(tl.load(A + i_h).to(tl.float32))
 
     stride_row = H * D
     stride_col = 1
@@ -1589,13 +1624,13 @@ def kda_gate_fwd_kernel(
         )
         b_g = b_g + b_bias[None, :]
 
-    # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
-    # When beta * x > threshold, use linear approximation x
-    # Use threshold to switch to linear when beta*x > threshold
-    g_scaled = b_g * beta
-    use_linear = g_scaled > threshold
-    sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
-    b_y = b_a * sp
+    if USE_LOWER_BOUND:
+        b_y = lower_bound * tl.sigmoid(b_a * b_g)
+    else:
+        g_scaled = b_g * beta
+        use_linear = g_scaled > threshold
+        sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
+        b_y = -b_a * sp
 
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1607,6 +1642,7 @@ def fused_kda_gate(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
+    lower_bound: float | None = None,
 ) -> torch.Tensor:
     """
     Forward pass for KDA gate:
@@ -1634,6 +1670,7 @@ def fused_kda_gate(
         A,
         y,
         g_bias,
+        lower_bound or 0.0,
         beta,
         threshold,
         T,
@@ -1641,6 +1678,7 @@ def fused_kda_gate(
         head_k_dim,
         BD=next_power_of_2(head_k_dim),
         HAS_BIAS=g_bias is not None,
+        USE_LOWER_BOUND=lower_bound is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)

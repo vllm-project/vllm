@@ -39,9 +39,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.common.ops import (
-    fused_mtp_input_rmsnorm,
-    mtp_shared_head_rmsnorm,
+from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
+    _FUSED_MTP_INPUT_RMSNORM_KERNEL,
+    _MTP_SHARED_HEAD_RMSNORM_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -51,7 +51,7 @@ from .model import DeepseekV4DecoderLayer
 logger = init_logger(__name__)
 
 # MoE expert scales are fused into per-layer w13/w2 tensors. The exact
-# parameter suffix depends on which FusedMoE method handles the experts:
+# parameter suffix depends on which MoERunner method handles the experts:
 # - fp4 experts (Mxfp4MoEMethod) register ``w{1,2,3}_weight_scale``;
 # - fp8 experts (Fp8MoEMethod with block_quant=True) register
 #   ``w{1,2,3}_weight_scale_inv``.
@@ -127,6 +127,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
 
         self.hc_head_op = HCHeadOp()
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
+            _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -143,7 +147,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             -1, self.hc_mult, self.config.hidden_size
         )
         # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
-        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+        inputs_embeds, previous_hidden_states = _FUSED_MTP_INPUT_RMSNORM_KERNEL(
             inputs_embeds,
             positions,
             previous_hidden_states,
@@ -256,7 +260,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        hidden_states = mtp_shared_head_rmsnorm(
+        hidden_states = _MTP_SHARED_HEAD_RMSNORM_KERNEL(
             hidden_states,
             mtp_layer.shared_head.norm.weight.data,
             mtp_layer.shared_head.norm.variance_epsilon,
@@ -335,11 +339,10 @@ class DeepSeekV4MTP(nn.Module):
         loaded_params: set[str] = set()
 
         def _resolve_scale_name(name: str) -> str:
-            # Quark checkpoints name FP8 block scales ``.weight_scale``,
-            # but block-FP8 layers register them as ``.weight_scale_inv``
-            # while MXFP4 experts register ``.weight_scale``. Auto-detect:
-            # rename to ``_inv`` only when that variant exists and the plain
-            # one does not.
+            # Quark checkpoints and QuarkW8A8Fp8PerBlock use ``.weight_scale``.
+            # Native block-FP8 layers register ``.weight_scale_inv``. Rename
+            # to ``_inv`` only when that variant exists and the plain one
+            # does not.
             if name.endswith(".weight_scale") and name not in params_dict:
                 inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
                 if inv in params_dict:

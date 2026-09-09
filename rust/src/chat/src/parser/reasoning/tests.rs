@@ -25,7 +25,7 @@ fn factory_contains_and_lists_registered_parsers() {
 }
 
 #[test]
-fn factory_resolves_deepseek_v4_to_qwen3_alias() {
+fn factory_resolves_deepseek_v4() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
@@ -34,6 +34,23 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
     assert_eq!(
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
+    );
+}
+
+#[test]
+fn factory_distinguishes_qwen_model_families() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/QwQ-32B"),
+        Some(names::DEEPSEEK_R1)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-8B"),
+        Some(names::QWEN3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
+        None
     );
 }
 
@@ -94,4 +111,15 @@ fn factory_rejects_unknown_parser_names() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("choose from"));
+}
+
+#[test]
+fn factory_distinguishes_glm_reasoning_framing() {
+    let factory = ReasoningParserFactory::new();
+    for model in ["zai-org/GLM-4.5", "zai-org/GLM-4.6"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM45));
+    }
+    for model in ["zai-org/GLM-4.7-Flash", "zai-org/GLM-5.2-FP8"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM47));
+    }
 }

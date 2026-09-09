@@ -207,6 +207,7 @@ mod tests {
                 Some("qwen3_vl".to_string()),
                 files,
                 Arc::new(qwen3_vl_tokenizer()),
+                std::collections::HashMap::new(),
             )
         };
 

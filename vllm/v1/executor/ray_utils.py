@@ -176,9 +176,6 @@ try:
                     output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: dict[str, str]):
-            os.environ.update(vars)
-
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
 
@@ -202,10 +199,10 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
     backed by Ray's shared-memory object store. Ray's channel docs explicitly
     warn that subsequent reads may block if such an object is still in scope.
 
-    vLLM can return numpy-backed logprobs in `ModelRunnerOutput.logprobs`. If
-    those arrays are backed by Ray SHM (commonly read-only), retaining them in
-    scope across scheduler iterations can stall the channel and eventually hit
-    `RAY_CGRAPH_get_timeout`.
+    vLLM can return numpy-backed logprobs and routed experts in
+    `ModelRunnerOutput`. If those arrays are backed by Ray SHM (commonly
+    read-only), retaining them in scope across scheduler iterations can stall
+    the channel and eventually hit `RAY_CGRAPH_get_timeout`.
 
     Copy read-only numpy arrays so the returned output no longer retains
     references to Ray's shared-memory buffers.
@@ -214,27 +211,37 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
     `LogprobsTensors` backed by PyTorch-owned CPU tensors (`to_cpu_nonblocking`
     or `empty_cpu`), not NumPy views decoded from Ray channels.
     """
-    if output.logprobs is None:
-        return
-
-    token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
 
     def _copy_if_readonly(arr):
         if isinstance(arr, np.ndarray) and not arr.flags.writeable:
             return arr.copy()
         return arr
 
-    # `cu_num_generated_tokens` is already a plain Python list (or None), so it
-    # never aliases Ray SHM buffers and can be reused as-is.
-    token_ids_c = _copy_if_readonly(token_ids)
-    logprobs_c = _copy_if_readonly(logprobs)
-    ranks_c = _copy_if_readonly(ranks)
-    if token_ids_c is token_ids and logprobs_c is logprobs and ranks_c is ranks:
-        return
+    if output.logprobs is not None:
+        token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
 
-    output.logprobs = type(output.logprobs)(
-        token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
-    )
+        # `cu_num_generated_tokens` is already a plain Python list (or None),
+        # so it never aliases Ray SHM buffers and can be reused as-is.
+        token_ids_c = _copy_if_readonly(token_ids)
+        logprobs_c = _copy_if_readonly(logprobs)
+        ranks_c = _copy_if_readonly(ranks)
+        if (
+            token_ids_c is not token_ids
+            or logprobs_c is not logprobs
+            or ranks_c is not ranks
+        ):
+            output.logprobs = type(output.logprobs)(
+                token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
+            )
+
+    if output.routed_experts is not None:
+        routing_data, slot_mapping = output.routed_experts
+        routing_data_c = _copy_if_readonly(routing_data)
+        slot_mapping_c = _copy_if_readonly(slot_mapping)
+        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
+            output.routed_experts = type(output.routed_experts)(
+                routing_data_c, slot_mapping_c
+            )
 
 
 class FutureWrapper(Future):
@@ -507,24 +514,6 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             ) from None
 
 
-def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
-    ray.util.remove_placement_group(current_placement_group)
-    s = time.time()
-    wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        pg = ray.util.get_current_placement_group()
-        if pg is None:
-            break
-
-        # Exponential backoff for warning print.
-        wait_interval *= 2
-        logger.info(
-            "Waiting for removing a placement group of specs for %d seconds.",
-            int(time.time() - s),
-        )
-        time.sleep(wait_interval)
-
-
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
@@ -580,7 +569,7 @@ def initialize_ray_cluster(
             )
             ray.init(
                 address=ray_address,
-                num_gpus=parallel_config.world_size,
+                num_gpus=current_platform.device_count(),
                 runtime_env=parallel_config.ray_runtime_env,
             )
     else:
@@ -671,29 +660,3 @@ def initialize_ray_cluster(
     )
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
-
-
-def get_num_tpu_nodes() -> int:
-    from ray._private.accelerators import TPUAcceleratorManager
-
-    cluster_resources = ray.cluster_resources()
-    total_tpus = int(cluster_resources["TPU"])
-    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
-    assert total_tpus % tpus_per_node == 0
-    return total_tpus // tpus_per_node
-
-
-def get_num_nodes_in_placement_group() -> int:
-    pg_table = ray.util.placement_group_table()
-    current_pg = ray.util.get_current_placement_group()
-    num_nodes = 0
-
-    if current_pg:
-        nodes_in_pg = set()
-        for pg_key, pg in pg_table.items():
-            if pg_key == current_pg.id.hex():
-                for _, node in pg["bundles_to_node_id"].items():
-                    nodes_in_pg.add(node)
-        num_nodes = len(nodes_in_pg)
-
-    return num_nodes

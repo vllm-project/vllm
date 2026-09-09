@@ -28,19 +28,53 @@ def mock_vllm_config():
 
 
 @pytest.fixture
-def mock_on_gfx9():
-    """Mock gfx9 arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_gfx9", return_value=True):
+def mock_get_cdna_version():
+    """Mock cdna version arch detection to return True."""
+    with patch("vllm.platforms.rocm.get_cdna_version", return_value=3):
         yield
 
 
-@pytest.fixture
-def mock_on_mi3xx():
-    """Mock mi3xx arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_mi3xx", return_value=True):
-        yield
+def test_aiter_unified_attention_uses_dedicated_metadata_builder():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+    from vllm.v1.attention.backends.rocm_attn import (
+        RocmAttentionBackend,
+        RocmAttentionMetadataBuilder,
+    )
+
+    assert RocmAttentionBackend.get_builder_cls() is RocmAttentionMetadataBuilder
+    assert (
+        RocmAiterUnifiedAttentionBackend.get_builder_cls()
+        is RocmAiterUnifiedAttentionMetadataBuilder
+    )
 
 
+def test_aiter_unified_attention_capture_preserves_query_start_locations():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+
+    builder = object.__new__(RocmAiterUnifiedAttentionMetadataBuilder)
+    metadata = MagicMock()
+    metadata.seq_lens = torch.tensor([1048576, 524288], dtype=torch.int32)
+    builder.build = MagicMock(return_value=metadata)
+    common = MagicMock()
+    expected_query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    common.query_start_loc = expected_query_start_loc.clone()
+    metadata.query_start_loc = common.query_start_loc
+
+    actual = builder.build_for_cudagraph_capture(common)
+
+    builder.build.assert_called_once_with(0, common)
+    assert actual is metadata
+    assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
+    assert actual.query_start_loc is common.query_start_loc
+    assert torch.equal(actual.query_start_loc, expected_query_start_loc)
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, expected_backend_path",
     [
@@ -110,12 +144,12 @@ def test_standard_attention_backend_selection(
     env_vars,
     selected_backend,
     expected_backend_path,
+    use_dcp,
     mock_vllm_config,
-    mock_on_gfx9,
-    mock_on_mi3xx,
+    mock_get_cdna_version,
     monkeypatch,
 ):
-    """Test standard attention backend selection with various configurations."""
+    """Standard ROCm backends remain selectable without DCP and reject DCP."""
     # Set environment variables
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -144,7 +178,13 @@ def test_standard_attention_backend_selection(
         use_mla=False,
         has_sink=False,
         use_sparse=False,
+        use_dcp=use_dcp,
     )
+
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(backend_enum, attn_selector_config)
+        return
 
     backend_path = RocmPlatform.get_attn_backend_cls(
         selected_backend=backend_enum, attn_selector_config=attn_selector_config
@@ -153,6 +193,7 @@ def test_standard_attention_backend_selection(
     assert backend_path == expected_backend_path
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [
@@ -229,10 +270,11 @@ def test_mla_backend_selection(
     block_size,
     expected_backend_path,
     should_raise,
+    use_dcp,
     mock_vllm_config,
     monkeypatch,
 ):
-    """Test MLA backend selection with various configurations."""
+    """Dense MLA remains selectable with DCP for valid block sizes."""
     # Set environment variables
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -271,6 +313,7 @@ def test_mla_backend_selection(
                     use_mla=True,
                     has_sink=False,
                     use_sparse=False,
+                    use_dcp=use_dcp,
                 )
                 attn_selector_config = AttentionSelectorConfig(
                     head_size=128,
@@ -280,6 +323,7 @@ def test_mla_backend_selection(
                     use_mla=True,
                     has_sink=False,
                     use_sparse=False,
+                    use_dcp=use_dcp,
                 )
                 backend_path = RocmPlatform.get_attn_backend_cls(
                     selected_backend=backend_enum,
@@ -295,6 +339,7 @@ def test_mla_backend_selection(
                 use_mla=True,
                 has_sink=False,
                 use_sparse=False,
+                use_dcp=use_dcp,
             )
 
             backend_path = RocmPlatform.get_attn_backend_cls(
@@ -304,13 +349,70 @@ def test_mla_backend_selection(
             assert backend_path == expected_backend_path
 
 
-def test_aiter_fa_requires_mi3xx(mock_vllm_config):
-    """Test that ROCM_AITER_FA requires mi3xx architecture."""
+@pytest.mark.parametrize("use_dcp", [False, True])
+@pytest.mark.parametrize(
+    "selected_backend", [None, AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
+)
+def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
+    """Sparse MLA remains selectable without DCP and fails early with DCP."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_mi3xx to return False (used by supports_compute_capability)
+    selector_config = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=True,
+        use_sparse=True,
+        use_dcp=use_dcp,
+    )
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
+    else:
+        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+        )
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+@pytest.mark.parametrize(
+    "selected_backend, head_size, kv_cache_dtype",
+    [
+        (AttentionBackendEnum.TRITON_ATTN_DIFFKV, 192, "bfloat16"),
+        # A 128-dimensional head uses 118 packed bytes, or 59 fp16 elements.
+        (AttentionBackendEnum.TURBOQUANT, 59, "turboquant_k3v4_nc"),
+    ],
+)
+def test_specialized_attention_backends_reject_dcp(
+    selected_backend, head_size, kv_cache_dtype, use_dcp
+):
+    """Valid DiffKV and compressed-cache configurations must reject DCP."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    selector_config = AttentionSelectorConfig(
+        head_size=head_size,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=16,
+        use_dcp=use_dcp,
+    )
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
+    else:
+        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+            selected_backend.get_path()
+        )
+
+
+def test_aiter_fa_requires_mi3xx(mock_vllm_config):
+    """Test that ROCM_AITER_FA requires CDNA3+ architecture."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    # Mock cdna version to return 1 (used by supports_compute_capability)
     with (
-        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.get_cdna_version", return_value=1),
         pytest.raises(
             ValueError,
             match="compute capability not supported",

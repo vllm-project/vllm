@@ -4,7 +4,10 @@
 from typing import Literal, get_args
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -25,7 +28,6 @@ QuantizationMethods = Literal[
     "awq_marlin",
     "humming",
     "compressed-tensors",
-    "bitsandbytes",
     "experts_int8",
     "quark",
     "moe_wna16",
@@ -117,7 +119,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
-    from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
@@ -153,7 +154,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
-        "bitsandbytes": BitsAndBytesConfig,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
@@ -185,6 +185,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
 __all__ = [
     "QuantizationConfig",
+    "resolve_quant_method",
     "QuantizationMethods",
     "get_quantization_config",
     "register_quantization_config",
