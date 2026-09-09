@@ -14,10 +14,10 @@ from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
-        _TOPK_TOPP_KERNEL,
-        _TOPP_SPLIT_MASK_KERNEL,
-        _TOPP_SPLIT_STATS_KERNEL,
-        _TOPP_SPLIT_STEP_KERNEL,
+        _dispatch_topk_topp,
+        _dispatch_topp_split_mask,
+        _dispatch_topp_split_stats,
+        _dispatch_topp_split_step,
         apply_top_k_top_p_triton,
     )
 
@@ -27,11 +27,11 @@ logger = init_logger(__name__)
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON and not current_platform.is_cpu():
-        _TOPK_TOPP_KERNEL.register_warmup()
+        _dispatch_topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
-            _TOPP_SPLIT_STATS_KERNEL.register_warmup()
-            _TOPP_SPLIT_STEP_KERNEL.register_warmup()
-            _TOPP_SPLIT_MASK_KERNEL.register_warmup()
+            _dispatch_topp_split_stats.register_warmup()
+            _dispatch_topp_split_step.register_warmup()
+            _dispatch_topp_split_mask.register_warmup()
 
 
 def _skip_aiter_sampler_on_gfx1250() -> bool:
