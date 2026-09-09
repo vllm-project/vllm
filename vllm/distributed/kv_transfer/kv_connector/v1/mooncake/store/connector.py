@@ -25,6 +25,7 @@ from vllm.distributed.kv_events import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
@@ -189,6 +190,19 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Discard peer handshake metadata, PP shards included.
+
+        Producers and consumers meet in MooncakeDistributedStore, not through
+        each other's transfer agents, so this connector never reads handshake
+        metadata -- the base class's setter for it is a no-op here. The base
+        PP-aware setter still rejects ``pp_rank > 0`` to protect connectors that
+        do read it, which stops PP-disaggregated serving from starting over a
+        value this one throws away.
+        """
 
     def shutdown(self):
         """Release connector resources on teardown.
