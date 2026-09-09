@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     convert_to_int8_moe_kernel_format,
     make_int8_moe_kernel,
@@ -22,8 +23,10 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_weight_quant,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    weight_amax,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -36,9 +39,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         *,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
     ):
-        super().__init__(layer.moe_config)
+        super().__init__(moe)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
             weight_key=kInt8StaticChannelSym,
@@ -72,6 +75,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             dtype=torch.float32,
         )
 
+        w2_amax = weight_amax(layer.w2_weight, dim=-1)
+        w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
+
         for expert in range(layer.local_num_experts):
             # w13: per-row quantization over hidden_size dim
             w = layer.w13_weight[expert, :, :]
@@ -82,7 +88,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
 
             # w2: per-row quantization over intermediate_size dim
             w = layer.w2_weight[expert, :, :]
-            scales = w.abs().amax(dim=1) / vmax
+            scales = w2_amax[expert] / vmax
             q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
             w2[expert, :, :] = q.to(torch.int8)
             w2_scale[expert, :] = scales
@@ -112,8 +118,8 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

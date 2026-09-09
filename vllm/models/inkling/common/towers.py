@@ -9,6 +9,7 @@ Both use vLLM's standard ``RMSNorm`` (CPU-friendly, with a native fallback).
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import cast
 
 import numpy as np
@@ -43,6 +44,20 @@ def _prime_factors(n: int) -> list[int]:
     if n > 1:
         factors.append(n)
     return factors
+
+
+def linear_sum_assignment(
+    cost_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Implement SciPy's assignment for Inkling's ordered L1 cost matrix."""
+    rows = np.arange(cost_matrix.shape[0])
+    cols = np.array(
+        min(
+            combinations(range(cost_matrix.shape[1]), len(rows)),
+            key=lambda candidate: cost_matrix[rows, candidate].sum(),
+        )
+    )
+    return rows, cols
 
 
 def plan_out_scales(
@@ -97,8 +112,6 @@ def plan_out_scales(
     if n_layers >= len(scales):
         idxs = np.argmin(cost_matrix, axis=1)
     else:
-        from scipy.optimize import linear_sum_assignment
-
         idxs = linear_sum_assignment(cost_matrix)[1]
 
     assert len(idxs) >= 2
