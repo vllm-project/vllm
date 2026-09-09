@@ -1801,7 +1801,11 @@ def stage_postprocess_inputs_to_gpu(
         scheduled_np[i] = scheduled
         computed_np[i] = computed
         draft_np[i] = num_draft
-        prefill_np[i] = computed < req_state.num_prompt_tokens
+        # Match Mamba attention: stateful one-token prompt tails, including
+        # those padded with speculative placeholders, run the decode kernels.
+        prefill_np[i] = computed < req_state.num_prompt_tokens and not (
+            computed > 0 and (scheduled == 1 or scheduled == num_draft + 1)
+        )
     if run_prefix_state_migration:
         assert ctx.mamba_state_idx_buf is not None
         ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)

@@ -107,27 +107,51 @@ def test_previous_scheduled_page_is_passed_only_to_mamba2() -> None:
     assert "prev_last_scheduled_idx" not in gdn_args
 
 
-def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("computed", "scheduled", "drafts", "prefilling", "expected_prefilling"),
+    [
+        (256, 4, 3, True, False),  # Cached prompt tail plus placeholders.
+        (1, 4, 3, True, False),  # Rejection can exceed the cached prefix length.
+        (256, 1, 0, True, False),
+        (0, 4, 3, True, True),  # No prior state: must stay a prefill.
+        (256, 4, 0, True, True),
+        (256, 4, 3, False, False),
+    ],
+)
+def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
+    monkeypatch: pytest.MonkeyPatch,
+    computed,
+    scheduled,
+    drafts,
+    prefilling,
+    expected_prefilling,
+) -> None:
     state = object.__new__(MambaHybridModelState)
-    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=3)
     state.max_model_len = 8192
     state._align_mode = False
-    state._use_flashinfer_replayssm = False
+    state._use_flashinfer_replayssm = True
+    state._is_prefilling_gpu = torch.zeros(1, dtype=torch.bool)
+    state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
+    state._get_mamba_group_info = Mock(return_value=([], None))
+    state._ensure_mamba_postprocess_ctx = Mock()
     state._mamba_prev_last_scheduled_idx_gpu = None
     state.recoverssm = None
 
-    positions = torch.tensor([1536], dtype=torch.int64)
+    positions = torch.arange(computed, computed + scheduled, dtype=torch.int64)
     input_batch = SimpleNamespace(
         num_reqs=1,
-        num_tokens=1,
+        num_tokens=scheduled,
         num_reqs_after_padding=1,
-        num_tokens_after_padding=1,
-        query_start_loc_np=torch.tensor([0, 1], dtype=torch.int32).numpy(),
-        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-        num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
-        seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
-        seq_lens=torch.tensor([1537], dtype=torch.int32),
-        is_prefilling_np=torch.tensor([False]).numpy(),
+        num_tokens_after_padding=scheduled,
+        query_start_loc_np=torch.tensor([0, scheduled], dtype=torch.int32).numpy(),
+        query_start_loc=torch.tensor([0, scheduled], dtype=torch.int32),
+        num_scheduled_tokens=torch.tensor([scheduled], dtype=torch.int32).numpy(),
+        num_draft_tokens_per_req=torch.tensor([drafts], dtype=torch.int32).numpy(),
+        idx_mapping=torch.tensor([0], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([computed + scheduled]),
+        seq_lens=torch.tensor([computed + scheduled]),
+        is_prefilling_np=torch.tensor([prefilling]).numpy(),
         dcp_local_seq_lens=None,
         positions=positions,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
@@ -147,6 +171,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+    assert state._is_prefilling_gpu.item() == expected_prefilling
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

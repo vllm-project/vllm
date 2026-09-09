@@ -751,6 +751,42 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
     ctx.replayssm.materialize.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("computed", "scheduled", "drafts", "prompt_len", "expected_prefilling"),
+    [
+        (256, 4, 3, 257, False),
+        (1, 4, 3, 2, False),
+        (256, 1, 0, 257, False),
+        (0, 4, 3, 1, True),
+        (256, 4, 0, 260, True),
+        (256, 4, 3, 256, False),
+    ],
+)
+def test_stage_replayssm_prefill_classification(
+    computed, scheduled, drafts, prompt_len, expected_prefilling
+):
+    ctx = _make_staging_ctx(1, torch.device("cpu"))
+    stage_postprocess_inputs_to_gpu(
+        ctx,
+        _make_postprocess_scheduler_output(
+            req_ids=["req"],
+            num_scheduled_tokens={"req": scheduled},
+            scheduled_spec_decode_tokens={"req": [1] * drafts},
+        ),
+        ["req"],
+        1,
+        _make_requests(
+            req_ids=["req"],
+            num_computed_tokens=[computed],
+            block_ids_per_req=[[0]],
+            num_prompt_tokens=[prompt_len],
+        ),
+        {},
+        run_prefix_state_migration=False,
+    )
+    assert ctx.is_prefilling_buf.gpu.item() == expected_prefilling
+
+
 def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
     """If preprocess_mamba didn't populate mamba_state_idx for a req in the
     batch, staging must fail loudly rather than silently writing a stale index."""

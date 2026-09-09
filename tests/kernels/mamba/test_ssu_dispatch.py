@@ -11,6 +11,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculat
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
+    _postprocess_replayssm_kernel,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
@@ -227,3 +228,62 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("post_step", [False, True])
+@pytest.mark.parametrize(
+    ("computed_before", "query_len", "prefilling", "accepted", "expected"),
+    [
+        (256, 4, False, 1, 3),  # Padded cached prompt tail commits its real token.
+        (1, 4, False, 1, 3),  # Rejected placeholders exceed the cached prefix.
+        (256, 1, False, 1, 3),
+        (0, 4, True, 1, 0),  # Initial prefill clears stale trackers.
+        (256, 4, True, 1, 0),  # Multi-token prefill also clears trackers.
+        (256, 4, False, 3, 5),  # Ordinary speculative decode commits acceptance.
+    ],
+)
+def test_replayssm_postprocess_commits_staged_transition(
+    post_step, computed_before, query_len, prefilling, accepted, expected
+):
+    """The staged kernel path must preserve accepted history on prompt tails."""
+
+    def tensor(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    computed = computed_before
+    if post_step:
+        computed += query_len if prefilling else accepted
+    ring_start = tensor([3])
+    committed = tensor([2])
+    plan_start, plan_flush = tensor([0]), tensor([-1])
+    slots = tensor([[0]])
+    _postprocess_replayssm_kernel[(1,)](
+        tensor([0]),
+        tensor([0, query_len]) if post_step else tensor([query_len]),
+        tensor([computed]),
+        tensor([accepted]),
+        torch.tensor([prefilling], device="cuda"),
+        None,
+        tensor([[0, 0]]),
+        ring_start,
+        committed,
+        slots,
+        slots,
+        plan_start,
+        plan_flush,
+        2,
+        1,
+        MAMBA_BLOCK_SIZE=256,
+        LOGICAL_WINDOW=16,
+        RING_BUFFER_LEN=20,
+        NUM_LAYERS=1,
+        PAD_SLOT_ID=-1,
+        QUERY_METADATA_IS_CUMULATIVE=post_step,
+        NUM_COMPUTED_IS_POST_STEP=post_step,
+        HAS_IDX_MAPPING=post_step,
+        MATERIALIZE_PREFIXES=False,
+        LIVE_COL_IS_ZERO=True,
+    )
+    assert committed.item() == expected
+    assert ring_start.item() == (0 if prefilling else 3)

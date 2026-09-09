@@ -316,8 +316,6 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch, num_reqs
             )
 
-        if self._use_flashinfer_replayssm:
-            self._is_prefilling_gpu[:num_reqs].copy_(is_prefilling, non_blocking=True)
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -347,6 +345,20 @@ class MambaHybridModelState(DefaultModelState):
 
         if self._use_flashinfer_replayssm:
             self._replayssm_query_start_loc = input_batch.query_start_loc
+            # Match Mamba attention using pre-step metadata: after acceptance,
+            # subtracting the scheduled length also subtracts rejected drafts.
+            query_lens = torch.diff(query_start_loc_cpu)
+            decode_rows = query_lens == 1
+            if num_decode_draft_tokens_cpu is not None:
+                decode_rows |= (num_decode_draft_tokens_cpu >= 0) & (
+                    query_lens == num_decode_draft_tokens_cpu + 1
+                )
+            replayssm_prefilling = is_prefilling & ~(
+                (seq_lens_cpu_upper_bound[:num_reqs] > query_lens) & decode_rows
+            )
+            self._is_prefilling_gpu[:num_reqs].copy_(
+                replayssm_prefilling, non_blocking=True
+            )
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             self._ensure_mamba_postprocess_ctx(
                 kv_cache_config, mamba_group_ids, block_tables

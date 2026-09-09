@@ -143,10 +143,8 @@ def _postprocess_replayssm_kernel(
     computed_before = tl.where(
         NUM_COMPUTED_IS_POST_STEP, computed - query_len, computed
     )
-    # Mamba attention runs a one-token final prefill chunk with prior state as
-    # decode. Commit the same transition here instead of resetting its cursors.
+    # Staged from forward metadata using Mamba attention's classification.
     prefilling = tl.load(is_prefilling + batch_idx)
-    prefilling = prefilling & ((query_len != 1) | (computed_before <= 0))
     accepted = tl.maximum(tl.load(num_accepted_tokens + req_idx), 1)
 
     # Derive this request's pre/post-step positions from ReplaySSM metadata.

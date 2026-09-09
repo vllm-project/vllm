@@ -28,6 +28,8 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
     layer = SimpleNamespace(
         get_state_shape=lambda: ((2,),),
         get_state_dtype=lambda: (torch.float32,),
+        get_replayssm_state_shape=lambda: (),
+        get_replayssm_state_dtype=lambda: (),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
     )

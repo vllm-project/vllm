@@ -1045,8 +1045,6 @@ def _run_mamba_prefix_cache_mrv2_configured(
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
-        query_start_loc: torch.Tensor | None = None,
-        is_prefilling: torch.Tensor | None = None,
     ) -> None:
         action = cur_step_action
         block_tables = captured.get("block_tables")
@@ -1064,8 +1062,6 @@ def _run_mamba_prefix_cache_mrv2_configured(
                 idx_mapping,
                 num_sampled,
                 num_computed_tokens,
-                query_start_loc,
-                is_prefilling,
             )
         expected = action.postprocess_copy_idx
         snapshots = [
@@ -1077,8 +1073,6 @@ def _run_mamba_prefix_cache_mrv2_configured(
             idx_mapping,
             num_sampled,
             num_computed_tokens,
-            query_start_loc,
-            is_prefilling,
         )
         # Comparing device tensors for the assertion is a deliberate D2H.
         with gpu_sync_allowed():
