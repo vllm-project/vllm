@@ -91,17 +91,17 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 def _job_metadata(
     job_id: int,
     keys: list[bytes] | None = None,
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
         keys = [b"key1"]
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -254,9 +254,9 @@ class TestLookup:
     "kv_params,expected",
     [
         (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
-        (None, OffloadPolicy.BLOCK_LEVEL),
-        (_remote_prefiller_kv_params(), OffloadPolicy.BLOCK_LEVEL),
-        ({"remote_decoder": {}}, OffloadPolicy.BLOCK_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
     ],
     ids=["producer", "plain", "consumer", "producer_no_id"],
 )
@@ -366,7 +366,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=1,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -397,7 +397,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=7,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -440,7 +440,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
+            job_id=1, keys=[], chunk_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -463,7 +463,7 @@ class TestSubmitLoad:
         job = _job_metadata(
             job_id=42,
             keys=[b"k1", b"k2"],
-            block_ids=[5, 6],
+            chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
@@ -1155,7 +1155,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=100,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1163,7 +1163,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=200,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
         )
@@ -1173,7 +1173,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=101,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
@@ -1181,7 +1181,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=201,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
         )
@@ -1573,7 +1573,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=900,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1581,7 +1581,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=901,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
