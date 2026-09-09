@@ -862,6 +862,77 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _cap_num_stages_for_gfx11_lds(
+    num_stages: int,
+    block_m: int,
+    tile_size: int,
+    head_size: int,
+    element_size: int,
+) -> int:
+    """Cap the K/V software-pipeline depth to fit the gfx11 LDS budget.
+
+    Each stage holds independent K and V tiles, so LDS grows with
+    ``num_stages``.  Wide heads overflow the budget at the depths chosen
+    below and Triton aborts with ``OutOfResources: shared memory``.
+    Estimated layout::
+
+        Q tile : block_m * head_size * element_size
+        S accum: block_m * tile_size * 4          (fp32)
+        K + V  : num_stages * 2 * tile_size * head_size * element_size
+
+    Args:
+        num_stages: Requested pipeline depth.
+        block_m: Query rows per block.
+        tile_size: KV tile depth.
+        head_size: Attention head dimension.
+        element_size: Bytes per KV element.
+
+    Returns:
+        The capped depth. Never below 1: a single stage that still does not
+        fit cannot be shortened any further.
+    """
+    q_bytes = block_m * head_size * element_size
+    s_bytes = block_m * tile_size * 4
+    kv_bytes_per_stage = 2 * tile_size * head_size * element_size
+    remaining = _GFX11_LDS_BUDGET - q_bytes - s_bytes
+    return max(1, min(num_stages, remaining // kv_bytes_per_stage))
+
+
+def _gfx11_launch_config(
+    max_seqlen_q: int,
+    head_size: int,
+    element_size: int,
+    block_m: int,
+    tile_size: int,
+) -> dict[str, int]:
+    """Launch parameters for the 2D unified-attention kernel on gfx11.
+
+    Triton's defaults are tuned for NVIDIA and leave the 2D path an order of
+    magnitude below the bf16 peak on RDNA3. The 3D path is not covered.
+
+    Args:
+        max_seqlen_q: Longest query in the batch; ``1`` means decode.
+        head_size: Attention head dimension.
+        element_size: Bytes per query element.
+        block_m: Query rows per block.
+        tile_size: KV tile depth the kernel will launch with.
+
+    Returns:
+        Keyword arguments for the kernel launch.
+    """
+    # A wide head lets the K/V tiles dominate LDS, so only a narrow-head
+    # decode can afford a deep pipeline.
+    num_stages = (1 if head_size >= 80 else 3) if max_seqlen_q == 1 else 1
+
+    return {
+        "num_warps": 4,
+        "num_stages": _cap_num_stages_for_gfx11_lds(
+            num_stages, block_m, tile_size, head_size, element_size
+        ),
+        "waves_per_eu": 2,
+    }
+
+
 def unified_attention(
     q,
     k,
@@ -1152,7 +1223,13 @@ def unified_attention(
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
+    # Lowest precedence first: platform tuning, then the caller's explicit
+    # ``launch_*`` overrides. An empty dict leaves the Triton defaults.
     launch_kwargs: dict[str, int] = {}
+    if not use_3d and _ON_GFX11:
+        launch_kwargs = _gfx11_launch_config(
+            max_seqlen_q, head_size, q.element_size(), BLOCK_M, tile_size
+        )
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
     if launch_num_stages is not None:
