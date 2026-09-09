@@ -3,6 +3,10 @@
 
 """Unit tests for the MuseGlimmer ATEM tool parser and reasoning parser.
 
+The reasoning side is the engine-based ``MuseGlimmerParser`` behind its
+``ReasoningParser`` adapter; the tool side is still the legacy ATEM parser
+that consumes the forwarded tool channel.
+
 MuseGlimmer writes every turn as a sequence of channel-scoped messages rather
 than JSON, so the two parsers are tested together: the reasoning parser strips
 the reasoning span and forwards the remaining channels as content, and the tool
@@ -27,10 +31,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
+from tests.parser.engine.conftest import make_mock_tokenizer
+from vllm.parser.engine.registered_adapters import (
+    MuseGlimmerParserReasoningAdapter,
+)
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
-R: MuseGlimmerReasoningParser
+_VOCAB = {
+    "<|start|>": 200001,
+    "<|message|>": 200002,
+    "<|eom|>": 200003,
+    "<|eot|>": 200004,
+}
+
+R: MuseGlimmerParserReasoningAdapter
 T: MuseGlimmerToolParser
 
 
@@ -38,7 +52,7 @@ T: MuseGlimmerToolParser
 def _fresh_parsers():
     """Give each test request-scoped parser state through the real constructors."""
     global R, T
-    R = MuseGlimmerReasoningParser(object())
+    R = MuseGlimmerParserReasoningAdapter(make_mock_tokenizer(_VOCAB))
     T = MuseGlimmerToolParser(object())
 
 
@@ -166,7 +180,7 @@ def test_reasoning_to_toolcall_handoff():
         '<atem:parameter name="city">Paris</atem:parameter>\n'
         "</atem:invoke>\n</atem:function_calls>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = R.extract_reasoning(raw, None)
     assert reasoning == "Let me call the tool.", repr(reasoning)
     assert content is not None and "<atem:invoke" in content, repr(content)
     out = MuseGlimmerToolParser.extract_tool_calls(T, content, None)
@@ -179,16 +193,14 @@ def test_reasoning_then_user_answer():
         " to=self<|message|>thinking<|eom|>"
         "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = R.extract_reasoning(raw, None)
     assert reasoning == "thinking", repr(reasoning)
     assert content == "The answer is 42.", repr(content)
     assert not MuseGlimmerToolParser.extract_tool_calls(T, content, None).tools_called
 
 
 def test_plain_content_without_framing_passes_through():
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(
-        R, "Just a direct answer.", None
-    )
+    reasoning, content = R.extract_reasoning("Just a direct answer.", None)
     assert reasoning is None and content == "Just a direct answer.", (
         reasoning,
         content,
@@ -207,7 +219,7 @@ def test_reasoning_then_parallel_calls():
         '<atem:parameter name="a">3</atem:parameter>\n</atem:invoke>\n'
         "</atem:function_calls><|eot|>"
     )
-    reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+    reasoning, content = R.extract_reasoning(raw, None)
     assert reasoning == "need two calls", repr(reasoning)
     out = MuseGlimmerToolParser.extract_tool_calls(T, content, None)
     assert [t.function.name for t in out.tool_calls] == ["math.add", "math.mul"], (
@@ -227,16 +239,15 @@ def _stream(raw: str, chunk: int):
     while i < len(raw):
         cur = raw[: i + chunk]
         delta = cur[len(prev) :]
-        dm = MuseGlimmerReasoningParser.extract_reasoning_streaming(
-            R, prev, cur, delta, [], [], []
-        )
+        dm = R.extract_reasoning_streaming(prev, cur, delta, [], [], [])
         if dm is not None:
             if getattr(dm, "reasoning", None):
                 reasoning.append(dm.reasoning)
             content_delta = getattr(dm, "content", None)
-            # Tool-channel content is an internal handoff to the tool parser,
+            # Once the engine confirms reasoning end, content deltas are the
+            # forwarded tool channel: an internal handoff to the tool parser,
             # not client-visible content from the unified parser.
-            if content_delta and "<atem:function_calls>" not in content_delta:
+            if content_delta and not R.has_engine_confirmed_reasoning_end():
                 content.append(content_delta)
         dt = MuseGlimmerToolParser.extract_tool_calls_streaming(
             T, prev, cur, delta, [], [], [], _FakeReq()
@@ -322,9 +333,7 @@ def test_truncated_cot_no_toolcall_nonstreaming():
     out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _FakeReq())
     assert not out.tools_called and out.tool_calls == []
     # partial reasoning must still be recovered by the reasoning parser
-    reasoning, _ = MuseGlimmerReasoningParser.extract_reasoning(
-        R, RAW_TRUNCATED, _FakeReq()
-    )
+    reasoning, _ = R.extract_reasoning(RAW_TRUNCATED, _FakeReq())
     assert reasoning and "Maybe I should call" in reasoning, repr(reasoning)
 
 

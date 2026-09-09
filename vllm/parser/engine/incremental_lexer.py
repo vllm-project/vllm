@@ -18,6 +18,7 @@ class TerminalDef:
     pattern: re.Pattern[str]
     is_literal: bool = False
     literal: str = ""
+    prefix: str = ""
 
 
 @dataclass(slots=True)
@@ -42,6 +43,8 @@ class LexerShape:
         "has_only_literals",
         "prefix_set",
         "literals_by_first",
+        "regex_terminals",
+        "boundary_probes",
     )
 
     def __init__(self, terminals: list[TerminalDef]) -> None:
@@ -54,6 +57,8 @@ class LexerShape:
             if t.is_literal:
                 literal_strings.append((t.literal, t.name))
 
+        self.regex_terminals = [t for t in self.terminals if not t.is_literal]
+
         self.literal_strings = literal_strings
         max_len = 0
         for lit, _ in literal_strings:
@@ -62,14 +67,24 @@ class LexerShape:
         self.max_literal_len = max_len
         self.literal_first_chars = frozenset(
             lit[0] for lit, _ in literal_strings if lit
-        )
+        ) | frozenset(t.prefix[0] for t in self.regex_terminals)
         self.has_only_literals = all(t.is_literal for t in terminals)
 
+        # Prefixes that could still grow into a terminal: for a regex
+        # terminal, only the proper prefixes of its literal prefix -- once
+        # the full prefix is present, partial regex matching takes over.
         prefix_set: set[str] = set()
         for lit, _ in literal_strings:
             for i in range(1, len(lit)):
                 prefix_set.add(lit[:i])
+        for t in self.regex_terminals:
+            for i in range(1, len(t.prefix)):
+                prefix_set.add(t.prefix[:i])
         self.prefix_set = frozenset(prefix_set)
+
+        self.boundary_probes = [lit for lit, _ in literal_strings] + [
+            t.prefix for t in self.regex_terminals
+        ]
 
         by_first: dict[str, list[tuple[str, str]]] = {}
         for lit, name in literal_strings:
@@ -113,6 +128,8 @@ class IncrementalLexer:
         self._has_only_literals = shape.has_only_literals
         self._prefix_set = shape.prefix_set
         self._literals_by_first = shape.literals_by_first
+        self._regex_terminals = shape.regex_terminals
+        self._boundary_probes = shape.boundary_probes
 
     def reset(self) -> None:
         self.buffer = ""
@@ -212,6 +229,26 @@ class IncrementalLexer:
                 ):
                     best_match = (name, lit, len(lit))
 
+            # Regex terminals match only at the buffer start, gated by their
+            # literal prefix. A partial match (the buffer could still grow
+            # into a full match) holds the buffer, mirroring literal prefix
+            # buffering; a literal match of the same length wins the tie.
+            regex_hold = False
+            for t in self._regex_terminals:
+                if not self.buffer.startswith(t.prefix):
+                    continue
+                m = t.pattern.match(self.buffer, partial=not final)
+                if m is None:
+                    continue
+                if m.partial:
+                    regex_hold = True
+                    continue
+                length = m.end()
+                if best_match is None or length > best_match[2]:
+                    best_match = (t.name, m.group(0), length)
+            if regex_hold:
+                break
+
             # If the current buffer is both a complete literal and the prefix
             # of a longer literal, wait for the next chunk. For example,
             # "<invoke name=" should not be emitted before the next chunk
@@ -277,11 +314,36 @@ class IncrementalLexer:
             if buf[i] not in first_chars:
                 continue
             remaining = n - i
-            for lit, _ in self._literal_strings:
-                check_len = min(remaining, len(lit))
-                if buf[i : i + check_len] == lit[:check_len]:
+            for probe in self._boundary_probes:
+                check_len = min(remaining, len(probe))
+                if buf[i : i + check_len] == probe[:check_len]:
                     return i
         return n
+
+
+_REGEX_METACHARS = frozenset("[](){}?*+|^$.\\")
+
+
+def terminal_from_regex(name: str, pattern: str) -> TerminalDef:
+    """Build a non-literal terminal from a regex *pattern*.
+
+    The pattern must start with a run of plain literal characters (its
+    prefix); the lexer only attempts the regex once the buffer starts with
+    that prefix, and holds shorter buffers that could still complete it.
+    The pattern should have an unambiguous end: a complete match must not
+    be extensible by further input, or the lexer may emit it early.
+    """
+    prefix_chars: list[str] = []
+    for ch in pattern:
+        if ch in _REGEX_METACHARS:
+            break
+        prefix_chars.append(ch)
+    prefix = "".join(prefix_chars)
+    if not prefix:
+        raise ValueError(
+            f"regex terminal {name!r} must start with a literal prefix: {pattern!r}"
+        )
+    return TerminalDef(name=name, pattern=re.compile(pattern), prefix=prefix)
 
 
 def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
