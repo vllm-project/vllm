@@ -421,7 +421,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
-            from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
 
             _FUSED_Q_KV_RMSNORM_KERNEL.register_warmup()
@@ -1038,7 +1037,6 @@ class DeepseekV4Indexer(nn.Module):
         ]
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
 
             if not has_cutedsl() and not current_platform.is_xpu():
