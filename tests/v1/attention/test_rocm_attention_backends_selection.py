@@ -146,6 +146,39 @@ def test_standard_attention_backend_selection(
 
 
 @pytest.mark.parametrize(
+    "unified_attn_enabled, expect_selected",
+    [
+        # VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION unset (default False): the
+        # RDNA unified-attn kernel exceeds RDNA's LDS limit on some shapes, so
+        # it must not be force-selected just because aiter is enabled.
+        (False, False),
+        # Explicit opt-in still works.
+        (True, True),
+    ],
+)
+def test_rdna_unified_attn_backend_respects_flag(unified_attn_enabled, expect_selected):
+    """On RDNA (no CDNA aiter support), ROCM_AITER_UNIFIED_ATTN must only be
+    prioritized when VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION is enabled, not
+    merely because VLLM_ROCM_USE_AITER is set (see #56021)."""
+    from vllm.platforms.rocm import _get_backend_priorities
+
+    with (
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=False),
+        patch("vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=False),
+        patch(
+            "vllm._aiter_ops.rocm_aiter_ops.is_rdna_unified_attn_enabled",
+            return_value=unified_attn_enabled,
+        ),
+    ):
+        backends = _get_backend_priorities(use_mla=False, use_sparse=False)
+
+    if expect_selected:
+        assert backends[0] == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    else:
+        assert AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN not in backends
+
+
+@pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [
         # Test Case 1: TRITON_MLA with block_size != 1
