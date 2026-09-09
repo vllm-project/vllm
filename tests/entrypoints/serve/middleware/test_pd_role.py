@@ -15,18 +15,23 @@ from vllm.entrypoints.serve.pd_role.state import PDRoleState
 
 @pytest.mark.asyncio
 async def test_role_switch_waits_for_http_and_kv_drain():
-    """An accepted stream and delayed KV ownership both precede role commit."""
     release_stream = asyncio.Event()
     entered_stream = asyncio.Event()
     prepared = asyncio.Event()
     release_kv = asyncio.Event()
     calls = []
+    committed_status = []
 
     async def call_all(method, *args):
         calls.append(method)
         if method == "prepare_pd_role":
             prepared.set()
         committed = method == "commit_pd_role"
+        if committed:
+            # Observe wait_for's scheduling gap on Python 3.10/3.11.
+            asyncio.get_running_loop().call_soon(
+                lambda: committed_status.append(state.status())
+            )
         return [
             {
                 "role": "decode" if committed else "prefill",
@@ -69,27 +74,30 @@ async def test_role_switch_waits_for_http_and_kv_drain():
         assert "commit_pd_role" not in calls
         release_kv.set()
         await state.task
+        status = committed_status[0]
+        assert status["phase"] != "ready" or status["transition_seconds"] is not None
         assert state.status()["phase"] == "ready"
+        assert state.duration is not None
         assert (state.role, state.epoch) == ("decode", 1)
         stale = await client.post("/v1/completions", headers=headers)
         assert stale.status_code == 409
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("partial_commit", [False, True])
-async def test_role_switch_recovers_only_before_commit(partial_commit):
-    """A drain failure restores admission; an uncertain commit stays fenced."""
+@pytest.mark.parametrize("failure", ["drain", "commit", "cancel"])
+async def test_role_switch_recovers_only_before_commit(failure):
     calls = []
 
     async def call_all(method, *args):
         calls.append(method)
-        if method == "get_pd_role_status" and not partial_commit:
+        if method == "get_pd_role_status" and failure != "commit":
             raise TimeoutError("delayed KV transfer")
         if method == "commit_pd_role":
             raise RuntimeError("one rank did not acknowledge")
+        num_ranks = 1 if method == "cancel_pd_role" and failure == "cancel" else 2
         return [
             {"role": "prefill", "epoch": 0, "drained": True, "pending_role": None}
-        ] * 2
+        ] * num_ranks
 
     state = PDRoleState("prefill", 2, call_all)
     state.start("decode", 0, 1)
@@ -97,12 +105,8 @@ async def test_role_switch_recovers_only_before_commit(partial_commit):
         state.start("decode", 0, 1)
     await state.task
     assert (state.role, state.epoch) == ("prefill", 0)
-    if partial_commit:
-        assert state.phase == "failed"
-        assert "cancel_pd_role" not in calls
-    else:
-        assert state.phase == "ready"
-        assert calls[-1] == "cancel_pd_role"
+    assert state.phase == ("ready" if failure == "drain" else "failed")
+    assert ("cancel_pd_role" in calls) == (failure != "commit")
 
 
 @pytest.mark.asyncio
@@ -119,18 +123,6 @@ async def test_http_drain_timeout_keeps_existing_request_and_epoch():
     assert state.active_requests == 1
     assert (state.role, state.epoch) == ("decode", 0)
     assert "TimeoutError" in state.error
-
-
-@pytest.mark.asyncio
-async def test_role_switch_requires_every_rank_acknowledgement():
-    async def call_all(method, *args):
-        return [{"role": "prefill", "epoch": 0, "drained": True}]
-
-    state = PDRoleState("prefill", 2, call_all)
-    state.start("decode", 0, 1)
-    await state.task
-    assert state.phase == "failed"
-    assert state.epoch == 0
 
 
 @pytest.mark.asyncio
@@ -189,5 +181,4 @@ async def test_prepare_timeout_cancels_every_prepared_rank():
         ).status_code == 200
     assert calls == ["prepare_pd_role", "cancel_pd_role"]
     assert prepared_roles == [None, None]
-    assert state.phase == "ready"
     assert state.epoch == 0

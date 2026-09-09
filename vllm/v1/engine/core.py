@@ -888,8 +888,7 @@ class EngineCore:
     def get_pd_role_status(self) -> dict[str, Any]:
         running, waiting = self.scheduler.get_request_counts()
         pending_batches = len(self.batch_queue) if self.batch_queue else 0
-        # Unlike get_num_unfinished_requests(), these counts include queued
-        # streaming inputs. has_requests() also includes delayed connector frees.
+        # Include streaming-input waiters and delayed connector cleanup.
         drained = (
             running == 0
             and waiting == 0
@@ -921,8 +920,7 @@ class EngineCore:
             raise ValueError("Cannot change P/D role while scheduling is paused")
         if self._pending_pd_role not in (None, role):
             raise ValueError("Another P/D role change is already prepared")
-        # Fence new adds without pausing the scheduler: existing requests and
-        # NIXL lease holders must continue through their normal completion path.
+        # Keep accepted requests and KV cleanup running while new adds are fenced.
         self._pending_pd_role = role
         return self.get_pd_role_status()
 
@@ -1628,8 +1626,7 @@ class EngineCoreProc(EngineCore):
                 return
             if self._rejects_pd_role_request(req):
                 if req.kv_transfer_params:
-                    # Run the connector's pre-admission cleanup hook so a
-                    # rejected decode does not strand its remote prefill KV.
+                    # Release remote prefill KV owned by the rejected request.
                     req.abort_immediately = True
                     self.add_request(req, request_wave)
                 self._send_error_outputs_to_client([req.request_id], req.client_index)

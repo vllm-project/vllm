@@ -55,7 +55,7 @@ class PDRoleState:
         self.error = None
         self.duration = None
         self.started_at = time.monotonic()
-        # The operation outlives its HTTP caller, including caller disconnects.
+        # Keep the transition alive after caller disconnects.
         self.task = asyncio.create_task(self._switch(role, expected_epoch, timeout))
 
     def _check_ranks(
@@ -67,8 +67,7 @@ class PDRoleState:
             raise RuntimeError("Engine ranks disagree on the serving role or epoch")
 
     async def _prepare_and_commit(self, role: PDRole, epoch: int) -> None:
-        # Keep stepping all accepted work, including requests still in
-        # HTTP preprocessing and requests waiting for scheduler capacity.
+        # Finish admitted HTTP work before fencing engine requests.
         await self.idle.wait()
         self.phase = "preparing"
         statuses = await self.call_all("prepare_pd_role", role, epoch)
@@ -85,15 +84,16 @@ class PDRoleState:
         self._check_ranks(statuses, role, epoch + 1)
         self.role = role
         self.epoch = epoch + 1
-        self.phase = "ready"
 
     async def _switch(self, role: PDRole, epoch: int, timeout: float) -> None:
         try:
             await asyncio.wait_for(self._prepare_and_commit(role, epoch), timeout)
+            self.phase = "ready"
         except Exception as exc:
             prepared = self.phase == "preparing"
             committing = self.phase == "committing"
             self.error = f"{type(exc).__name__}: {exc}"
+            # Do not reopen admission after an uncertain commit.
             self.phase = "failed" if committing else "rolling_back"
             if not committing:
                 try:
@@ -108,7 +108,6 @@ class PDRoleState:
                 except Exception as rollback_exc:
                     self.phase = "failed"
                     self.error += f"; rollback failed: {rollback_exc}"
-            # A possibly partial commit remains fenced; never publish readiness.
         finally:
             assert self.started_at is not None
             self.duration = time.monotonic() - self.started_at

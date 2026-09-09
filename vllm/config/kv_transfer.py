@@ -43,9 +43,8 @@ class KVTransferConfig:
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
     pd_role: Literal["prefill", "decode"] | None = None
-    """Opt into runtime P/D role switching, with this initial serving role.
-    Requires NixlConnector with kv_role='kv_both'; the transfer capability
-    remains fixed for the lifetime of the engine."""
+    """Initial serving role for runtime P/D switching. Requires NixlConnector
+    with kv_role='kv_both'; KV transfer capabilities remain fixed."""
 
     kv_rank: int | None = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:

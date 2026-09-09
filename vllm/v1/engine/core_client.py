@@ -1615,8 +1615,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )[0]
 
     async def call_utility_all_async(self, method: str, *args) -> list[Any]:
-        # Wait for every rank before reporting a failed mutation, so its caller
-        # can safely query or cancel a partially prepared transaction.
+        # Wait for every rank before the caller can roll back a partial prepare.
         results = await asyncio.gather(
             *[
                 self._call_utility_async(method, *args, engine=engine)
