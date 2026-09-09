@@ -21,6 +21,34 @@ following `quantization.quant_algo` values:
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 
+### Layer-wise mixed-precision KV cache
+
+ModelOpt checkpoints may select full FP8 K/V or full NVFP4 K/V independently
+for each attention layer. When `kv_cache_quant_algo` is `MIXED_PRECISION`, vLLM
+reads the versioned `kv_cache_quantized_layers` mapping and dispatches each
+listed layer to its existing FP8 or NVFP4 KV-cache implementation. Layers not
+listed in the mapping keep the model dtype.
+
+Keep `kv_cache_dtype="auto"` (the default) to use the checkpoint recipe. An
+explicit `--kv-cache-dtype` overrides the recipe for every layer, and
+`--kv-cache-dtype-skip-layers` still takes precedence for selected layers.
+
+For hybrid attention/Mamba models using aligned prefix caching, vLLM packs exact
+per-layer pages in a block-outer layout when the backend supports one. Without
+an explicit block size, the manager block remains the backend's preferred
+kernel page (P64 for FlashInfer NVFP4). This does not require additional
+kernels. An explicitly selected layer-outer layout, or a backend without
+block-outer support, uses the legacy aligned-page fallback.
+
+This integration supports full FP8 K/V and full NVFP4 K/V layers. A format
+that mixes K and V within one layer, such as FP8 K with NVFP4 V, requires a
+separate attention-kernel implementation and is intentionally outside this
+layer-wise allocation change.
+
+For compressed-tensors-style configuration, an explicit
+`kv_cache_quant_algo` takes precedence over the legacy `kv_cache_scheme` when
+both keys are present.
+
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
     time from the backends available on the current platform (CUTLASS,
