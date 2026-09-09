@@ -22,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
+from vllm.platforms import current_platform
 
 DAEMON_TIMEOUT_S = 600
 
@@ -182,6 +183,9 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon.
     """
+    if case is K3_CASE and not current_platform.is_device_capability_family(100):
+        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
