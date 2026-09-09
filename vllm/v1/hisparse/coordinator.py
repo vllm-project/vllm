@@ -4,7 +4,12 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -389,7 +394,11 @@ class HiSparseCoordinator:
 
     def take_events(self) -> list[KVCacheEvent]:
         pool = self.get_host_block_pool()
-        return [] if pool is None else pool.take_events()
+        events = [] if pool is None else pool.take_events()
+        for event in events:
+            if isinstance(event, (BlockStored, BlockRemoved)):
+                event.medium = MEDIUM_CPU
+        return events
 
     def reclaim_resident_blocks(self, num_blocks: int) -> int:
         """Reclaim host-valid pages and enqueue copies for GPU-only pages."""

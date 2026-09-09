@@ -15,6 +15,7 @@ import torch
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
     MEDIUM_GPU,
     AllBlocksCleared,
     BlockRemoved,
@@ -718,6 +719,72 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     command = manager.hisparse_coordinator.build_offload_command()
     counts = {spill.transfer_id: 1 for spill in command.page_transfers}
     manager.hisparse_coordinator.update_spills(counts, counts)
+
+
+def test_hisparse_events_report_host_and_device_placement():
+    """Host publication and eviction must not advertise GPU-resident KV."""
+    manager = make_kv_cache_manager(
+        make_hisparse_kv_cache_config(32, 16),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=HISPARSE_BLOCK_SIZE,
+        enable_kv_cache_events=True,
+    )
+    request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 64) is not None
+    _publish_hisparse_pages(manager)
+
+    stored = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    assert {(event.group_idx, event.medium) for event in stored} == {
+        (0, MEDIUM_CPU),
+        (1, MEDIUM_GPU),
+    }
+
+    host_block = manager.get_blocks(request.request_id).blocks[0][0]
+    manager.evict_blocks({host_block.block_id})
+    [removed] = manager.take_events()
+    assert isinstance(removed, BlockRemoved)
+    assert removed.medium == MEDIUM_CPU
+    assert removed.group_idx == 0
+
+
+def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
+    """Draining unused connector offers must not retain old recurrent states."""
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    request = make_request("request", list(range(64)), 16, sha256)
+    old_blocks = []
+    for end in (16, 32, 48):
+        assert manager.allocate_slots(request, 16) is not None
+        request.num_computed_tokens = end
+        offers = manager.take_boundary_state_offloads()
+        [(_, block_id, boundary)] = offers[request.request_id]
+        assert boundary == end
+        old_blocks.append(manager.block_pool.blocks[block_id])
+        manager.remove_skipped_blocks(request.request_id, end, 64)
+        manager.new_step_starts()
+
+    assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
 def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():

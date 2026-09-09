@@ -206,7 +206,6 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
-        self._partial_tail_pins: dict[str, list[KVCacheBlock]] = {}
 
     @property
     def usage(self) -> float:
@@ -635,9 +634,6 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        pins = self._partial_tail_pins.pop(request.request_id, None)
-        if pins:
-            self.free_blocks(pins)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -670,11 +666,7 @@ class KVCacheManager:
         Returns:
             The request's blocks in allocation order.
         """
-        blocks = self.coordinator.pop_blocks_for_free(request.request_id)
-        pins = self._partial_tail_pins.pop(request.request_id, None)
-        if pins:
-            blocks = pins + blocks
-        return blocks
+        return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Return blocks to their owning physical pool."""
@@ -963,8 +955,6 @@ class KVCacheManager:
                 block,
                 boundary_tokens,
             ) in mgr.take_pending_boundary_state_offloads():
-                mgr.block_pool.touch((block,))
-                self._partial_tail_pins.setdefault(req_id, []).append(block)
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
