@@ -36,6 +36,19 @@ plus lower/higher batch interactions at three-quarters and one-half of that
 count. This gives broader coverage than a one-parameter-at-a-time sweep without
 the cost of a full Cartesian grid.
 
+The serving benchmark scales request count with workload concurrency, following
+vLLM's `PROMPTS_PER_CONCURRENCY` model:
+
+```text
+num_prompts = min(1000, max(100, concurrency * 10))
+```
+
+This targets about ten concurrency turnovers when neither bound applies. The
+100-prompt floor avoids very small samples for P99 latency and 99% compliance
+measurements, while the 1000-prompt cap bounds sweep runtime. Workload
+concurrency is fixed during the scheduler sweep, so every scheduler candidate
+uses the same number of prompts.
+
 ## Run and Recommend
 
 ```bash

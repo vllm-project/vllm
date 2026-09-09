@@ -13,6 +13,17 @@ from typing import Any
 
 from runtime_tuning import WorkloadHints
 
+PROMPTS_PER_CONCURRENCY = 10
+MIN_NUM_PROMPTS = 100
+MAX_NUM_PROMPTS = 1000
+
+
+def _num_prompts_for_concurrency(concurrency: int) -> int:
+    return min(
+        MAX_NUM_PROMPTS,
+        max(MIN_NUM_PROMPTS, concurrency * PROMPTS_PER_CONCURRENCY),
+    )
+
 
 def _positive_int(config: dict[str, Any], key: str) -> int:
     value = config.get(key)
@@ -124,6 +135,7 @@ def build_bench_params(workload: WorkloadHints) -> list[dict[str, Any]]:
             "random_input_len": workload.input_tokens,
             "random_output_len": workload.output_tokens,
             "max_concurrency": workload.concurrency,
+            "num_prompts": _num_prompts_for_concurrency(workload.concurrency),
         }
     ]
 
@@ -290,6 +302,18 @@ Resume an interrupted sweep:
 ```
 
 By default, vLLM benchmarks each parameter combination three times.
+
+The benchmark request count scales with the supplied workload concurrency using
+the same model as vLLM's `PROMPTS_PER_CONCURRENCY` performance-benchmark
+control:
+
+```text
+num_prompts = min(1000, max(100, concurrency * 10))
+```
+
+This targets about ten concurrency turnovers when neither bound applies, keeps
+at least 100 requests for percentile/compliance measurements, and caps each run
+at 1000 requests. All scheduler candidates use the same request count.
 {sla_text}
 ## Outputs
 
