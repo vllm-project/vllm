@@ -212,7 +212,7 @@ def test_buckets_return_fresh_copies():
 
 
 def test_bucket_family_keys():
-    """The override vocabulary is exactly the known families."""
+    """The declared families are exactly these, and each one feeds a histogram."""
     assert {
         "request_latency",
         "time_to_first_token",
@@ -223,6 +223,7 @@ def test_bucket_family_keys():
         "request_tokens",
         "kv_cache_residency",
     } == BUCKET_FAMILY_KEYS
+    assert set(METRIC_FAMILIES.values()) == BUCKET_FAMILY_KEYS
 
 
 def collect_histogram_buckets() -> dict[str, list[float]]:
@@ -250,7 +251,12 @@ def build_logger_config(
 
 
 def test_prometheus_logger_default_buckets():
-    """Every histogram the logger registers must use its family's defaults."""
+    """Every core engine histogram must use its family's defaults.
+
+    The config deliberately sets no kv_transfer_config: a KV connector would
+    register its own histograms, which own their boundaries and are not
+    covered by METRIC_FAMILIES.
+    """
     config = build_logger_config(ObservabilityConfig(kv_cache_metrics=True))
     assert config.model_config.max_model_len == TEST_MODEL_MAX_LEN
     try:

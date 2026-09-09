@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Default bucket boundaries for the Prometheus histograms emitted by vLLM.
 
-Every histogram created by the Prometheus stat logger draws its bucket
-boundaries from exactly one of the families defined here, so each default
-list has a single source of truth.
+Every core engine histogram created by the Prometheus stat logger draws its
+bucket boundaries from exactly one of the families defined here, so each
+default list has a single source of truth. Histograms owned by other
+subsystems, such as the KV connector and offloading metrics, keep their own
+boundaries.
 """
 
 from typing import Literal, get_args
@@ -123,8 +125,11 @@ REQUEST_PARAMS_N_BUCKETS: tuple[float, ...] = (1, 2, 5, 10, 20)
 """Small integer counts for the ``n`` sampling parameter."""
 
 REQUEST_NUM_PREEMPTIONS_BUCKETS: tuple[float, ...] = (1, 2, 3, 4, 5, 10, 20)
-"""Per-request preemption counts: unit resolution over the common 1-5 range,
-coarsening for repeatedly preempted requests."""
+"""Per-request preemption counts, recorded for every finished request: the
+first bucket therefore holds never-preempted requests together with
+singly-preempted ones, 2 through 5 are separated individually, and the tail
+coarsens to 20. Distinct from `REQUEST_PARAMS_N_BUCKETS` because these are the
+boundaries the metric shipped with, not a harmonized choice."""
 
 KV_CACHE_RESIDENCY_BUCKETS: tuple[float, ...] = (
     0.001,

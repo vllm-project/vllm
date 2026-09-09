@@ -730,10 +730,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         iteration_tokens_buckets = histogram_buckets("iteration_tokens")
         request_params_n_buckets = histogram_buckets("request_params_n")
-        request_num_preemptions_buckets = histogram_buckets("request_num_preemptions")
         time_to_first_token_buckets = histogram_buckets("time_to_first_token")
         inter_token_latency_buckets = histogram_buckets("inter_token_latency")
         request_latency_buckets = histogram_buckets("request_latency")
+        request_num_preemptions_buckets = histogram_buckets("request_num_preemptions")
 
         #
         # Histograms of counts
