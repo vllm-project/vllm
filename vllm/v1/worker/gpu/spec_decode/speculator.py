@@ -17,7 +17,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.watermarking.spec_decode import DraftWatermarker
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.spec_decode import (
+    DraftWatermarker,
+    create_speculative_draft_watermarker,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     init_attn_backend,
@@ -172,10 +176,12 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.draft_watermarker: DraftWatermarker | None = None
         if watermark_config := vllm_config.watermark_config:
-            self.draft_watermarker = DraftWatermarker(
-                watermark_config,
+            watermarker = create_watermarker(watermark_config)
+            self.draft_watermarker = create_speculative_draft_watermarker(
+                watermarker,
                 self.max_num_reqs,
                 device,
+                watermark_config.allow_target_only_speculative_decoding,
             )
 
         self.supports_mm_inputs = False

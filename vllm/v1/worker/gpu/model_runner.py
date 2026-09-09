@@ -496,11 +496,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     assert isinstance(self.sampler, GPUWatermarkSampler)
+                    watermarker = self.sampler.watermarker
                     self.rejection_sampler = WatermarkedRejectionSampler(
                         self.sampler,
                         self.speculative_config,
                         self.device,
-                        self.vllm_config.watermark_config,
+                        watermarker,
                     )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,

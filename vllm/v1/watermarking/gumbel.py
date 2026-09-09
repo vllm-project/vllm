@@ -14,7 +14,9 @@ from vllm.v1.watermarking.detector import (
 )
 from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
+    AcceptanceRandomness,
     RandomSampler,
+    SpeculativeVerification,
     Watermarker,
     WatermarkSample,
 )
@@ -98,18 +100,25 @@ class GumbelWatermarker(Watermarker):
 
 
 class DualKeyGumbelWatermarker(GumbelWatermarker):
-    supports_speculative_decoding = True
+    speculative_verification = SpeculativeVerification.STANDARD
+    acceptance_randomness = AcceptanceRandomness.RANDOM
 
     def __init__(
         self,
         key: int,
         context_width: int = 4,
-        prf: WatermarkPRF | WatermarkPRFName = "philox",
-        *,
-        is_drafting: bool = False,
+        prf: WatermarkPRFName = "philox",
     ) -> None:
-        domain = b"draft" if is_drafting else b"target"
-        super().__init__(derive_watermark_key(key, domain), context_width, prf)
+        self.master_key = key
+        self.prf_name = prf
+        super().__init__(derive_watermark_key(key, b"target"), context_width, prf)
+
+    def create_draft_watermarker(self) -> Watermarker:
+        return GumbelWatermarker(
+            derive_watermark_key(self.master_key, b"draft"),
+            self.context_width,
+            self.prf_name,
+        )
 
 
 class GumbelWatermarkDetector(WatermarkDetector):

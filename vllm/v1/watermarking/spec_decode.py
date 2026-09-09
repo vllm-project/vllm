@@ -5,10 +5,13 @@ import numpy as np
 import torch
 
 from vllm.config import SpeculativeConfig
-from vllm.config.watermarking import WatermarkConfig
-from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
-from vllm.v1.watermarking.watermarker import Watermarker
+from vllm.v1.watermarking.watermarker import (
+    AcceptanceRandomness,
+    SpeculativeVerification,
+    SupportsSpeculativeDecoding,
+    Watermarker,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
@@ -16,14 +19,14 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sam
 class DraftWatermarker:
     def __init__(
         self,
-        config: WatermarkConfig,
+        watermarker: Watermarker,
         max_num_reqs: int,
         device: torch.device,
     ) -> None:
-        self.watermarker = create_watermarker(config, is_drafting=True)
+        self.watermarker = watermarker
         self.contexts = torch.zeros(
             max_num_reqs,
-            config.context_width,
+            watermarker.context_width,
             dtype=torch.int64,
             device=device,
         )
@@ -55,6 +58,25 @@ class DraftWatermarker:
         contexts = self.contexts[: logits.shape[0]]
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled
+
+
+def create_speculative_draft_watermarker(
+    watermarker: Watermarker,
+    max_num_reqs: int,
+    device: torch.device,
+    allow_target_only: bool,
+) -> DraftWatermarker | None:
+    if isinstance(watermarker, SupportsSpeculativeDecoding):
+        return DraftWatermarker(
+            watermarker.create_draft_watermarker(), max_num_reqs, device
+        )
+    if allow_target_only:
+        return None
+    raise ValueError(
+        f"The {type(watermarker).__name__} watermarking algorithm does not support "
+        "speculative decoding. Set allow_target_only_speculative_decoding=true to "
+        "leave draft tokens unwatermarked."
+    )
 
 
 def watermarked_rejection_sample(
@@ -169,10 +191,15 @@ class WatermarkedRejectionSampler(RejectionSampler):
         sampler: GPUWatermarkSampler,
         spec_config: SpeculativeConfig,
         device: torch.device,
-        watermark_config: WatermarkConfig,
+        watermarker: Watermarker,
     ) -> None:
+        if isinstance(watermarker, SupportsSpeculativeDecoding) and (
+            watermarker.speculative_verification is not SpeculativeVerification.STANDARD
+            or watermarker.acceptance_randomness is not AcceptanceRandomness.RANDOM
+        ):
+            raise NotImplementedError("Unsupported speculative watermarking protocol")
         super().__init__(sampler, spec_config, device)
-        self.watermarker = create_watermarker(watermark_config)
+        self.watermarker = watermarker
 
     def _verify(
         self,

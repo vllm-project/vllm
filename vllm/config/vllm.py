@@ -1134,14 +1134,6 @@ class VllmConfig:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
             return
-        if (
-            self.speculative_config is not None
-            and not watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
         if self.speculative_config is not None:
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":

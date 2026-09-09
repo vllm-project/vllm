@@ -132,6 +132,12 @@ vllm serve MODEL \
 This implements the construction from [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 
+Watermarking algorithms without native speculative-decoding support can be
+used with `"allow_target_only_speculative_decoding": true`. Accepted draft
+tokens are not watermarked in this mode; only target-side rejection recovery
+and bonus sampling are watermarked. This weakens detection compared with fully
+watermarked generation.
+
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
@@ -204,9 +210,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 ## Limitations
 
 - Watermarking is currently available only with Model Runner V2.
-- Speculative-decoding support depends on the configured watermark algorithm;
-  check the watermarker's `supports_speculative_decoding` capability before
-  combining them.
+- Not all watermarking algorithms have native speculative-decoding support.
 - Beam search expands candidates from model log probabilities and does not apply
   Gumbel-max watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use

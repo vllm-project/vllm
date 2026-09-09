@@ -12,13 +12,22 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarker,
+    SupportsSpeculativeDecoding,
     create_watermarker,
     derive_watermark_key,
 )
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
-from vllm.v1.watermarking.spec_decode import DraftWatermarker
-from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
+from vllm.v1.watermarking.spec_decode import (
+    DraftWatermarker,
+    create_speculative_draft_watermarker,
+)
+from vllm.v1.watermarking.watermarker import (
+    AcceptanceRandomness,
+    SpeculativeVerification,
+    Watermarker,
+    WatermarkSample,
+)
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import (
     philox_gumbel_sample,
@@ -102,13 +111,37 @@ def test_dual_key_watermarker_uses_domain_separated_keys():
     config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
 
     target = create_watermarker(config)
-    draft = create_watermarker(config, is_drafting=True)
+    assert isinstance(target, SupportsSpeculativeDecoding)
+    draft = target.create_draft_watermarker()
 
     assert isinstance(target, DualKeyGumbelWatermarker)
-    assert target.supports_speculative_decoding
+    assert target.speculative_verification is SpeculativeVerification.STANDARD
+    assert target.acceptance_randomness is AcceptanceRandomness.RANDOM
     assert target.prf.key == derive_watermark_key(42, b"target")
     assert draft.prf.key == derive_watermark_key(42, b"draft")
     assert target.prf.key != draft.prf.key
+
+
+def test_target_only_speculative_watermarking_skips_draft_watermarker():
+    watermarker = create_watermarker(WatermarkConfig(algorithm="gumbel", key=42))
+
+    assert not isinstance(watermarker, SupportsSpeculativeDecoding)
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        create_speculative_draft_watermarker(
+            watermarker,
+            max_num_reqs=1,
+            device=torch.device("cpu"),
+            allow_target_only=False,
+        )
+    assert (
+        create_speculative_draft_watermarker(
+            watermarker,
+            max_num_reqs=1,
+            device=torch.device("cpu"),
+            allow_target_only=True,
+        )
+        is None
+    )
 
 
 def test_dual_key_derivation_is_stable():
@@ -853,3 +886,27 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
         watermark_logits[0][:, [1, 5]], torch.tensor([[10, 20], [30, 40]])
     )
     assert torch.isneginf(watermark_logits[0][:, [0, 2, 3, 4, 6, 7]]).all()
+
+
+def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch):
+    speculator = object.__new__(DSparkSpeculator)
+    speculator.draft_logits = torch.zeros(2, 1, 8)
+    speculator._d2t_scatter_index = None
+    speculator.temperature = torch.ones(2)
+    speculator.seeds = torch.zeros(2, dtype=torch.int64)
+    speculator._step_cols = torch.tensor([0])
+    speculator.use_fp64_gumbel = False
+    speculator.draft_watermarker = None
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dspark.speculator.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([3, 4]),
+    )
+
+    sampled = speculator._sample_logits(
+        torch.zeros(2, 8),
+        torch.tensor([0, 1]),
+        torch.tensor([1, 1]),
+        0,
+    )
+
+    assert torch.equal(sampled, torch.tensor([3, 4]))

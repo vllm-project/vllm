@@ -2752,8 +2752,11 @@ def _watermarked_vllm_config() -> VllmConfig:
     return config
 
 
-def test_gumbel_watermark_rejects_speculative_decoding():
+def test_target_only_gumbel_allows_speculative_decoding():
     config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        key=42, allow_target_only_speculative_decoding=True
+    )
     config.speculative_config = SimpleNamespace(
         method="mtp",
         draft_sample_method="probabilistic",
@@ -2761,8 +2764,7 @@ def test_gumbel_watermark_rejects_speculative_decoding():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="does not support speculative decoding"):
-        config._check_watermarking_unsupported()
+    config._check_watermarking_unsupported()
 
 
 def test_dual_key_gumbel_requires_probabilistic_drafting():
