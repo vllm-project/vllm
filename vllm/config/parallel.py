@@ -395,6 +395,9 @@ class ParallelConfig:
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
 
+    _cp_kv_cache_interleave_size_auto: bool = True
+    """Whether NIXL may select the interleave size automatically."""
+
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
