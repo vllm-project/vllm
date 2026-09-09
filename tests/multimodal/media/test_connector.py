@@ -21,6 +21,7 @@ from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media.connector import _MEDIA_CACHE_MIN_ENTRY_BYTES
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -570,3 +571,96 @@ def test_get_cached_bytes_file_deleted_before_read():
         connector._media_cache_path(url).unlink()
 
         assert connector._get_cached_bytes(url) is None
+
+
+class _StaticBytesConnection:
+    """HTTP connection stub that always returns a fixed payload."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def get_bytes(self, url, **kwargs):
+        return self.payload
+
+    async def async_get_bytes(self, url, **kwargs):
+        return self.payload
+
+
+def _cache_filenames(cache_dir: str) -> list[str]:
+    return [name for name in os.listdir(cache_dir) if not name.startswith(".")]
+
+
+def _tiny_png() -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (1, 1), (0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_empty_payload_not_cached():
+    """Empty downloads must not create a cache file."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        connector._put_cached_bytes("https://example.com/empty.png", b"")
+
+        assert _cache_filenames(cache_dir) == []
+        assert connector._get_cached_bytes("https://example.com/empty.png") is None
+
+
+def test_tiny_entries_count_toward_size_budget():
+    """Tiny files are billed at the minimum entry size so LRU still fires."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir, max_mb=0)
+        connector._media_cache_max_bytes = _MEDIA_CACHE_MIN_ENTRY_BYTES * 2
+
+        urls = [f"https://example.com/{i}.bin" for i in range(3)]
+        for i, url in enumerate(urls):
+            connector._put_cached_bytes(url, b"x")
+            path = connector._media_cache_path(url)
+            os.utime(path, (time.time() + i, time.time() + i))
+
+        assert connector._get_cached_bytes(urls[0]) is None
+        assert connector._get_cached_bytes(urls[2]) == b"x"
+
+
+def test_undecodable_http_media_not_cached():
+    """Failed image decode must not leave a cache file (sync path)."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        connector.connection = _StaticBytesConnection(b"")
+        connector.allowed_media_domains = ["example.com"]
+
+        with pytest.raises(ValueError, match="Failed to load image"):
+            connector.fetch_image("https://example.com/empty.png")
+
+        assert _cache_filenames(cache_dir) == []
+
+
+def test_undecodable_http_media_not_cached_async():
+    """Failed image decode must not leave a cache file (async path)."""
+
+    async def _run() -> None:
+        with TemporaryDirectory() as cache_dir:
+            connector = _make_cached_connector(cache_dir)
+            connector.connection = _StaticBytesConnection(b"")
+            connector.allowed_media_domains = ["example.com"]
+
+            with pytest.raises(ValueError, match="Failed to load image"):
+                await connector.fetch_image_async("https://example.com/empty.png")
+
+            assert _cache_filenames(cache_dir) == []
+
+    asyncio.run(_run())
+
+
+def test_valid_http_media_is_cached_after_decode():
+    """Successful fetches still populate the download cache."""
+    payload = _tiny_png()
+    url = "https://example.com/tiny.png"
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        connector.connection = _StaticBytesConnection(payload)
+        connector.allowed_media_domains = ["example.com"]
+
+        connector.fetch_image(url)
+
+        assert connector._get_cached_bytes(url) == payload

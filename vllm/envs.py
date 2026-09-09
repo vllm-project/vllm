@@ -969,7 +969,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # from URLs during inference). Empty string disables caching.
     "VLLM_MEDIA_CACHE": lambda: os.getenv("VLLM_MEDIA_CACHE", ""),
     # Maximum cache size in MB. When exceeded, least-recently-used entries
-    # are evicted. Default is 5120 (5 GB).
+    # are evicted. Each entry is billed at least 4 KiB so empty or tiny
+    # files cannot bypass the budget. Default is 5120 (5 GB).
     "VLLM_MEDIA_CACHE_MAX_SIZE_MB": lambda: int(
         os.getenv("VLLM_MEDIA_CACHE_MAX_SIZE_MB", "5120")
     ),
