@@ -15,12 +15,7 @@ impl SeedOssReasoningParser {
     /// Create a SeedOSS parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
-                tokenizer,
-                "<seed:think>",
-                "</seed:think>",
-                false,
-            )?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<seed:think>", "</seed:think>")?,
         })
     }
 }
