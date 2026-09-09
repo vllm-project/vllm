@@ -439,43 +439,48 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      # CPU release images follow the CUDA pattern: a single build label per arch
+      # pushes the arch-specific commit tag to ECR, consumed by both the nightly
+      # DockerHub publish and the release publish step. The block auto-skips in
+      # nightly (if NIGHTLY != "1") so the build runs unattended, mirroring
+      # block-build-release-images.
       - block: "Build release image for x86_64 CPU"
         key: block-cpu-release-image-build
         depends_on: ~
+        if: build.env("NIGHTLY") != "1"
 
       - label: "Build release image - x86_64 - CPU"
         key: build-cpu-release-image-x86
         depends_on:
           - block-cpu-release-image-build
-          - input-release-version
+        allow_dependency_failure: true
         agents:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
-          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)" release-images'
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64" release-images'
         env:
           DOCKER_BUILDKIT: "1"
 
       - block: "Build release image for arm64 CPU"
         key: block-arm64-cpu-release-image-build
         depends_on: ~
+        if: build.env("NIGHTLY") != "1"
 
       - label: "Build release image - arm64 - CPU"
         key: build-cpu-release-image-arm64
         depends_on:
           - block-arm64-cpu-release-image-build
-          - input-release-version
+        allow_dependency_failure: true
         agents:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest"
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
-          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)" release-images'
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-arm64" release-images'
         env:
           DOCKER_BUILDKIT: "1"
 
@@ -572,6 +577,25 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - label: "Publish nightly CPU multi-arch image to DockerHub"
+        depends_on:
+          - build-cpu-release-image-x86
+          - build-cpu-release-image-arm64
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds-cpu.sh"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-cpu"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
