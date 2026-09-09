@@ -22,6 +22,9 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.models.hy_v4.nvidia.triton_ihc import (
+    _IHC_POST_KERNEL,
+    _IHC_PRE_STAGE1_KERNEL,
+    _IHC_PRE_STAGE2_KERNEL,
     triton_ihc_post,
     triton_ihc_pre,
     triton_ihc_supported,
@@ -85,6 +88,9 @@ class HYV4HCPreLayer(nn.Module):
                 norm_eps=layernorm_epsilon,
                 fallback_op=self,
             )
+        else:
+            _IHC_PRE_STAGE1_KERNEL.register_warmup()
+            _IHC_PRE_STAGE2_KERNEL.register_warmup()
 
     def reset_parameters(self, init_std: float, base_noise_std: float = 0.0) -> None:
         """Initialize the gate scale and per-channel gate bias."""
@@ -173,6 +179,8 @@ class HYV4HCPostLayer(nn.Module):
         hc_mult = getattr(config, "hc_mult", 0)
         if HpcIHCPost.support(hc_mult, config.hidden_size):
             self.hpc_op = HpcIHCPost(hc_mult=hc_mult, hidden_size=config.hidden_size)
+        else:
+            _IHC_POST_KERNEL.register_warmup()
 
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor
