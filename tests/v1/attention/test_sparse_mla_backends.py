@@ -2968,34 +2968,40 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
     torch.testing.assert_close(follower_indices, topk + 10)
 
 
-def test_hisparse_single_token_decode_uses_canonical_request_rows():
-    """Zero-filled graph padding must not share request 0's residency state."""
-    num_decodes = 4
-    topk = torch.zeros((num_decodes, 2), dtype=torch.int32)
+def test_hisparse_varlen_decode_uses_canonical_request_rows():
+    """Graph metadata's query upper bound must preserve packed token rows."""
+    num_decodes = 2
+    topk = torch.arange(18, dtype=torch.int32).view(9, 2)
+
+    def swap_in(_request_ids, *, logical_topk_indices, **_kwargs):
+        return logical_topk_indices + 10
+
     cache = SimpleNamespace(
         source_block_table=torch.zeros((num_decodes, 1), dtype=torch.int32),
-        swap_in=MagicMock(return_value=topk),
+        swap_in=MagicMock(side_effect=swap_in),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
-    index_group.physical_topk_indices = torch.empty_like(topk)
+    index_group.physical_topk_indices = torch.empty((10, 2), dtype=torch.int32)
+    index_group.valid_topk_counts = torch.empty(10, dtype=torch.int32)
     index_group.request_ids = torch.arange(num_decodes, dtype=torch.int32)
     metadata = SimpleNamespace(
         num_decodes=num_decodes,
-        num_decode_tokens=num_decodes,
-        decode_max_query_len=1,
-        req_id_per_token=torch.zeros(num_decodes, dtype=torch.int32),
+        num_decode_tokens=topk.shape[0],
+        decode_max_query_len=15,
+        query_start_loc=torch.tensor([0, 8, 9], dtype=torch.int32),
         block_size=64,
     )
 
-    index_group.convert_decode_logical_to_physical_topk(
+    physical_topk = index_group.convert_decode_logical_to_physical_topk(
         0,
         topk,
         metadata,
         return_valid_counts=False,
     )
 
-    request_rows = cache.swap_in.call_args.args[0]
+    torch.testing.assert_close(physical_topk, topk + 10)
+    request_rows = cache.swap_in.call_args_list[0].args[0]
     torch.testing.assert_close(request_rows, index_group.request_ids)
 
 

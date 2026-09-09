@@ -16,6 +16,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -507,9 +508,18 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         topk_tokens = self.topk_indices_buffer.shape[1]
         self._prepare_mqa_kernel(layer, kv_cache.device)
 
+        q_dtype = (
+            current_platform.fp8_dtype()
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else kv_cache.dtype
+        )
         q = torch.zeros(
-            (num_tokens, self.num_heads, self.qk_head_dim),
-            dtype=kv_cache.dtype,
+            (
+                num_tokens,
+                self.num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            ),
+            dtype=q_dtype,
             device=kv_cache.device,
         )
         topk_indices = (
