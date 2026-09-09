@@ -200,6 +200,7 @@ return curr_o @ W_O
 """
 
 import functools
+import inspect
 import itertools
 import math
 from abc import abstractmethod
@@ -2565,7 +2566,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size
 
-            decode_metadata = self._build_decode(
+            decode_kwargs: dict = dict(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_device=seq_lens[:num_decodes],
                 max_seq_len=max_seq_len,
@@ -2573,8 +2574,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
-                causal=not non_causal_decode,
             )
+            # Only backends that consume the mask (Aiter/FlashMLA/FA MLA)
+            # accept this argument. Dots3 NOTE's NVIDIA override does not.
+            if "causal" in inspect.signature(self._build_decode).parameters:
+                decode_kwargs["causal"] = not non_causal_decode
+            decode_metadata = self._build_decode(**decode_kwargs)
 
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,

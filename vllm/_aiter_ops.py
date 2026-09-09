@@ -589,10 +589,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
 
-    # Leave the argument off when the block is causal, so builds without it
-    # keep working; backend selection is what refuses a non-causal block there.
-    if not causal:
-        kwargs["causal"] = False
+    kwargs["causal"] = causal
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -1969,10 +1966,10 @@ class rocm_aiter_ops:
     @if_aiter_supported
     @functools.cache
     def mla_decode_supports_non_causal(cls) -> bool:
-        """Probe whether the installed aiter.mla.mla_decode_fwd accepts `causal`.
+        """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
 
-        Added in aiter v0.1.20. Older builds are causal-only, so a non-causal
-        query block has no kernel there.
+        Added in aiter v0.1.20. The ROCm Aiter MLA backend treats a missing
+        argument as a hard error rather than selecting another backend.
         """
         import inspect
 

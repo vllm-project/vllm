@@ -253,9 +253,13 @@ class AiterMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        # A non-causal block is served by handing the mask to the asm decode,
-        # so the only thing to check is whether the installed aiter takes one.
-        return bool(rocm_aiter_ops.mla_decode_supports_non_causal())
+        if not rocm_aiter_ops.mla_decode_supports_non_causal():
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:

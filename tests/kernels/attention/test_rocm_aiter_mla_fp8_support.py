@@ -27,7 +27,6 @@ def reset_aiter_mla_support_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     import vllm._aiter_ops as aiter_ops
 
     monkeypatch.setattr(aiter_ops, "_AITER_MLA_SUPPORTS_FP8", None)
-    # if_aiter_supported wraps the functools.cache, so reach through to it.
     aiter_ops.rocm_aiter_ops.mla_decode_supports_non_causal.__wrapped__.cache_clear()
 
 
@@ -152,14 +151,27 @@ def test_aiter_mla_fp8_support_result_is_cached(monkeypatch):
 
 @pytest.mark.parametrize("supports_causal", [True, False])
 def test_non_causal_probe_follows_the_installed_signature(monkeypatch, supports_causal):
-    """Builds without a ``causal`` argument are causal-only; asking one for a
-    non-causal block would return a causally masked result and say nothing."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     _install_fake_aiter_modules(
         monkeypatch, supports_fp8=True, supports_causal=supports_causal
     )
     assert bool(rocm_aiter_ops.mla_decode_supports_non_causal()) is supports_causal
+
+
+def test_aiter_mla_backend_fails_closed_without_causal_arg(monkeypatch):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+
+    _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=False)
+    with pytest.raises(RuntimeError, match="causal-only"):
+        AiterMLABackend.supports_non_causal()
+
+
+def test_aiter_mla_backend_accepts_causal_arg(monkeypatch):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+
+    _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=True)
+    assert AiterMLABackend.supports_non_causal() is True
 
 
 def _install_callable_fake(monkeypatch) -> list:
@@ -196,11 +208,10 @@ def _call_impl(causal: bool) -> None:
     )
 
 
-def test_a_causal_block_never_passes_the_argument(monkeypatch):
-    """Causal is the default, so builds without the argument keep working."""
+def test_a_causal_block_passes_causal_true(monkeypatch):
     seen = _install_callable_fake(monkeypatch)
     _call_impl(causal=True)
-    assert "causal" not in seen[0]
+    assert seen[0]["causal"] is True
 
 
 def test_a_non_causal_block_reaches_a_capable_build(monkeypatch):
