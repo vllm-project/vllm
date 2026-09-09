@@ -112,6 +112,7 @@ def test_dual_key_watermarker_uses_domain_separated_keys():
     target = watermarker.create_target_watermarker()
 
     assert isinstance(watermarker, DualKeyGumbelWatermarker)
+    assert watermarker.alpha == 0.1
     assert watermarker.prf.key == derive_watermark_key(42, b"key_a")
     assert draft.prf.key == derive_watermark_key(42, b"key_a")
     assert target.prf.key == derive_watermark_key(42, b"key_b")

@@ -126,7 +126,7 @@ vllm serve MODEL \
 Dual-key Gumbel-max derives independent keys A and B from one configured master
 key using SHA-256 domain separation. During ordinary generation, each token uses
 key A with probability `1 - alpha` and key B with probability `alpha`; `alpha`
-defaults to 0.5. Detection scores every token against both keys.
+defaults to 0.1. Detection scores every token against both keys.
 
 The same two key streams support speculative decoding without changing its
 acceptance rate. In this mode, the speculative protocol selects the key instead
@@ -141,7 +141,7 @@ Select `dual_key_gumbel` together with probabilistic drafting:
 vllm serve MODEL \
   --speculative-config \
   '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
-  --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.5}'
+  --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.1}'
 ```
 
 ### SynthID-Text

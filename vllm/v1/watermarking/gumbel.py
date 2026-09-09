@@ -104,7 +104,7 @@ class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
         key: int,
         context_width: int = 4,
         prf: WatermarkPRFName = "philox",
-        alpha: float = 0.5,
+        alpha: float = 0.1,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1")
