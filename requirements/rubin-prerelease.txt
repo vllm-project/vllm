@@ -2,12 +2,14 @@
 # Installed when INSTALL_RUBIN_PRERELEASE=true (see docker/Dockerfile).
 # TODO(rubin-bringup): delete once Rubin APIs ship in regular PyTorch wheels
 # (vllm-project/vllm#49735).
---pre
 --extra-index-url https://download.pytorch.org/whl/nightly/cu134
 
 torch==2.15.0.dev20260903+cu134
-torchvision==0.30.0.dev20260903+cu134
-torchaudio==2.11.0.dev20260903+cu134
+# The aarch64 torchvision nightly is dated one day after the torch nightly
+# required by its wheel metadata, unlike the same-day x86_64 pairing.
+torchvision==0.30.0.dev20260903+cu134; platform_machine == "x86_64"
+torchvision==0.30.0.dev20260904+cu134; platform_machine == "aarch64"
+torchaudio==2.11.0.dev20260902+cu134
 
 # docker/Dockerfile strips these two from requirements/cuda.txt whenever
 # INSTALL_RUBIN_PRERELEASE=true, so they must be pinned here instead to
