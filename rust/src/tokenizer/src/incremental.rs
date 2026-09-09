@@ -72,21 +72,11 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
-    fn record_token(&mut self, token_id: u32) {
-        if self.skip_special_tokens && self.tokenizer.is_special_id(token_id) {
-            self.decoded.record_zero_width_token(token_id);
-        } else {
-            self.decoded.record_pending_token(token_id);
-        }
-    }
-
     /// Decode prompt-only context for prefix seeding.
     ///
     /// Prompt ids may come from the model vocabulary rather than the local
     /// tokenizer vocabulary. For this seeding path, ids that cannot be mapped
-    /// back to raw token text are dropped before retrying strict decode. This
-    /// tolerance is intentionally limited to prompt context; generated ids are
-    /// decoded later through the normal strict path.
+    /// back to raw token text are dropped before retrying strict decode.
     fn decode_prompt_context(&self, ids: &[u32]) -> Result<(String, Vec<u32>)> {
         match self.tokenizer.decode(ids, self.skip_special_tokens) {
             Ok(decoded) => Ok((decoded, ids.to_vec())),
@@ -144,10 +134,22 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         }
 
         self.ids.push(token_id);
-        self.record_token(token_id);
         let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
-        if string.len() <= prefix_len || string.ends_with('\u{FFFD}') {
+        let produced_text = string.len() > prefix_len && !string.ends_with('\u{FFFD}');
+
+        // Skipped undefined IDs leave the decoded text unchanged. Check only
+        // non-emitting steps to avoid id_to_token's lookup and String allocation
+        // on the normal path.
+        let zero_width = (self.skip_special_tokens && self.tokenizer.is_special_id(token_id))
+            || (!produced_text && self.tokenizer.id_to_token(token_id).is_none());
+        if zero_width {
+            self.decoded.record_zero_width_token(token_id);
+        } else {
+            self.decoded.record_pending_token(token_id);
+        }
+
+        if !produced_text {
             return Ok(0);
         }
         // Ensure we split at a utf-8 char boundary.
@@ -224,8 +226,8 @@ mod tests {
             unreachable!()
         }
 
-        fn id_to_token(&self, _id: u32) -> Option<String> {
-            unreachable!()
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            Some(id.to_string())
         }
     }
 
@@ -456,8 +458,8 @@ mod tests {
             unreachable!()
         }
 
-        fn id_to_token(&self, _id: u32) -> Option<String> {
-            unreachable!()
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            Some(id.to_string())
         }
     }
 
