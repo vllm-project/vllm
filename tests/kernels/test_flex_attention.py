@@ -357,6 +357,93 @@ def test_block_mask_direct_vs_slow_path():
     )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    reason="CUDA not available or PyTorch version < 2.9",
+)
+@pytest.mark.parametrize("direct_build", [True, False])
+@torch.inference_mode()
+def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build):
+    """Request-count changes preserve attention results and compiled graph reuse."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+    from torch.nn.attention.flex_attention import flex_attention
+
+    from vllm.v1.attention.backends.flex_attention import get_kernel_options
+
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=128,
+        num_gpu_blocks=40,
+        max_num_seqs=8,
+        max_num_batched_tokens=128,
+    )
+    builder = FlexAttentionMetadataBuilder(
+        create_standard_kv_cache_spec(config), [], config, device
+    )
+    builder.direct_build = direct_build
+    query = torch.randn(1, 2, 32, 64, device=device)
+    key = torch.randn(1, 2, 640, 64, device=device)
+    value = torch.randn_like(key)
+    kernel_options = get_kernel_options(query, 16, 16, direct_build)
+    counter = CompileCounterWithBackend("inductor")
+    compiled_attention = torch.compile(flex_attention, backend=counter, fullgraph=True)
+
+    def build_metadata(num_reqs):
+        # Keep Q/K tensor and block-mask sizes fixed to isolate request counts.
+        common = create_common_attn_metadata(
+            BatchSpec(seq_lens=[64] * num_reqs, query_lens=[32 // num_reqs] * num_reqs),
+            16,
+            device,
+            max_block_idx=40,
+        )
+        common.block_table_tensor.copy_(
+            torch.arange(1, num_reqs * 4 + 1, device=device).view(num_reqs, 4)
+        )
+        return builder.build(0, common)
+
+    def attend(metadata):
+        return compiled_attention(
+            query,
+            key,
+            value,
+            block_mask=metadata.block_mask,
+            kernel_options=kernel_options,
+        )
+
+    def reference(num_reqs):
+        query_len = 32 // num_reqs
+        q_idx = torch.arange(32, device=device)[:, None]
+        kv_idx = torch.arange(640, device=device)[None, :]
+        request = q_idx // query_len
+        logical_q = q_idx % query_len + 64 - query_len
+        logical_kv = kv_idx - (request * 4 + 1) * 16
+        mask = (logical_kv >= 0) & (logical_kv <= logical_q)
+        return torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=mask
+        )
+
+    for num_reqs in (4, 2, 1, 8, 1):
+        metadata = build_metadata(num_reqs)
+        torch.testing.assert_close(
+            attend(metadata), reference(num_reqs), atol=1e-4, rtol=1e-4
+        )
+    assert counter.frame_count == 1
+
+    if direct_build:
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = attend(metadata)
+        for num_reqs in (8, 2, 1):
+            metadata = build_metadata(num_reqs)
+            graph.replay()
+            torch.testing.assert_close(
+                output, reference(num_reqs), atol=1e-4, rtol=1e-4
+            )
+
+
 def test_physical_to_logical_mapping_handles_reused_blocks():
     """Regression test: reused physical blocks map to the latest logical block.
 
