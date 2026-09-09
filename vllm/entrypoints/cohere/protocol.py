@@ -170,7 +170,7 @@ class CohereChatV2Request(BaseModel):
     thinking: Thinking | None = None
 
     # Scheduling
-    priority: int | None = None
+    priority: int | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
 
     # vLLM-specific extensions (not in Cohere spec). These mirror what the
     # Anthropic and OpenAI surfaces already expose so V2 callers can reach
