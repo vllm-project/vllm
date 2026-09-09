@@ -447,7 +447,37 @@ def test_deepseek_v4_image_blocks_become_placeholders():
         thinking=False,
     )
 
-    assert "<｜User｜>first:<｜deepseek_image｜>second:<｜deepseek_image｜>" in prompt
+    assert (
+        "<｜User｜>first:\n\n<｜deepseek_image｜>\n\n"
+        "second:\n\n<｜deepseek_image｜>" in prompt
+    )
+
+
+def test_deepseek_v4_image_blocks_match_reference_spacing():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "第一张图"},
+                {"type": "image_url", "image_url": {"url": "file:///a.png"}},
+                {"type": "text", "text": "和第二张图"},
+                {"type": "image_url", "image_url": {"url": "file:///b.png"}},
+                {"type": "text", "text": "分别是什么？"},
+            ],
+        }
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tokenize=False,
+        thinking=False,
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>第一张图\n\n"
+        "<｜deepseek_image｜>\n\n和第二张图\n\n"
+        "<｜deepseek_image｜>\n\n分别是什么？<｜Assistant｜></think>"
+    )
 
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():

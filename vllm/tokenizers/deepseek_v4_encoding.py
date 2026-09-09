@@ -224,7 +224,10 @@ def flatten_content_blocks(content: Any) -> Any:
             raise ValueError(
                 f"Unsupported content block type: {block.get('type')!r}"
             )
-    return "".join(parts)
+    # Match the official DeepSeek-V4 multimodal encoder: content blocks are
+    # separated by a blank line before image blocks are expanded to sentinel
+    # spans. Direct concatenation changes the prompt and image start offsets.
+    return "\n\n".join(parts)
 
 
 def render_message(
