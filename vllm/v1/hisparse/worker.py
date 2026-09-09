@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import get_unique_kv_cache_group_id
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -21,7 +20,6 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -36,23 +34,23 @@ def _allocate_hisparse_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[int, torch.Tensor]]:
-    host_sizes: dict[int | None, int] = {}
+    host_sizes: dict[int, int] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
-        if not tensor.host_resident:
+        if tensor.block_pool_id != kv_cache_config.host_block_pool_id:
             continue
         previous_size = host_sizes.setdefault(tensor.block_pool_id, tensor.size)
         assert previous_size == tensor.size
     check_hisparse_host_memory(sum(host_sizes.values()))
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    host_backings: dict[int | None, torch.Tensor] = {}
+    host_backings: dict[int, torch.Tensor] = {}
     device_backings: dict[int, torch.Tensor] = {}
     raw_tensors: dict[str, torch.Tensor] = {}
     kv_caches: dict[str, torch.Tensor] = {}
     pinned_host_pools: dict[int, torch.Tensor] = {}
 
     for tensor in kv_cache_config.kv_cache_tensors:
-        if tensor.host_resident:
+        if tensor.block_pool_id == kv_cache_config.host_block_pool_id:
             backing = host_backings.get(tensor.block_pool_id)
             if backing is None:
                 backing, registered_pool = allocate_pinned_host_pool(tensor.size)
@@ -60,10 +58,8 @@ def _allocate_hisparse_kv_cache(
                 pinned_host_pools[backing.data_ptr()] = registered_pool
             else:
                 assert backing.numel() == tensor.size
-            num_blocks = kv_cache_config.hisparse_host_num_blocks
-            assert num_blocks is not None
+            num_blocks = kv_cache_config.block_pools[tensor.block_pool_id].num_blocks
         else:
-            assert tensor.block_pool_id is not None
             backing = device_backings.get(tensor.block_pool_id)
             if backing is None:
                 backing = torch.zeros(tensor.size, dtype=torch.int8, device=device)
@@ -158,7 +154,6 @@ def _bind_hisparse_kv_caches(
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
             tensor_config = tensor_configs[cache_name]
-            assert tensor_config.block_pool_id is not None
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             cache_handle.bind_cache(
                 raw_tensors[cache_name],
@@ -191,7 +186,6 @@ def _bind_hisparse_kv_caches(
             layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             tensor_config = tensor_configs[cache_name]
-            assert tensor_config.block_pool_id is not None
             cache_handle.runtime.bind_hot_cache(
                 raw_tensor,
                 byte_offset=tensor_config.offset,
@@ -224,9 +218,7 @@ def _bind_hisparse_kv_caches(
     )
     for cache_handle in cache_handles:
         cache_handle.runtime.request_state_indices = request_state_indices
-    source_group_id = get_unique_kv_cache_group_id(
-        kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
-    )
+    (source_group_id,) = kv_cache_config.host_group_ids
     source_block_table = block_tables.input_block_tables[source_group_id]
     source_slot_mapping = block_tables.slot_mappings[source_group_id]
     resident = cache_handles[0].view

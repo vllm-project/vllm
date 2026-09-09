@@ -1920,7 +1920,8 @@ class MooncakeStoreWorker:
 
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
-        use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
+        host_layer_names = self._kv_cache_config.host_layer_names
+        use_group_regions = self._kv_cache_config.host_block_pool_id is not None
 
         if not use_group_regions:
             seen_storage_ptrs: set[int] = set()
@@ -1946,11 +1947,6 @@ class MooncakeStoreWorker:
             for db in self.token_dbs:
                 db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
 
-        tensor_configs = {
-            layer_name: tensor_config
-            for tensor_config in self._kv_cache_config.kv_cache_tensors
-            for layer_name in tensor_config.layers
-        }
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
         num_device_segments = 0
@@ -1976,21 +1972,10 @@ class MooncakeStoreWorker:
             block_lens: list[int] = []
             for layer_name, value in group_caches:
                 cache = _repr_tensor(value)
-                tensor_config = tensor_configs.get(layer_name)
-                is_host_resident = (
-                    tensor_config is not None and tensor_config.host_resident
-                )
-                if is_host_resident:
-                    num_blocks = self._kv_cache_config.hisparse_host_num_blocks
-                    assert num_blocks is not None
-                else:
-                    block_pool_id = (
-                        tensor_config.block_pool_id
-                        if tensor_config is not None
-                        else group.block_pool_id
-                    )
-                    assert block_pool_id == 0
-                    num_blocks = self._kv_cache_config.num_blocks
+                is_host_resident = layer_name in host_layer_names
+                num_blocks = self._kv_cache_config.block_pools[
+                    group.block_pool_id
+                ].num_blocks
                 cache = group_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:

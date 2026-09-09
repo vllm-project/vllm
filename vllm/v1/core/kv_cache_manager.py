@@ -965,7 +965,7 @@ class KVCacheManager:
             self.coordinator.single_type_managers,
         ):
             new_ids = mgr.take_new_block_ids()
-            if group.block_pool_id is not None:
+            if group.block_pool_id == 0:
                 ids.extend(new_ids)
         return ids
 
@@ -1001,7 +1001,7 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        pending_copies: list[tuple[int | None, KVCacheBlock, KVCacheBlock]] = []
+        pending_copies: list[tuple[int, KVCacheBlock, KVCacheBlock]] = []
         for group, mgr in zip(
             self.kv_cache_config.kv_cache_groups,
             self.coordinator.single_type_managers,

@@ -319,7 +319,7 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_fine_grained_prefix_cache
             ),
         )
-        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+        if self.kv_cache_config.host_block_pool_id is not None:
             # TODO(NickLucche): unify scheduler-side connector initialization.
             hisparse_connector = find_hisparse_connector(self.connector)
             assert hisparse_connector is not None, (

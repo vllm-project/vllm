@@ -25,9 +25,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheBlockPoolSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheGroupSpec,
+    KVCachePlacement,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -1834,7 +1835,8 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
 
 
 @pytest.mark.cpu_test
-def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
+@pytest.mark.parametrize("kernel_block_size", [16, 8])
+def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size):
     host_num_blocks = 4
     gpu_num_blocks = 9
     spec = MLAAttentionSpec(
@@ -1845,15 +1847,17 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=gpu_num_blocks,
-        hisparse_host_num_blocks=host_num_blocks,
+        block_pools=[
+            KVCacheBlockPoolSpec(gpu_num_blocks),
+            KVCacheBlockPoolSpec(host_num_blocks, KVCachePlacement.HOST),
+        ],
         kv_cache_tensors=[
             KVCacheTensor(
                 size=host_num_blocks * spec.page_size_bytes,
                 layers=["mla.host"],
                 layer_stride=host_num_blocks * spec.page_size_bytes,
                 block_stride=spec.page_size_bytes,
-                host_resident=True,
-                block_pool_id=None,
+                block_pool_id=1,
             ),
             KVCacheTensor(
                 size=gpu_num_blocks * spec.page_size_bytes,
@@ -1866,8 +1870,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
             KVCacheGroupSpec(
                 ["mla.host"],
                 spec,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
+                block_pool_id=1,
             ),
             KVCacheGroupSpec(["mla.device"], spec),
         ],
@@ -1875,15 +1878,21 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
     vllm_config = create_vllm_config(block_size=16)
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
-    fake_backend.get_supported_kernel_block_sizes.return_value = [16]
+    fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
     fake_backend.get_name.return_value = "FLASHMLA"
     fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
-    fake_backend.get_kv_cache_shape.return_value = (1, 16, 1, 1)
+    fake_backend.get_kv_cache_shape.return_value = (1, kernel_block_size, 1, 1)
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
-    host_cache = torch.zeros(host_num_blocks, spec.page_size_bytes, dtype=torch.uint8)
-    device_cache = torch.zeros(gpu_num_blocks, spec.page_size_bytes, dtype=torch.uint8)
+    physical_per_logical = spec.block_size // kernel_block_size
+    physical_page_bytes = spec.page_size_bytes // physical_per_logical
+    host_cache = torch.zeros(
+        host_num_blocks * physical_per_logical, physical_page_bytes, dtype=torch.uint8
+    )
+    device_cache = torch.zeros(
+        gpu_num_blocks * physical_per_logical, physical_page_bytes, dtype=torch.uint8
+    )
 
     with (
         patch.object(bw, "NixlWrapper"),
@@ -1898,10 +1907,10 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
         worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
         worker.register_kv_caches({"mla.host": host_cache, "mla.device": device_cache})
 
-    assert worker.num_blocks == gpu_num_blocks
+    assert worker.num_blocks == gpu_num_blocks * physical_per_logical
     assert dict(zip(worker.region_group_ids, worker.region_num_blocks)) == {
-        0: host_num_blocks,
-        1: gpu_num_blocks,
+        0: host_num_blocks * physical_per_logical,
+        1: gpu_num_blocks * physical_per_logical,
     }
     caches = {"mla.host": host_cache, "mla.device": device_cache}
     expected_addrs = [
