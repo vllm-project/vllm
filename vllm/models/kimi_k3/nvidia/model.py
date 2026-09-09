@@ -1670,7 +1670,9 @@ class KimiLinearForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
         dtypes = MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
         if vllm_config.cache_config.use_kda_recoverssm:
             dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
@@ -1727,11 +1729,15 @@ class KimiLinearForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights)
+        return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        # A parent AutoWeightsLoader may invoke load_weights repeatedly for
+        # non-contiguous streamed prefixes. Finalize only after the full stream.
+        self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
         # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
         # hook for any AttentionLayerBase, so no manual trigger is needed here.
-        return loaded
 
 
 def get_spec_layer_idx_from_weight_name(

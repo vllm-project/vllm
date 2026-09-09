@@ -19,7 +19,6 @@ impl CohereCmdReasoningParser {
                 tokenizer,
                 "<|START_THINKING|>",
                 "<|END_THINKING|>",
-                false,
             )?,
         })
     }
