@@ -12,6 +12,7 @@ the shared coordinator, which binds itself to all of them.
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -73,6 +74,7 @@ class HiSparseSourceManager(FullAttentionManager):
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=device_pool.metrics_collector,
+            medium=MEDIUM_CPU,
         )
         self._null_block = self.block_pool.null_block
         _attach_hisparse_coordinator(self, managers, kv_cache_config, max_model_len)
@@ -383,12 +385,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def _speaks_for_coordinator(self) -> bool:
         coordinator = self.coordinator
         return coordinator is not None and coordinator.resident_managers[0] is self
-
-    def take_block_table_updates(self) -> set[str]:
-        if not self._speaks_for_coordinator:
-            return set()
-        assert self.coordinator is not None
-        return self.coordinator.take_dirty_request_ids()
 
     def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
         if self._speaks_for_coordinator:

@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -484,6 +484,14 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        """Bind the scheduler's KV cache manager once it has been built.
+
+        Args:
+            kv_cache_manager: the scheduler-side KV cache manager.
+        """
+        self.bind_gpu_block_pool(kv_cache_manager.block_pool)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """

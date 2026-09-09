@@ -401,10 +401,6 @@ class SingleTypeKVCacheManager(ABC):
     # Groups whose cache is partly off-device drive worker-side work through
     # the hooks below; the defaults describe a purely device-resident group.
 
-    def take_block_table_updates(self) -> set[str]:
-        """Requests whose block table this group rewrote in place."""
-        return set()
-
     def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
         """A connector finished loading external KV for the request."""
         return None

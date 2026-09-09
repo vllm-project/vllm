@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -23,6 +24,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
 
 # Sealed pages this many positions behind the block-table tail stay pinned so
 # a page written by an in-flight step is never handed out under it.
@@ -561,12 +565,6 @@ class HiSparseCoordinator:
                     return False
         return True
 
-    def take_dirty_request_ids(self) -> set[str]:
-        """Requests whose resident pages changed since the last step."""
-        request_ids = self.block_table_updates
-        self.block_table_updates = set()
-        return request_ids
-
     def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
         updates = {
             request_id: tuple(
@@ -676,3 +674,15 @@ class HiSparseCoordinator:
                 else:
                     continue
                 blocks[page_idx] = manager._null_block
+
+
+def get_hisparse_coordinator(
+    kv_cache_manager: "KVCacheManager",
+) -> HiSparseCoordinator:
+    """Return the coordinator shared by a KV cache manager's HiSparse groups."""
+    for manager in kv_cache_manager.coordinator.single_type_managers:
+        coordinator = getattr(manager, "coordinator", None)
+        if coordinator is not None:
+            assert isinstance(coordinator, HiSparseCoordinator)
+            return coordinator
+    raise ValueError("No HiSparse cache group is configured.")

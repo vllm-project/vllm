@@ -2,19 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
-from vllm.distributed.kv_events import (
-    MEDIUM_CPU,
-    BlockRemoved,
-    BlockStored,
-    KVCacheEvent,
-)
+from vllm.distributed.kv_events import MEDIUM_GPU, BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
@@ -189,6 +184,13 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # Distinct pools backing the groups, in group order; more than one when
+        # a group's cache lives in a different medium.
+        self.block_pools = tuple(
+            dict.fromkeys(
+                manager.block_pool for manager in self.coordinator.single_type_managers
+            )
+        )
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -211,15 +213,6 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
-
-    @property
-    def hisparse_coordinator(self):
-        """Temporary: the HiSparse coordinator, until commands ride the output."""
-        for manager in self.coordinator.single_type_managers:
-            coordinator = getattr(manager, "coordinator", None)
-            if coordinator is not None:
-                return coordinator
-        return None
 
     @property
     def usage(self) -> float:
@@ -597,10 +590,6 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
-        """Block-table rows rewritten in place since the last step."""
-        return self.coordinator.take_block_table_updates()
-
     def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
         """A connector finished loading external KV for the request."""
         self.coordinator.complete_external_load(request_id, num_computed_tokens)
@@ -657,26 +646,22 @@ class KVCacheManager:
 
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Return blocks to the pool each was allocated from."""
-        by_pool: dict[int, tuple[BlockPool, list[KVCacheBlock]]] = {}
+        if len(self.block_pools) == 1:
+            self.block_pool.free_blocks(blocks)
+            return
+        by_pool: defaultdict[int, list[KVCacheBlock]] = defaultdict(list)
         for block in blocks:
-            pool = self._pool_of(block)
-            by_pool.setdefault(id(pool), (pool, []))[1].append(block)
-        for pool, pool_blocks in by_pool.values():
-            pool.free_blocks(pool_blocks)
+            by_pool[self._pool_index_of(block)].append(block)
+        for pool_idx, pool_blocks in by_pool.items():
+            self.block_pools[pool_idx].free_blocks(pool_blocks)
 
-    def _pools(self) -> list[BlockPool]:
-        pools: dict[int, BlockPool] = {}
-        for manager in self.coordinator.single_type_managers:
-            pools.setdefault(id(manager.block_pool), manager.block_pool)
-        return list(pools.values())
-
-    def _pool_of(self, block: KVCacheBlock) -> BlockPool:
-        for pool in self._pools():
+    def _pool_index_of(self, block: KVCacheBlock) -> int:
+        for idx, pool in enumerate(self.block_pools):
             if (
                 block.block_id < len(pool.blocks)
                 and pool.blocks[block.block_id] is block
             ):
-                return pool
+                return idx
         raise ValueError(f"Block {block.block_id} belongs to no pool.")
 
     def evict_blocks(self, block_ids: set[int]) -> None:
@@ -685,14 +670,10 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        # Connector block IDs address the persistent tier: the host-resident
-        # groups' pool when there is one, else the device pool.
-        pools = [
-            manager.block_pool
-            for manager in self.coordinator.single_type_managers
-            if manager.host_resident
-        ]
-        for pool in {id(pool): pool for pool in pools or [self.block_pool]}.values():
+        # Connector block IDs address the persistent tier: the off-device pools
+        # when there are any, else the device pool.
+        pools = [pool for pool in self.block_pools if pool.medium != MEDIUM_GPU]
+        for pool in pools or [self.block_pool]:
             pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
@@ -704,7 +685,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not all(pool.reset_prefix_cache() for pool in self._pools()):
+        if not all(pool.reset_prefix_cache() for pool in self.block_pools):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -752,18 +733,8 @@ class KVCacheManager:
             A list of KV cache events.
         """
         events: list[KVCacheEvent] = []
-        seen: set[int] = set()
-        for manager in self.coordinator.single_type_managers:
-            pool = manager.block_pool
-            if id(pool) in seen:
-                continue
-            seen.add(id(pool))
-            pool_events = pool.take_events()
-            if manager.host_resident:
-                for event in pool_events:
-                    if isinstance(event, (BlockStored, BlockRemoved)):
-                        event.medium = MEDIUM_CPU
-            events.extend(pool_events)
+        for pool in self.block_pools:
+            events.extend(pool.take_events())
         for event in events:
             if not isinstance(event, BlockStored):
                 continue

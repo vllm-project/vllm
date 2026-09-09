@@ -168,19 +168,6 @@ class KVCacheCoordinator(ABC):
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
 
-    def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
-        """Complete block-table rows for requests some group rewrote in place."""
-        request_ids: set[str] = set()
-        for manager in self.single_type_managers:
-            request_ids |= manager.take_block_table_updates()
-        return {
-            request_id: tuple(
-                [block.block_id for block in manager.req_to_blocks.get(request_id, [])]
-                for manager in self.single_type_managers
-            )
-            for request_id in request_ids
-        }
-
     def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
         for manager in self.single_type_managers:
             manager.complete_external_load(request_id, num_computed_tokens)

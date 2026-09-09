@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
 from vllm.platforms import current_platform
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
 
@@ -43,7 +44,9 @@ def _shrink_config(config):
 
 def _num_hisparse_spills(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
-    coordinator = client.engine_core.scheduler.kv_cache_manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(
+        client.engine_core.scheduler.kv_cache_manager
+    )
     return coordinator.next_spill_id
 
 
