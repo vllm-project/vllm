@@ -140,12 +140,20 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if (
+            if speculative_config.use_dspark():
+                dcp_size = parallel_config.decode_context_parallel_size
+                if dcp_size not in (1, pcp_size):
+                    raise NotImplementedError(
+                        "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
+                        f"DCP={dcp_size}, PCP={pcp_size}."
+                    )
+            elif (
                 speculative_config.method != "mtp"
                 or speculative_config.use_multi_module_mtp()
             ):
                 raise NotImplementedError(
-                    "MRV2 PCP only supports single-module MTP speculative decoding."
+                    "MRV2 PCP only supports DSpark or single-module MTP "
+                    "speculative decoding."
                 )
             if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 raise NotImplementedError(

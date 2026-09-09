@@ -480,11 +480,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
 
         last_token_indices = self.last_token_indices[:num_reqs]
-        positions = (
-            self.input_buffers.positions
-            if global_positions is None
-            else global_positions
-        )[last_token_indices]
+        positions = self.input_buffers.positions[last_token_indices]
         # The output hidden state at position P (= positions) and the token id
         # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
         # position before the sampled token, so the net adjustment is +1.

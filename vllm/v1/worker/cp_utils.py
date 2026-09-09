@@ -27,7 +27,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
         for layer in layers.values():
             get_attn_backend = getattr(layer, "get_attn_backend", None)
-            if pcp_size > 1 and get_attn_backend is not None:
+            layer_uses_pcp = getattr(layer, "use_pcp", pcp_size > 1)
+            if layer_uses_pcp and get_attn_backend is not None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "

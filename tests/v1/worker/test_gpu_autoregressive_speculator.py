@@ -370,6 +370,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     speculator.temperature = torch.zeros(2)
     speculator.seeds = torch.zeros(2, dtype=torch.int64)
     speculator.current_draft_step = torch.tensor(0)
+    speculator.sample_src_positions = torch.zeros(2, dtype=torch.int64)
     speculator.draft_logits = None
     speculator.draft_tokens = torch.zeros((2, 1), dtype=torch.int64)
     speculator.hidden_states = torch.zeros((4, 1))

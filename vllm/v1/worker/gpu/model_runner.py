@@ -833,21 +833,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            spec_input_batch = input_batch
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
-                    input_batch=spec_input_batch,
+                    input_batch=input_batch,
                     attn_metadata=attn_metadata,
                     slot_mappings=slot_mappings_by_layer,
                     last_hidden_states=spec_hidden_states,
                     aux_hidden_states=aux_hidden_states,
                     num_sampled=torch.ones(
-                        spec_input_batch.num_reqs,
+                        input_batch.num_reqs,
                         dtype=torch.int32,
                         device=self.device,
                     ),
                     num_rejected=torch.zeros(
-                        spec_input_batch.num_reqs,
+                        input_batch.num_reqs,
                         dtype=torch.int32,
                         device=self.device,
                     ),
@@ -1941,7 +1940,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Last rank: sample tokens
         # Keep the target's rank-local representation for the sharded drafter.
         # Sampling still restores the ordinary target hidden states globally.
-        spec_hidden_states = hidden_states
+        spec_hidden_states = None
         if self.speculator is not None and hasattr(
             self.model, "get_mtp_target_hidden_states"
         ):
@@ -1950,6 +1949,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+        if spec_hidden_states is None:
+            spec_hidden_states = hidden_states
+        if self.pcp_manager is not None and aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.pcp_manager.restore_hidden_states(states)
+                for states in aux_hidden_states
+            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
