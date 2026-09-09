@@ -71,8 +71,6 @@ class Transfer:
     batch_src: torch.Tensor
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
-    # Submitted but faulted: queued only so its stream can be drained before
-    # the job is reported. Carries no timing and never returns to the pools.
     failed: bool = False
 
 
@@ -668,31 +666,11 @@ class SingleDirectionOffloadingHandler:
                     )
                 end_event.record(stream)
         except RuntimeError:
-            # Device faults surface as RuntimeError (torch.AcceleratorError and
-            # the STD_TORCH_CHECK in swap_blocks_batch both derive from it).
-            # Deliberately not broader: a missing op or a bad argument is a
-            # programming error and must keep propagating, not be silently
-            # downgraded to a degraded cache.
             logger.exception(
                 "KV offload %s transfer failed for job %d",
                 "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
                 job_id,
             )
-            # A transfer fault must not take the engine down: offloading is a
-            # best-effort cache (OffloadingConnector.requires_kv_delivery is
-            # False), so the job is reported as failed and the connector
-            # decides what to do. It cannot be reported yet, though. A batched
-            # copy can fail partway through - swap_blocks_batch checks each
-            # chunk of the descriptor list separately (ROCm caps a call at 8192
-            # descriptors) and hipMemcpyBatchAsync is itself a loop of async
-            # copies that breaks on the first failure - so copies submitted
-            # before the fault may still be reading the source blocks, writing
-            # the destination blocks and DMA-reading the pinned descriptors.
-            # Record the end event behind them and report the failure from
-            # get_finished() once the stream drains. Keeping the transfer
-            # queued also preserves the wait() fence and the ordering chain the
-            # next submission builds on. A failure to record leaves the
-            # in-flight copies unbounded and must propagate.
             end_event.record(stream)
             self._transfer_events[job_id] = end_event
             self._transfers.append(
@@ -741,9 +719,6 @@ class SingleDirectionOffloadingHandler:
                     else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
                 )
             except RuntimeError:
-                # A device error latched by this transfer (or by earlier work
-                # on its stream) surfaces here rather than at submit time.
-                # Same contract as the submit-time failure above.
                 logger.exception(
                     "KV offload %s transfer failed for job %d while polling "
                     "for completion",
@@ -758,10 +733,6 @@ class SingleDirectionOffloadingHandler:
             self._transfers.popleft()
             self._transfer_events.pop(transfer.job_id, None)
             if transfer.failed:
-                # Drained: the blocks are quiescent and the scheduler may reuse
-                # them. The stream, events and descriptor buffers are dropped
-                # rather than pooled, since the stream may carry a latched
-                # device error that would spread to an unrelated transfer.
                 results.append(TransferResult(job_id=transfer.job_id, success=False))
                 continue
 
@@ -788,9 +759,6 @@ class SingleDirectionOffloadingHandler:
                 try:
                     event.synchronize()
                 except RuntimeError:
-                    # Leave the transfer queued: the next get_finished() poll
-                    # hits the same error and reports the job as failed, which
-                    # keeps failure handling in one place.
                     logger.exception(
                         "KV offload transfer for job %d failed while waiting "
                         "for it to complete",

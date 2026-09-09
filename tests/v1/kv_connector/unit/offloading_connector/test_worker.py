@@ -334,7 +334,6 @@ def test_failed_load_reports_its_blocks_for_recomputation():
 
     assert finished_recving == {"req"}
     assert worker.get_block_ids_with_load_errors() == {3, 4, 5}
-    # Draining is one-shot: the scheduler must not see them twice.
     assert worker.get_block_ids_with_load_errors() == set()
     meta = worker.build_connector_worker_meta()
     assert meta is not None

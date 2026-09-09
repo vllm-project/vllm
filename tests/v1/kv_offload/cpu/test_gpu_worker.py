@@ -239,7 +239,6 @@ def test_submit_failure_is_not_reported_until_stream_drains(
     (transfer,) = handler._transfers
     assert (transfer.job_id, transfer.failed) == (7, True)
     assert handler._transfer_events == {7: end_event}
-    # Still under DMA: nothing may be handed to another transfer yet.
     assert not handler._stream_pool
     assert not handler._event_pool
     assert not handler._buffer_pool
@@ -253,8 +252,6 @@ def test_submit_failure_is_not_reported_until_stream_drains(
     assert [(r.job_id, r.success) for r in results] == [(7, False)]
     assert not handler._transfers
     assert not handler._transfer_events
-    # Drained, but the stream may carry a latched device error, so it and its
-    # events and descriptor buffers are dropped rather than pooled.
     assert not handler._stream_pool
     assert not handler._event_pool
     assert not handler._buffer_pool
@@ -329,9 +326,6 @@ def test_get_finished_reports_failure_when_event_query_raises() -> None:
     assert [(r.job_id, r.success) for r in results] == [(3, False), (4, True)]
     assert not handler._transfers
     assert not handler._transfer_events
-    # The faulted transfer's stream/events are dropped rather than pooled, so a
-    # latched device error cannot leak into an unrelated transfer. Its
-    # descriptor buffers may still be under DMA, so they are dropped too.
     assert handler._stream_pool == [ready.stream]
     assert handler._buffer_pool == [
         (ready.batch_src, ready.batch_dst, ready.batch_sizes)

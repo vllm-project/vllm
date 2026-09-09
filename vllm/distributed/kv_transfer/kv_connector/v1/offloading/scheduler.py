@@ -77,8 +77,6 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
-    # Set when any worker reports its transfer failed. Sticky: pending_count
-    # can reach zero on a later step than the one carrying the failure.
     failed: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
@@ -1824,9 +1822,6 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                # A failed store never wrote its destination blocks. Publishing
-                # them would expose whatever the recycled blocks last held, so
-                # success=False removes and frees them instead.
                 if job_status.failed:
                     logger.warning(
                         "KV offload store job %d failed; dropping %d chunk(s) "
@@ -1840,10 +1835,6 @@ class OffloadingConnectorScheduler:
                     success=not job_status.failed,
                 )
             else:
-                # complete_load only drops the CPU-side ref count, which must
-                # happen either way or the source blocks stay pinned. A failed
-                # load's damage is on the GPU side and is reported separately
-                # via get_block_ids_with_load_errors().
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
