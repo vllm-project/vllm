@@ -459,13 +459,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     assert run_fullgraph.call_count == expected_graph_replays
 
 
-def test_pcp_multi_step_drafts_are_marked_as_decode():
-    speculator = object.__new__(_TestSpeculator)
-    speculator.pcp_manager = Mock()
-    is_prefilling = speculator.draft_decode_is_prefilling(2)
-    assert torch.equal(is_prefilling, torch.zeros(2, dtype=torch.bool))
-
-
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     monkeypatch,
 ):

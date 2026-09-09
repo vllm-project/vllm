@@ -215,11 +215,6 @@ class DraftModelSpeculator(BaseSpeculator):
         """Inject EPLB state after construction."""
         self.eplb_state = eplb_state
 
-    def draft_decode_is_prefilling(self, num_reqs: int) -> torch.Tensor | None:
-        if self.pcp_manager is None:
-            return None
-        return torch.zeros(num_reqs, dtype=torch.bool)
-
     def _prepare_eplb_forward(self, num_unpadded_tokens: int) -> None:
         """Call EPLB prepare_forward if EPLB is active for the draft model."""
         if self.eplb_state is not None:
@@ -335,7 +330,11 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=self.draft_decode_is_prefilling(num_reqs),
+            is_prefilling=(
+                torch.zeros(num_reqs, dtype=torch.bool)
+                if getattr(self, "pcp_manager", None) is not None
+                else None
+            ),
         )
         return attn_metadata
 

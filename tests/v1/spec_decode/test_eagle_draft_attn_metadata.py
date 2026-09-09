@@ -101,6 +101,22 @@ def test_build_draft_attn_metadata_sets_seq_lens_cpu_upper_bound():
     assert torch.equal(bound, torch.tensor([102, 202, 302, 0], dtype=torch.int32))
 
 
+def test_pcp_draft_decode_is_not_prefilling():
+    fake = _make_fake_speculator()
+    fake.pcp_manager = object()
+
+    captured = _run_build(
+        fake,
+        num_reqs=2,
+        num_reqs_padded=2,
+        num_tokens_padded=2,
+        base=torch.tensor([5, 9]),
+        step=1,
+    )
+
+    assert torch.equal(captured["is_prefilling"], torch.zeros(2, dtype=torch.bool))
+
+
 def test_build_draft_attn_metadata_handles_zero_unpadded_reqs():
     """Edge case: when ``num_reqs == 0`` the upper-bound tensor must
     still be a valid all-zero tensor of length ``num_reqs_padded``."""
