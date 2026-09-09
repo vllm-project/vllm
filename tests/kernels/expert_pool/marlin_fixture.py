@@ -130,6 +130,10 @@ def make_layer(
             device = torch.accelerator.current_accelerator()
             assert device is not None
             with device_loading_context(layer.routed_experts, device):
+                # The loader contract: the conversion sees device tensors.
+                for name in EXPERT_TENSORS:
+                    p = getattr(layer.routed_experts, name)
+                    assert p.device.type == device.type, name
                 layer._quant_method.process_weights_after_loading(layer.routed_experts)
             for name in EXPERT_TENSORS:
                 p = getattr(layer.routed_experts, name)
