@@ -415,7 +415,7 @@ def _store_cache_checkpoints_kernel(
     # store checkpoints to cache
     seq_idx = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx)
+    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx).to(tl.int64)
     checkpoint_offset = tl.load(
         checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
     )
