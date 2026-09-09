@@ -111,6 +111,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             temperature,
             seeds,
+            dummy_run,
             mm_inputs,
             is_profile,
         )
