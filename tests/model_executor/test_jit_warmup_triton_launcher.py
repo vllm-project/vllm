@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+import torch
 
 from vllm.model_executor.warmup import jit_warmup_triton_helper
 from vllm.model_executor.warmup.jit_warmup import (
@@ -20,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
+    triton_kernel,
     triton_scalar_specialization_rep,
     triton_warmup_inputs,
 )
@@ -184,6 +186,112 @@ def test_declarative_triton_kernel_traces_ranges_and_retains_inputs(
     assert owner.kernel.warmup_calls == [
         {"grid": (1,), "first": "warmup", "second": 1, "CONST": 0}
     ]
+
+
+def test_triton_kernel_decorator_returns_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _FakeTritonKernel()
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(
+            first="warmup",
+            second=WarmupChoices(1, 2),
+            config=7,
+        )
+
+    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    def launch(first: str, second: int, config: int) -> LaunchSpec:
+        return (2,), dict(CONST=config)
+
+    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
+        return {(id(kernel), kwargs["second"], kwargs["CONST"])}
+
+    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["second"])}
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        fake_precompile_keys,
+    )
+    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+
+    keys = launch._owner.get_warmup_keys()
+    assert [key.inputs.as_dict()["second"] for key in keys] == [1, 2]
+    launch._owner.compile(keys[0])
+    assert kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
+    ]
+    assert launch.__name__ == "launch"
+
+
+def test_triton_kernel_decorator_compacts_large_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _FakeTritonKernel()
+    dispatched: list[int] = []
+
+    def warmup_inputs() -> dict[str, Any]:
+        tokens: Any = WarmupIntRange(1, 8193)
+        return dict(first="warmup", second=tokens)
+
+    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: str, second: int) -> LaunchSpec:
+        dispatched.append(second)
+        return (second,), dict(CONST=7 if second <= 17 else 8)
+
+    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
+        return {(id(kernel), kwargs["CONST"])}
+
+    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        fake_precompile_keys,
+    )
+    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+
+    keys = dispatch._owner.get_warmup_keys()
+    assert len(dispatched) < 64
+    assert len(keys) == 2
+    assert {7 if key.inputs.as_dict()["second"] <= 17 else 8 for key in keys} == {7, 8}
+
+
+def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _FakeTritonKernel()
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(
+            first=TritonWarmupTensor(torch.float32, shape=(2, 3)),
+            second=1,
+        )
+
+    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
+        assert isinstance(first, torch.Tensor)
+        assert first.is_cuda
+        assert first[0].is_contiguous()
+        return (first.shape[0],), dict(CONST=first[0].numel())
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        lambda kernel, kwargs: {(id(kernel), kwargs["CONST"])},
+    )
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_compile_keys",
+        lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
+    )
+
+    keys = dispatch._owner.get_warmup_keys()
+    assert len(keys) == 1
+    assert keys[0].inputs.as_dict()["first"].device.type == "cuda"
 
 
 def test_direct_triton_kernel_preserves_native_call_shape(

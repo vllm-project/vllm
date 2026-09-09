@@ -694,6 +694,9 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         self,
         cases_fn: Callable[..., Any],
         *args: Any,
+        _value_expander: Callable[[WarmupValues], tuple[Any, ...]] = (
+            _expand_warmup_values
+        ),
         **kwargs: Any,
     ) -> Iterator[dict[str, Any]]:
         """Expand symbolic domains declared inside a warmup-cases method."""
@@ -751,7 +754,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 )
                 if call_name in {"WarmupIntRange", "WarmupChoices"}:
                     value = _eval_dispatch_expr(value_expr, static_values, globals_)
-                    domains.append((name, _expand_warmup_values(value)))
+                    domains.append((name, _value_expander(value)))
                 else:
                     local_exprs.append((name, value_expr))
                 continue
@@ -792,7 +795,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                     return self.generic_visit(node)
                 name = f"__warmup_domain_{len(domains)}"
                 domain = _eval_dispatch_expr(node, static_values, globals_)
-                domains.append((name, _expand_warmup_values(domain)))
+                domains.append((name, _value_expander(domain)))
                 return ast.copy_location(ast.Name(id=name), node)
 
         return_expr = cast(ast.Call, _InlineDomainRewriter().visit(return_expr))
@@ -825,7 +828,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             if not isinstance(case, Mapping):
                 raise TypeError("AST-traced warmup cases must return a mapping")
             inline_domains = [
-                (name, _expand_warmup_values(value))
+                (name, _value_expander(value))
                 for name, value in case.items()
                 if isinstance(value, WarmupChoices | WarmupIntRange)
             ]

@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -33,11 +41,39 @@ def _scatter_states_kernel(
     tl.store(state_ptr + state_idx * stride_state_batch + offsets, values, mask=mask)
 
 
+def _scatter_states_warmup_inputs(
+    *,
+    state_shape: tuple[int, ...],
+    state_dtype: torch.dtype,
+    indices_dtype: torch.dtype,
+    max_num_tokens: int,
+) -> dict[str, object]:
+    num_tokens: Any = WarmupIntRange(1, max_num_tokens + 1)
+    return dict(
+        state=TritonWarmupTensor(
+            state_dtype,
+            shape=(1,) + state_shape,
+        ),
+        src=TritonWarmupTensor(
+            state_dtype,
+            shape=(num_tokens,) + state_shape,
+        ),
+        indices=TritonWarmupTensor(
+            indices_dtype,
+            shape=(num_tokens,),
+        ),
+    )
+
+
+@triton_kernel(
+    kernel=_scatter_states_kernel,
+    warmup_inputs=_scatter_states_warmup_inputs,
+)
 def scatter_states(
     state: torch.Tensor,
     src: torch.Tensor,
     indices: torch.Tensor,
-) -> None:
+) -> DispatchSpec:
     """Scatter ``src`` rows into ``state`` at ``indices`` (in place).
 
     Equivalent to ``state[indices] = src`` but non-atomic and bandwidth-bound,
@@ -58,13 +94,10 @@ def scatter_states(
     assert src[0].is_contiguous()
     block_size = min(triton.next_power_of_2(row_size), 1024)
     grid = (triton.cdiv(row_size, block_size), indices.numel())
-    _scatter_states_kernel[grid](
-        state,
-        src,
-        indices,
-        state.stride(0),
-        src.stride(0),
-        indices.stride(0),
+    return grid, dict(
+        stride_state_batch=state.stride(0),
+        stride_src_batch=src.stride(0),
+        stride_indices=indices.stride(0),
         row_size=row_size,
         BLOCK_SIZE=block_size,
         num_warps=8,
