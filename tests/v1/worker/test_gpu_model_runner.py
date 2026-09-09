@@ -1741,6 +1741,28 @@ def test_reorder_batch_threshold_preserves_required_decode_ordering():
     assert runner.reorder_batch_threshold == 4
 
 
+def test_reorder_batch_threshold_keeps_minimum_for_optional_ordering():
+    runner = object.__new__(GPUModelRunner)
+    first_builder = SimpleNamespace(
+        reorder_batch_threshold=1,
+        requires_decode_ordering=False,
+    )
+    second_builder = SimpleNamespace(
+        reorder_batch_threshold=4,
+        requires_decode_ordering=False,
+    )
+    runner.attn_groups = [
+        [
+            SimpleNamespace(get_metadata_builder=lambda: first_builder),
+            SimpleNamespace(get_metadata_builder=lambda: second_builder),
+        ]
+    ]
+
+    GPUModelRunner.calculate_reorder_batch_threshold(runner)
+
+    assert runner.reorder_batch_threshold == 1
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Attention backend FLASHINFER is only supported on CUDA.",
