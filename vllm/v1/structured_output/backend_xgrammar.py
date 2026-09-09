@@ -20,6 +20,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
+    compile_grammar_with_timeout,
     compile_regex_with_timeout,
     convert_lark_to_ebnf,
     grammar_is_likely_lark,
@@ -83,15 +84,28 @@ class XgrammarBackend(StructuredOutputBackend):
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            ctx = self.compiler.compile_json_schema(
-                grammar_spec, any_whitespace=not self.disable_any_whitespace
+            ctx = compile_grammar_with_timeout(
+                self.compiler.compile_json_schema,
+                grammar_spec,
+                grammar_spec=grammar_spec,
+                grammar_type="JSON schema",
+                any_whitespace=not self.disable_any_whitespace,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+            ctx = compile_grammar_with_timeout(
+                self.compiler.compile_json_schema,
+                '{"type": "object"}',
+                grammar_spec='{"type": "object"}',
+                grammar_type="JSON object schema",
+                any_whitespace=not self.disable_any_whitespace,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
-            ctx = self.compiler.compile_grammar(grammar_spec)
+            ctx = compile_grammar_with_timeout(
+                self.compiler.compile_grammar,
+                grammar_spec,
+                grammar_spec=grammar_spec,
+                grammar_type="Grammar",
+            )
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -109,9 +123,20 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+                ctx = compile_grammar_with_timeout(
+                    self.compiler.compile_structural_tag,
+                    tags,
+                    s_tag["triggers"],
+                    grammar_spec=grammar_spec,
+                    grammar_type="Structural tag",
+                )
             else:
-                ctx = self.compiler.compile_structural_tag(grammar_spec)
+                ctx = compile_grammar_with_timeout(
+                    self.compiler.compile_structural_tag,
+                    grammar_spec,
+                    grammar_spec=grammar_spec,
+                    grammar_type="Structural tag",
+                )
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -329,7 +354,12 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.choice:
         choice_grammar = choice_as_grammar(so_params.choice)
         try:
-            xgr.Grammar.from_ebnf(choice_grammar)
+            compile_grammar_with_timeout(
+                xgr.Grammar.from_ebnf,
+                choice_grammar,
+                grammar_spec=choice_grammar,
+                grammar_type="Choice grammar",
+            )
         except Exception as err:
             raise VLLMValidationError(
                 f"Failed to transform choices into a grammar: {err}"
@@ -353,7 +383,12 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             )
 
         try:
-            xgr.Grammar.from_json_schema(schema)
+            compile_grammar_with_timeout(
+                xgr.Grammar.from_json_schema,
+                schema,
+                grammar_spec=str(schema),
+                grammar_type="JSON schema",
+            )
         except Exception as err:
             raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
@@ -373,7 +408,12 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         # Test parsing EBNF grammar, possibly already converted from Lark
         try:
             # parse the grammar, but we aren't compiling it.
-            xgr.Grammar.from_ebnf(so_params.grammar)
+            compile_grammar_with_timeout(
+                xgr.Grammar.from_ebnf,
+                so_params.grammar,
+                grammar_spec=so_params.grammar,
+                grammar_type="Grammar",
+            )
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
         return
@@ -392,8 +432,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                     )
                     for s in s_tag["structures"]
                 ]
-                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+                compile_grammar_with_timeout(
+                    xgr.Grammar.from_structural_tag,
+                    tags,
+                    s_tag["triggers"],
+                    grammar_spec=so_params.structural_tag,
+                    grammar_type="Structural tag",
+                )
             else:
-                xgr.Grammar.from_structural_tag(so_params.structural_tag)
+                compile_grammar_with_timeout(
+                    xgr.Grammar.from_structural_tag,
+                    so_params.structural_tag,
+                    grammar_spec=so_params.structural_tag,
+                    grammar_type="Structural tag",
+                )
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
