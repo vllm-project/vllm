@@ -19,9 +19,8 @@ The score kernels are built on ``v_mfma_f32_16x16x32_fp8_fp8``, so this impl
 requires an fp8 (e4m3) index cache and an fp8 index query -- the fused
 QK-norm/RoPE kernel emits both directly when the index cache is e4m3. See
 ``aiter_indexer_unsupported_reason`` for the full set of limits;
-``select_indexer_impl_cls`` refuses to pick this impl unless they all hold.
-
-AITER imports are function-local so this module stays import-safe off ROCm.
+``select_aiter_indexer_impl_cls`` refuses to pick this impl unless they all
+hold, and the model falls back to the platform-neutral ``MiniMaxM3Indexer``.
 """
 
 import math
@@ -30,27 +29,40 @@ from functools import cache
 from typing import ClassVar
 
 import torch
+from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.attention import IndexerKVDType
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.amd.ops.sparse_pa import ASM_PAGE_SIZE
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
+    MiniMaxM3IndexerCache,
     MiniMaxM3IndexerDecodeMetadata,
     MiniMaxM3IndexerImpl,
     MiniMaxM3IndexerMetadata,
     MiniMaxM3IndexerMetadataBuilder,
     MiniMaxM3IndexerPrefillMetadata,
 )
-from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
+
+# The single source of truth for whether the AITER attend was asked for; this
+# indexer is only usable alongside it.
+from vllm.models.minimax_m3.common.sparse_attention import (
+    _minimax_m3_aiter_sparse_pa_requested,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-# Page size == sparse block size == index-K block.
-PAGE_SIZE = 128
+logger = init_logger(__name__)
+
+# Compiled AITER MiniMax-M3 score/top-k contract
+MSA_TOPK_BLOCKS = 16
+MSA_SCORE_TYPE = "max"
+MSA_SPARSE_BLOCK_SIZE = 128
+MSA_INDEX_HEAD_DIM = 128
 # Wave width the top-k is written against: it gives one lane per output slot and
 # reads the score row in wave-wide strips.
 WAVE_SIZE = 64
@@ -93,7 +105,7 @@ def aiter_indexer_max_decode_query_len(vllm_config: VllmConfig) -> int:
 
 @cache
 def aiter_msa_kernels_unavailable_reason() -> str | None:
-    """Why AITER's MSA score/top-k kernels cannot be reached, or None if they can.
+    """Return why the AITER MSA score/top-k ops cannot be imported, or None.
 
     They are a recent addition, so an AITER that predates them imports fine
     while these three names do not exist, and the failure would otherwise
@@ -121,16 +133,30 @@ def aiter_indexer_unsupported_reason(
     indexer_kv_dtype: IndexerKVDType,
     max_model_len: int,
     max_decode_query_len: int = 1,
+    score_type: str = "max",
 ) -> str | None:
-    """Why the AITER indexer cannot serve this configuration, or None if it can.
+    """Return why this config cannot use the AITER indexer, or None if it can.
 
-    Returning the reason rather than a bool keeps the fallback log actionable,
-    since most of these limits are shape constants a deployment can change.
-    Covers whether AITER can supply the kernels at all, so a caller that gets
-    None back can import them without guarding.
+    Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
+    dtype, the compiled score/top-k contract, MFMA column limits, max context
+    in blocks, and whether AITER exposes the MSA kernels.
+    ``select_aiter_indexer_impl_cls`` logs the string and falls back when it is
+    not None.
     """
     if not current_platform.is_rocm():
-        return "not running on ROCm"
+        return (
+            "needs ROCm for the AITER fp8 MFMA score/top-k, "
+            f"got platform={current_platform.device_type!r}"
+        )
+    if not _minimax_m3_aiter_sparse_pa_requested():
+        # The top-k emits the attend's page table in page-16 numbering, which
+        # only addresses the interleaved cache the AITER attend reads. Paired
+        # with any other attend there is nowhere valid to write it, so this
+        # indexer is not usable on its own.
+        return (
+            "needs the AITER sparse PA attend, whose page table its top-k "
+            "emits (rocm_aiter_ops + shuffle KV cache layout)"
+        )
     if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
         # The score kernels are fp8 MFMA; there is no bf16 instantiation.
         return (
@@ -140,8 +166,20 @@ def aiter_indexer_unsupported_reason(
 
     if not on_gfx950():
         return f"needs {' or '.join(SUPPORTED_ARCHS)} for the fp8 MFMA"
-    if topk_blocks > WAVE_SIZE:
-        return f"topk_blocks={topk_blocks} exceeds one wave ({WAVE_SIZE})"
+    if score_type != MSA_SCORE_TYPE:
+        return f"needs score_type={MSA_SCORE_TYPE!r}, got score_type={score_type!r}"
+    if topk_blocks != MSA_TOPK_BLOCKS:
+        return f"needs topk_blocks={MSA_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
+    if sparse_block_size != MSA_SPARSE_BLOCK_SIZE:
+        return (
+            f"needs sparse_block_size={MSA_SPARSE_BLOCK_SIZE}, "
+            f"got sparse_block_size={sparse_block_size}"
+        )
+    if index_head_dim != MSA_INDEX_HEAD_DIM:
+        return (
+            f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
+            f"got index_head_dim={index_head_dim}"
+        )
     if num_index_heads > MFMA_COLS:
         return f"num_index_heads={num_index_heads} exceeds the {MFMA_COLS} MFMA columns"
     # A decode row's whole query shares one MFMA tile, one column per (token,
@@ -151,24 +189,12 @@ def aiter_indexer_unsupported_reason(
             f"num_index_heads={num_index_heads} x max_decode_query_len="
             f"{max_decode_query_len} exceeds the {MFMA_COLS} MFMA columns"
         )
-    if index_head_dim % 64 != 0:
-        return f"index_head_dim={index_head_dim} must be a multiple of 64"
-    if sparse_block_size % MFMA_COLS != 0:
-        return (
-            f"sparse_block_size={sparse_block_size} must tile into "
-            f"{MFMA_COLS}-token MFMA rows"
-        )
     max_blocks = math.ceil(max_model_len / sparse_block_size)
     if max_blocks > MAX_SUPPORTED_BLOCKS:
         return (
             f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
             f"more than the top-k's {MAX_SUPPORTED_BLOCKS}"
         )
-    # Last, because it is the only check that costs anything: reaching the
-    # kernels pulls in AITER itself. Every configuration that gets this far is
-    # one that would load AITER anyway, so by here the import is already paid
-    # for -- whereas a ROCm deployment not using AITER at all bails on the
-    # dtype above without ever touching it.
     return aiter_msa_kernels_unavailable_reason()
 
 
@@ -192,7 +218,7 @@ class MiniMaxM3IndexerAiterMetadata(MiniMaxM3IndexerMetadata):
     the last block holds.
     """
 
-    # [num_prefill_tokens] int32, cdiv(position + 1, PAGE_SIZE) per prefill row.
+    # [num_prefill_tokens] int32, cdiv(position + 1, sparse_block_size) per prefill row.
     prefill_num_valid_pages: torch.Tensor | None = None
     # [num_prefill_tokens] int32, the request each prefill row belongs to.
     prefill_row_req_id: torch.Tensor | None = None
@@ -211,6 +237,11 @@ class MiniMaxM3IndexerAiterMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        hf_config = vllm_config.model_config.hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        self.sparse_block_size = int(
+            text_config.sparse_attention_config["sparse_block_size"]
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # Companions to the base's num_valid_pages_buffer, for the two vectors
         # only the emitted table needs.
@@ -274,7 +305,7 @@ class MiniMaxM3IndexerAiterMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 num_decode_tokens:num_tokens
             ]
             prefill_num_valid_pages.copy_(
-                row_positions // PAGE_SIZE + 1, non_blocking=True
+                row_positions // self.sparse_block_size + 1, non_blocking=True
             )
             prefill_kv_lens = self.kv_lens_buffer[num_decode_tokens:num_tokens]
             prefill_kv_lens.copy_(row_positions + 1, non_blocking=True)
@@ -331,18 +362,23 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
     """AITER fp8 score + top-k for both prefill and decode."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerAiterBackend
-    emits_sparse_block_table: ClassVar[bool] = True
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         # Both passes are v_mfma_f32_16x16x32_fp8_fp8 with no bf16 instantiation,
         # so an index cache of any other dtype would be read as e4m3 bytes.
-        # select_indexer_impl_cls will not get here, but nothing else may either.
+        # The selector will not get here, but nothing else may either.
         if self.indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
             raise ValueError(
                 "The AITER indexer requires an fp8 e4m3 index cache, got "
                 f"indexer_kv_dtype={self.indexer_kv_dtype!r}"
             )
+        # Shared, stable-address page table + per-row context bound the top-k
+        # emits for the attend. Owned by the model so one allocation serves
+        # every layer; left None when it reserved none, in which case the
+        # attend rebuilds the table itself.
+        self.sparse_bt_buffer: torch.Tensor | None = None
+        self.sparse_ctx_buffer: torch.Tensor | None = None
 
     @property
     def pages_per_block(self) -> int:
@@ -397,6 +433,9 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
     def forward(
         self,
         index_query: torch.Tensor,
+        *,
+        decode_page16_block_table: torch.Tensor | None = None,
+        prefill_page16_block_table: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         from aiter.ops.msa_attention import (
             pa_sparse_block_score_decode,
@@ -413,12 +452,9 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
         # different group's than the index cache's, so the top-k resolves the
         # selection through the attend's block table -- only the score pass reads
         # the index cache and takes the indexer's. It has to be the page-16
-        # rebase of that table: the kernel expands a block into a compile-time
-        # number of pages, which is one side's worth, and the attend's blocks
-        # hold both sides.
-        attend_md = attn_metadata[self.attend_layer_name]
-        assert isinstance(attend_md, MiniMaxM3SparseMetadata)
-
+        # rebase of that table, which the attend's own metadata builder does
+        # once per step; the indexer's metadata cannot reach another group's
+        # blocks, so the layer reads it off the attend and hands it in.
         num_tokens = md.num_actual_tokens
         nd = md.num_decode_tokens
         iq = index_query[:num_tokens].view(
@@ -443,6 +479,10 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
         if md.num_decodes > 0:
             d = md.decode
             assert d is not None
+            assert decode_page16_block_table is not None, (
+                "the AITER indexer's top-k emits the attend's page table and "
+                "needs the page-16 rebase of the attend's decode block table"
+            )
             score = self._new_score(nd, d.max_seq_len)
             pa_sparse_block_score_decode(
                 iq[:nd],
@@ -460,12 +500,10 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
             # A decode row's causal length is seq_len - query_len + token + 1,
             # which the kernel derives itself, so the emitted table covers
             # speculative rows without any extra per-row shape.
-            assert attend_md.decode is not None
-            assert attend_md.decode.page16_block_table is not None
             pa_sparse_block_topk(
                 score,
                 decode_topk,
-                attend_md.decode.page16_block_table,
+                decode_page16_block_table,
                 d.seq_lens,
                 sparse_bt,
                 sparse_ctx,
@@ -479,6 +517,10 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
         if md.num_prefills > 0:
             p = md.prefill
             assert p is not None
+            assert prefill_page16_block_table is not None, (
+                "the AITER indexer's top-k emits the attend's page table and "
+                "needs the page-16 rebase of the attend's prefill block table"
+            )
             assert md.prefill_num_valid_pages is not None
             assert md.prefill_row_req_id is not None
             assert md.prefill_kv_lens is not None
@@ -499,12 +541,10 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
             sparse_bt, sparse_ctx = self._table_rows(nd, num_tokens)
             # Ragged rows carry their request and causal length explicitly: the
             # block count alone cannot place the tail block the table ends on.
-            assert attend_md.prefill is not None
-            assert attend_md.prefill.page16_block_table is not None
             pa_sparse_block_topk(
                 score,
                 prefill_topk,
-                attend_md.prefill.page16_block_table,
+                prefill_page16_block_table,
                 p.seq_lens,
                 sparse_bt,
                 sparse_ctx,
@@ -518,3 +558,89 @@ class MiniMaxM3IndexerAiterImpl(MiniMaxM3IndexerImpl):
             )
 
         return decode_topk, prefill_topk
+
+
+def select_aiter_indexer_impl_cls(
+    *,
+    topk_blocks: int,
+    sparse_block_size: int,
+    num_index_heads: int,
+    index_head_dim: int,
+    indexer_kv_dtype: IndexerKVDType,
+    score_type: str = "max",
+) -> type[MiniMaxM3IndexerAiterImpl] | None:
+    """The AITER indexer impl if this config can use it, else None.
+
+    ``None`` sends the caller to the platform-neutral ``MiniMaxM3Indexer``,
+    which on ROCm means the Triton indexer -- and a bf16-only one, so an fp8
+    index cache that lands here has nowhere to go.
+    """
+    reason = aiter_indexer_unsupported_reason(
+        topk_blocks=topk_blocks,
+        sparse_block_size=sparse_block_size,
+        num_index_heads=num_index_heads,
+        index_head_dim=index_head_dim,
+        indexer_kv_dtype=indexer_kv_dtype,
+        max_model_len=get_current_vllm_config().model_config.max_model_len,
+        max_decode_query_len=aiter_indexer_max_decode_query_len(
+            get_current_vllm_config()
+        ),
+        score_type=score_type,
+    )
+    if reason is not None:
+        logger.info_once("MiniMax M3 indexer: AITER unavailable (%s)", reason)
+        return None
+    logger.info_once(
+        "MiniMax M3 indexer: selected AITER (fp8 MFMA score + top-k) "
+        "[topk_blocks=%d, indexer_kv_dtype=%s]",
+        topk_blocks,
+        indexer_kv_dtype,
+    )
+    return MiniMaxM3IndexerAiterImpl
+
+
+class MiniMaxM3AiterIndexer(nn.Module):
+    """``MiniMaxM3Indexer``'s surface over the AITER impl.
+
+    The platform-neutral wrapper picks its impl through ``common``'s selector
+    and forwards a Triton-only set of fused-table arguments, neither of which
+    can reach this impl without editing ``common``. This holds the same three
+    members the attention layer uses -- ``impl``, ``index_cache``,
+    ``num_index_heads`` -- and forwards the one argument AITER needs instead.
+    """
+
+    def __init__(
+        self,
+        *,
+        impl_cls: type[MiniMaxM3IndexerAiterImpl],
+        sparse_bt_buffer: torch.Tensor | None = None,
+        sparse_ctx_buffer: torch.Tensor | None = None,
+        **impl_kwargs,
+    ) -> None:
+        super().__init__()
+        self.impl = impl_cls(**impl_kwargs)
+        # Assigned rather than passed: the impl's base ``__init__`` lives in
+        # common and takes no table buffers.
+        self.impl.sparse_bt_buffer = sparse_bt_buffer
+        self.impl.sparse_ctx_buffer = sparse_ctx_buffer
+
+    @property
+    def index_cache(self) -> MiniMaxM3IndexerCache:
+        return self.impl.index_cache
+
+    @property
+    def num_index_heads(self) -> int:
+        return self.impl.num_index_heads
+
+    def forward(
+        self,
+        index_query: torch.Tensor,
+        *,
+        decode_page16_block_table: torch.Tensor | None = None,
+        prefill_page16_block_table: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        return self.impl(
+            index_query,
+            decode_page16_block_table=decode_page16_block_table,
+            prefill_page16_block_table=prefill_page16_block_table,
+        )

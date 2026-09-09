@@ -370,7 +370,30 @@ def minimax_m3_sparse_block_page_stride(
     return PAGES_PER_SPARSE_BLOCK * (2 if _sides_are_packed(k_cache, v_cache) else 1)
 
 
-minimax_m3_block_page_stride = minimax_m3_sparse_block_page_stride
+# K/V sides sharing one block, which is how many sides' pages a block spans.
+# The attend publishes two head slots and the indexer's side cache one, and
+# specs that mix HNC shapes narrow the resolved layout to a block-compact one
+# (LHBNC is not), so this path always lands on an interleaved block.
+PAGE16_SIDES_PER_BLOCK = 2
+
+
+def minimax_m3_rebase_block_table_to_page16(
+    block_table: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rebase a logical page table onto AITER's page-16 page numbering.
+
+    The page ids AITER's top-k emits for the attend are
+    ``block_table[blk] * pages_per_block + j``, and ``pages_per_block`` is fixed
+    at AITER build time to one side's pages. An interleaved block spans both
+    sides, so the only way to reach its pages through that kernel is to hand it
+    a table already scaled to the wider stride. The caller does this once per
+    step, since every sparse layer resolves its selection through the same
+    table.
+    """
+    if out is None:
+        out = torch.empty_like(block_table)
+    return torch.mul(block_table, PAGE16_SIDES_PER_BLOCK, out=out)
 
 
 def _gluon_scale_arg(
@@ -422,9 +445,6 @@ def minimax_m3_sparse_attn_decode_aiter(
     sparse_block_table: torch.Tensor | None = None,
     sparse_context_lens: torch.Tensor | None = None,
 ) -> None:
-    # An indexer whose top-k already emitted the table hands it in; the winners
-    # were in that kernel's LDS, so resolving them there costs a wave and this
-    # pass is skipped entirely.
     if (sparse_block_table is None) != (sparse_context_lens is None):
         raise ValueError(
             "MiniMax-M3 prepared sparse block table and context lengths "
@@ -472,7 +492,12 @@ def minimax_m3_sparse_attn_prefill_aiter(
     sparse_bt: torch.Tensor | None = None,
     sparse_ctx: torch.Tensor | None = None,
 ) -> None:
-    if sparse_bt is None or sparse_ctx is None:
+    if (sparse_bt is None) != (sparse_ctx is None):
+        raise ValueError(
+            "MiniMax-M3 prepared sparse block table and context lengths "
+            "must be provided together"
+        )
+    if sparse_bt is None:
         sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
             topk_idx,
             block_table,
@@ -480,6 +505,7 @@ def minimax_m3_sparse_attn_prefill_aiter(
             query_abs_pos,
             minimax_m3_sparse_block_page_stride(k_cache, v_cache),
         )
+    assert sparse_ctx is not None
     _run_gluon_decode(
         q,
         k_cache,
