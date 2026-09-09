@@ -19,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -45,10 +47,8 @@ def _make_bare_scheduler(
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
-    scheduler.kv_cache_config = SimpleNamespace(
-        select_block_ids=lambda block_ids, group_ids: tuple(block_ids)
-    )
-    scheduler._store_group_ids = ()
+    scheduler.kv_cache_config = SimpleNamespace()
+    scheduler._store_group_ids = (0,)
     scheduler._store_group_id_by_kv_cache_group_id = {0: 0, 1: 1}
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
@@ -285,12 +285,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
         scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
 
     assert scheduler._store_group_ids == (0, 2)
-    assert scheduler.kv_cache_config.select_block_ids(
-        ([1], [8], [3]), scheduler._store_group_ids
-    ) == ([1], [3])
     assert scheduler._boundary_state_group_ids == frozenset({1})
-    with pytest.raises(ValueError, match="Expected 3 KV cache groups, got 1"):
-        scheduler.kv_cache_config.select_block_ids(([1],), scheduler._store_group_ids)
 
 
 def test_current_save_block_ids_use_store_group_projection():
@@ -307,10 +302,7 @@ def test_current_save_block_ids_use_store_group_projection():
     )
     meta.add_request(req_meta)
     output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            block_ids={"req-0": ([10], [80], [30])},
-            boundary_state_offloads={},
-        )
+        kv_connector_block_state=_make_connector_block_state(([10], [80], [30]))
     )
 
     scheduler._apply_current_save_block_ids(meta, output)
@@ -321,11 +313,9 @@ def test_current_save_block_ids_use_store_group_projection():
 def test_update_state_excludes_nontransfer_groups():
     """Store metadata must match the worker's registered cache groups."""
     scheduler = _make_bare_scheduler()
-    scheduler.kv_cache_config = SimpleNamespace(
-        select_block_ids=lambda block_ids, group_ids: (block_ids[0],)
-    )
+    scheduler._store_group_ids = (0,)
     request = SimpleNamespace(request_id="req-1")
-    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
+    blocks = KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2)], [KVCacheBlock(9)]))
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
 
@@ -1093,6 +1083,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
 
 def test_finished_partial_tail_is_pre_pinned_as_store_job():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._store_group_ids = (0, 1)
     scheduler.client = SimpleNamespace(discard=lambda *_: None)
     request = SimpleNamespace(
         request_id="req-0",
@@ -1299,6 +1290,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
 
 def test_store_job_pins_current_non_null_non_mamba_blocks():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._store_group_ids = (0, 1)
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
         block_hashes=[bytes([i]) for i in range(12)],
