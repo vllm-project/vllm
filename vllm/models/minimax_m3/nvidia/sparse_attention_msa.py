@@ -13,6 +13,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.config.cache import CacheDType
@@ -133,6 +134,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.decode_backend = vllm_config.attention_config.minimax_m3_msa_decode_backend
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
+        self.msa_cutlass_min_batch_size = envs.VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH
 
     def build(
         self,
@@ -159,6 +161,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             kv_cache_dtype=self.kv_cache_dtype,
             page_size=SPARSE_BLOCK_SIZE,
             topk_blocks=self.topk_blocks,
+            min_batch_size=self.msa_cutlass_min_batch_size,
         ):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
