@@ -15,7 +15,9 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
-use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
+use crate::client::state::{
+    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
@@ -147,7 +149,7 @@ impl ClientInner {
     pub fn take_senders_for_outputs<'a>(
         &self,
         outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
-    ) -> Vec<Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>>> {
+    ) -> Vec<Option<OutputSender>> {
         self.request_reg.lock().senders_for_outputs(outputs)
     }
 
@@ -156,7 +158,7 @@ impl ClientInner {
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
-    ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
+    ) -> Vec<OutputSender> {
         self.request_reg.lock().finish_many(request_ids)
     }
 
@@ -197,7 +199,7 @@ impl ClientInner {
 
         // Notify all ongoing requests that the client is closed.
         for sender in request_senders {
-            let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
+            let _ = sender.try_send(Err(Error::Shared(persistent_error.clone())));
         }
         for sender in utility_senders {
             let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
@@ -416,6 +418,7 @@ pub(crate) async fn run_output_dispatcher_loop(
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
+                    let mut slow_consumers: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
                         let Some(sender) = sender else {
@@ -428,8 +431,29 @@ pub(crate) async fn run_output_dispatcher_loop(
                             timestamp: batch.timestamp,
                             output,
                         };
-                        if sender.send(Ok(wrapped_output)).is_err() {
-                            debug!(request_id, "request output stream receiver dropped");
+                        match sender.try_send(Ok(wrapped_output)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                debug!(request_id, "request output stream receiver dropped");
+                            }
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                warn!(request_id, "aborting request: unread output queue is full");
+                                if let Some(engine_id) = inner.take_auto_abort_target(&request_id) {
+                                    slow_consumers.entry(engine_id).or_default().push(request_id);
+                                }
+                            }
+                        }
+                    }
+
+                    for (engine_id, request_ids) in slow_consumers {
+                        if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await
+                        {
+                            warn!(
+                                ?engine_id,
+                                ?request_ids,
+                                error = %error.as_report(),
+                                "failed to abort slow-consumer request streams"
+                            );
                         }
                     }
 
@@ -534,5 +558,53 @@ mod tests {
             inner.health_error().as_deref(),
             Some(Error::EngineCoreDead)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unread_output_overflow_removes_request_for_abort() {
+        use crate::client::state::MAX_QUEUED_OUTPUTS_PER_REQUEST;
+
+        let inner = test_inner().await;
+        let request_id = "req-slow".to_string();
+        let (_engine_id, mut rx) = inner.register_request(request_id.clone(), None, None).unwrap();
+
+        let output = EngineCoreOutput {
+            request_id: request_id.clone(),
+            ..Default::default()
+        };
+        let sender = inner
+            .take_senders_for_outputs(std::slice::from_ref(&output))
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("active request");
+
+        let wrapped = EngineCoreStreamOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: output.clone(),
+        };
+        for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
+            sender
+                .try_send(Ok(wrapped.clone()))
+                .expect("queue should accept up to the bound");
+        }
+        assert!(matches!(
+            sender.try_send(Ok(wrapped)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        let engine_id = inner
+            .take_auto_abort_target(&request_id)
+            .expect("overflow must still abort the engine request");
+        assert_eq!(engine_id, EngineId::from(b"engine-0"));
+        assert!(inner.take_auto_abort_target(&request_id).is_none());
+        drop(sender);
+
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, MAX_QUEUED_OUTPUTS_PER_REQUEST);
     }
 }
