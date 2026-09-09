@@ -126,6 +126,31 @@ def test_msa_cutlass_decode_static_dispatch_keeps_sm100_floor(
     assert should_prepare_decode_metadata(16, DEFAULT_QUERY_LEN, **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("min_batch_size", "batch_size", "expected"),
+    [(8, 4, False), (8, 8, True), (16, 8, False), (16, 16, True)],
+)
+def test_msa_cutlass_decode_static_dispatch_honors_batch_override(
+    min_batch_size: int,
+    batch_size: int,
+    expected: bool,
+) -> None:
+    assert (
+        should_prepare_decode_metadata(
+            batch_size,
+            DEFAULT_QUERY_LEN,
+            decode_backend="cutlass",
+            num_q_heads=64,
+            num_kv_heads=4,
+            kv_cache_dtype="fp8_e4m3",
+            page_size=BLOCK_SIZE,
+            topk_blocks=TOPK,
+            min_batch_size=min_batch_size,
+        )
+        is expected
+    )
+
+
 def test_msa_cutlass_decode_static_dispatch_requires_opt_in() -> None:
     assert not should_prepare_decode_metadata(
         32,
@@ -266,6 +291,7 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.kv_cache_dtype = "fp8_e4m3"
     builder.decode_backend = "cutlass"
     builder.msa_cutlass_plan_cache = object()
+    builder.msa_cutlass_min_batch_size = None
 
     metadata = builder.build(
         0,
