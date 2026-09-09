@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
-    KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
@@ -30,7 +29,6 @@ HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 class HiSparseLayout:
     source_group: KVCacheGroupSpec
     device_groups: list[KVCacheGroupSpec]
-    host_tensors: list[KVCacheTensor]
     host_num_blocks: int
 
 
@@ -230,20 +228,8 @@ def create_hisparse_layout(
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
 
-    tensors = [
-        KVCacheTensor(
-            size=spec.page_size_bytes * host_num_blocks,
-            layers=[name],
-            layer_stride=spec.page_size_bytes * host_num_blocks,
-            block_stride=spec.page_size_bytes,
-            host_resident=True,
-            block_pool_id=None,
-        )
-        for name, spec in source_specs.items()
-    ]
     return HiSparseLayout(
         source_group=source_group,
         device_groups=gpu_groups,
-        host_tensors=tensors,
         host_num_blocks=host_num_blocks,
     )

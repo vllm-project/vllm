@@ -238,14 +238,16 @@ def _allocate_hisparse_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[int, torch.Tensor]]:
-    host_bytes = sum(
-        tensor.size
-        for tensor in kv_cache_config.kv_cache_tensors
-        if tensor.host_resident
-    )
-    check_hisparse_host_memory(host_bytes)
+    host_sizes: dict[int | None, int] = {}
+    for tensor in kv_cache_config.kv_cache_tensors:
+        if not tensor.host_resident:
+            continue
+        previous_size = host_sizes.setdefault(tensor.block_pool_id, tensor.size)
+        assert previous_size == tensor.size
+    check_hisparse_host_memory(sum(host_sizes.values()))
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    host_backings: dict[int | None, torch.Tensor] = {}
     device_backings: dict[int, torch.Tensor] = {}
     raw_tensors: dict[str, torch.Tensor] = {}
     kv_caches: dict[str, torch.Tensor] = {}
@@ -253,8 +255,13 @@ def _allocate_hisparse_kv_cache(
 
     for tensor in kv_cache_config.kv_cache_tensors:
         if tensor.host_resident:
-            backing, registered_pool = allocate_pinned_host_pool(tensor.size)
-            pinned_host_pools[backing.data_ptr()] = registered_pool
+            backing = host_backings.get(tensor.block_pool_id)
+            if backing is None:
+                backing, registered_pool = allocate_pinned_host_pool(tensor.size)
+                host_backings[tensor.block_pool_id] = backing
+                pinned_host_pools[backing.data_ptr()] = registered_pool
+            else:
+                assert backing.numel() == tensor.size
             num_blocks = kv_cache_config.hisparse_host_num_blocks
             assert num_blocks is not None
         else:

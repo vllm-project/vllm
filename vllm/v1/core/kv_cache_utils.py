@@ -1645,6 +1645,62 @@ def validate_kv_cache_layout(
         )
 
 
+def _build_kv_cache_tensors(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    num_blocks: int,
+    size: int,
+    layout: KVCacheLayout,
+    bytes_per_block: int,
+    *,
+    host_resident: bool = False,
+    block_pool_id: int | None = 0,
+) -> list[KVCacheTensor]:
+    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+    tensors: list[KVCacheTensor] = []
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name, spec in group_spec.kv_cache_specs.items():
+                layers_by_spec[spec].append(layer_name)
+        elif group.layer_names:
+            layers_by_spec[group_spec].extend(group.layer_names)
+
+        byte_offset = 0
+        for spec, layer_names in layers_by_spec.items():
+            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
+                if not layout.is_block_outermost:
+                    raise ValueError("HiSparse requires a block-outermost KV layout.")
+                layer_stride = spec.page_size_bytes
+                block_stride = bytes_per_block
+            else:
+                layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                    spec,
+                    num_blocks,
+                    len(layer_names),
+                    layout,
+                    fixed_strides=(None, interleaved_block_stride, None, None, None),
+                )
+            offset = (
+                byte_offset
+                * max(layer_stride, spec.page_size_bytes)
+                // spec.page_size_bytes
+            )
+            tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    layers=layer_names,
+                    layer_stride=layer_stride,
+                    block_stride=block_stride,
+                    offset=offset,
+                    host_resident=host_resident,
+                    block_pool_id=block_pool_id,
+                )
+            )
+            byte_offset += len(layer_names) * spec.page_size_bytes
+    return tensors
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1748,7 +1804,6 @@ def get_kv_cache_config_from_groups(
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
-    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
@@ -1765,54 +1820,28 @@ def get_kv_cache_config_from_groups(
     # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
-    kv_cache_tensors = (
-        list(hisparse_layout.host_tensors) if hisparse_layout is not None else []
+    kv_cache_tensors = _build_kv_cache_tensors(
+        kv_cache_groups, num_blocks, size, layout, bytes_per_block
     )
-    for group in kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            for layer_name, spec in group_spec.kv_cache_specs.items():
-                layers_by_spec[spec].append(layer_name)
-        elif group.layer_names:
-            layers_by_spec[group_spec].extend(group.layer_names)
-
-        byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
-            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
-                if not layout.is_block_outermost:
-                    raise ValueError("HiSparse requires a block-outermost KV layout.")
-                layer_stride = spec.page_size_bytes
-                block_stride = bytes_per_block
-            else:
-                layer_stride, block_stride, _, _, _ = compute_layout_strides(
-                    spec,
-                    num_blocks,
-                    len(layer_names),
-                    layout,
-                    fixed_strides=(None, interleaved_block_stride, None, None, None),
-                )
-            offset = (
-                byte_offset
-                * max(layer_stride, spec.page_size_bytes)
-                // spec.page_size_bytes
-            )
-            kv_cache_tensors.append(
-                KVCacheTensor(
-                    size=size,
-                    layers=layer_names,
-                    layer_stride=layer_stride,
-                    block_stride=block_stride,
-                    offset=offset,
-                )
-            )
-            byte_offset += len(layer_names) * spec.page_size_bytes
 
     if hisparse_layout is not None:
+        host_groups = [hisparse_layout.source_group]
+        validate_kv_cache_layout(layout, host_groups)
+        host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
+        host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
+        kv_cache_tensors[:0] = _build_kv_cache_tensors(
+            host_groups,
+            hisparse_layout.host_num_blocks,
+            host_size,
+            layout,
+            host_bytes_per_block,
+            host_resident=True,
+            block_pool_id=None,
+        )
         logger.info_once(
             "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
             "GPU indexer/resident/hot pool (%d blocks).",
-            sum(tensor.size for tensor in hisparse_layout.host_tensors) / 2**30,
+            host_size / 2**30,
             hisparse_layout.host_num_blocks,
             size / 2**30,
             num_blocks,
