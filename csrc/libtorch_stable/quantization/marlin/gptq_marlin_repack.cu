@@ -15,12 +15,14 @@ namespace {
 
 bool supports_ldmatrix_s4(int device_index) {
 #if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040
-  int major;
-  int minor;
-  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
-                         device_index);
-  cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
-                         device_index);
+  int major = 0;
+  int minor = 0;
+  if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
+                             device_index) != cudaSuccess ||
+      cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
+                             device_index) != cudaSuccess) {
+    return false;
+  }
 
   #if defined(VLLM_MARLIN_LDMATRIX_S4_SM90_ENABLED)
   if (major == 9 && minor == 0) {
