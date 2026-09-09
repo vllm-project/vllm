@@ -444,6 +444,102 @@ class TestMissingToolCallsWrapper:
         assert result.content is None
 
 
+# ── Empty <｜DSML｜tool_calls></｜DSML｜tool_calls> block ──────────────
+
+
+class TestEmptyToolCallsBlock:
+    """The model occasionally emits an empty wrapper with no invoke inside.
+    The block carries no call, so it must be skipped without swallowing
+    any surrounding text; otherwise the client sees truncated or empty
+    content together with ``finish_reason=stop``."""
+
+    _EMPTY = DSML_TOOL_START + DSML_TOOL_END
+
+    def test_non_streaming_surrounding_text_preserved(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls("pre\n" + self._EMPTY + "post", mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "pre\npost"
+        assert "DSML" not in result.content
+
+    def test_streaming_surrounding_text_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        chunks = ["pre\n", DSML_TOOL_START, DSML_TOOL_END, "post"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "pre\npost"
+        assert collect_function_name(results) is None
+
+    def test_streaming_markers_split_across_deltas(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(
+            parser, mock_request, list("pre" + self._EMPTY + "post")
+        )
+
+        assert collect_content(results) == "prepost"
+
+    def test_whitespace_only_block_behaves_like_empty(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = "pre" + DSML_TOOL_START + "\n" + DSML_TOOL_END + "post"
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "prepost"
+
+    def test_empty_block_before_real_call(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            self._EMPTY
+            + DSML_TOOL_START
+            + f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+            + _param("command", "true", "echo hi")
+            + f"\n{DSML_INVOKE_END}"
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content is None
+
+    def test_empty_block_in_thinking_mode(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["plan\n", DSML_TOOL_START, DSML_TOOL_END, "answer"]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert reasoning.startswith("plan")
+        assert content == "answer"
+
+    def test_consecutive_empty_blocks(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            self._EMPTY + self._EMPTY + "text", mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "text"
+
+
 # ── Thinking mode initial state ──────────────────────────────────────
 
 
