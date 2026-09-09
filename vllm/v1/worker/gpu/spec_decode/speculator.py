@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -364,7 +365,7 @@ class DraftModelSpeculator(BaseSpeculator):
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        sample_src_positions: torch.Tensor,
         idx_mapping: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
@@ -373,15 +374,14 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
             return gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
                 seeds,
-                positions + 1,
+                sample_src_positions,
                 apply_temperature=True,
+                is_drafting=True,
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
@@ -410,3 +410,22 @@ class DraftModelSpeculator(BaseSpeculator):
         # idx_mapping for CG padded requests points to -1, which is ignored
         # during sampling to prevent writing stale values to draft logits.
         self.idx_mapping[num_reqs:].fill_(-1)
+
+    def _build_uniform_batch_dp_sync(
+        self,
+        target_dp_sync: DPSyncState,
+        num_reqs: int,
+        num_query_per_req: int = 1,
+    ) -> tuple[DPSyncState, int]:
+        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        assert num_reqs * num_query_per_req <= num_batch_tokens, (
+            "reusing a DP sync that does not cover this batch's requests"
+        )
+        return replace(
+            target_dp_sync,
+            num_tokens_across_dp=torch.full_like(
+                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+            ),
+            uniform_token_count=num_query_per_req,
+            eager=False,
+        ), num_batch_tokens

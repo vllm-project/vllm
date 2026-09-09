@@ -27,7 +27,7 @@
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from functools import lru_cache, partial
+from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import einops
@@ -82,6 +82,7 @@ from vllm.multimodal.video_prune.evs import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.cache import LRUCache
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -647,6 +648,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        self._rope_by_thw_cache = LRUCache(capacity=1024)
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
@@ -795,12 +797,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         return index_new, cu_seqlens_tmp
 
-    @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
+        cache_key = (t, h, w)
+        if cache_key in self._rope_by_thw_cache:
+            return self._rope_by_thw_cache[cache_key]
+
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        window_index_thw_dev = async_tensor_h2d(window_index_thw, cos_thw.device)
         cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
         sin_thw = sin_thw[window_index_thw_dev, :, :]
@@ -809,13 +814,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
-        return (
+        result = (
             cos_thw,
             sin_thw,
             window_index_thw,
             cu_seqlens_window_thw,
             cu_seqlens_thw,
         )
+        self._rope_by_thw_cache[cache_key] = result
+        return result
 
     def compute_attn_mask_seqlen(
         self,
@@ -1046,7 +1053,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
-        window_index = window_index.to(device=device, non_blocking=True)
+        window_index = async_tensor_h2d(window_index, device)
         reverse_indices = reverse_indices.to(device=device, non_blocking=True)
 
         metadata["rotary_pos_emb_cos"] = rotary_pos_emb_cos
@@ -1468,8 +1475,8 @@ class Qwen2_5_VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(
-                emb.device, non_blocking=True
+            positions = async_tensor_h2d(
+                compute_mrope_for_media(size, merge_size), emb.device
             )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
@@ -1551,12 +1558,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 spatial_merge_size=self.visual.spatial_merge_size,
                 q=self.video_pruning_rate,
             )
-            positions = compute_mrope_for_media(
+            positions_cpu = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device, non_blocking=True)
+            )
+            positions = async_tensor_h2d(positions_cpu, emb.device)
 
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
