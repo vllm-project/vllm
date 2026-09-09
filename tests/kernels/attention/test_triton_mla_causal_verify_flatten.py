@@ -42,12 +42,13 @@ def _seq_lens(query_len: int) -> list[int]:
     return [c + query_len for c in CONTEXT_LENS]
 
 
-def _make_impl() -> TritonMLAImpl:
+def _make_impl(dcp_world_size: int = 1) -> TritonMLAImpl:
     """Only the attributes ``forward_mqa`` reads; __init__ wants a full config."""
     impl = object.__new__(TritonMLAImpl)
     impl.kv_lora_rank = KV_LORA_RANK
     impl.scale = HEAD_SIZE**-0.5
     impl._sm_count = 304
+    impl.dcp_world_size = dcp_world_size
     return impl
 
 
@@ -68,7 +69,13 @@ def _make_metadata(seq_lens: list[int], query_len: int, causal: bool):
     )
 
 
-def _run_forward_mqa(seq_lens: list[int], query_len: int, causal: bool, q_rows=None):
+def _run_forward_mqa(
+    seq_lens: list[int],
+    query_len: int,
+    causal: bool,
+    q_rows=None,
+    dcp_world_size: int = 1,
+):
     """Drive forward_mqa with the decode kernel spied out.
 
     Returns the ``(block_table, seq_lens)`` handed to ``decode_attention_fwd``.
@@ -88,7 +95,7 @@ def _run_forward_mqa(seq_lens: list[int], query_len: int, causal: bool, q_rows=N
     layer = SimpleNamespace(_k_scale=torch.ones(1), layer_name="test")
 
     with patch("vllm.v1.attention.backends.mla.triton_mla.decode_attention_fwd", spy):
-        _make_impl().forward_mqa(q, kv_cache, metadata, layer)
+        _make_impl(dcp_world_size).forward_mqa(q, kv_cache, metadata, layer)
 
     assert captured, "forward_mqa did not reach the decode kernel"
     return captured
@@ -196,3 +203,13 @@ def test_non_uniform_block_is_rejected():
     """q rows must divide evenly across the decode requests."""
     with pytest.raises(AssertionError, match="non-uniform decode block"):
         _run_forward_mqa(_seq_lens(1), query_len=1, causal=True, q_rows=6)
+
+
+def test_causal_multi_token_decode_is_rejected_under_dcp():
+    """Per-row extents offset the global seq_len, but DCP passes the rank-local
+    slice, so the causal arithmetic would silently address the wrong KV."""
+    with pytest.raises(AssertionError, match="not supported with DCP"):
+        _run_forward_mqa(_seq_lens(4), query_len=4, causal=True, dcp_world_size=2)
+
+    # Non-causal rows all take the same extent, which stays correct when local.
+    _run_forward_mqa(_seq_lens(4), query_len=4, causal=False, dcp_world_size=2)

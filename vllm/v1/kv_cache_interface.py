@@ -559,8 +559,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     storage_block_size: int | None = None
     """Token width used to view storage when it differs from the kernel block."""
-    # Group capability; every layer in the group must agree on it. Runtime
-    # metadata still selects causal vs. non-causal mode.
+    # Group capability enabled when any member flattens a non-causal query block
+    # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -574,14 +574,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
-        # Not reconcilable: any() would hand a causal group the draft's raised
-        # reorder_batch_threshold. Callers catch this and bucket separately.
-        non_causal_set = set(spec.non_causal_multi_token_decode for spec in specs)
-        if len(non_causal_set) != 1:
-            raise AssertionError(
-                "All attention layers in the same KV cache group must agree on "
-                "non_causal_multi_token_decode."
-            )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
@@ -609,7 +601,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             storage_block_size=storage_block_size_set.pop(),
-            non_causal_multi_token_decode=non_causal_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
