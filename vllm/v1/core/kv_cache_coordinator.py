@@ -109,27 +109,14 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
         )
 
-        source_groups = [
-            group for group in kv_cache_config.kv_cache_groups if group.host_resident
-        ]
         host_block_pool = HiSparseCoordinator.create_host_block_pool(
             kv_cache_config,
-            enable_caching=(
-                enable_caching
-                and bool(source_groups)
-                and source_groups[0].enable_prefix_caching
-            ),
+            enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
         )
-        group_block_pools: list[BlockPool] = []
-        for group in kv_cache_config.kv_cache_groups:
-            if group.host_resident:
-                assert host_block_pool is not None
-                group_block_pools.append(host_block_pool)
-            else:
-                group_block_pools.append(self.block_pool)
+        assert host_block_pool is not None or not kv_cache_config.host_group_ids
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {
@@ -166,7 +153,9 @@ class KVCacheCoordinator(ABC):
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
-                block_pool=group_block_pools[i],
+                block_pool=(
+                    host_block_pool if kv_cache_group.host_resident else self.block_pool
+                ),
                 enable_caching=(
                     enable_caching and kv_cache_group.enable_prefix_caching
                 ),

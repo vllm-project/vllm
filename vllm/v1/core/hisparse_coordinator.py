@@ -87,7 +87,11 @@ class HiSparseCoordinator:
             return None
         return BlockPool(
             num_gpu_blocks=num_blocks,
-            enable_caching=enable_caching,
+            enable_caching=enable_caching
+            and any(
+                group.host_resident and group.enable_prefix_caching
+                for group in kv_cache_config.kv_cache_groups
+            ),
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
