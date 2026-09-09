@@ -364,6 +364,70 @@ def single_self_call(funcdef: ast.FunctionDef, name: str) -> ast.Call:
     return call
 
 
+def _is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _in_boolean_context(funcdef: ast.FunctionDef, ref: ast.expr) -> bool:
+    """Is `ref` used only for its truth value (a test, or a `not` operand)?
+
+    In these positions the object's identity never escapes, so a reference that
+    is always truthy can be replaced by `True`. `and`/`or` are excluded: they
+    yield an operand, so the module could escape (`x and self.<name>`)."""
+    for node in ast.walk(funcdef):
+        if (
+            isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert))
+            and node.test is ref
+        ):
+            return True
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.Not)
+            and node.operand is ref
+        ):
+            return True
+    return False
+
+
+def bypass_existence_guard(
+    funcdef: ast.FunctionDef, ref: ast.Attribute, name: str
+) -> None:
+    """Fold a guard on `self.<name>`'s existence to its constant value.
+
+    The fuser deletes `self.<name>` and binds only instances where it exists as a
+    truthy `nn.Linear` (guaranteed by the match, the cache key, and `validate`),
+    so a guard testing its presence is a fusion invariant. Two forms are folded:
+
+    - an identity `None` check `self.<name> is None` -> `False`,
+      `self.<name> is not None` -> `True` (either operand order). `==`/`!=` are
+      *not* folded: `is_linear` accepts `nn.Linear` subclasses, which may override
+      `__eq__`/`__ne__`, so equality is not guaranteed to track identity.
+    - a bare truthiness test (`if self.<name>:`, `... if self.<name> else ...`,
+      `not self.<name>`): the reference itself to `True`.
+
+    Any other surviving reference escapes the projection's value, which no longer
+    exists after fusion, so refuse rather than change semantics."""
+    for node in ast.walk(funcdef):
+        # `self.<name> is (not) None`, either operand order.
+        if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+            continue
+        (op,), (right,) = node.ops, node.comparators
+        if not isinstance(op, (ast.Is, ast.IsNot)):
+            continue
+        if (ref is node.left and _is_none(right)) or (
+            ref is right and _is_none(node.left)
+        ):
+            value = isinstance(op, ast.IsNot)
+            replace_expr(funcdef, node, ast.copy_location(ast.Constant(value), node))
+            return
+    # A bare truthiness test (statement `if`, ternary, or `not`); an `nn.Linear`
+    # is always truthy, so the reference folds to `True`.
+    if _in_boolean_context(funcdef, ref):
+        replace_expr(funcdef, ref, ast.copy_location(ast.Constant(True), ref))
+        return
+    raise ValueError(f"{name} is referenced outside an existence guard")
+
+
 def block_chain(
     block: list[ast.stmt], node: ast.AST
 ) -> list[tuple[list[ast.stmt], int]]:
@@ -391,6 +455,60 @@ def block_chain(
                 return [(block, index), *tail]
         return [(block, index)]
     return []
+
+
+def _base_name(node: ast.expr) -> str | None:
+    """The root `Name` of an attribute/subscript chain (`a.b[c]` -> `a`)."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _rebound_names(region: list[ast.stmt]) -> set[str]:
+    """Names rebound outright within `region` (`x = ...`, `del x`).
+
+    These are `Name` nodes in a `Store`/`Del` context."""
+    return {
+        node.id
+        for stmt in region
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+
+
+def _inplace_target(node: ast.AST) -> str | None:
+    """Base name `node` mutates in place, if any.
+
+    A write through the name (`x[i] = ...`, `x.attr = ...`) or an in-place method
+    call (`x.mul_(...)`) leaves the base name in a `Load` context, so it is not a
+    plain `Name` store (see `_rebound_names`)."""
+    if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
+        node.ctx, (ast.Store, ast.Del)
+    ):
+        return _base_name(node)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr.endswith("_")
+        and not node.func.attr.endswith("__")
+    ):
+        return _base_name(node.func.value)
+    return None
+
+
+def _mutated_names(region: list[ast.stmt]) -> set[str]:
+    """Names mutated in place within `region` (see `_inplace_target`)."""
+    return {
+        base
+        for stmt in region
+        for node in ast.walk(stmt)
+        if (base := _inplace_target(node)) is not None
+    }
+
+
+def written_names(region: list[ast.stmt]) -> set[str]:
+    """Names rebound or mutated in place within `region`."""
+    return _rebound_names(region) | _mutated_names(region)
 
 
 def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:

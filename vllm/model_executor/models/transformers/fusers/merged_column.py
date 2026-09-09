@@ -16,7 +16,6 @@ from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     is_linear,
     recover_forward,
-    single_self_call,
 )
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
@@ -92,7 +91,7 @@ class MergedColumnParallelFuser(StackedFuser):
     def update_forward(self, module: nn.Module) -> None:
         """Replace the parallel calls with one merged call and split."""
         funcdef, fn = recover_forward(type(module))
-        calls = [single_self_call(funcdef, name) for name in self.linear_names]
+        calls = self._unguarded_calls(funcdef, self.linear_names)
         if len(set(ast.dump(call.args[0]) for call in calls)) != 1:
             raise ValueError("parallel linears read different inputs")
         chains = [block_chain(funcdef.body, call) for call in calls]
@@ -103,20 +102,9 @@ class MergedColumnParallelFuser(StackedFuser):
             raise ValueError("parallel linear calls are in different blocks")
 
         block = blocks[0][0]
-        index = min(index for _, index in blocks)
-        calls_have_name_arg = all(isinstance(call.args[0], ast.Name) for call in calls)
-        # Moving projections must not cross operations that can change their input.
-        for statement in block[index : max(index for _, index in blocks) + 1]:
-            if not isinstance(statement, (ast.Assign, ast.Return)):
-                raise ValueError("parallel projections cross other operations")
-            if isinstance(statement, ast.Assign) and any(
-                not isinstance(target, ast.Name) for target in statement.targets
-            ):
-                raise ValueError("parallel projection assignment has side effects")
-            value = statement.value
-            values = value.elts if isinstance(value, ast.Tuple) else [value]
-            if any(value not in calls for value in values) or not calls_have_name_arg:
-                raise ValueError("parallel projections cross other operations")
+        indices = [index for _, index in blocks]
+        index = min(indices)
+        self._check_input_stable(calls, block, indices)
 
         # l1(x), l2(x), ... -> merged(x).split(merged.output_sizes / merged.tp_size, -1)
         self._splice_merged_split(funcdef, calls, block, index)

@@ -5,13 +5,18 @@
 import ast
 import types
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
 from torch import fx, nn
 
-from vllm.model_executor.models.transformers.fx_utils import replace_expr
+from vllm.model_executor.models.transformers.fx_utils import (
+    bypass_existence_guard,
+    replace_expr,
+    self_call_and_refs,
+    written_names,
+)
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
@@ -159,6 +164,43 @@ class StackedFuser(RewriteFuser):
         """`{merged_name: [projection names]}` so quantization can unpack the
         fused layer into its per-shard configs."""
         return {self.merged_name: [name for name, _ in self.shards]}
+
+    def _unguarded_calls(
+        self, funcdef: ast.FunctionDef, names: Iterable[str]
+    ) -> list[ast.Call]:
+        """One `self.<name>(arg)` call per projection, existence guards folded.
+
+        `update_attrs` deletes the projections it merges, so any reference to one beyond
+        its call site must be a guard on its existence; folding those to their constant
+        value keeps the rewritten forward off a name that no longer exists. A reference
+        that is not such a guard raises, so fusion is skipped."""
+        calls = []
+        for name in names:
+            call, refs = self_call_and_refs(funcdef, name)
+            for ref in refs:
+                bypass_existence_guard(funcdef, ref, name)
+            calls.append(call)
+        return calls
+
+    def _check_input_stable(
+        self, calls: list[ast.Call], block: list[ast.stmt], indices: list[int]
+    ) -> None:
+        """Raise unless the shared input survives hoisting the merged GEMM.
+
+        The merged call is evaluated once at `min(indices)` instead of at each
+        original call site, so it must read the same input the last of `calls`
+        would have. Anything in between that rebinds or mutates a name the input
+        reads (`x = ...`, `x[i] = ...`, `x.attr = ...`, `x.mul_(...)`) would
+        change that value; see `written_names`.
+        """
+        arg_names = {
+            node.id
+            for node in ast.walk(calls[0].args[0])
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        region = block[min(indices) : max(indices) + 1]
+        if arg_names & written_names(region):
+            raise ValueError("projection input is rebound or mutated before all calls")
 
     def _splice_merged_split(
         self,

@@ -20,7 +20,10 @@ from vllm.model_executor.models.transformers.fusers import (
     packed_qkv,
     qkv,
 )
-from vllm.model_executor.models.transformers.fx_utils import trace
+from vllm.model_executor.models.transformers.fx_utils import (
+    bypass_existence_guard,
+    trace,
+)
 
 
 class SiluAndMulStub(nn.Module):
@@ -201,6 +204,14 @@ class FourParallelLinears(nn.Module):
 
     def forward(self, x):
         return self.proj_a(x), self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class GuardedParallelLinears(FourParallelLinears):
+    """A projection referenced by an existence guard as well as its call."""
+
+    def forward(self, x):
+        d = self.proj_d(x) if self.proj_d is not None else None
+        return self.proj_a(x), self.proj_b(x), self.proj_c(x), d
 
 
 class MutatingParallelLinears(FourParallelLinears):
@@ -895,7 +906,7 @@ def test_bypass_existence_guard_folds_identity_none_check(expr, expected):
     rewritten away without changing the guard's outcome. `==`/`!=` are excluded
     (see the refusal test) because a subclass may override `__eq__`/`__ne__`."""
     funcdef, ref = _guard_funcdef(expr)
-    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
+    bypass_existence_guard(funcdef, ref, "v_proj")
     test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.IfExp)).test
     assert isinstance(test, ast.Constant) and test.value is expected
 
@@ -914,7 +925,7 @@ def test_bypass_existence_guard_folds_bare_truthiness(expr):
     boolean position (a test, or a `not` operand) the reference can be replaced by
     `True`, letting the projection be deleted."""
     funcdef, ref = _guard_funcdef(expr)
-    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
+    bypass_existence_guard(funcdef, ref, "v_proj")
     # No `self.v_proj` reference survives; a literal `True` took its place.
     attrs = [n for n in ast.walk(funcdef) if isinstance(n, ast.Attribute)]
     assert not any(n.attr == "v_proj" for n in attrs)
@@ -937,7 +948,7 @@ def test_bypass_existence_guard_folds_bare_if_statement():
         for node in ast.walk(funcdef)
         if isinstance(node, ast.Attribute) and node.attr == "v_proj"
     )
-    qkv._bypass_existence_guard(funcdef, ref, "v_proj")
+    bypass_existence_guard(funcdef, ref, "v_proj")
     test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.If)).test
     assert isinstance(test, ast.Constant) and test.value is True
 
@@ -962,7 +973,7 @@ def test_bypass_existence_guard_refuses_non_guard_reference(expr):
     `__eq__`/`__ne__`, so equality need not agree with `is (not) None`."""
     funcdef, ref = _guard_funcdef(expr)
     with pytest.raises(ValueError, match="outside an existence guard"):
-        qkv._bypass_existence_guard(funcdef, ref, "v_proj")
+        bypass_existence_guard(funcdef, ref, "v_proj")
 
 
 @pytest.mark.parametrize("layer_idx", [0, 1])
@@ -994,18 +1005,35 @@ def test_fuses_real_gemma4_attention(layer_idx):
     assert not {"q_proj", "k_proj", "v_proj"} & names
 
 
+def test_merged_column_fuser_folds_existence_guard():
+    """A guarded projection fuses: the merged linear replaces the deleted names.
+
+    Guard folding lives on `StackedFuser`, not just `QKVFuser`, because every
+    stacked fuser deletes the projections it merges -- a surviving reference to
+    one would fail at runtime."""
+    with torch.device("meta"):
+        module = GuardedParallelLinears()
+    fuser = MergedColumnParallelFuser.match(trace(module), module)
+    assert fuser is not None
+    fuser.update_forward(module)
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert fuser.merged_name in names
+    assert not {"proj_a", "proj_b", "proj_c", "proj_d"} & names
+
+
 def test_merged_column_fuser_rejects_input_mutation():
     """The later projections must not be moved ahead of an input mutation."""
     with torch.device("meta"):
         module = MutatingParallelLinears()
     fuser = MergedColumnParallelFuser.match(trace(module), module)
     assert fuser is not None
-    with pytest.raises(ValueError, match="cross other operations"):
+    with pytest.raises(ValueError, match="rebound or mutated"):
         fuser.update_forward(module)
 
 
+@pytest.mark.parametrize("cls", [FourParallelLinears, GuardedParallelLinears])
 def test_merged_column_fuser_supports_any_number_of_linears(
-    default_vllm_config, monkeypatch
+    cls, default_vllm_config, monkeypatch
 ):
     from vllm.model_executor import parameter
     from vllm.model_executor.layers import linear
@@ -1018,19 +1046,14 @@ def test_merged_column_fuser_supports_any_number_of_linears(
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
     with torch.device("meta"):
-        meta = FourParallelLinears()
+        meta = cls()
     fuser = MergedColumnParallelFuser.match(trace(meta), meta)
     assert fuser is not None
-    assert fuser.linear_names == ("proj_a", "proj_b", "proj_c", "proj_d")
-    assert fuser.shards == [
-        ("proj_a", 0),
-        ("proj_b", 1),
-        ("proj_c", 2),
-        ("proj_d", 3),
-    ]
+    assert set(fuser.linear_names) == {"proj_a", "proj_b", "proj_c", "proj_d"}
+    assert fuser.shards == [(name, i) for i, name in enumerate(fuser.linear_names)]
     fuser.update_forward(meta)
 
-    real = FourParallelLinears()
+    real = cls()
     x = torch.randn(2, 8)
     expected = real(x)
     weights = [
