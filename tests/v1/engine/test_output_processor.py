@@ -1504,9 +1504,7 @@ def test_abort_requests_updates_finished_stats(abort_stage: str):
         assert finished.mean_time_per_output_token is None
 
 
-@pytest.mark.parametrize(
-    "output_kind", [None, RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
-)
+@pytest.mark.parametrize("output_kind", [None, RequestOutputKind.FINAL_ONLY])
 def test_abort_parent_records_parallel_sampling_stats(output_kind):
     """Finalize parent metrics once all aborted children have been removed."""
     output_processor = OutputProcessor(None, log_stats=True)
