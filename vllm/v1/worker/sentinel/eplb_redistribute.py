@@ -216,48 +216,6 @@ def rebuild_model_expert_maps(
         expert_map.copy_(new_map)
 
 
-def sync_num_dispatchers_for_nixl_ep(
-    model: torch.nn.Module,
-    all2all_backend: str,
-    dead_ep_ranks: set[int],
-) -> None:
-    """Rewrite each MoE layer's num_dispatchers to the nixl_ep kernel's
-    active_rank_bound (= highest surviving EP rank + 1) after masking.
-
-    The kernel sizes combine output as active_rank_bound * max_tokens and
-    asserts the width matches; vLLM cache num_dispatchers as the
-    original EP world size, so masking the highest rank desyncs the two.
-    DeepEP-LL keeps a fixed num_ranks-wide layout and needs no sync.
-    """
-    if all2all_backend != "nixl_ep":
-        return
-
-    ep_world_size = get_ep_group().world_size
-    surviving = sorted(set(range(ep_world_size)) - dead_ep_ranks)
-    if not surviving:
-        return
-    active_rank_bound = surviving[-1] + 1
-
-    for layer in model.moe_layers:
-        routed = getattr(layer, "routed_experts", layer)
-        quant_method = getattr(routed, "quant_method", None)
-        moe_kernel = getattr(quant_method, "moe_kernel", None)
-        if moe_kernel is None or moe_kernel.is_monolithic:
-            continue
-        pf = moe_kernel.prepare_finalize
-        experts = moe_kernel.fused_experts
-        if hasattr(pf, "num_dispatchers_"):
-            pf.num_dispatchers_ = active_rank_bound
-        if getattr(experts, "num_dispatchers", None) is not None:
-            experts.num_dispatchers = active_rank_bound
-
-    logger.info(
-        "[FT] Synced num_dispatchers to active_rank_bound=%d, dead_ep_ranks=%s",
-        active_rank_bound,
-        sorted(dead_ep_ranks),
-    )
-
-
 def reload_experts_from_disk(
     model: torch.nn.Module,
     vllm_config: VllmConfig,
