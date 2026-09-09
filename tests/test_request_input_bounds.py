@@ -286,6 +286,142 @@ def test_encode_messages_scans_last_user_once_per_conversation(
     assert calls == 1
 
 
+def _openai_tool_call(name: str = "fn") -> dict:
+    return {
+        "type": "function",
+        "function": {"name": name, "arguments": '{"x": 1}'},
+    }
+
+
+def _tool_conversation(num_tools: int) -> list[dict]:
+    tool_calls = [_openai_tool_call(f"fn{i}") for i in range(num_tools)]
+    messages: list[dict] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": tool_calls},
+    ]
+    messages.extend(
+        {"role": "tool", "content": f"r{i}", "tool_call_id": str(i)}
+        for i in range(num_tools)
+    )
+    messages.append({"role": "user", "content": "go"})
+    return messages
+
+
+def test_encode_messages_preserves_tool_result_prompt():
+    prompt = deepseek_v32_encoding.encode_messages(
+        _tool_conversation(2),
+        thinking_mode="chat",
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>hi<｜Assistant｜></think>"
+        "\n\n<｜DSML｜function_calls>\n"
+        '<｜DSML｜invoke name="fn0">\n'
+        '<｜DSML｜parameter name="x" string="false">1</｜DSML｜parameter>\n'
+        "</｜DSML｜invoke>\n"
+        '<｜DSML｜invoke name="fn1">\n'
+        '<｜DSML｜parameter name="x" string="false">1</｜DSML｜parameter>\n'
+        "</｜DSML｜invoke>\n"
+        "</｜DSML｜function_calls><｜end▁of▁sentence｜>"
+        "\n\n<function_results>\n<result>r0</result>\n<result>r1</result>\n"
+        "</function_results>\n\n</think>"
+        "<｜User｜>go<｜Assistant｜></think>"
+    )
+
+
+def test_encode_messages_does_not_rescan_each_tool_message(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+    original = deepseek_v32_encoding._previous_non_tool_index
+
+    def counted_previous_non_tool_index(messages, index):
+        nonlocal calls
+        calls += 1
+        return original(messages, index)
+
+    monkeypatch.setattr(
+        deepseek_v32_encoding,
+        "_previous_non_tool_index",
+        counted_previous_non_tool_index,
+    )
+
+    deepseek_v32_encoding.encode_messages(
+        _tool_conversation(80),
+        thinking_mode="chat",
+    )
+
+    assert calls == 1
+
+
+def test_encode_messages_rejects_tool_output_without_assistant():
+    with pytest.raises(ValueError, match="Invalid messages at"):
+        deepseek_v32_encoding.encode_messages(
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "tool", "content": "r", "tool_call_id": "1"},
+            ],
+            thinking_mode="chat",
+        )
+
+
+def test_encode_messages_rejects_tool_output_without_matching_tool_calls():
+    with pytest.raises(ValueError, match="No tool calls but found tool output"):
+        deepseek_v32_encoding.encode_messages(
+            [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [_openai_tool_call()],
+                },
+                {"role": "tool", "content": "r0", "tool_call_id": "0"},
+                {"role": "tool", "content": "r1", "tool_call_id": "1"},
+            ],
+            thinking_mode="chat",
+        )
+
+
+def test_encode_messages_tool_results_follow_context_assistant():
+    context = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_openai_tool_call("a"), _openai_tool_call("b")],
+        },
+    ]
+    prompt = deepseek_v32_encoding.encode_messages(
+        [
+            {"role": "tool", "content": "ra", "tool_call_id": "0"},
+            {"role": "tool", "content": "rb", "tool_call_id": "1"},
+        ],
+        thinking_mode="chat",
+        context=context,
+        add_default_bos_token=False,
+    )
+
+    assert prompt == (
+        "\n\n<function_results>\n<result>ra</result>\n<result>rb</result>\n"
+        "</function_results>\n\n</think>"
+    )
+
+
+def test_render_message_resolves_tool_owner_without_cached_index():
+    messages = _tool_conversation(2)
+    last_user_idx = deepseek_v32_encoding.find_last_user_index(messages)
+
+    text = deepseek_v32_encoding.render_message(
+        3,
+        messages,
+        thinking_mode="chat",
+        last_user_idx=last_user_idx,
+    )
+
+    assert "<result>r1</result>" in text
+    assert "</function_results>" in text
+
+
 @pytest.mark.parametrize(
     "encoding_module",
     ENCODING_MODULES,
