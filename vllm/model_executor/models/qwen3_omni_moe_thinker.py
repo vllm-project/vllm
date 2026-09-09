@@ -1001,7 +1001,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
         # and FA3 vit attention requires cu_seqlens on CUDA.
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, self.device)
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
@@ -1574,8 +1574,8 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
