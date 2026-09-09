@@ -478,11 +478,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
-    # The weight cache IPC loader re-runs process_weights_after_loading in
-    # pre-processed mode; only the FLASHINFER_TRTLLM_MXFP4_MXFP8 backend keeps
-    # all post-load state in exported tensors (scales stay on the layer rather
-    # than in a plain-attribute PrecisionConfig, as the TRITON backends do).
-    # Other backends fail closed in _setup_kernel_from_pre_processed.
     supports_pre_processed_weights = True
 
     def __init__(self, moe: FusedMoEConfig):
@@ -791,10 +786,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         if is_weights_pre_processed():
-            # The IPC loader imports tensors that already went through a full
-            # process_weights_after_loading (weights permuted, scales
-            # interleaved into the TRTLLM kernel layout); only the non-tensor
-            # kernel objects are rebuilt. Verified with TRTLLM only.
             if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
                 raise RuntimeError(
                     "weight cache IPC for MXFP4 MoE is only verified with the "

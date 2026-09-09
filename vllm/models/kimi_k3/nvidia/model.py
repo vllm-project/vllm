@@ -366,9 +366,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
-        # Declared up front so the IPC reuse check in finalize_weights can use
-        # direct attribute access; filled by the DeepGEMM transform (normal
-        # load) or pre-populated by the weight cache IPC loader.
         self.register_buffer("_mega_l1_packed", None, persistent=False)
         self.register_buffer("_mega_l1_scale", None, persistent=False)
         self.register_buffer("_mega_l2_packed", None, persistent=False)
@@ -388,9 +385,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         if self._transformed_l1_weights is not None:
             return
 
-        # Weight cache IPC engine: the daemon already ran the DeepGEMM transform
-        # and shared the results as buffers. Reuse them zero-copy and drop the
-        # raw packed params so the loader does not allocate empty placeholders.
+        # Weight cache IPC engine: the daemon exported the transformed
+        # buffers; reuse them zero-copy and drop the raw packed params.
         if self._mega_l1_packed is not None:
             self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
             self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
@@ -1727,9 +1723,7 @@ class KimiLinearForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def process_weights_after_loading(self) -> None:
-        # Weight cache IPC path skips load_weights(), so drive the MegaMoE
-        # finalize here (invoked by the generic post-load hook) to assemble the
-        # shared transformed weights before any meta placeholders are allocated.
+        # The weight cache IPC path skips load_weights(); finalize here.
         self.model.finalize_mega_moe_weights()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1819,9 +1813,8 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            # Under meta-device init (the weight cache IPC loader) the tower
-            # tensors are mapped/materialized by the loader afterwards, so
-            # moving them to a real device here would fail on meta storage.
+            # Meta-device init (IPC loader): the loader materializes the
+            # tower afterwards; .to() here would fail on meta storage.
             if is_meta_module(self.vision_tower):
                 pass
             elif self._maybe_ignore_quant_config(quant_config) is not None:
@@ -1864,8 +1857,7 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            # Skip the device move under meta-device init (weight cache IPC
-            # loader); the loader maps/materializes these tensors afterwards.
+            # Skip the device move under meta-device init (IPC loader).
             if not is_meta_module(self.mm_projector):
                 self.mm_projector = self.mm_projector.to(
                     device=self.device, dtype=model_config.dtype

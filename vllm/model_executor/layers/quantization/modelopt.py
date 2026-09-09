@@ -1039,14 +1039,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
-        """Recover the padded ``moe_config`` dims from the exported weights.
-
-        The weight cache IPC loader imports tensors that already went through
-        ``process_weights_after_loading`` on the daemon (padded for the TRTLLM
-        kernel, then row-shuffled without shape change), so the padded dims are
-        read off the tensor shapes directly rather than re-derived from the
-        kernel's alignment constants.
-        """
+        """Recover the padded ``moe_config`` dims from the exported weights."""
         mc = layer.moe_config
         padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:

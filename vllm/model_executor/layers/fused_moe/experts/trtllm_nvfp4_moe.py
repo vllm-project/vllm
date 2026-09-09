@@ -150,11 +150,6 @@ class TrtLlmNvFp4ExpertsBase:
         return self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Skip the in-place activation-scale fold when weights arrive already
-        # post-processed (weight cache IPC): w*_weight_scale_2 was exported
-        # after this mul_, so re-applying it would double-fuse. The derived
-        # params below are recomputed from the already-fused scales, matching
-        # the exporting side.
         if not is_weights_pre_processed():
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
