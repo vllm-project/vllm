@@ -642,9 +642,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
-    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
-    # the worker's `execute_model` and `sample_tokens` calls. Valid values
-    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # If set, enable GPU<->CPU synchronization checking around the worker's
+    # `execute_model` and `sample_tokens` calls, via PyTorch's sync debug mode
+    # plus wrappers flagging `non_blocking` CPU<->CUDA copies that silently
+    # block the host (CPU tensors that are not pinned or not densely laid out).
+    # Valid values are "warn" (warn on each sync) or "error" (raise on sync).
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
