@@ -15,7 +15,7 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 def get_local_sizes() -> list[int] | None:
     dp_metadata = get_forward_context().dp_metadata
-    if dp_metadata is None:
+    if dp_metadata is None:  # PCP with DP=1
         return None
     return dp_metadata.get_chunk_sizes_across_dp_rank()
 
