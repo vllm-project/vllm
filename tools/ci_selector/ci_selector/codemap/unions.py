@@ -14,13 +14,25 @@ from __future__ import annotations
 from . import build_map, hardware
 from .claim import Claim
 from .state import RepoState, _graph_known
-from .step_refs import _source_dep_steps, _source_dep_steps_ungated
+from .step_refs import (
+    _declaring_deps,
+    _source_dep_steps,
+    _source_dep_steps_ungated,
+)
 
 # Only the rules that are certain nothing runs are exempt: a doc cannot break a
 # build, and dead hardware runs nothing. release-ci is NOT here, because a
 # release script can also carry a live test, so it must still pick up its
 # genuine declarers.
 _DEP_UNION_EXEMPT = frozenset({"no-code", "no-hardware"})
+
+
+def _pin_existing(claim: Claim) -> None:
+    """Freeze the reason for the steps already on the claim, before a pass
+    appends its own sentence to `detail`. Without this they inherit a summary
+    describing steps they are not."""
+    for sid in claim.step_ids:
+        claim.step_detail.setdefault(sid, claim.detail)
 
 
 def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
@@ -45,17 +57,27 @@ def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
         # This claim says nothing runs, and a declarer is the evidence that
         # the file is still tested, so the switch must not silence it.
         declarers = _source_dep_steps_ungated(state, path)
+        specific_only, gated = False, False
         omitted = 0
     elif _graph_known(state, path):
         declarers = _source_dep_steps(state, path, specific_only=True)
+        specific_only, gated = True, True
         omitted = len(_source_dep_steps(state, path) - declarers)
     else:
         declarers = _source_dep_steps(state, path)
+        specific_only, gated = False, True
         omitted = 0
     added = declarers - claim.step_ids
     if added:
+        _pin_existing(claim)
         claim.step_ids |= added
         claim.detail += f"; +{len(added)} steps declare it as a source dep"
+        deps = _declaring_deps(state, path, specific_only, gated=gated)
+        for sid in added:
+            dep = deps.get(sid)
+            if dep:
+                claim.step_detail[sid] = f"this step declares '{dep}' as a source dep"
+                claim.step_rule[sid] = "declared-deps"
     if omitted:
         claim.detail += f"; {omitted} catch-all-only declarers omitted"
     return claim
@@ -108,8 +130,16 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
         steps &= _build_map_allowed(state, fams)
     added = steps - claim.step_ids
     if added:
+        _pin_existing(claim)
         claim.step_ids |= added
         claim.detail += f"; +{len(added)} steps run on an image this file is built into"
+        # Sorted so a step in two images always names the same one.
+        for df in sorted(state.artifacts.images_for_input(path)):
+            for sid in state.artifacts.consumers_of_image(df) & added:
+                claim.step_detail.setdefault(
+                    sid, f"copied into {df}; this step runs on that image"
+                )
+                claim.step_rule.setdefault(sid, "image-copy")
     return claim
 
 

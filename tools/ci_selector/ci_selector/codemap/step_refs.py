@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 
 from . import hardware
-from .claim import step_declares
+from .claim import matching_deps, step_declares
 from .state import RepoState
 
 ENV_VAR = "CI_SELECTOR_DECLARED_DEPS"
@@ -67,6 +67,25 @@ def _source_dep_steps(
     if mode() == "off":
         return set()
     return _source_dep_steps_ungated(state, path, specific_only)
+
+
+def _declaring_deps(
+    state: RepoState, path: str, specific_only: bool = False, *, gated: bool = True
+) -> dict[str, str]:
+    """step_id -> the declared dep that matched `path`.
+
+    Reads the declarations directly: calling `_source_dep_steps_ungated` would
+    trip the call-count guard in the tests.
+    """
+    if gated and mode() == "off":
+        return {}
+    out: dict[str, str] = {}
+    for p in state.pipelines:
+        for s in p.steps:
+            hits = matching_deps(s.source_file_dependencies, path, specific_only)
+            if hits:
+                out[s.step_id] = hits[0]
+    return out
 
 
 def _direct_step_refs(state: RepoState, path: str) -> set[str]:

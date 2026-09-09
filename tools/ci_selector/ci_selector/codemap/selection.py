@@ -119,8 +119,8 @@ def _apply_claim_to_pipeline(
             _record(
                 sel,
                 step,
-                f"{path}: {claim.detail}",
-                claim.rule,
+                f"{path}: {claim.step_detail.get(step.step_id, claim.detail)}",
+                claim.step_rule.get(step.step_id, claim.rule),
                 paths if droppable else None,
                 by_file=path,
             )

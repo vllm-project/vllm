@@ -78,6 +78,10 @@ class ArtifactGraph:
             out |= self.consumers_of_image(df)
         return out
 
+    def images_for_input(self, path: str) -> set[str]:
+        """Image definitions `path` is built into, whole-context ones included."""
+        return self._images_for_input(path, self.inputs_of)
+
     def explicit_images_of(self, path: str) -> set[str]:
         """Images that COPY `path` by name, exact or by directory. Excludes the
         whole-context images that only borrow it."""

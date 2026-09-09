@@ -2949,3 +2949,76 @@ def test_build_validated_manual_only_declarers_fall_open(state, declared_deps_on
     st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
     claim = _classify(st2, path, None)
     assert claim.rule == "fail-open" and claim.run_all
+
+
+def test_reasons_are_attributed_per_step(state):
+    """Each step is told why it was selected, not why the claim exists."""
+    from ci_selector.codemap.classify import _classify
+
+    path = ".buildkite/test_areas/lora.yaml"
+    claim = _classify(state, path, None)
+    defined = {
+        s.step_id for p in state.pipelines for s in p.steps if s.source_file == path
+    }
+    assert defined, "no step names lora.yaml as its source_file"
+    copied = claim.step_ids - defined
+    assert copied, "the image copy added nothing; this specimen no longer bites"
+    assert set(claim.step_detail) == claim.step_ids, "a step has no reason of its own"
+
+    for sid in copied:
+        assert claim.step_rule[sid] == "image-copy"
+        assert "runs on that image" in claim.step_detail[sid]
+        assert "defines these steps" not in claim.step_detail[sid]
+
+    for sid in defined:
+        assert claim.step_detail[sid] == f"{path} defines these steps"
+        assert "runs on that image" not in claim.step_detail[sid]
+        # No override: the claim's own rule stands for these.
+        assert sid not in claim.step_rule
+
+
+def test_declarer_reasons_name_the_dep_they_matched(state):
+    """A declarer-added step names the declaration that matched it, not the
+    claim's own reason. release-ci is the leg that fires with the switch off."""
+    from ci_selector.codemap.classify import _classify
+
+    path = ".buildkite/release-pipeline.yaml"
+    claim = _classify(state, path, None)
+    assert claim.rule == "release-ci"
+    declared = {sid for sid, rule in claim.step_rule.items() if rule == "declared-deps"}
+    assert declared == claim.step_ids, (
+        "every step on a release-ci claim arrives through the declarer union"
+    )
+    for sid in declared:
+        assert claim.step_detail[sid] == (
+            f"this step declares '{path}' as a source dep"
+        )
+
+
+def test_per_step_reason_keys_stay_within_step_ids(state):
+    """The dataclass check runs at construction and the union passes mutate
+    after it, so only a sweep catches a stray key."""
+    import subprocess
+
+    from helpers import drift_message
+
+    files = subprocess.check_output(
+        ["git", "-C", str(state.repo), "ls-files", "csrc/", ".buildkite/"],
+        text=True,
+    ).split()
+    assert len(files) >= 400, drift_message(
+        f"the sweep resolved to only {len(files)} files",
+        "the invariant is not being exercised against the tree it watches",
+        "the ls-files prefixes in this test",
+    )
+    checked = 0
+    seen: set[str] = set()
+    for f in files:
+        for claim in select(state, [f]).claims:
+            assert set(claim.step_detail) <= claim.step_ids, f
+            assert set(claim.step_rule) <= claim.step_ids, f
+            checked += len(claim.step_detail)
+            seen |= set(claim.step_rule.values())
+    assert checked > 0, "no per-step reason was written anywhere; the sweep is blind"
+    # Both, so a regression in the rarer one cannot hide behind the other.
+    assert {"image-copy", "declared-deps"} <= seen, sorted(seen)

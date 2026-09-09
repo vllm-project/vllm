@@ -65,7 +65,9 @@ RULES = frozenset(
 
 # Emitted alongside selected steps, never as a Claim.rule. "coverage" is written
 # by the CLI for steps the record added, which skip `_record`.
-SYNTHETIC_RULES = frozenset({"preflight", "run-all", "always-run", "coverage"})
+SYNTHETIC_RULES = frozenset(
+    {"preflight", "run-all", "always-run", "coverage", "image-copy"}
+)
 
 OUTPUT_RULES = RULES | SYNTHETIC_RULES
 
@@ -95,6 +97,10 @@ class Claim:
     # csrc changes. The path itself is never recorded, so leaving it in would
     # keep every step.
     evidence_paths: frozenset[str] = frozenset()
+    # Per-step overrides of `detail` and `rule`, written by the union passes
+    # for the steps they add, so their sentence does not replay under every step.
+    step_detail: dict[str, str] = field(default_factory=dict)
+    step_rule: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.rule not in RULES:
@@ -105,6 +111,16 @@ class Claim:
                 f"{self.rule}: droppable_step_ids must be a subset of step_ids; "
                 f"stray {sorted(stray)[:3]}"
             )
+        for name, table in (
+            ("step_detail", self.step_detail),
+            ("step_rule", self.step_rule),
+        ):
+            stray = set(table) - self.step_ids
+            if stray:
+                raise ValueError(
+                    f"{self.rule}: {name} keys must be a subset of step_ids; "
+                    f"stray {sorted(stray)[:3]}"
+                )
 
 
 def docs_only(paths: list[str]) -> bool:
@@ -151,18 +167,32 @@ def split_deps(deps: list[str] | None) -> tuple[list[str], list[str]]:
     return positive, negated
 
 
+def matching_deps(
+    deps: list[str] | None, path: str, specific_only: bool = False
+) -> list[str]:
+    """The positive declarations that fire for `path`, longest first.
+
+    One home for the predicate, since the callers need both "did any fire" and
+    "which one won" and two scans would drift.
+    """
+    positive, negated = split_deps(deps)
+    if not positive:
+        return []
+    if any(matches_source_dependency(d, path) for d in negated):
+        return []
+    if specific_only:
+        positive = [d for d in positive if not is_catch_all_dep(d)]
+    return sorted(
+        (d for d in positive if matches_source_dependency(d, path)),
+        key=lambda d: (-len(d), d),
+    )
+
+
 def step_declares(
     deps: list[str] | None, path: str, specific_only: bool = False
 ) -> bool:
     """True when a step's source_file_dependencies fire for `path`."""
-    positive, negated = split_deps(deps)
-    if not positive:
-        return False
-    if any(matches_source_dependency(d, path) for d in negated):
-        return False
-    if specific_only:
-        positive = [d for d in positive if not is_catch_all_dep(d)]
-    return any(matches_source_dependency(d, path) for d in positive)
+    return bool(matching_deps(deps, path, specific_only))
 
 
 def deps_match(deps: list[str] | None, paths: list[str]) -> bool:

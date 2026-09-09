@@ -220,6 +220,13 @@ def _classify_rust(state: RepoState, path: str) -> Claim:
         claim.step_ids |= bridge.step_ids
         claim.test_files |= bridge.test_files
         claim.run_all |= bridge.run_all
+        claim.step_detail.update(
+            {
+                sid: f"via {RUST_PYO3_BRIDGE_FILE}: {d}"
+                for sid, d in bridge.step_detail.items()
+            }
+        )
+        claim.step_rule.update(bridge.step_rule)
         claim.detail += f"; + the PyO3 bridge claim ({RUST_PYO3_BRIDGE_FILE})"
     return claim
 
@@ -862,6 +869,10 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
                 droppable_step_ids=set(sub.droppable_step_ids),
                 droppable_test_files=sub.droppable_test_files,
                 image_union_exempt=sub.image_union_exempt,
+                step_detail={
+                    sid: f"via {old}: {d}" for sid, d in sub.step_detail.items()
+                },
+                step_rule=dict(sub.step_rule),
             )
             family = hardware.family_of_path(path)
             if family:

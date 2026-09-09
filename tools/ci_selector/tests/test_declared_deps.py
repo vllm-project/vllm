@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The declaration switch: the hand-written source_file_dependencies lists
 pick steps only through `_source_dep_steps`, which CI_SELECTOR_DECLARED_DEPS=off
-silences. Three reads ignore the switch by design, and the whitelist below
-fails when a fourth appears or one of the three disappears."""
+silences. Some reads ignore the switch by design, and the whitelists below fail
+when one appears or disappears. Two kinds, counted separately because they carry
+different risk: reads that pick STEPS (`_source_dep_steps_ungated`) and reads
+that only name the declaration in a reason string (`_declaring_deps`)."""
 
 import ast
 from pathlib import Path
@@ -293,3 +295,29 @@ def test_switch_off_still_never_selects_nothing_for_a_release_file(state, monkey
         claim = classify._classify(state, p, None)
         want = _source_dep_steps_ungated(state, p) & state.auto_step_ids
         assert claim.run_all or want <= claim.step_ids
+
+
+def test_declaration_attribution_has_one_call_site():
+    """`_declaring_deps` reads the declarations to name one in a reason string,
+    and on the release-ci leg it does so with the switch ignored. It cannot pick
+    a job -- it returns prose, never step ids -- but the guard above counts
+    `_source_dep_steps_ungated` by name and is blind to this one.
+
+    Pins the call site rather than the `gated=` argument: that argument is
+    passed as a variable, so no static reading of it means anything.
+    """
+    calls: dict[str, int] = {}
+    for py in sorted(PKG.rglob("*.py")):
+        n = sum(
+            1
+            for node in ast.walk(ast.parse(py.read_text()))
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "_declaring_deps"
+        )
+        if n:
+            calls[py.relative_to(PKG).as_posix()] = n
+    # The declarer union, inside `if added:`. A second caller is a new
+    # switch-ignoring read until someone argues otherwise.
+    assert calls == {"codemap/unions.py": 1}, (
+        f"declaration attribution moved or gained a caller: {calls}"
+    )

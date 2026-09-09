@@ -357,10 +357,22 @@ def test_image_input_union_does_not_resurrect_a_zero_claim(state):
     from ci_selector.codemap.classify import _classify
 
     for path in (".buildkite/test-amd.yaml", ".buildkite/scripts/build-macos-wheel.sh"):
+        # Without this the assertions below still pass if the file stopped
+        # being an image input at all.
+        assert state.artifacts.steps_for_input(path), (
+            f"{path} is no longer copied into any image; this test proves "
+            "nothing until the premise is restored"
+        )
         claim = _classify(state, path, None)
+        assert claim.rule in ("legacy-ci", "inert-ci", "release-ci", "inert"), (
+            f"{path}: expected a zero-jobs rule, got {claim.rule}"
+        )
         assert not claim.run_all, path
         assert "run on an image" not in claim.detail, (
             f"{path}: the image union overrode a zero-jobs claim"
+        )
+        assert not claim.step_rule, (
+            f"{path}: the seam attributed steps to a zero-jobs claim"
         )
 
 
