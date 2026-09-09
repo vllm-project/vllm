@@ -463,9 +463,8 @@ class LoRAModelManager:
                     self.supported_lora_modules,
                 ):
                     continue
-            # Full classification heads come from PEFT modules_to_save and must be
-            # wrapped independently of target_modules, which only filters A/B LoRA.
             elif not self._match_target_modules(module_name) and not is_classifier_head:
+                # Full classification heads bypass the A/B LoRA target filter.
                 continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)
