@@ -2861,6 +2861,12 @@ def test_watermark_key_must_fit_in_64_bits():
         WatermarkConfig(key=2**64)
 
 
+@pytest.mark.parametrize("alpha", [-0.1, 1.1])
+def test_watermark_alpha_must_be_a_probability(alpha):
+    with pytest.raises(ValidationError):
+        WatermarkConfig(key=42, algorithm="dual_key_gumbel", alpha=alpha)
+
+
 def test_unknown_watermark_prf_is_rejected():
     with pytest.raises(ValidationError):
         pydantic.TypeAdapter(WatermarkConfig).validate_python(

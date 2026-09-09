@@ -43,13 +43,13 @@ def test_detector_deduplicates_context_even_when_target_differs():
 
 def test_dual_key_detector_scores_each_token_against_both_keys():
     token_ids = [1, 2, 3, 4, 5]
-    draft_detector = GumbelWatermarkDetector(
-        key=derive_watermark_key(42, b"draft"),
+    key_a_detector = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"key_a"),
         context_width=1,
         deduplicate_contexts=False,
     )
-    target_detector = GumbelWatermarkDetector(
-        key=derive_watermark_key(42, b"target"),
+    key_b_detector = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"key_b"),
         context_width=1,
         deduplicate_contexts=False,
     )
@@ -59,11 +59,11 @@ def test_dual_key_detector_scores_each_token_against_both_keys():
         deduplicate_contexts=False,
     )
 
-    draft = draft_detector.detect(token_ids)
-    target = target_detector.detect(token_ids)
+    key_a = key_a_detector.detect(token_ids)
+    key_b = key_b_detector.detect(token_ids)
     dual = detector.detect(token_ids)
 
-    assert dual.score == pytest.approx((draft.score + target.score) / 2)
+    assert dual.score == pytest.approx((key_a.score + key_b.score) / 2)
     assert dual.p_value == pytest.approx(
         _gamma_survival_integer_shape(dual.score * 2, dual.num_scored_tokens * 2)
     )

@@ -80,7 +80,10 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
-from vllm.v1.watermarking.spec_decode import WatermarkedRejectionSampler
+from vllm.v1.watermarking.spec_decode import (
+    WatermarkedRejectionSampler,
+    create_speculative_target_watermarker,
+)
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -476,6 +479,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
+                if self.speculative_config is not None:
+                    watermarker = create_speculative_target_watermarker(watermarker)
                 self.sampler = GPUWatermarkSampler(
                     watermarker,
                     deduplicate_contexts=wm_config.deduplicate_contexts,

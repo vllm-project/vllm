@@ -53,7 +53,7 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"gumbel","key":42,"prf":"philox",'
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
             '"allow_target_only_watermarking":true}',
         ]
     )
@@ -61,8 +61,9 @@ def test_watermark_config_cli():
     config = EngineArgs.from_cli_args(args).create_watermark_config()
 
     assert config is not None
-    assert config.algorithm == "gumbel"
+    assert config.algorithm == "dual_key_gumbel"
     assert config.key == 42
+    assert config.alpha == 0.25
     assert config.context_width == 4
     assert config.deduplicate_contexts == "single_turn"
     assert config.deduplicate_contexts_max_history == 8192

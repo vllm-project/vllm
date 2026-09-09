@@ -17,5 +17,6 @@ def create_watermarker(config: WatermarkConfig) -> Watermarker:
             config.key,
             config.context_width,
             config.prf,
+            config.alpha,
         )
     raise ValueError(f"Unknown watermarking algorithm: {config.algorithm}")

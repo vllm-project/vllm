@@ -58,7 +58,9 @@ By default, a watermarking algorithm without native speculative-decoding
 support is rejected before model loading. Set
 `"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
 not watermarked, while target-side rejection recovery and bonus sampling remain
-watermarked. This weakens detection compared with fully watermarked generation.
+watermarked. The watermark signal is diluted in proportion to the share of
+output tokens supplied by accepted drafts; rejected drafts do not dilute it
+because their recovery tokens are watermarked.
 
 ## Algorithms
 
@@ -121,12 +123,17 @@ vllm serve MODEL \
 
 ### Dual-key Gumbel-max
 
-Dual-key Gumbel-max is a speculative-decoding variant of Gumbel-max. It derives
-independent draft and target keys from one configured master key using SHA-256
-domain separation. Draft tokens use the draft key; rejection recovery and
-bonus tokens use the target key. The ordinary target-to-draft probability-ratio
-test remains unchanged, preserving the expected acceptance rate of
-unwatermarked speculative decoding.
+Dual-key Gumbel-max derives independent keys A and B from one configured master
+key using SHA-256 domain separation. During ordinary generation, each token uses
+key A with probability `1 - alpha` and key B with probability `alpha`; `alpha`
+defaults to 0.5. Detection scores every token against both keys.
+
+The same two key streams support speculative decoding without changing its
+acceptance rate. In this mode, the speculative protocol selects the key instead
+of `alpha`: draft tokens use key A, while rejection recovery and bonus tokens
+use key B. The ordinary target-to-draft probability-ratio test remains unchanged,
+implementing [SynthID-Text Supplementary Algorithm
+6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 
 Select `dual_key_gumbel` together with probabilistic drafting:
 
@@ -134,11 +141,8 @@ Select `dual_key_gumbel` together with probabilistic drafting:
 vllm serve MODEL \
   --speculative-config \
   '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
-  --watermark-config '{"algorithm":"dual_key_gumbel","key":42}'
+  --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.5}'
 ```
-
-This implements the construction from [SynthID-Text Supplementary Algorithm
-6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 
 ### SynthID-Text
 

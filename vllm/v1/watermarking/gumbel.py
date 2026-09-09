@@ -104,14 +104,57 @@ class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
         key: int,
         context_width: int = 4,
         prf: WatermarkPRFName = "philox",
+        alpha: float = 0.5,
     ) -> None:
+        if not 0 <= alpha <= 1:
+            raise ValueError("alpha must be between 0 and 1")
         self.master_key = key
         self.prf_name = prf
-        super().__init__(derive_watermark_key(key, b"target"), context_width, prf)
+        self.alpha = alpha
+        super().__init__(derive_watermark_key(key, b"key_a"), context_width, prf)
+        self.key_b_watermarker = GumbelWatermarker(
+            derive_watermark_key(key, b"key_b"), context_width, prf
+        )
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        contexts: torch.Tensor,
+        random_sample: RandomSampler,
+    ) -> WatermarkSample:
+        if self.alpha == 0:
+            return super().sample(logits, contexts, random_sample)
+        if self.alpha == 1:
+            return self.key_b_watermarker.sample(logits, contexts, random_sample)
+
+        key_a_sample = super().sample(logits, contexts, random_sample)
+        key_b_sample = self.key_b_watermarker.sample(logits, contexts, random_sample)
+        routing_logits = torch.tensor(
+            [1 - self.alpha, self.alpha],
+            dtype=torch.float32,
+            device=logits.device,
+        ).log()
+        routing_logits = routing_logits.expand(logits.shape[0], -1)
+        use_key_a = random_sample(routing_logits) == 0
+        return WatermarkSample(
+            torch.where(
+                use_key_a,
+                key_a_sample.token_ids,
+                key_b_sample.token_ids,
+            ),
+            logits,
+        )
 
     def create_draft_watermarker(self) -> Watermarker:
         return GumbelWatermarker(
-            derive_watermark_key(self.master_key, b"draft"),
+            derive_watermark_key(self.master_key, b"key_a"),
+            self.context_width,
+            self.prf_name,
+        )
+
+    def create_target_watermarker(self) -> Watermarker:
+        return GumbelWatermarker(
+            derive_watermark_key(self.master_key, b"key_b"),
             self.context_width,
             self.prf_name,
         )
@@ -154,13 +197,13 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         deduplicate_contexts: bool = True,
     ) -> None:
         super().__init__(
-            derive_watermark_key(key, b"target"),
+            derive_watermark_key(key, b"key_a"),
             context_width,
             p_value_threshold,
             prf,
             deduplicate_contexts,
         )
-        self.draft_prf = create_prf(prf, derive_watermark_key(key, b"draft"))
+        self.key_b_prf = create_prf(prf, derive_watermark_key(key, b"key_b"))
 
     def _score_tokens(
         self, contexts: torch.Tensor, targets: torch.Tensor
@@ -172,7 +215,7 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
                     .squeeze(-1)
                     .to(torch.float64)
                 )
-                for prf in (self.prf, self.draft_prf)
+                for prf in (self.prf, self.key_b_prf)
             ],
             dim=-1,
         )

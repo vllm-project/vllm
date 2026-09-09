@@ -58,6 +58,12 @@ class DraftWatermarker:
         return sampled
 
 
+def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermarker:
+    if isinstance(watermarker, SupportsSpeculativeDecoding):
+        return watermarker.create_target_watermarker()
+    return watermarker
+
+
 def create_speculative_draft_watermarker(
     watermarker: Watermarker,
     max_num_reqs: int,

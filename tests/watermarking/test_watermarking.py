@@ -21,6 +21,7 @@ from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     create_speculative_draft_watermarker,
+    create_speculative_target_watermarker,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -105,14 +106,59 @@ def test_large_context_width_warns_but_is_allowed():
 def test_dual_key_watermarker_uses_domain_separated_keys():
     config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
 
-    target = create_watermarker(config)
-    assert isinstance(target, SupportsSpeculativeDecoding)
-    draft = target.create_draft_watermarker()
+    watermarker = create_watermarker(config)
+    assert isinstance(watermarker, SupportsSpeculativeDecoding)
+    draft = watermarker.create_draft_watermarker()
+    target = watermarker.create_target_watermarker()
 
-    assert isinstance(target, DualKeyGumbelWatermarker)
-    assert target.prf.key == derive_watermark_key(42, b"target")
-    assert draft.prf.key == derive_watermark_key(42, b"draft")
+    assert isinstance(watermarker, DualKeyGumbelWatermarker)
+    assert watermarker.prf.key == derive_watermark_key(42, b"key_a")
+    assert draft.prf.key == derive_watermark_key(42, b"key_a")
+    assert target.prf.key == derive_watermark_key(42, b"key_b")
     assert target.prf.key != draft.prf.key
+
+
+def test_dual_key_watermarker_routes_tokens_with_alpha():
+    watermarker = DualKeyGumbelWatermarker(key=42, context_width=2, alpha=0.25)
+    logits = torch.zeros(2, 16)
+    contexts = torch.tensor([[1, 2], [3, 4]])
+    key_a = watermarker.create_draft_watermarker().sample(
+        logits, contexts, lambda _: None
+    )
+    key_b = watermarker.create_target_watermarker().sample(
+        logits, contexts, lambda _: None
+    )
+
+    def route(routing_logits):
+        torch.testing.assert_close(
+            routing_logits.softmax(dim=-1),
+            torch.tensor([[0.75, 0.25], [0.75, 0.25]]),
+        )
+        return torch.tensor([0, 1])
+
+    sampled = watermarker.sample(logits, contexts, route)
+
+    assert torch.equal(
+        sampled.token_ids, torch.stack([key_a.token_ids[0], key_b.token_ids[1]])
+    )
+
+
+def test_speculative_decoding_uses_fixed_dual_key_roles():
+    watermarker = create_watermarker(
+        WatermarkConfig(algorithm="dual_key_gumbel", key=42, alpha=0.25)
+    )
+
+    target = create_speculative_target_watermarker(watermarker)
+    draft = create_speculative_draft_watermarker(
+        watermarker,
+        max_num_reqs=1,
+        device=torch.device("cpu"),
+        allow_target_only=False,
+    )
+
+    assert target.prf.key == derive_watermark_key(42, b"key_b")
+    assert draft is not None
+    assert draft.watermarker.prf.key == derive_watermark_key(42, b"key_a")
 
 
 def test_target_only_speculative_watermarking_skips_draft_watermarker():
@@ -138,8 +184,8 @@ def test_target_only_speculative_watermarking_skips_draft_watermarker():
 
 
 def test_dual_key_derivation_is_stable():
-    assert derive_watermark_key(32, b"target") == 7484172436829796191
-    assert derive_watermark_key(32, b"draft") == 18284270469433393546
+    assert derive_watermark_key(32, b"key_a") == 16368605726115524094
+    assert derive_watermark_key(32, b"key_b") == 4799302812959726346
 
 
 def test_sampling_params_can_disable_watermarking():
