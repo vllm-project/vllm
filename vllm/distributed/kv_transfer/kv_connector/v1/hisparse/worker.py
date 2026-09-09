@@ -822,6 +822,11 @@ class HiSparseConnectorWorker:
     def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
         state = self._slot_mapping_staging
         if state is not None and state.num_tokens:
+            if not any(handle.num_actual_tokens for handle in self.cache_handles):
+                raise RuntimeError(
+                    "HiSparse has scheduled KV writes but no active mirror metadata. "
+                    "Prepare mirror state before CUDA graph replay."
+                )
             # Measured free: blocking here costs no throughput (26.7 vs 27.6
             # gen tok/s) and lets every step mirror exactly the written rows.
             state.event.synchronize()

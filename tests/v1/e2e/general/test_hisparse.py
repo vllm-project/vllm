@@ -3,8 +3,10 @@
 
 import prometheus_client
 import pytest
+import torch
 
 from tests.conftest import VllmRunner
+from vllm import SamplingParams
 from vllm.config import AttentionConfig, HiSparseConfig, KVTransferConfig
 from vllm.platforms import current_platform
 
@@ -44,6 +46,74 @@ def _offload_load_bytes() -> float:
         for sample in metric.samples
         if sample.name == "vllm:kv_offload_load_bytes_total"
     )
+
+
+def _check_last_token_host_mirrors(model) -> int:
+    torch.accelerator.synchronize()
+    checked = set()
+    for layer in model.modules():
+        cache = getattr(layer, "hisparse_cache", None)
+        if cache is None or id(cache) in checked:
+            continue
+        assert cache.view is not None
+        source_slot = int(cache.slot_mapping[0].item())
+        host_slot = int(cache.mirror_slot_mapping[0].item())
+        assert source_slot >= 0 and host_slot >= 0
+        block, row = divmod(source_slot, cache.view.block_size)
+        expected = cache.view.cache[block, row].cpu().view(torch.uint8)
+        actual = cache.runtime.host_cache[host_slot].view(torch.uint8)
+        assert torch.equal(actual, expected), "Decode KV was not mirrored to host"
+        checked.add(id(cache))
+    return len(checked)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+)
+def test_hisparse_fullgraph_decode_mirrors_written_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+):
+    """Graph-replayed decode must mirror KV before any page is spilled."""
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
+
+    with vllm_runner(
+        MODEL,
+        load_format="dummy",
+        hf_overrides=_shrink_config,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(
+                device_buffer_size=512, eager_host_mirror=True
+            )
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1},
+        ),
+        block_size=64,
+        max_model_len=320,
+        max_num_batched_tokens=1024,
+        max_num_seqs=4,
+        num_gpu_blocks_override=128,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        async_scheduling=True,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [1, 4],
+        },
+    ) as runner:
+        runner.llm.generate(
+            [{"prompt_token_ids": [1000 + i % 64 for i in range(32)]}],
+            SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
+        )
+        assert all(runner.llm.apply_model(_check_last_token_host_mirrors))
 
 
 @pytest.mark.skipif(

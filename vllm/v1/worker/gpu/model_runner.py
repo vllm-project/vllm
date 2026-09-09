@@ -66,6 +66,7 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.hisparse.runtime import prepare_hisparse_for_graph_replay
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     HiSparseHotSpec,
@@ -1839,6 +1840,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.idx_mapping,
                 input_batch.req_ids,
             )
+            if not dummy_run and self.kv_cache_config.hisparse_host_num_blocks:
+                assert attn_metadata is not None
+                prepare_hisparse_for_graph_replay(
+                    attn_metadata, self.compilation_config.static_forward_context
+                )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
