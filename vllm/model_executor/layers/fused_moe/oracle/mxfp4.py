@@ -178,10 +178,15 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
             TrtLlmMxfp4ExpertsModular,
             TrtLlmMxfp4ExpertsMonolithic,
+            TrtLlmMxfp4Mxfp8ExpertsModular,
         )
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
-        return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmMxfp4ExpertsModular]
+        return [
+            TrtLlmMxfp4ExpertsMonolithic,
+            TrtLlmMxfp4Mxfp8ExpertsModular,
+            TrtLlmMxfp4ExpertsModular,
+        ]
 
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,

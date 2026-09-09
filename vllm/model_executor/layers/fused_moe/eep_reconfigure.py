@@ -67,9 +67,9 @@ def make_eep_staged_quant_method(
     if getattr(quant_method, "wraps_legacy_quant_method", False):
         return None
 
-    old_batched_format = module.moe_config.use_batched_activation_format
-    new_batched_format = moe_config.use_batched_activation_format
-    assert old_batched_format == new_batched_format
+    old_format = module.moe_config.activation_format
+    new_format = moe_config.activation_format
+    assert new_format.is_superset(old_format)
 
     moe_kernel = quant_method.moe_kernel
     if moe_kernel is None:
