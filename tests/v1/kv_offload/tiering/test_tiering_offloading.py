@@ -11,6 +11,9 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import mmap
+import os
+import uuid
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
@@ -39,6 +42,12 @@ from vllm.v1.kv_offload.base import (
     TierFilter,
     TierMatcher,
     make_offload_key,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -145,6 +154,50 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         stats = self.stats
         self.stats = None
         return stats
+
+
+def _spec_offloading_config(engine_id: str, cpu_bytes: int) -> OffloadingConfig:
+    return OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=mmap.PAGESIZE,
+        enable_kv_cache_events=False,
+        extra_config={"cpu_bytes_to_use": cpu_bytes},
+        engine_id=engine_id,
+        model=OffloadingModelConfig(name="test/model", dtype="float16"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
+            rank=0,
+            world_size=1,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
+            is_parallelism_agnostic=False,
+        ),
+        replicated_layout=False,
+    )
+
+
+def test_get_manager_unlinks_the_region_file():
+    """Workers finish initialization before the scheduler is constructed, so
+    the scheduler maps the region last and drops its name: nothing survives
+    in /dev/shm for a later sweep to reclaim, and the mapping keeps working."""
+    engine_id = f"test-{uuid.uuid4().hex[:8]}"
+    path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    spec = TieringOffloadingSpec(_spec_offloading_config(engine_id, 4 * mmap.PAGESIZE))
+
+    manager = spec.get_manager()
+    try:
+        assert not os.path.exists(path)
+        view = manager.primary_tier.get_kv_memoryview()
+        view[0, 0] = 7
+        assert view[0, 0] == 7
+    finally:
+        manager.shutdown()
+    assert not os.path.exists(path)
 
 
 def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):

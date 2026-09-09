@@ -73,7 +73,10 @@ class SharedOffloadRegion:
     File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
     given, the path is unlinked once every worker has mapped the file, so
     the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    how it exits; mappings taken before the unlink stay valid.  Regions
+    that are also mapped outside the workers (tiering maps one in the
+    scheduler process) outlive the barrier: whoever maps last calls
+    unlink_backing_file() instead.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -147,15 +150,12 @@ class SharedOffloadRegion:
                 barrier()
             except Exception:
                 if self._creator:
-                    os.unlink(self.mmap_path)
-                    self._creator = False
+                    self.unlink_backing_file()
                 self.mmap_obj.close()
                 os.close(self.fd)
                 raise
             if self._creator:
-                os.unlink(self.mmap_path)
-                self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
+                self.unlink_backing_file()
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
@@ -285,6 +285,27 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
+    def unlink_backing_file(self) -> None:
+        """Drop the region's name once everything that needs it has mapped it.
+
+        Established mappings stay valid and the kernel reclaims the memory
+        when the last of them goes away, however that process exits, so no
+        file is left behind for a later sweep to reclaim. Idempotent, and
+        callable from a process that did not create the file: whichever
+        process maps the region last calls it.
+        """
+        if not getattr(self, "mmap_path", None):
+            return
+        self._creator = False
+        try:
+            os.unlink(self.mmap_path)
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning("Failed to unlink path %s", self.mmap_path, exc_info=True)
+            return
+        logger.info("Unlinked mmap file %s", self.mmap_path)
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
@@ -313,15 +334,8 @@ class SharedOffloadRegion:
         # Unlink before closing the fd: the fd holds the shared flock, so
         # dropping it first would leave the file briefly unlocked and a
         # concurrently starting engine could reclaim it as an orphan.
-        if self._creator and getattr(self, "mmap_path", None):
-            try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed mmap file %s", self.mmap_path)
-            except Exception:
-                logger.warning(
-                    "Failed to unlink path %s", self.mmap_path, exc_info=True
-                )
-            self._creator = False
+        if self._creator:
+            self.unlink_backing_file()
         if self.fd is not None:
             try:
                 os.close(self.fd)

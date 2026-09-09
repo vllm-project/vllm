@@ -861,6 +861,29 @@ def test_backing_file_unlinked_after_barrier(iid):
         _cleanup_file(path)
 
 
+def test_unlink_backing_file_keeps_existing_mappings(iid):
+    """A region also mapped outside the workers (tiering maps one in the
+    scheduler) is dropped by whoever maps last, which may not be its creator:
+    the name goes away, every established mapping keeps working, and the
+    creator's cleanup() has nothing left to unlink."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with _multi_region(iid, num_workers=2) as (creator, joiner):
+        joiner.unlink_backing_file()
+
+        assert not os.path.exists(path), "name must be dropped"
+        creator.mmap_obj[0:1] = b"\x5a"
+        assert memoryview(joiner.mmap_obj)[0:1] == b"\x5a", "mapping stays shared"
+
+
+def test_unlink_backing_file_is_idempotent(iid):
+    """Both the creator's cleanup() and a last-mapper hook can reach it."""
+    with _region(iid) as region:
+        region.unlink_backing_file()
+        region.unlink_backing_file()
+        assert not os.path.exists(region.mmap_path)
+        assert region._creator is False
+
+
 def test_barrier_failure_unlinks_creator_and_raises(iid):
     """A failed rendezvous must remove the creator's file and re-raise, not
     leave a region behind for the next start to join."""
