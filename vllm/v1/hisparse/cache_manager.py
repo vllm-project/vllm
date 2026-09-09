@@ -76,9 +76,13 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         apply_admission_cap: bool = False,
     ) -> int:
         assert not new_computed_blocks
-        if request_id not in self.hot_required:
-            return 0
-        return self.get_num_required_blocks(request_id)
+        host_import = total_computed_tokens > num_local_computed_tokens
+        resumes_host_prefix = (
+            num_local_computed_tokens > 0 and request_id not in self.num_cached_block
+        )
+        if host_import or resumes_host_prefix or request_id in self.hot_required:
+            return self.get_num_required_blocks(request_id)
+        return 0
 
     def get_num_required_blocks(self, request_id: str) -> int:
         return max(
@@ -99,6 +103,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
+        # Cold admissions can bypass add_local_computed_blocks.
+        self.num_cached_block[request_id] = 0
         if request_id not in self.hot_required:
             return []
         req_blocks = self.req_to_blocks[request_id]

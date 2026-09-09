@@ -685,6 +685,19 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     assert state.ready_prefix_pages == 1
 
 
+def test_hisparse_resident_request_can_grow_without_hot_capacity():
+    """Running resident history must not be mistaken for a new host-prefix hit."""
+    manager = make_hisparse_kv_cache_manager(8, 16)
+    request = make_request("resident", list(range(48)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=32) is not None
+    request.num_computed_tokens = 32
+
+    # Three free blocks fit the next indexer/resident pages, but not a hot region.
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+    assert manager.get_block_ids(request.request_id)[3] == []
+
+
 def test_hisparse_capacity_query_does_not_require_hot_blocks():
     """A read-only capacity query must not mutate hot-block requirements."""
     manager = make_hisparse_kv_cache_manager(16, 16)

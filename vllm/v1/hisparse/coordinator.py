@@ -173,19 +173,14 @@ class HiSparseCoordinator:
             self.request_states[request_id] = state
         return state
 
-    def needs_hot(
-        self,
-        new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
-    ) -> bool:
-        host_group_id = self.host_group_id
-        return host_group_id is not None and bool(new_computed_blocks[host_group_id])
-
     def commit_computed_blocks(
         self,
         request_id: str,
         new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
     ) -> None:
-        has_cpu_history = self.needs_hot(new_computed_blocks)
+        has_cpu_history = self.host_group_id is not None and bool(
+            new_computed_blocks[self.host_group_id]
+        )
         if self.resident_managers and has_cpu_history:
             state = self._get_request_state(request_id)
             assert self.host_group_id is not None and self.host_manager is not None

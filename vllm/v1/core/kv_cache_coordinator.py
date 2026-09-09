@@ -19,7 +19,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
-from vllm.v1.hisparse.cache_manager import HiSparseHotManager
 from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -220,20 +219,12 @@ class KVCacheCoordinator(ABC):
         Returns:
             The number of blocks to allocate.
         """
-        needs_hot = self.hisparse_coordinator.needs_hot(new_computed_blocks)
-        num_external_computed_tokens = total_computed_tokens - num_local_computed_tokens
-        host_import = (
-            num_external_computed_tokens > 0
-            and self.hisparse_coordinator.has_host_cache
-        )
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
             if group.host_resident:
                 continue
-            if isinstance(manager, HiSparseHotManager) and (host_import or needs_hot):
-                num_blocks = manager.get_num_required_blocks(request_id)
-            elif isinstance(manager, CrossAttentionManager):
+            if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks = manager.get_num_blocks_to_allocate(
