@@ -2785,11 +2785,18 @@ def get_kv_cache_configs(
             )
         )
 
-    min_num_blocks = min(config.num_blocks for config in kv_cache_configs)
-    for i, config in enumerate(kv_cache_configs):
-        if config.num_blocks == min_num_blocks:
+    # Change the num_blocks of each rank to the smallest among all ranks.
+    # We also need to shrink the tensor size proportionally to avoid
+    # allocating unused memory.
+    min_num_blocks = min(
+        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
+    )
+    for i, kv_cache_config in enumerate(kv_cache_configs):
+        if kv_cache_config.num_blocks == min_num_blocks:
             continue
-        groups = config.kv_cache_groups
+        # Re-plan with exactly the memory the smallest rank can afford, so
+        # strides and offsets stay consistent with the shrunken allocation.
+        groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
             vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
         )
