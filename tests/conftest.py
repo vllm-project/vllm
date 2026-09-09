@@ -1042,12 +1042,24 @@ class VllmRunner:
         # Only wait on the devices this engine will actually occupy. On a shared
         # node the visible set can include GPUs owned by other processes that
         # never free, which would otherwise time out the settle wait below.
+        # ``device_ids`` may pin the engine to specific, possibly non-contiguous
+        # GPUs; see ``resolve_engine_devices``.
+        from tests.utils import resolve_engine_devices
+
+        device_ids = kwargs.get("device_ids")
         num_engine_devices = (
             tensor_parallel_size
             * int(kwargs.get("pipeline_parallel_size", 1))
+            * int(kwargs.get("prefill_context_parallel_size", 1))
             * int(kwargs.get("data_parallel_size", 1))
         )
-        engine_devices = list(range(num_engine_devices))
+        engine_devices = resolve_engine_devices(device_ids, num_engine_devices)
+        pinned = bool(device_ids) and all(
+            isinstance(d, int) for d in (device_ids or [])
+        )
+        self._engine_device_ids: list[int] | None = (
+            list(engine_devices) if pinned else None
+        )
 
         if current_platform.is_rocm():
             # An unset utilization resolves to 1.0 with the extensible KV cache,
@@ -1434,8 +1446,16 @@ class VllmRunner:
             or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
         # Only wait on the devices this engine occupied so the settle wait does
-        # not block on GPUs owned by other processes sharing the node.
-        engine_devices = list(range(vllm_config.parallel_config.world_size_across_dp))
+        # not block on GPUs owned by other processes sharing the node. Reuse the
+        # visible-set indices resolved at construction (``device_ids`` when
+        # pinned, possibly non-contiguous), falling back to the contiguous range
+        # ``[0, world_size_across_dp)``.
+        from tests.utils import resolve_engine_devices
+
+        engine_devices = resolve_engine_devices(
+            self._engine_device_ids,
+            vllm_config.parallel_config.world_size_across_dp,
+        )
         from vllm.platforms import current_platform
 
         try:
