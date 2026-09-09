@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
 
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.request import Request
 
 
@@ -15,6 +16,7 @@ class SchedulingPolicy(Enum):
 
     FCFS = "fcfs"
     PRIORITY = "priority"
+    SLO = "slo"
 
 
 class RequestQueue(ABC):
@@ -198,11 +200,83 @@ class PriorityRequestQueue(RequestQueue):
             yield heapq.heappop(heap_copy)
 
 
+class SLORequestQueue(RequestQueue):
+    """A priority queue ordered by scheduler-computed SLO urgency."""
+
+    def __init__(self) -> None:
+        self._heap: list[tuple[float, float, str, Request]] = []
+
+    @staticmethod
+    def _make_entry(request: Request) -> tuple[float, float, str, Request]:
+        return (
+            -request.slo_urgency_score,
+            request.arrival_time,
+            request.request_id,
+            request,
+        )
+
+    def add_request(self, request: Request) -> None:
+        heapq.heappush(self._heap, self._make_entry(request))
+
+    def pop_request(self) -> Request:
+        if not self._heap:
+            raise IndexError("pop from empty SLO queue")
+        _, _, _, request = heapq.heappop(self._heap)
+        return request
+
+    def peek_request(self) -> Request:
+        if not self._heap:
+            raise IndexError("peek from empty SLO queue")
+        _, _, _, request = self._heap[0]
+        return request
+
+    def prepend_request(self, request: Request) -> None:
+        self.add_request(request)
+
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        for request in requests:
+            self.add_request(request)
+
+    def remove_request(self, request: Request) -> None:
+        self._heap = [entry for entry in self._heap if entry[3] != request]
+        heapq.heapify(self._heap)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        requests_to_remove = requests if isinstance(requests, set) else set(requests)
+        self._heap = [
+            entry for entry in self._heap if entry[3] not in requests_to_remove
+        ]
+        heapq.heapify(self._heap)
+
+    def iter_requests_unordered(self) -> Iterator[Request]:
+        for _, _, _, request in self._heap:
+            yield request
+
+    def rebuild_with_updated_scores(self) -> None:
+        with record_function_or_nullcontext("slo_queue: rebuild_with_updated_scores"):
+            self._heap = [self._make_entry(entry[3]) for entry in self._heap]
+            heapq.heapify(self._heap)
+
+    def __bool__(self) -> bool:
+        return bool(self._heap)
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def __iter__(self) -> Iterator[Request]:
+        heap_copy = self._heap[:]
+        while heap_copy:
+            _, _, _, request = heapq.heappop(heap_copy)
+            yield request
+
+
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue()
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
+    elif policy == SchedulingPolicy.SLO:
+        return SLORequestQueue()
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")
