@@ -1966,6 +1966,8 @@ def build_mla_chunked_context_metadata(
     context_lens = context_lens_cpu.tolist()
     if max(context_lens, default=0) <= 0:
         return None
+    if PIN_MEMORY and not context_lens_cpu.is_pinned():
+        context_lens_cpu = context_lens_cpu.pin_memory()
 
     # The `gather_and_maybe_dequant_cache` kernel cannot handle chunk starts
     # that are not aligned to block_size, so a split request advances in

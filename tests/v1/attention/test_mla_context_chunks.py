@@ -11,6 +11,7 @@ longer needs an empty-span masking pass).
 import pytest
 import torch
 
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
@@ -27,6 +28,7 @@ def build_chunked_context(
     block_size: int = BLOCK_SIZE,
     dcp_world_size: int = 1,
     dcp_local_block_size: int = 1,
+    device: str = "cpu",
 ):
     query_start_loc = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
     query_start_loc[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
@@ -38,11 +40,24 @@ def build_chunked_context(
         chunked_prefill_workspace_size=workspace_size,
         block_size=block_size,
         align_chunk_to_block=True,
-        device=torch.device("cpu"),
+        device=torch.device(device),
         dcp_world_size=dcp_world_size,
         dcp_local_block_size=dcp_local_block_size,
         dcp_virtual_block_size=dcp_local_block_size * dcp_world_size,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pageable_context_lengths_do_not_force_gpu_sync(monkeypatch):
+    """Sparse MLA supplies pageable context lengths to the shared builder."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    metadata = gsd.with_gpu_sync_check(build_chunked_context)(
+        [2048, 320], [4, 4], 1024, device="cuda"
+    )
+    assert metadata is not None
+    assert metadata.context_lens.device.type == "cuda"
+    assert metadata.context_lens.tolist() == [2048, 320]
 
 
 @pytest.mark.parametrize(
