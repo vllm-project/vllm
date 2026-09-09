@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    DevicePointers,
     GPULoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
@@ -96,9 +97,10 @@ class MockOffloadingWorker(OffloadingWorker):
         return finished
 
     def submit_store(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        assert device_ptrs.device_spec is not None
+        self.transfer_specs[job_id] = (device_ptrs.device_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -106,10 +108,11 @@ class MockOffloadingWorker(OffloadingWorker):
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        assert device_ptrs.device_spec is not None
+        self.transfer_specs[job_id] = (src_spec, device_ptrs.device_spec)
         self.waiting_jobs.add(job_id)
         if self.fail_loads:
             self._failing_jobs.add(job_id)
