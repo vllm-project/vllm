@@ -31,7 +31,6 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
     redistribute_expert_placement,
     reload_experts_from_disk,
     reset_eplb_async_state,
-    sync_num_dispatchers_for_nixl_ep,
 )
 
 if TYPE_CHECKING:
@@ -162,11 +161,6 @@ class WorkerSentinel:
         self.retry(ft_request)
 
         self._redistribute_experts(dead_ep_ranks)
-        sync_num_dispatchers_for_nixl_ep(
-            model_runner.model,
-            self.worker.parallel_config.all2all_backend,
-            dead_ep_ranks,
-        )
 
         logger.info(
             "[FT] Worker scale_down complete: dp_group_size=%d, "
