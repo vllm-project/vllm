@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -15,6 +16,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
+
+logger = init_logger(__name__)
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
@@ -80,6 +83,20 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
         embeddings_indices = self.punica_wrapper._embeddings_indices[:num_tokens]
+
+        if embeddings_indices.shape[0] != num_tokens:
+            # Called outside the request-token mapping - e.g. a multimodal
+            # encoder embedding replacement tokens, which can exceed
+            # max_num_batched_tokens. Those tokens have no entry in the
+            # adapter index mapping, so no LoRA delta can be applied.
+            logger.warning_once(
+                "Embedding LoRA skipped for %d tokens: exceeds the adapter "
+                "index mapping (%d). Output for these tokens uses base "
+                "weights only.",
+                num_tokens,
+                embeddings_indices.shape[0],
+            )
+            return self.base_layer.forward(x)
 
         full_lora_a_embeddings = F.embedding(
             x + embeddings_indices,
