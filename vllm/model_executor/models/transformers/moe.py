@@ -359,7 +359,9 @@ class MoEMixin(_MoEMixinBase):
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
                             glu_fuser = get_fuser(hf_shared, GLUFuser)
-                            down_name = glu_fuser and glu_fuser.down_name
+                            down_name = (
+                                glu_fuser.down_name if glu_fuser is not None else None
+                            )
                             if down_name is not None:
                                 shared_down_projs.append((hf_shared, down_name))
                         # Prefer config, otherwise read it from fuser.
