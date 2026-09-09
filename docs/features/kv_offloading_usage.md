@@ -55,7 +55,8 @@ vllm serve <model> \
           "type": "fs",
           "root_dir": "/mnt/kv_cache",
           "n_read_threads": 32,
-          "n_write_threads": 16
+          "n_write_threads": 16,
+          "max_bytes": 107374182400
         }
       ]
     }
@@ -113,7 +114,7 @@ Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the sa
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
-The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
+The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`STORAGE` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an OBJ tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
@@ -127,10 +128,24 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
-| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+| `max_bytes` | no | unlimited | Maximum bytes of persisted KV block data. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+When `max_bytes` is set, the tier removes least recently used blocks before a
+store would exceed the limit. Blocks in an active load or store are protected.
+If a batch cannot fit safely, its cache write is skipped without failing the
+request. Existing block files are counted once when the tier starts. Omitting
+`max_bytes` preserves the historical unbounded behavior.
+
+The limit applies to this tier's mapped `<model>_<digest>_r<rank>` directory,
+not to the whole `root_dir` or all engines combined. Bounded mode requires
+exclusive ownership of that directory; concurrent engines sharing it are not
+supported. Accounting covers persisted block bytes, excluding temporary files,
+configuration and filesystem overhead. Restart recency is seeded from file
+modification times; runtime LRU history is not persisted.
 
 #### On-Disk Layout
 
@@ -152,9 +167,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 #### Cross-Process Sharing
 
-KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
+For an unbounded filesystem tier (`max_bytes` unset), KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
 
-The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing a cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
+This sharing guidance does not apply when `max_bytes` is set. Bounded filesystem tiers maintain independent in-memory capacity state, so each mapped directory must have exclusive ownership by one engine instance.
+
+The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing an unbounded cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
 
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...

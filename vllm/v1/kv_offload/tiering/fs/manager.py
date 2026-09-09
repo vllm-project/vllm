@@ -18,8 +18,10 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+import threading
+from collections import Counter, OrderedDict
+from collections.abc import Collection, Iterable
+from typing import TYPE_CHECKING, Any, ClassVar
 
 try:
     from vllm.fs_io_C import batch_lookup as batch_lookup_C
@@ -30,14 +32,20 @@ except ImportError:
 
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
     Medium,
     OffloadingEvent,
+    OffloadingGaugeMetadata,
+    OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
@@ -106,6 +114,22 @@ class FileSystemTierManager(SecondaryTierManager):
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
+    CACHE_BYTES = "vllm:kv_offload_fs_cache_bytes"
+    CACHE_ENTRIES = "vllm:kv_offload_fs_cache_entries"
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        del extra_config
+        return {
+            cls.CACHE_BYTES: OffloadingGaugeMetadata(
+                documentation="Current filesystem KV cache block-data bytes."
+            ),
+            cls.CACHE_ENTRIES: OffloadingGaugeMetadata(
+                documentation="Current filesystem KV cache block entry count."
+            ),
+        }
 
     def __init__(
         self,
@@ -117,6 +141,7 @@ class FileSystemTierManager(SecondaryTierManager):
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        max_bytes: int | None = None,
     ):
         """
         Args:
@@ -132,8 +157,17 @@ class FileSystemTierManager(SecondaryTierManager):
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
                 to the publishing vLLM instance.
+            max_bytes: Maximum block-data bytes stored by this filesystem tier.
+                ``None`` preserves the historical unbounded behavior.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        if isinstance(max_bytes, bool) or (
+            max_bytes is not None and not isinstance(max_bytes, int)
+        ):
+            raise TypeError("max_bytes must be a non-negative integer or None")
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be a non-negative integer or None")
+        self.max_bytes = max_bytes
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -159,6 +193,9 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+        self._load_paths: dict[JobId, list[str]] = {}
+        self._skipped_store_jobs: set[JobId] = set()
+        self._evicted_store_keys: dict[JobId, list[OffloadKey]] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -173,6 +210,13 @@ class FileSystemTierManager(SecondaryTierManager):
             blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         )
+        self._storage_dir = f"{self.file_mapper.base_path}_r{self.file_mapper.rank}"
+        self._capacity_lock = threading.Lock()
+        self._entries: OrderedDict[str, int] = OrderedDict()
+        self._cache_bytes = 0
+        self._reserved_bytes = 0
+        self._protected_paths: Counter[str] = Counter()
+        self._writing_paths: set[str] = set()
 
         # Write config file
         config_path = self.file_mapper.get_config_file_path()
@@ -182,6 +226,13 @@ class FileSystemTierManager(SecondaryTierManager):
                 json.dump(
                     self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
                 )
+
+        if max_bytes is not None:
+            self._scan_cache()
+            with self._capacity_lock:
+                self._evict_locked(max(self._cache_bytes - max_bytes, 0), set())
+            if self._cache_bytes > max_bytes:
+                raise OSError("Cannot reduce existing filesystem cache to max_bytes")
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
@@ -214,18 +265,176 @@ class FileSystemTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
+    def _scan_cache(self) -> None:
+        """Build the LRU index once at startup from file modification times."""
+        entries = []
+        if os.path.isdir(self._storage_dir):
+            for dirpath, _, filenames in os.walk(self._storage_dir):
+                for filename in filenames:
+                    if not filename.endswith(".bin"):
+                        continue
+                    path = os.path.join(dirpath, filename)
+                    try:
+                        stat = os.stat(path)
+                    except FileNotFoundError:
+                        continue
+                    entries.append((stat.st_mtime_ns, path, stat.st_size))
+        entries.sort()
+        self._entries.update((path, size) for _, path, size in entries)
+        self._cache_bytes = sum(self._entries.values())
+
+    @staticmethod
+    def _path_key(path: str) -> OffloadKey | None:
+        try:
+            group_dir = os.path.basename(os.path.dirname(path))
+            group_idx = int(group_dir.rsplit("_g", 1)[1])
+            block_hash = bytes.fromhex(os.path.basename(path)[:-4])
+            return make_offload_key(block_hash, group_idx)
+        except (IndexError, ValueError):
+            return None
+
+    def _evict_locked(
+        self, bytes_to_free: int, protected: set[str]
+    ) -> tuple[list[OffloadKey], int]:
+        if bytes_to_free <= 0:
+            return [], 0
+        evicted = []
+        freed = 0
+        candidates = []
+        available = 0
+        for path, size in self._entries.items():
+            if path in protected or path in self._protected_paths:
+                continue
+            candidates.append((path, size))
+            available += size
+            if available >= bytes_to_free:
+                break
+        if available < bytes_to_free:
+            return [], 0
+        for path, size in candidates:
+            if freed >= bytes_to_free:
+                break
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+            self._entries.pop(path, None)
+            self._cache_bytes -= size
+            freed += size
+            key = self._path_key(path)
+            if key is not None:
+                evicted.append(key)
+        return evicted, freed
+
+    def _store_batch(self, job_id: JobId, paths: list[str], offsets: list[int]) -> None:
+        if self.max_bytes is None:
+            batch_store_block(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+            return
+        unique = dict(zip(paths, offsets))
+        with self._capacity_lock:
+            if self._writing_paths.intersection(unique):
+                self._skipped_store_jobs.add(job_id)
+                return
+            missing = []
+            for path, offset in unique.items():
+                if path in self._entries and not os.path.exists(path):
+                    self._cache_bytes -= self._entries.pop(path)
+                if path in self._entries:
+                    self._entries.move_to_end(path)
+                elif os.path.exists(path):
+                    try:
+                        size = os.path.getsize(path)
+                    except OSError:
+                        missing.append((path, offset))
+                    else:
+                        self._entries[path] = size
+                        self._cache_bytes += size
+                else:
+                    missing.append((path, offset))
+
+            needed = len(missing) * self._block_size
+            if self.max_bytes is not None:
+                if needed > self.max_bytes:
+                    self._skipped_store_jobs.add(job_id)
+                    logger.warning(
+                        "Skipping filesystem KV cache store for job %s: "
+                        "the batch does not fit in max_bytes=%s.",
+                        job_id,
+                        self.max_bytes,
+                    )
+                    return
+                required = max(
+                    self._cache_bytes + self._reserved_bytes + needed - self.max_bytes,
+                    0,
+                )
+                evicted, freed = self._evict_locked(required, set(unique))
+                if evicted:
+                    self._evicted_store_keys[job_id] = evicted
+                required -= freed
+                if required > 0:
+                    self._skipped_store_jobs.add(job_id)
+                    logger.warning(
+                        "Skipping filesystem KV cache store for job %s: "
+                        "the batch does not fit in max_bytes=%s.",
+                        job_id,
+                        self.max_bytes,
+                    )
+                    return
+            if not missing:
+                return
+            store_paths = [path for path, _ in missing]
+            self._reserved_bytes += needed
+            self._protected_paths.update(store_paths)
+            self._writing_paths.update(store_paths)
+
+        try:
+            batch_store_block(
+                store_paths,
+                self._primary_kv_view,
+                [offset for _, offset in missing],
+                self._block_size,
+                self._use_o_direct,
+            )
+        finally:
+            with self._capacity_lock:
+                self._reserved_bytes -= needed
+                self._unprotect(store_paths)
+                self._writing_paths.difference_update(store_paths)
+                for path in store_paths:
+                    try:
+                        size = os.path.getsize(path)
+                    except FileNotFoundError:
+                        size = 0
+                    except OSError:
+                        size = self._block_size
+                    self._cache_bytes += size - self._entries.pop(path, 0)
+                    if size:
+                        self._entries[path] = size
+
+    def _unprotect(self, paths: Iterable[str]) -> None:
+        for path in paths:
+            self._protected_paths[path] -= 1
+            if self._protected_paths[path] == 0:
+                del self._protected_paths[path]
+
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
-            batch_store_block,
+            self._store_batch,
+            job_metadata.job_id,
             [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
         )
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
@@ -237,6 +446,10 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         paths = [self.file_mapper.get_file_name(key) for key in keys]
+        if self.max_bytes is not None:
+            self._load_paths[job_id] = paths
+            with self._capacity_lock:
+                self._protected_paths.update(paths)
         offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
 
         def load_task() -> None:
@@ -274,9 +487,24 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
+            with self._capacity_lock:
+                self._unprotect(self._load_paths.pop(job_id, ()))
+                skipped = job_id in self._skipped_store_jobs
+                self._skipped_store_jobs.discard(job_id)
+                evicted = self._evicted_store_keys.pop(job_id, ())
+            success = success and not skipped
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
+                if evicted:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=evicted,
+                            medium=self.medium,
+                            removed=True,
+                            locality=self.locality,
+                        )
+                    )
+                if success and keys and not skipped:
                     self.events.append(
                         OffloadingEvent(
                             keys=keys,
@@ -312,6 +540,26 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
             )
         return results
+
+    @override
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        del req_context
+        if self.max_bytes is None:
+            return
+        with self._capacity_lock:
+            for key in keys:
+                path = self.file_mapper.get_file_name(key)
+                if path in self._entries:
+                    self._entries.move_to_end(path)
+
+    @override
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        if self.max_bytes is None:
+            return None
+        stats = OffloadingConnectorStats()
+        stats.set_gauge(self.CACHE_BYTES, self._cache_bytes)
+        stats.set_gauge(self.CACHE_ENTRIES, len(self._entries))
+        return stats
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -229,6 +229,205 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def make_bounded_tier(tmp_path, max_blocks=2):
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=2,
+        n_write_threads=2,
+        max_bytes=max_blocks * tensor.stride(0) * tensor.element_size(),
+    )
+    return tier, tensor
+
+
+@pytest.mark.parametrize("replacement_count", [1, 2])
+def test_bounded_tier_evicts_least_recently_used(tmp_path, replacement_count):
+    tier, _ = make_bounded_tier(tmp_path)
+    try:
+        tier.submit_store(make_job(1, [key(1), key(2)]))
+        assert all(result.success for result in drain(tier))
+        tier.touch([key(1)], _CTX)
+        tier.submit_store(make_job(2, [key(3 + i) for i in range(replacement_count)]))
+        assert all(result.success for result in drain(tier))
+
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1))) == (
+            replacement_count == 1
+        )
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
+        assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+        assert tier._cache_bytes <= tier.max_bytes
+    finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_counts_partial_store_failure(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as manager_module
+
+    tier, _ = make_bounded_tier(tmp_path)
+    original = manager_module.batch_store_block
+
+    def partial_store(paths, view, offsets, *args):
+        original(paths[:1], view, offsets[:1], *args)
+        raise OSError("injected failure after first block")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_module, "batch_store_block", partial_store)
+            tier.submit_store(make_job(1, [key(1), key(2)]))
+            assert not drain(tier)[0].success
+        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier._block_size
+        tier.submit_store(make_job(2, [key(3), key(4)]))
+        assert drain(tier)[0].success
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier.max_bytes
+    finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_skips_oversized_batch_without_eviction(tmp_path):
+    tier, _ = make_bounded_tier(tmp_path, max_blocks=1)
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(result.success for result in drain(tier))
+        tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
+        assert not any(result.success for result in drain(tier))
+
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(3)))
+    finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_does_not_evict_active_load(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as manager_module
+
+    tier, _ = make_bounded_tier(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    original_load = manager_module.batch_load_block
+
+    def blocked_load(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "batch_load_block", blocked_load)
+    try:
+        tier.submit_store(make_job(1, [key(1), key(2)]))
+        assert all(result.success for result in drain(tier))
+        tier.submit_load(make_job(2, [key(1)], [3], is_promotion=True))
+        assert started.wait(timeout=5)
+        tier.submit_store(make_job(3, [key(3)], [2]))
+
+        path3 = tier.file_mapper.get_file_name(key(3))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not os.path.exists(path3):
+            time.sleep(0.01)
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
+        assert os.path.exists(path3)
+    finally:
+        release.set()
+        drain(tier)
+        tier.shutdown()
+
+
+def test_bounded_tier_restores_accounting_after_restart(tmp_path):
+    tier, tensor = make_bounded_tier(tmp_path)
+    tier.submit_store(make_job(1, [key(1), key(2)]))
+    assert all(result.success for result in drain(tier))
+    tier.shutdown()
+
+    restarted = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        max_bytes=2 * tensor.stride(0) * tensor.element_size(),
+    )
+    try:
+        assert restarted._cache_bytes == restarted.max_bytes
+        restarted.submit_store(make_job(2, [key(3)], [2]))
+        assert all(result.success for result in drain(restarted))
+        assert restarted._cache_bytes <= restarted.max_bytes
+    finally:
+        restarted.shutdown()
+
+
+def test_bounded_tier_stats_do_not_scan_filesystem(tmp_path, monkeypatch):
+    tier, _ = make_bounded_tier(tmp_path)
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(result.success for result in drain(tier))
+        monkeypatch.setattr(os, "walk", MagicMock(side_effect=AssertionError))
+
+        with tier._capacity_lock:
+            stats = tier.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[tier.CACHE_BYTES] == tier._block_size
+        assert reduced[tier.CACHE_ENTRIES] == 1
+    finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_keeps_protection_until_last_reader(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as module
+
+    tier, _ = make_bounded_tier(tmp_path, max_blocks=1)
+    gate = threading.Event()
+    started = threading.Event()
+    original = module.batch_load_block
+
+    def load(paths, view, offsets, *args):
+        if offsets[0] == 2 * tier._block_size:
+            started.set()
+            assert gate.wait(10)
+        return original(paths, view, offsets, *args)
+
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert drain(tier)[0].success
+        monkeypatch.setattr(module, "batch_load_block", load)
+        tier.submit_load(make_job(2, [key(1)], [2], is_promotion=True))
+        assert started.wait(5)
+        tier.submit_load(make_job(3, [key(1)], [3], is_promotion=True))
+        results: dict[int, JobResult] = {}
+        deadline = time.monotonic() + 5
+        while 3 not in results and time.monotonic() < deadline:
+            results.update((r.job_id, r) for r in tier.get_finished_jobs())
+            time.sleep(0.01)
+        assert results[3].success
+        tier.submit_store(make_job(4, [key(2)], [1]))
+        while 4 not in results and time.monotonic() < deadline:
+            results.update((r.job_id, r) for r in tier.get_finished_jobs())
+            time.sleep(0.01)
+        assert not results[4].success
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
+    finally:
+        gate.set()
+        drain(tier)
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("max_bytes", [-1, 1.5, True])
+def test_bounded_tier_rejects_invalid_capacity(tmp_path, max_bytes):
+    tensor = _page_aligned_zero_tensor(1, _BLOCK_ELEMENTS)
+    error = ValueError if max_bytes == -1 else TypeError
+    with pytest.raises(error, match="max_bytes"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            max_bytes=max_bytes,
+        )
 
 
 def test_store_then_load_roundtrip(fs_tier):
