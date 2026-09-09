@@ -13,14 +13,26 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_offload.base import (
     DevicePointers,
-    FSLoadStoreSpec,
     LoadStoreSpec,
     OffloadingWorker,
+    OffloadKey,
     TransferResult,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 
 logger = init_logger(__name__)
+
+
+class FSLoadStoreSpec(LoadStoreSpec):
+    """Spec for loading/storing KV blocks from a filesystem tier.
+
+    Carries content-addressed OffloadKeys that the worker resolves to
+    file paths via a FileMapper.
+    """
+
+    def __init__(self, keys: list[OffloadKey]):
+        self.keys = keys
+
 
 DEFAULT_MAX_THREADS = 400
 
@@ -146,12 +158,14 @@ class FSOffloadingWorker(OffloadingWorker):
                     f.result()
 
     def shutdown(self) -> None:
-        for t in self._transfers.values():
-            for f in t.futures:
-                f.result()
-        self._transfers.clear()
-        self._pool.shutdown(wait=True)
-        self.shutdown_backend()
+        try:
+            for t in self._transfers.values():
+                for f in t.futures:
+                    f.result()
+        finally:
+            self._transfers.clear()
+            self._pool.shutdown(wait=True)
+            self.shutdown_backend()
 
     # --- Internal: group device pointers per key and submit I/O ---
 
@@ -205,4 +219,6 @@ class FSOffloadingWorker(OffloadingWorker):
 
             ptr_offset += n_data_refs * group_size
 
+        assert key_idx == len(keys)
+        assert ptr_offset == len(device_ptrs.ptrs)
         return futures, total_bytes
