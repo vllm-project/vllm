@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# SPDX-LicenseFileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Determinism + FP32-reference correctness tests for the RDNA3 W4A16 GEMM.
 
 The split-K epilogues of ``gptq_gemm_rdna3`` (scalar path) and the WMMA
