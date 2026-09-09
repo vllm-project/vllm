@@ -118,6 +118,54 @@ def test_batch_invariant_hlm_advances_requests_individually(monkeypatch) -> None
     assert calls == [("first", 1.0, 2.0), ("second", 3.0, 4.0)]
 
 
+def test_batch_invariant_multichunk_prefill_advances_in_fixed_order(
+    monkeypatch,
+) -> None:
+    """Make HLM results independent of chunked-prefill partitioning."""
+
+    calls = []
+
+    class RecordingHighLevel:
+        def advance(self, state, encoder_chunk, layer_chunks) -> None:
+            calls.append(
+                (
+                    state.req_id,
+                    encoder_chunk.item(),
+                    tuple(value.item() for value in layer_chunks),
+                )
+            )
+
+        def prefill(self, *args, **kwargs) -> None:
+            raise AssertionError("batch-invariant HLM must not use multi-chunk prefill")
+
+    store = make_store()
+    store.add_request("request", computed_tokens=0)
+    segment = store.resolve_segments(make_input_batch(["request"], [4], [0]))[0]
+    model = SimpleNamespace(
+        backend_config=SimpleNamespace(chunk_size=2),
+        highlevel=RecordingHighLevel(),
+    )
+    encoder_hidden = torch.tensor([[1.0], [3.0], [5.0], [7.0]])
+    encoder_raw_layers = (
+        torch.tensor([[2.0], [4.0], [6.0], [8.0]]),
+        torch.tensor([[10.0], [12.0], [14.0], [16.0]]),
+    )
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    advance = NCPOlmo3ForCausalLM._advance_completed_chunks(
+        model,
+        segment,
+        encoder_hidden,
+        encoder_raw_layers,
+    )
+
+    assert advance is None
+    assert calls == [
+        ("request", 2.0, (3.0, 11.0)),
+        ("request", 6.0, (7.0, 15.0)),
+    ]
+
+
 def test_normal_hlm_path_batches_equal_position_requests(monkeypatch) -> None:
     """Retain the throughput path when exact batch invariance is disabled."""
 

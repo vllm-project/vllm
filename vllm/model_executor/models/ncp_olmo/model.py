@@ -197,6 +197,17 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
                     encoder_chunks[0],
                     tuple(values[0] for values in layer_chunks),
                 )
+            elif envs.VLLM_BATCH_INVARIANT:
+                # Chunked prefill may present the same prompt as one multi-chunk
+                # segment or as several smaller segments depending on unrelated
+                # requests sharing the scheduler budget. Keep the HLM arithmetic
+                # independent of that partitioning in correctness-first mode.
+                for chunk_index in range(num_completed):
+                    self.highlevel.advance(
+                        state,
+                        encoder_chunks[chunk_index],
+                        tuple(values[chunk_index] for values in layer_chunks),
+                    )
             else:
                 self.highlevel.prefill(
                     state,
