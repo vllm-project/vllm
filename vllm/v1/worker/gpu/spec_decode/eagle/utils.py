@@ -86,13 +86,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
             ),
         )
     if speculative_config.kv_cache_dtype is not None:
-        vllm_config = replace(
-            vllm_config,
-            cache_config=replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            ),
-        )
+        # Set in place rather than replacing cache_config: the draft's attention
+        # impl binds the worker's single cache_config via get_current_vllm_config(),
+        # and the KV cache layout is adopted into that object (via
+        # set_kv_cache_layout) before cudagraph capture. A replaced copy would
+        # stay at layout=None and crash on get_resolved_kv_cache_layout().
+        vllm_config.cache_config.cache_dtype = speculative_config.kv_cache_dtype
     if speculative_config.attention_backend is not None:
         # Before get_model(): the backend is read off the constructed layers.
         # Only when set, so the draft keeps a KV cache layout the target shares.
