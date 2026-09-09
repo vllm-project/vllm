@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cuteDSL low-latency router GEMM (dot-product + split-K)."""
 
+import shutil
+import subprocess
+import sys
+import textwrap
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -164,6 +169,44 @@ def test_splitk_K_sweep(K):
     a = torch.randn(8, K, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
     _assert_close(_gemm(a, b), _ref(a, b), context=f"splitk K={K}")
+
+
+def test_splitk_producer_consumer_barriers():
+    """Partial-block MMA barriers must not rendezvous with DMA exit barriers."""
+    sanitizer = shutil.which("compute-sanitizer")
+    if sanitizer is None:
+        pytest.skip("compute-sanitizer is required to check barrier participation")
+    assert sanitizer is not None
+    code = textwrap.dedent("""
+        import torch
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
+
+        for rows, width, experts in ((5, 2048, 17), (16, 4096, 256)):
+            a = torch.ones((rows, width), device="cuda", dtype=torch.bfloat16)
+            b = torch.ones((experts, width), device="cuda", dtype=torch.bfloat16)
+            output = ll_bf16_gemm(a, b)
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(
+                output, torch.full_like(output, width), rtol=0, atol=0
+            )
+    """)
+    result = subprocess.run(
+        [
+            sanitizer,
+            "--tool",
+            "synccheck",
+            "--error-exitcode",
+            "86",
+            sys.executable,
+            "-c",
+            code,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ERROR SUMMARY: 0 errors" in result.stdout + result.stderr
 
 
 # =================================================================
