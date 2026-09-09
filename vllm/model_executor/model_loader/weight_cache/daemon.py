@@ -12,6 +12,13 @@ Launch one daemon per TP rank with a single command:
     python -m vllm.model_executor.model_loader.weight_cache.daemon \\
         --model /path/to/model --tensor-parallel-size 4
 
+A second replica can seed its daemons from the first replica without
+reading the checkpoint again. Pass one source Unix socket per TP rank for
+same-host peer copies, or one ``host:port`` per rank with
+``--weight-cache-seed-backend rdma`` for cross-host Mooncake copies. The source
+must expose ``--weight-cache-listen-addr host:base_port`` and
+``--weight-cache-seed-token`` for cross-host transfers.
+
 Engines then load from the daemons with:
 
     vllm serve /path/to/model --tensor-parallel-size 4 \\
@@ -23,13 +30,16 @@ are rejected at launch.
 
 import contextlib
 import fcntl
+import hmac
 import multiprocessing
 import os
 import queue
+import select
 import signal
 import socket
 import sys
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -50,10 +60,45 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     recv_msg,
     send_msg,
     verify_peer_is_owner,
+    verify_socket_owner,
+)
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    PEER_IPC_SEED_SOURCE,
+    build_manifest,
+    get_seed_source,
 )
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _split_seed_addresses(value: str | None) -> list[str]:
+    return [address.strip() for address in (value or "").split(",") if address.strip()]
+
+
+def _seed_address(value: str | None, tp_rank: int) -> str | None:
+    addresses = _split_seed_addresses(value)
+    if not addresses:
+        return None
+    if len(addresses) == 1:
+        return addresses[0]
+    if tp_rank >= len(addresses):
+        raise ValueError(
+            f"--weight-cache-seed has {len(addresses)} addresses but TP rank "
+            f"{tp_rank} needs an address; pass one address per TP rank"
+        )
+    return addresses[tp_rank]
+
+
+def _listen_address(value: str | None, tp_rank: int) -> tuple[str, int] | None:
+    if not value:
+        return None
+    host, separator, port = value.rpartition(":")
+    if not separator or not host or not port.isdigit():
+        raise ValueError(
+            f"--weight-cache-listen-addr must be host:base_port, got {value!r}"
+        )
+    return host, int(port) + tp_rank
 
 
 def _report_ready(message: str) -> None:
@@ -122,14 +167,24 @@ class WeightCacheDaemon:
         tp_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
+        seed_addr: str | None = None,
+        seed_backend: str = PEER_IPC_SEED_SOURCE,
+        listen_addr: tuple[str, int] | None = None,
+        seed_token: str | None = None,
     ):
         self.vllm_config = vllm_config
         self.tp_rank = tp_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
+        self.seed_addr = seed_addr
+        self.seed_backend = seed_backend
+        self.listen_addr = listen_addr
+        self.seed_token = seed_token
         self.model: torch.nn.Module | None = None
         self.entries: dict[str, TensorEntry] = {}
         self.aliases: dict[str, str] = {}
+        self.state_tensors: dict[str, torch.Tensor] = {}
+        self._seed_sources: dict[str, Any] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -141,19 +196,22 @@ class WeightCacheDaemon:
     def load_model(self) -> None:
         from vllm.model_executor.model_loader import get_model
 
-        tp_size = self.cache_config.tp_size
         torch.accelerator.set_device_index(self.tp_rank)
-        init_distributed_environment(
-            world_size=tp_size,
-            rank=self.tp_rank,
-            distributed_init_method=self.distributed_init_method,
-            local_rank=self.tp_rank,
-            backend=current_platform.dist_backend,
-        )
-        with set_current_vllm_config(self.vllm_config):
-            ensure_model_parallel_initialized(tp_size, 1)
-            self.model = get_model(vllm_config=self.vllm_config)
-        self._export_entries()
+        if self.seed_addr is not None:
+            self._load_from_seed()
+        else:
+            tp_size = self.cache_config.tp_size
+            init_distributed_environment(
+                world_size=tp_size,
+                rank=self.tp_rank,
+                distributed_init_method=self.distributed_init_method,
+                local_rank=self.tp_rank,
+                backend=current_platform.dist_backend,
+            )
+            with set_current_vllm_config(self.vllm_config):
+                ensure_model_parallel_initialized(tp_size, 1)
+                self.model = get_model(vllm_config=self.vllm_config)
+            self._export_entries()
         logger.info(
             "Weight cache daemon rank %d cached %d tensors",
             self.tp_rank,
@@ -163,6 +221,90 @@ class WeightCacheDaemon:
     def _export_entries(self) -> None:
         assert self.model is not None
         self.entries, self.aliases = export_entries(self.model)
+        self.state_tensors = {}
+        for name, tensor in self.model.named_parameters(remove_duplicate=False):
+            if name in self.entries:
+                self.state_tensors[name] = tensor.detach()
+        for name, tensor in self.model.named_buffers(remove_duplicate=False):
+            if name in self.entries:
+                self.state_tensors[name] = tensor.detach()
+
+    def _connect_seed(self) -> tuple[socket.socket, bool]:
+        assert self.seed_addr is not None
+        if self.seed_addr.startswith("/") or self.seed_addr.startswith("./"):
+            verify_socket_owner(self.seed_addr, strict_perms=False)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            target: Any = self.seed_addr
+            remote = False
+        else:
+            host, separator, port = self.seed_addr.rpartition(":")
+            if not separator or not host or not port.isdigit():
+                raise ValueError(
+                    "Seed address must be an absolute Unix socket path or host:port"
+                )
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target = (host, int(port))
+            remote = True
+        sock.settimeout(300.0)
+        try:
+            sock.connect(target)
+        except OSError:
+            sock.close()
+            raise
+        return sock, remote
+
+    def _load_from_seed(self) -> None:
+        sock, remote = self._connect_seed()
+        try:
+            request: dict[str, Any] = {
+                "cmd": "fetch_manifest",
+                "seed_backend": self.seed_backend,
+            }
+            if remote:
+                request["token"] = self.seed_token
+            send_msg(sock, request)
+            response = recv_msg(sock)
+        finally:
+            sock.close()
+        if response.get("status") != "ok":
+            raise RuntimeError(
+                f"Seed daemon {self.seed_addr} refused the mirror request: "
+                f"{response.get('message', response)}"
+            )
+        source_config = response.get("cache_config")
+        if not isinstance(source_config, WeightCacheKey):
+            raise RuntimeError("Seed daemon returned no compatible cache config")
+        mismatched = self.cache_config.mismatched_fields(source_config)
+        if mismatched:
+            raise RuntimeError(
+                f"Seed daemon cache differs on fields {mismatched}; refusing "
+                "to mirror a different weight shard"
+            )
+        source = self._seed_sources.get(self.seed_backend)
+        if source is None:
+            source = get_seed_source(self.seed_backend)
+            self._seed_sources[self.seed_backend] = source
+        manifest = response["manifest"]
+        tensors = source.fill(
+            manifest, response["seed"], torch.device("cuda", self.tp_rank)
+        )
+        if set(tensors) != set(manifest):
+            raise RuntimeError("Seed backend did not fill the complete tensor manifest")
+        self.entries = {
+            name: TensorEntry.from_tensor(
+                tensors[name], "param" if metadata["is_param"] else "buffer"
+            )
+            for name, metadata in manifest.items()
+        }
+        self.aliases = response.get("aliases", {})
+        self.state_tensors = tensors
+        self.cache_config = source_config
+        logger.info(
+            "Weight cache daemon rank %d mirrored %d tensors from %s",
+            self.tp_rank,
+            len(self.entries),
+            self.seed_addr,
+        )
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -188,6 +330,13 @@ class WeightCacheDaemon:
         server.bind(socket_path)
         os.chmod(socket_path, 0o600)
         server.listen()
+        tcp_server = None
+        if self.listen_addr is not None:
+            tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            tcp_server.bind(self.listen_addr)
+            tcp_server.listen()
+        listeners = [server] + ([tcp_server] if tcp_server is not None else [])
         logger.info(
             "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
         )
@@ -198,21 +347,28 @@ class WeightCacheDaemon:
             ready_callback()
         try:
             while True:
-                conn, _ = server.accept()
-                with conn:
-                    try:
-                        verify_peer_is_owner(conn)
-                        self._handle_connection(conn)
-                    except (ConnectionError, EOFError):
-                        logger.warning("Client disconnected mid-request")
-                    except Exception:
-                        # A single malformed or malicious request must not take
-                        # down the daemon for every other engine on this GPU.
-                        logger.exception(
-                            "Error handling weight cache client; continuing"
-                        )
+                readable, _, _ = select.select(listeners, [], [], 1.0)
+                for listener in readable:
+                    conn, _ = listener.accept()
+                    with conn:
+                        try:
+                            remote = listener is tcp_server
+                            if not remote:
+                                verify_peer_is_owner(conn)
+                            self._handle_connection(conn, remote=remote)
+                        except (ConnectionError, EOFError):
+                            logger.warning("Client disconnected mid-request")
+                        except Exception:
+                            # A malformed peer must not take down all clients.
+                            logger.exception(
+                                "Error handling weight cache client; continuing"
+                            )
         finally:
             server.close()
+            if tcp_server is not None:
+                tcp_server.close()
+            for source in self._seed_sources.values():
+                source.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -242,11 +398,25 @@ class WeightCacheDaemon:
             gpu_id = device_index
         return get_socket_path(gpu_id, self.socket_dir)
 
-    def _handle_connection(self, conn: socket.socket) -> None:
+    def _handle_connection(self, conn: socket.socket, *, remote: bool = False) -> None:
         request = recv_msg(conn)
+        if remote:
+            presented = request.get("token")
+            if (
+                not self.seed_token
+                or not isinstance(presented, str)
+                or not hmac.compare_digest(presented, self.seed_token)
+                or request.get("cmd") != "fetch_manifest"
+            ):
+                send_msg(
+                    conn, {"status": "error", "message": "Unauthorized seed request"}
+                )
+                return
         cmd = request.get("cmd")
         if cmd == "get_state":
             self._handle_get_state(conn, request)
+        elif cmd == "fetch_manifest":
+            self._handle_fetch_manifest(conn, request)
         elif cmd == "release":
             self._handle_release(conn)
         else:
@@ -275,9 +445,39 @@ class WeightCacheDaemon:
             },
         )
 
+    def _handle_fetch_manifest(self, conn: socket.socket, request: dict) -> None:
+        if not self.entries:
+            send_msg(conn, {"status": "error", "message": "Weights were released"})
+            return
+        backend = request.get("seed_backend", PEER_IPC_SEED_SOURCE)
+        source = self._seed_sources.get(backend)
+        if source is None:
+            source = get_seed_source(backend)
+            self._seed_sources[backend] = source
+        try:
+            seed = source.prepare_seed(
+                self.entries,
+                self.state_tensors,
+                get_physical_device_id(torch.accelerator.current_device_index()),
+            )
+        except Exception as error:
+            send_msg(conn, {"status": "error", "message": str(error)})
+            return
+        send_msg(
+            conn,
+            {
+                "status": "ok",
+                "cache_config": self.cache_config,
+                "manifest": build_manifest(self.entries),
+                "aliases": self.aliases,
+                "seed": seed,
+            },
+        )
+
     def _handle_release(self, conn: socket.socket) -> None:
         self.entries.clear()
         self.aliases.clear()
+        self.state_tensors.clear()
         self.model = None
         torch.accelerator.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
@@ -295,10 +495,21 @@ def _run_daemon(
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
+    seed_addr: str | None,
+    seed_backend: str,
+    listen_addr: tuple[str, int] | None,
+    seed_token: str | None,
     ready_queue: "multiprocessing.Queue[int]",
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, distributed_init_method, socket_dir
+        vllm_config,
+        tp_rank,
+        distributed_init_method,
+        socket_dir,
+        seed_addr,
+        seed_backend,
+        listen_addr,
+        seed_token,
     )
     daemon.load_model()
     daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
@@ -334,9 +545,37 @@ def main() -> None:
         default=None,
         help="Directory for the daemon Unix sockets (default: tempdir).",
     )
+    parser.add_argument(
+        "--weight-cache-seed",
+        type=str,
+        default=None,
+        help="Comma-separated source daemon socket/host addresses, one per TP rank.",
+    )
+    parser.add_argument(
+        "--weight-cache-seed-backend",
+        choices=[PEER_IPC_SEED_SOURCE, "rdma"],
+        default=PEER_IPC_SEED_SOURCE,
+        help="Daemon-to-daemon mover: peer_ipc or rdma.",
+    )
+    parser.add_argument(
+        "--weight-cache-listen-addr",
+        type=str,
+        default=None,
+        help="host:base_port for the cross-node seed control plane.",
+    )
+    parser.add_argument(
+        "--weight-cache-seed-token",
+        type=str,
+        default=None,
+        help="Shared secret required by the cross-node seed control plane.",
+    )
     args = parser.parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
+    if args.weight_cache_listen_addr and not args.weight_cache_seed_token:
+        raise ValueError(
+            "--weight-cache-listen-addr requires --weight-cache-seed-token"
+        )
     if vllm_config.load_config.load_format == "ipc_cache":
         raise ValueError(
             "The weight cache daemon itself must load from disk; use the "
@@ -360,6 +599,10 @@ def main() -> None:
                 vllm_config,
                 distributed_init_method,
                 args.weight_cache_socket_dir,
+                _seed_address(args.weight_cache_seed, rank),
+                args.weight_cache_seed_backend,
+                _listen_address(args.weight_cache_listen_addr, rank),
+                args.weight_cache_seed_token,
                 ready_queue,
             ),
             name=f"vllm-weight-cache-daemon-{rank}",

@@ -11,10 +11,16 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_quant_support,
     is_ipc_quant_supported,
 )
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    PEER_IPC_SEED_SOURCE,
+    RDMA_SEED_SOURCE,
+)
 
 __all__ = [
     "CacheConfigMismatchError",
     "IpcModelLoader",
+    "PEER_IPC_SEED_SOURCE",
+    "RDMA_SEED_SOURCE",
     "TensorEntry",
     "UnsupportedQuantForIPCError",
     "WeightCacheKey",

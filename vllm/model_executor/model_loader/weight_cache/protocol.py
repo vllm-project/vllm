@@ -364,18 +364,21 @@ class TensorEntry:
     """Either "param" or "buffer"."""
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
+    shape: tuple[int, ...] = ()
+    dtype: str = ""
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
         from torch.multiprocessing.reductions import reduce_tensor
 
         tensor = tensor.detach()
+        metadata = {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype)}
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
+            return cls(kind=kind, ipc_args=ipc_args, **metadata)
+        return cls(kind=kind, cpu_tensor=tensor.cpu(), **metadata)
 
-    def rebuild(self, device_index: int) -> torch.Tensor:
+    def rebuild(self, device_index: int, *, retarget: bool = True) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
@@ -383,9 +386,11 @@ class TensorEntry:
 
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
-        # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings.
-        args[6] = device_index
+        # normally be retargeted to the local index since the daemon and the
+        # engine may have different CUDA_VISIBLE_DEVICES mappings. A daemon
+        # mirror leaves it at the source index while opening a peer handle.
+        if retarget:
+            args[6] = device_index
         return rebuild_cuda_tensor(*args)
 
 
