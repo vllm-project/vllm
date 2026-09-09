@@ -359,6 +359,7 @@ def _run_flashinfer_autotune_dummy_runs(
 ) -> None:
     import vllm.utils.flashinfer as fi_utils
 
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
         logger.info(
@@ -369,10 +370,10 @@ def _run_flashinfer_autotune_dummy_runs(
         with fi_utils.autotune(tuning_buckets=tuning_buckets):
             runner._dummy_run(
                 num_tokens=num_tokens,
-                skip_attn=skip_attn,
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
+                **dummy_run_kwargs,
             )
 
 
