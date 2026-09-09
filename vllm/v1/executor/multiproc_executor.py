@@ -745,7 +745,40 @@ class WorkerProc:
         with numa_utils.configure_subprocess(
             vllm_config, local_rank, process_kind="worker"
         ):
-            proc.start()
+            if current_platform.is_xpu():
+                assigned = (
+                    vllm_config.parallel_config.assigned_physical_gpu_ids
+                )
+
+                if assigned is not None:
+                    physical_device_id = assigned[local_rank]
+                else:
+                    physical_device_id = (
+                        current_platform.device_id_to_physical_device_id(
+                            local_rank
+                        )
+                    )
+
+                env_name = current_platform.device_control_env_var
+                old_device_env = os.environ.get(env_name)
+
+                try:
+                    os.environ[env_name] = str(physical_device_id)
+                    logger.debug(
+                        "Starting XPU worker rank=%d local_rank=%d with %s=%s",
+                        rank,
+                        local_rank,
+                        env_name,
+                        physical_device_id,
+                    )
+                    proc.start()
+                finally:
+                    if old_device_env is None:
+                        os.environ.pop(env_name, None)
+                    else:
+                        os.environ[env_name] = old_device_env
+            else:
+                proc.start()
 
         # Close child ends of pipes here in the parent
         ready_writer.close()

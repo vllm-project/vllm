@@ -209,9 +209,7 @@ class CoreEngineProcManager:
                 # Populate the logical-to-physical GPU mapping in DP for
                 # platforms that cannot rely on
                 # torch.accelerator.set_device_index(), and for Ray.
-                needs_device_env_isolation = not (
-                    current_platform.is_cuda_alike() or current_platform.is_xpu()
-                )
+                needs_device_env_isolation = not current_platform.is_cuda_alike()
                 if is_dp and (
                     needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
