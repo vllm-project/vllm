@@ -94,9 +94,25 @@ class FusedMoEActivationFormat(Enum):
     """
     BatchedExperts = ("batched_experts",)
     """
-    Like 'Standard' format but potentially padded in the expert (E) dimension.
+    Like 'Standard' (num_tokens, hidden dim), but the row count is an upper
+    bound rather than the exact token count, so some rows are inactive padding.
+
+    Produced by all2all backends (DeepEP v2) that cannot report the received
+    token count on the host without a device sync. Padding comes from the
+    worst-case recv allocation (decode/cudagraph mode, where the tail rows are
+    left uninitialized) and from per-expert block alignment (prefill mode,
+    where the gaps are zeroed).
+
+    Inactive rows are marked by setting all of their `topk_ids` slots to -1;
+    when available, `ExpertTokensMetadata.psum_recv_per_rank` carries the
+    real/padding boundary on device. Consuming kernels must therefore either
+    skip such rows or produce results for them that are safe to discard --
+    padding rows may hold uninitialized garbage, so an expert that derives
+    routing by scanning every row will corrupt real tokens if it ignores the
+    -1 markers. Only experts declaring this format are paired with such a
+    prepare/finalize step; see `is_superset`.
     """
-    PaddedStandard = ("padded_standard",)  # E-padded (indexed?)
+    PaddedStandard = ("padded_standard",)
 
     def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
         """Whether this (experts) format is a superset of ``pf_format``, i.e.
