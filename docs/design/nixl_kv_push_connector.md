@@ -204,6 +204,11 @@ registers its KV caches, and every transfer it issues uses that order.
 owns and reorders them to match, so both sides stay paired regardless of
 how each remote rank happens to order its metadata.
 
+Addresses, block lengths, strides, and per-region capacities follow the same
+member order. Descriptor offsets use each member's region capacity, so P and
+D need not allocate the same number of blocks. Physical allocations are still
+registered once, even when multiple members share them.
+
 Invariants enforced when the remote regions are aligned:
 
 * every locally owned member must be advertised exactly once by the
