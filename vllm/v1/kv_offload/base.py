@@ -561,6 +561,7 @@ class DevicePointers:
     group_block_counts: tuple[int, ...]  # device blocks per group
     group_data_ref_counts: tuple[int, ...]  # data_refs per group
     block_indices: tuple[int, ...]  # logical block offset per group
+    device_spec: "GPULoadStoreSpec | None" = None  # original spec (debugging)
 
 
 def resolve_device_pointers(
@@ -613,6 +614,7 @@ def resolve_device_pointers(
         group_block_counts=tuple(group_sizes),
         group_data_ref_counts=tuple(len(refs) for refs in group_data_refs),
         block_indices=tuple(block_indices),
+        device_spec=device_spec,
     )
 
 
