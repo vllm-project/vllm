@@ -137,8 +137,13 @@ def _kda_recoverssm_verify_kernel(
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
     )
-    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
+    state = tl.load(
+        state_ptrs, mask=mask_state, other=0.0, eviction_policy="evict_first"
+    ).to(tl.float32)
     A = tl.exp(tl.load(A_log_ptr + pid_h).to(tl.float32))
+    dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
+        tl.float32
+    )
 
     for token_offset in tl.static_range(SPEC_QUERY_LEN):
         token_valid = token_offset < query_len
@@ -157,6 +162,7 @@ def _kda_recoverssm_verify_kernel(
             v_ptr + token * stride_v_token + pid_h * V + offs_v,
             mask=token_valid & mask_v,
             other=0.0,
+            eviction_policy="evict_first",
         ).to(tl.float32)
         raw_g = tl.load(
             raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
@@ -170,9 +176,6 @@ def _kda_recoverssm_verify_kernel(
         ).to(tl.float32)
 
         q *= tl.rsqrt(tl.sum(q * q) + 1e-6) * (K**-0.5)
-        dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
-            tl.float32
-        )
         updated_state, correction = _kda_recurrent_step(
             state,
             k,
@@ -191,6 +194,7 @@ def _kda_recoverssm_verify_kernel(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
             mask=token_valid & mask_v,
+            eviction_policy="evict_first",
         )
 
         correction_ptr = (
@@ -661,7 +665,10 @@ def kda_recoverssm_verify(
         return out
 
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
+    block_v = min(
+        triton.next_power_of_2(value_dim),
+        (4 if batch <= 8 else 8) if key_dim == 128 else 32,
+    )
     grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -705,7 +712,7 @@ def kda_recoverssm_verify(
         BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
+        num_warps=1 if key_dim == 128 else 4,
         num_stages=2,
     )
     return out
