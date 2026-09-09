@@ -38,11 +38,31 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+# Pre-fill value for scale parameters whose shards load independently. The
+# shards are combined with .max(), so an unloaded shard must never win; the
+# smallest representable float32 guarantees that.
+FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
+
+
+def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the block-FP8 weight scale for supported quant methods."""
+    # Local import avoids a circular import: quark_w8a8_fp8 imports this module.
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
+        QuarkW8A8Fp8PerBlock,
+    )
+
+    if isinstance(
+        getattr(layer, "scheme", None),
+        QuarkW8A8Fp8PerBlock,
+    ):
+        return getattr(layer, "weight_scale", None)
+    return getattr(layer, "weight_scale_inv", None)
 
 
 def input_to_float8(
@@ -1243,6 +1263,35 @@ def validate_fp8_block_shape(
                     f"{output_partition_size} is not divisible by "
                     f"weight quantization block_n = {block_n}."
                 )
+
+
+def validate_fp8_block_shape_moe(
+    intermediate_size_per_partition: int,
+    block_size: list[int],
+) -> None:
+    """Validate fused MoE block quantization shapes for tensor parallelism."""
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    block_n, block_k = block_size[0], block_size[1]
+
+    # NOTE: To ensure proper alignment of the block-wise quantization
+    # scales, the output_size of the weights for both the gate and up
+    # layers must be divisible by block_n.
+    # Required by column parallel or enabling merged weights
+    if intermediate_size_per_partition % block_n != 0:
+        raise ValueError(
+            f"The output_size of gate's and up's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_n = {block_n}."
+        )
+    if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+        # Required by row parallel
+        raise ValueError(
+            f"The input_size of down's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_k = {block_k}."
+        )
 
 
 def create_fp8_weight_parameter(

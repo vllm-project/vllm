@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
+    EngramConfig,
     KernelConfig,
     KVTransferConfig,
     ModelConfig,
@@ -39,9 +42,18 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import (
+    get_pooling_config,
+    try_get_dense_modules,
+)
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
 
 
 def test_kda_recoverssm_derivation_is_revalidated():
@@ -103,7 +115,34 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
-def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "NixlConnector",
+                        "kv_role": "kv_both",
+                    },
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                    },
+                ]
+            },
+        ),
+    ],
+)
+def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
+    caplog, disable_log_dedup, kv_transfer_config
+):
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
         device_config=DeviceConfig(device="cpu"),
@@ -113,10 +152,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
             cp_kv_cache_interleave_size=3,
             distributed_executor_backend="mp",
         ),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="NixlConnector",
-            kv_role="kv_both",
-        ),
+        kv_transfer_config=kv_transfer_config,
     )
 
     kv_cache_config = SimpleNamespace(
@@ -127,6 +163,51 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 16
     assert "automatically adjusted from 3 to block_size 16" in caplog.text
+
+
+def test_kv_offloading_does_not_adjust_dcp_interleave_size():
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=1,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+        ),
+    )
+
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+    config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 1
+
+
+def test_kv_offloading_does_not_skip_dcp_interleave_validation():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            mamba_cache_mode="none",
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=3,
+        ),
+        scheduler_config=SimpleNamespace(disable_chunked_mm_input=False),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="divisible by"):
+        VllmConfig.validate_block_size(config)
 
 
 def test_compile_config_repr_succeeds():
@@ -258,9 +339,15 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("DeepseekV32MTPModel", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
         ("GlmMoeDsaForCausalLM", True, False),
+        ("Qwen4ExpForCausalLM", False, True),
+        ("Qwen4ExpForCausalLM", True, False),
+        ("Qwen4ExpForConditionalGeneration", False, True),
+        ("Qwen4ExpForConditionalGeneration", True, False),
+        ("Qwen4ExpMTP", False, True),
+        ("Qwen4ExpMTP", True, False),
     ],
 )
-def test_dsa_breakable_cudagraph_platform_default(
+def test_breakable_cudagraph_platform_default(
     monkeypatch, architecture, is_rocm, expected
 ):
     from vllm.config.vllm import default_breakable_cudagraph_architectures
@@ -673,6 +760,22 @@ def test_v1_model_runner_rejects_v2_only_features():
         VllmConfig._validate_v1_model_runner(config)
 
 
+def test_batch_sharded_sampling_rejects_return_sampling_mask():
+    """The batch-sharded gather drops sampling masks, so the combination must
+    fail loudly instead of returning ``sampling_mask=None``."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
+        speculative_config=None,
+    )
+
+    with pytest.raises(ValueError, match="sampling masks"):
+        VllmConfig._validate_batch_sharded_sampling(config)
+
+
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,
@@ -809,6 +912,159 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+@pytest.mark.parametrize(
+    "dp_size, across_dp, expected",
+    [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
+)
+def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: int):
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=dp_size,
+        distributed_executor_backend="mp",
+    )
+    config = EngramConfig(embedding_across_dp=across_dp)
+    assert config.get_parallel_size(parallel) == expected
+
+
+def test_engram_rejects_elastic_cross_dp():
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        distributed_executor_backend="mp",
+    )
+    parallel.enable_elastic_ep = True
+    with pytest.raises(ValueError, match="embedding_across_dp.*elastic EP"):
+        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
+
+
+@pytest.mark.parametrize("legacy", [None, "0", "1"])
+def test_engram_cpu_offload_environment_fallback(monkeypatch, legacy):
+    """Explicit settings must override the legacy environment fallback."""
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    if legacy is not None:
+        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    assert EngramConfig().cpu_offload == (legacy == "1")
+    assert EngramConfig(cpu_offload=False).cpu_offload is False
+    assert EngramConfig(cpu_offload=True).cpu_offload is True
+
+
+@pytest.mark.parametrize(
+    "architecture, ple_layers, cuda, supported",
+    [
+        ("Qwen4ExpForCausalLM", [1], True, True),
+        ("Qwen4ExpForConditionalGeneration", [1], True, True),
+        ("Qwen4ExpForCausalLM", [], True, False),
+        ("Qwen4ExpForCausalLM", None, True, False),
+        ("Qwen4ExpForCausalLM", [1], False, False),
+        ("LlamaForCausalLM", [1], True, False),
+        ("Qwen4ExpMTP", [], True, False),
+        (None, None, True, False),
+    ],
+)
+def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+    """A similarly named HF field must not enable unsupported implementations."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    model = (
+        cast(
+            ModelConfig,
+            SimpleNamespace(
+                architecture=architecture,
+                hf_text_config=SimpleNamespace(ple_layer_ids=ple_layers),
+            ),
+        )
+        if architecture is not None
+        else None
+    )
+    config = EngramConfig(cpu_offload=False, embedding_across_dp=False)
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            config.verify_model_config(model)
+
+
+def test_engram_config_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    config = VllmConfig()
+    assert config.engram_config is None
+    assert config.compute_hash()
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_none_resolves_legacy_offload(monkeypatch, legacy):
+    """Legacy enablement materializes a config before model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForCausalLM",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=None,
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    VllmConfig._resolve_and_verify_engram_config(config)
+    if legacy == "1":
+        assert config.engram_config is not None
+        assert config.engram_config.cpu_offload is True
+    else:
+        assert config.engram_config is None
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_explicit_config_requires_supported_model(monkeypatch, legacy):
+    """Explicit all-false settings still opt into model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig(engram_config=EngramConfig(cpu_offload=False))
+
+
+def test_engram_legacy_offload_requires_supported_model(monkeypatch):
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig()
+
+
+@pytest.mark.parametrize("target_has_ple", [False, True])
+def test_engram_draft_config_validates_target(monkeypatch, target_has_ple):
+    """MTP may inherit cross-DP sharding without having its own PLE layers."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    target = SimpleNamespace(
+        architecture="Qwen4ExpForCausalLM",
+        hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
+    )
+    draft = SimpleNamespace(architecture="Qwen4ExpMTP")
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=draft,
+            speculative_config=SimpleNamespace(
+                draft_model_config=draft, target_model_config=target
+            ),
+            engram_config=EngramConfig(embedding_across_dp=True),
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    if target_has_ple:
+        VllmConfig._resolve_and_verify_engram_config(config)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            VllmConfig._resolve_and_verify_engram_config(config)
+
+
+def test_engram_hash_tracks_storage_and_sharding():
+    configs = [
+        EngramConfig(cpu_offload=offload, embedding_across_dp=across_dp)
+        for offload in (False, True)
+        for across_dp in (False, True)
+    ]
+    assert len({config.compute_hash() for config in configs}) == 4
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -1029,6 +1285,103 @@ def test_get_pooling_config():
     assert model_config.pooler_config.use_activation
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.tok_pooling_type == "ALL"
+
+
+@pytest.mark.parametrize(
+    ("pooling_module_type", "normalize_module_type", "pooling_config", "expected"),
+    [
+        (
+            "sentence_transformers.models.Pooling",
+            "sentence_transformers.models.Normalize",
+            {"pooling_mode_mean_tokens": True},
+            {"use_activation": True, "seq_pooling_type": "MEAN"},
+        ),
+        (
+            "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+            "sentence_transformers.sentence_transformer.modules.normalize.Normalize",
+            {"pooling_mode": "lasttoken"},
+            {"use_activation": True, "seq_pooling_type": "LAST"},
+        ),
+        (
+            "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+            "sentence_transformers.base.modules.normalize.Normalize",
+            {"pooling_mode": "mean"},
+            {"use_activation": True, "seq_pooling_type": "MEAN"},
+        ),
+    ],
+)
+def test_get_pooling_config_supports_sentence_transformers_schemas(
+    tmp_path,
+    caplog,
+    pooling_module_type,
+    normalize_module_type,
+    pooling_config,
+    expected,
+):
+    modules = [
+        {"idx": 1, "name": "1", "path": "1_Pooling", "type": pooling_module_type},
+        {
+            "idx": 2,
+            "name": "2",
+            "path": "2_Normalize",
+            "type": normalize_module_type,
+        },
+    ]
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(tmp_path / "1_Pooling" / "config.json", pooling_config)
+
+    with caplog.at_level(logging.WARNING):
+        config = get_pooling_config(str(tmp_path))
+
+    assert config == expected
+    assert "Unable to determine Sentence Transformers pooling type" not in caplog.text
+
+
+def test_get_pooling_config_warns_when_pooling_mode_is_unknown(tmp_path, caplog):
+    modules = [
+        {
+            "idx": 1,
+            "name": "1",
+            "path": "1_Pooling",
+            "type": "sentence_transformers.models.Pooling",
+        }
+    ]
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(
+        tmp_path / "1_Pooling" / "config.json",
+        {"pooling_mode": "unsupported"},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config = get_pooling_config(str(tmp_path))
+
+    assert config == {"use_activation": False}
+    assert "Unable to determine Sentence Transformers pooling type" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "dense_module_type",
+    [
+        "sentence_transformers.models.Dense",
+        "sentence_transformers.base.modules.dense.Dense",
+    ],
+)
+def test_get_dense_modules_supports_sentence_transformers_schemas(
+    tmp_path, dense_module_type
+):
+    modules = [{"idx": 2, "name": "2", "path": "2_Dense", "type": dense_module_type}]
+    dense_config = {
+        "in_features": 768,
+        "out_features": 3072,
+        "bias": False,
+        "activation_function": "torch.nn.modules.linear.Identity",
+    }
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(tmp_path / "2_Dense" / "config.json", dense_config)
+
+    assert try_get_dense_modules(str(tmp_path)) == [
+        {**dense_config, "folder": "2_Dense"}
+    ]
 
 
 @pytest.mark.skipif(
@@ -1332,6 +1685,49 @@ def test_get_and_verify_max_len(
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
+
+
+@pytest.mark.parametrize("max_model_len", [None, 1024])
+@pytest.mark.parametrize(
+    ("rope_parameters", "expected_max_len"),
+    [
+        ({"rope_type": "default"}, 4096),
+        ({"rope_type": "linear", "factor": 2.0}, 8192),
+        ({"rope_type": "longrope"}, 2048),
+    ],
+)
+def test_get_and_verify_max_len_with_nope_layers(
+    max_model_len, rope_parameters, expected_max_len
+):
+    """NoPE layers do not prevent deriving or scaling the context length."""
+    from transformers import PretrainedConfig
+
+    from vllm.config.model import _get_and_verify_max_len
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        ModelArchConfigConvertorBase,
+    )
+
+    hf_config = PretrainedConfig(
+        max_position_embeddings=4096,
+        original_max_position_embeddings=2048,
+    )
+    hf_config.rope_parameters = {
+        "full_attention": None,
+        "sliding_attention": rope_parameters,
+    }
+    model_arch_config = ModelArchConfigConvertorBase(hf_config, hf_config).convert()
+
+    actual_max_len = _get_and_verify_max_len(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        tokenizer_config=None,
+        max_model_len=max_model_len,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert actual_max_len == (max_model_len or expected_max_len)
+    assert hf_config.rope_parameters["full_attention"] is None
 
 
 class MockConfig:
