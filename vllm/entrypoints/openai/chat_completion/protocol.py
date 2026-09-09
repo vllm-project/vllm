@@ -23,21 +23,21 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
-    OpenAIBaseModel,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
     ToolCall,
-    UsageInfo,
     structured_outputs_from_response_format,
+    validate_cache_salt,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -467,6 +467,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -518,6 +519,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod

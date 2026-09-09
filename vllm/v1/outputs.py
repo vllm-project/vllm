@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -53,42 +54,27 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
+    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+
     # [num_kept_tokens]
     token_ids: np.ndarray
-    # [num_generated_tokens + 1]
-    offsets: np.ndarray
-    # [num_reqs + 1]
+    # [num_positions + 1], or None for a single position
+    offsets: np.ndarray | None = None
+    # Unused with one position per request; kept for the wire layout.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        if self.cu_num_generated_tokens is None:
-            start_idx = req_idx
-        else:
-            start_idx = self.cu_num_generated_tokens[req_idx]
-        end_idx = start_idx + num_positions
-        flat_start = self.offsets[start_idx]
-        flat_end = self.offsets[end_idx]
+        assert num_positions == 1 and self.offsets is not None
         return SamplingMaskLists(
-            self.token_ids[flat_start:flat_end],
-            self.offsets[start_idx : end_idx + 1] - flat_start,
-            None,
+            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
         )
 
     def to_nested_list(self) -> list[list[int]]:
-        """Convert CSR representation to ``list[list[int]]``."""
-        return [
-            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
-            for i in range(len(self.offsets) - 1)
-        ]
-
-    @staticmethod
-    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
-        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
-        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
-        offsets = np.empty(len(counts) + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
-        return SamplingMaskLists(token_ids, offsets)
+        token_ids = self.token_ids.tolist()
+        if self.offsets is None:
+            return [token_ids]
+        offsets = self.offsets.tolist()
+        return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
 
 class LogprobsTensors(NamedTuple):
@@ -182,11 +168,18 @@ class LogprobsTensors(NamedTuple):
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
-            (num_positions, num_tokens_per_position), dtype=torch.int32, device="cpu"
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
-        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
-        selected_token_ranks = torch.empty(
-            num_positions, dtype=torch.int32, device="cpu"
+        logprobs = logprob_token_ids.new_empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.float32,
+            pin_memory=PIN_MEMORY,
+        )
+        selected_token_ranks = logprob_token_ids.new_empty(
+            num_positions, pin_memory=PIN_MEMORY
         )
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids,

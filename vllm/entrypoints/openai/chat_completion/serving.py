@@ -16,9 +16,15 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     make_tool_call_id,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    PerRequestMetrics,
+    RequestResponseMetadata,
+    ToolCall,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
-    GenerationError,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -36,23 +42,19 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     CompletionTokenUsageInfo,
-    DeltaMessage,
     ErrorResponse,
-    FunctionCall,
-    PerRequestMetrics,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
-    ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -233,11 +235,7 @@ class OpenAIServingChat(GenerateBaseServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight(request.n or 1)
 
         return await self.online_renderer.render_chat(request)
 
