@@ -1551,6 +1551,15 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_ETP: GroupCoordinator | None = None
+
+
+def get_etp_group() -> GroupCoordinator:
+    """Return the Engram Tensor Parallel (ETP) group that shards one embedding table."""
+    assert _ETP is not None, "Engram tensor-parallel group is not initialized"
+    return _ETP
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -2008,6 +2017,28 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
+    global _ETP
+    assert _ETP is None, "Engram tensor-parallel group is already initialized"
+    engram_tensor_parallel_size = (
+        config.engram_config.get_parallel_size(parallel_config)
+        if config.engram_config is not None
+        else tensor_model_parallel_size
+    )
+    if engram_tensor_parallel_size == tensor_model_parallel_size:
+        _ETP = _TP
+    else:
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 1, 4)
+            .reshape(-1, engram_tensor_parallel_size)
+            .unbind(0)
+        )
+        _ETP = init_model_parallel_group(
+            [ranks.tolist() for ranks in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="etp",
+        )
+
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
@@ -2142,13 +2173,14 @@ def initialize_model_parallel(
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
-        "TP rank %s, EP rank %s, EPLB rank %s",
+        "TP rank %s, ETP rank %s, EP rank %s, EPLB rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
+        _ETP.rank_in_group,
         _EP.rank_in_group if _EP is not None else "N/A",
         _EPLB.rank_in_group if _EPLB is not None else "N/A",
     )
@@ -2243,7 +2275,11 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP
+    global _TP, _ETP
+
+    if _ETP and _ETP is not _TP:
+        _ETP.destroy()
+    _ETP = None
 
     if _TP:
         _TP.destroy()

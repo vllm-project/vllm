@@ -23,6 +23,9 @@ else:
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
+    requires_device_loading: bool = True
+    """Whether post-load processing requires parameters on the target device."""
+
     uses_meta_device: bool = False
     """
     Whether this method creates weights on meta device for online quantization.

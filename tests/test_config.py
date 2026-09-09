@@ -22,6 +22,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
+    EngramConfig,
     KernelConfig,
     KVTransferConfig,
     ModelConfig,
@@ -911,6 +912,159 @@ def test_data_parallel_rpc_port_has_fixed_default():
 
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+@pytest.mark.parametrize(
+    "dp_size, across_dp, expected",
+    [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
+)
+def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: int):
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=dp_size,
+        distributed_executor_backend="mp",
+    )
+    config = EngramConfig(embedding_across_dp=across_dp)
+    assert config.get_parallel_size(parallel) == expected
+
+
+def test_engram_rejects_elastic_cross_dp():
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        distributed_executor_backend="mp",
+    )
+    parallel.enable_elastic_ep = True
+    with pytest.raises(ValueError, match="embedding_across_dp.*elastic EP"):
+        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
+
+
+@pytest.mark.parametrize("legacy", [None, "0", "1"])
+def test_engram_cpu_offload_environment_fallback(monkeypatch, legacy):
+    """Explicit settings must override the legacy environment fallback."""
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    if legacy is not None:
+        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    assert EngramConfig().cpu_offload == (legacy == "1")
+    assert EngramConfig(cpu_offload=False).cpu_offload is False
+    assert EngramConfig(cpu_offload=True).cpu_offload is True
+
+
+@pytest.mark.parametrize(
+    "architecture, ple_layers, cuda, supported",
+    [
+        ("Qwen4ExpForCausalLM", [1], True, True),
+        ("Qwen4ExpForConditionalGeneration", [1], True, True),
+        ("Qwen4ExpForCausalLM", [], True, False),
+        ("Qwen4ExpForCausalLM", None, True, False),
+        ("Qwen4ExpForCausalLM", [1], False, False),
+        ("LlamaForCausalLM", [1], True, False),
+        ("Qwen4ExpMTP", [], True, False),
+        (None, None, True, False),
+    ],
+)
+def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+    """A similarly named HF field must not enable unsupported implementations."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    model = (
+        cast(
+            ModelConfig,
+            SimpleNamespace(
+                architecture=architecture,
+                hf_text_config=SimpleNamespace(ple_layer_ids=ple_layers),
+            ),
+        )
+        if architecture is not None
+        else None
+    )
+    config = EngramConfig(cpu_offload=False, embedding_across_dp=False)
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            config.verify_model_config(model)
+
+
+def test_engram_config_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    config = VllmConfig()
+    assert config.engram_config is None
+    assert config.compute_hash()
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_none_resolves_legacy_offload(monkeypatch, legacy):
+    """Legacy enablement materializes a config before model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForCausalLM",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=None,
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    VllmConfig._resolve_and_verify_engram_config(config)
+    if legacy == "1":
+        assert config.engram_config is not None
+        assert config.engram_config.cpu_offload is True
+    else:
+        assert config.engram_config is None
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_explicit_config_requires_supported_model(monkeypatch, legacy):
+    """Explicit all-false settings still opt into model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig(engram_config=EngramConfig(cpu_offload=False))
+
+
+def test_engram_legacy_offload_requires_supported_model(monkeypatch):
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig()
+
+
+@pytest.mark.parametrize("target_has_ple", [False, True])
+def test_engram_draft_config_validates_target(monkeypatch, target_has_ple):
+    """MTP may inherit cross-DP sharding without having its own PLE layers."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    target = SimpleNamespace(
+        architecture="Qwen4ExpForCausalLM",
+        hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
+    )
+    draft = SimpleNamespace(architecture="Qwen4ExpMTP")
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=draft,
+            speculative_config=SimpleNamespace(
+                draft_model_config=draft, target_model_config=target
+            ),
+            engram_config=EngramConfig(embedding_across_dp=True),
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    if target_has_ple:
+        VllmConfig._resolve_and_verify_engram_config(config)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            VllmConfig._resolve_and_verify_engram_config(config)
+
+
+def test_engram_hash_tracks_storage_and_sharding():
+    configs = [
+        EngramConfig(cpu_offload=offload, embedding_across_dp=across_dp)
+        for offload in (False, True)
+        for across_dp in (False, True)
+    ]
+    assert len({config.compute_hash() for config in configs}) == 4
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
