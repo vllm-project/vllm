@@ -32,6 +32,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v4_engine_reasoning_parser",
         "DeepSeekV4ParserReasoningAdapter",
     ),
+    "plamo3": (
+        "plamo3_reasoning_parser",
+        "Plamo3ReasoningParser",
+    ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",
         "PoolsideV1ReasoningParser",
