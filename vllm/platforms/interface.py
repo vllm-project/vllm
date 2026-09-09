@@ -641,14 +641,83 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
-        if model_config.is_hybrid:
+        use_packed_hybrid_cache = cls._use_packed_hybrid_kv_cache(
+            vllm_config, backend_cls
+        )
+        if model_config.is_hybrid and not use_packed_hybrid_cache:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
+
+        if use_packed_hybrid_cache:
+            with set_current_vllm_config(vllm_config):
+                block_size_supported = backend_cls.supports_block_size(
+                    cache_config.block_size
+                )
+            if not block_size_supported:
+                raise ValueError(
+                    f"KV cache block size {cache_config.block_size} is not "
+                    f"supported by {backend_cls.get_name()}. Omit --block-size "
+                    "to use the backend default."
+                )
+
+            cache_config.mamba_block_size = cache_config.block_size
+            logger.info(
+                "Keeping %d-token KV cache blocks for layer-wise mixed KV "
+                "cache; Mamba and attention pages will use block-outer packing.",
+                cache_config.block_size,
+            )
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the
         # block pool (e.g. nvfp4 primary + unquantized skip layers).
         # May override the user's --block-size.
-        if cache_config.kv_cache_dtype_skip_layers:
+        if cache_config.kv_cache_dtype_skip_layers and not use_packed_hybrid_cache:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+
+    @classmethod
+    def _use_packed_hybrid_kv_cache(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_cls: "type[AttentionBackend]",
+    ) -> bool:
+        """Keep exact per-layer pages when block-outer packing can express them."""
+        import vllm.envs as envs
+        from vllm.config.cache import _layout_from_name
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        quant_config = vllm_config.quant_config
+        if (
+            model_config is None
+            or not model_config.is_hybrid
+            or cache_config.mamba_cache_mode != "align"
+            or quant_config is None
+            or not quant_config.has_layerwise_kv_cache()
+        ):
+            return False
+
+        requested_layout = cache_config.kv_cache_layout or envs.VLLM_KV_CACHE_LAYOUT
+        if requested_layout is not None:
+            return _layout_from_name(requested_layout).is_block_outermost
+
+        supported_layouts = backend_cls.supported_kv_cache_layouts()
+        connector_layout_name = None
+        if vllm_config.kv_transfer_config is not None:
+            connector_layout_name = cls._get_kv_connector_cache_layout(vllm_config)
+        if connector_layout_name is not None:
+            connector_layout = _layout_from_name(connector_layout_name)
+            if supported_layouts is None or connector_layout in supported_layouts:
+                return connector_layout.is_block_outermost
+
+        return supported_layouts is None or any(
+            layout.is_block_outermost for layout in supported_layouts
+        )
+
+    @staticmethod
+    def _get_kv_connector_cache_layout(vllm_config: "VllmConfig") -> str | None:
+        from vllm.distributed.kv_transfer.kv_connector.utils import (
+            get_kv_connector_cache_layout,
+        )
+
+        return get_kv_connector_cache_layout(vllm_config)
 
     @classmethod
     def _align_heterogeneous_kv_block_size(

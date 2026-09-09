@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, iter_layer_specs
 
 logger = init_logger(__name__)
 
@@ -468,10 +468,11 @@ def initialize_mamba_ssu_backend(
 ) -> None:
     """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
     if not any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.mamba_type
+        isinstance(spec, MambaSpec)
+        and spec.mamba_type
         in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
-        for g in kv_cache_config.kv_cache_groups
+        for group in kv_cache_config.kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
     ):
         return
 
