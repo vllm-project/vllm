@@ -26,9 +26,11 @@ class KVConnectorStats:
     Pipeline:
     1. Worker calls `record_transfer()` / `record_failed_*()` on its local
        stats object (per-engine).
-    2. Periodically, stats are sent to the logger process via `to_dict()`.
-    3. Logger calls `aggregate()` to combine stats from all workers into a
-       single cumulative `KVConnectorStats` object.
+    2. Stats from all workers are aggregated across workers (for NIXL, all
+       TP ranks) into a single cumulative `KVConnectorStats` object.
+    3. Logger calls `aggregate()` to accumulate the current interval's stats
+       into the logging accumulator (list-wise concatenation), not to combine
+       workers.
     4. Logger calls `reduce()` to produce a summary dict for CLI logging.
     5. Logger calls `log()` to print the summary.
     6. Logger calls `reset()` to clear for the next interval.
@@ -83,16 +85,15 @@ class KVConnectorLogging:
     Pipeline per logging interval:
     1. `observe()` - Called periodically when connector syncs with scheduler.
        Receives `transfer_stats_data` already aggregated across ALL workers
-       (see `aggregate()` in KVConnectorStats). Builds a stats object via
-       connector's `build_kv_connector_stats()`.
-    2. `aggregate()` - Combines current interval stats with accumulator
-       (list-wise concatenation for NIXL, combining all TP ranks).
+       (for MultiConnector, all TP ranks are already combined). Builds a
+       stats object via connector's `build_kv_connector_stats()`.
+    2. `aggregate()` - Accumulates current interval stats into the logging
+       accumulator (list-wise concatenation), NOT cross-worker aggregation.
     3. `log()` - Calls `reduce()` on accumulator to get summary dict,
        formats and logs it, then calls `reset()`.
 
-    The `transfer_stats_data` passed to `observe()` is expected to be
-    pre-aggregated across all workers (for MultiConnector, this means
-    all TP ranks are already combined).
+    Cross-worker aggregation happens before `observe()`: the
+    `transfer_stats_data` arrives already combined across all workers.
     """
 
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
