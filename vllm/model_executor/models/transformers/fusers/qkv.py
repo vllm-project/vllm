@@ -143,7 +143,7 @@ class QKVFuser(StackedFuser):
         block = chains[0][depth - 1][0]
         indices = [chain[depth - 1][1] for chain in chains]
         insert_index = min(indices)
-        self._check_input_stable(calls, block, indices)
+        self._check_input_stable(funcdef, module, calls, block, indices)
 
         # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
         self._splice_merged_split(funcdef, calls, block, insert_index)

@@ -221,6 +221,34 @@ class MutatingParallelLinears(FourParallelLinears):
         return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
 
 
+class AliasMutatingParallelLinears(FourParallelLinears):
+    """A view of the input is mutated between the projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        alias = x.view(-1)
+        alias.mul_(2)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class FunctionalInplaceParallelLinears(FourParallelLinears):
+    """The input is mutated by a functional in-place call between projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        F.relu(x, inplace=True)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class UnderscoreInplaceParallelLinears(FourParallelLinears):
+    """The input is mutated by a free in-place function between projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        torch.relu_(x)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
 class PlainQKV(nn.Module):
     """q/k/v returned as a bare tuple: no reshape stands between the calls and
     the return, so both QKVFuser and MergedColumnParallelFuser can rewrite it."""
@@ -476,6 +504,67 @@ class InPlaceMutatedArgAttention(FakeAttention):
         q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         if self.recompute:
             hidden_states.mul_(2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class AliasMutatedArgAttention(FakeAttention):
+    """A view of the shared input is mutated before k/v.
+
+    `hidden_states.view(-1)` shares storage with its base, so `alias.mul_(2)`
+    changes what k/v read without ever naming `hidden_states` as a target. Only
+    tracking names that may alias the input catches it. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            alias = hidden_states.view(-1)
+            alias.mul_(2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class FunctionalInplaceArgAttention(FakeAttention):
+    """The shared input is mutated by a functional in-place call before k/v.
+
+    `F.relu(hidden_states, inplace=True)` writes through an argument, so the
+    name appears only in a `Load` context inside a call that is not a method on
+    it -- invisible to a trailing-underscore method check. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            F.relu(hidden_states, inplace=True)
         k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
@@ -860,15 +949,19 @@ def test_fuses_gemma4_qkv_obstacles(attn_cls):
         RebindArgAttention,
         InPlaceMutatedArgAttention,
         SubscriptMutatedArgAttention,
+        AliasMutatedArgAttention,
+        FunctionalInplaceArgAttention,
         NonFoldableRefAttention,
     ],
 )
 def test_qkv_refuses_unsound_rewrites(attn_cls):
     """The match succeeds but the source rewrite must refuse, leaving no fuser.
 
-    `RebindArgAttention` rebinds the shared input before k/v, and the two
-    `*MutatedArgAttention` cases mutate it in place (`x.mul_(...)`, `x[...] = 0`)
-    -- all three would change what k/v see if the GEMM were hoisted above them.
+    `RebindArgAttention` rebinds the shared input before k/v; the `*Mutated*` and
+    `FunctionalInplace*` cases mutate it in place, directly (`x.mul_(...)`,
+    `x[...] = 0`), through a view that shares its storage, or through a call that
+    writes an argument (`F.relu(x, inplace=True)`) -- each would change what k/v
+    see if the GEMM were hoisted above them.
     `NonFoldableRefAttention` reads `v_proj` outside an existence guard (the fuser
     cannot fold it away). All fail closed in `update_forward`, so `get_fuser`
     returns `None`.
@@ -1021,10 +1114,24 @@ def test_merged_column_fuser_folds_existence_guard():
     assert not {"proj_a", "proj_b", "proj_c", "proj_d"} & names
 
 
-def test_merged_column_fuser_rejects_input_mutation():
-    """The later projections must not be moved ahead of an input mutation."""
+@pytest.mark.parametrize(
+    "cls",
+    [
+        MutatingParallelLinears,
+        AliasMutatingParallelLinears,
+        FunctionalInplaceParallelLinears,
+        UnderscoreInplaceParallelLinears,
+    ],
+)
+def test_merged_column_fuser_rejects_input_mutation(cls):
+    """The later projections must not be moved ahead of an input mutation.
+
+    The mutation may be direct (`x.add_(1)`), through a view that shares the
+    input's storage, or through a call that writes an argument in place
+    (`F.relu(x, inplace=True)`, `torch.relu_(x)`). Each one silently changes the
+    fused result, so the rewrite must refuse rather than fuse."""
     with torch.device("meta"):
-        module = MutatingParallelLinears()
+        module = cls()
     fuser = MergedColumnParallelFuser.match(trace(module), module)
     assert fuser is not None
     with pytest.raises(ValueError, match="rebound or mutated"):

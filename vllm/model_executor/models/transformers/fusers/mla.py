@@ -241,8 +241,9 @@ class MLAFuser(StackedFuser):
             calls = self._unguarded_calls(funcdef, names)
             if ast.dump(calls[0].args[0]) != ast.dump(calls[1].args[0]):
                 raise ValueError("down-projections read different inputs")
-            index = min(_top_level_index(funcdef, call) for call in calls)
-            self._splice_merged_split(funcdef, calls, funcdef.body, index)
+            indices = [_top_level_index(funcdef, call) for call in calls]
+            self._check_input_stable(funcdef, module, calls, funcdef.body, indices)
+            self._splice_merged_split(funcdef, calls, funcdef.body, min(indices))
 
         # Transformers expands the latent into full key/value in a dedicated method.
         # `MLAAttention` consumes the latent directly (absorbing `kv_b_proj`),

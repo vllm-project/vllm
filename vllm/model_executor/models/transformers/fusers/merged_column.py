@@ -104,7 +104,7 @@ class MergedColumnParallelFuser(StackedFuser):
         block = blocks[0][0]
         indices = [index for _, index in blocks]
         index = min(indices)
-        self._check_input_stable(calls, block, indices)
+        self._check_input_stable(funcdef, module, calls, block, indices)
 
         # l1(x), l2(x), ... -> merged(x).split(merged.output_sizes / merged.tp_size, -1)
         self._splice_merged_split(funcdef, calls, block, index)
