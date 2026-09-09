@@ -294,12 +294,6 @@ class SchedulerOutput:
     # Complete block-table rows that replace incrementally appended block IDs.
     block_table_updates: dict[str, tuple[list[int], ...]] | None = None
 
-    # Producer partial-tail offload hand-off for external KV connectors:
-    # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at
-    # the durable boundary block of a producer's last-prompt-boundary partial
-    # tail (mamba "align" CoW target). None unless partial hash hits are active.
-    partial_tail_offloads: dict[str, list[tuple[int, int, int]]] | None = None
-
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 
