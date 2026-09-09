@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's linear fusers."""
 
+import ast
 import inspect
 from types import MethodType, SimpleNamespace
 
@@ -19,7 +20,10 @@ from vllm.model_executor.models.transformers.fusers import (
     packed_qkv,
     qkv,
 )
-from vllm.model_executor.models.transformers.fx_utils import trace
+from vllm.model_executor.models.transformers.fx_utils import (
+    bypass_existence_guard,
+    trace,
+)
 
 
 class SiluAndMulStub(nn.Module):
@@ -202,10 +206,46 @@ class FourParallelLinears(nn.Module):
         return self.proj_a(x), self.proj_b(x), self.proj_c(x), self.proj_d(x)
 
 
+class GuardedParallelLinears(FourParallelLinears):
+    """A projection referenced by an existence guard as well as its call."""
+
+    def forward(self, x):
+        d = self.proj_d(x) if self.proj_d is not None else None
+        return self.proj_a(x), self.proj_b(x), self.proj_c(x), d
+
+
 class MutatingParallelLinears(FourParallelLinears):
     def forward(self, x):
         a = self.proj_a(x)
         x.add_(1)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class AliasMutatingParallelLinears(FourParallelLinears):
+    """A view of the input is mutated between the projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        alias = x.view(-1)
+        alias.mul_(2)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class FunctionalInplaceParallelLinears(FourParallelLinears):
+    """The input is mutated by a functional in-place call between projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        F.relu(x, inplace=True)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class UnderscoreInplaceParallelLinears(FourParallelLinears):
+    """The input is mutated by a free in-place function between projections."""
+
+    def forward(self, x):
+        a = self.proj_a(x)
+        torch.relu_(x)
         return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
 
 
@@ -292,6 +332,306 @@ class ResidDropoutAttention(FakeAttention):
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         return self.resid_dropout(self.o_proj(attn_output)), None
+
+
+class GuardedVAttention(FakeAttention):
+    """Gemma 4-style: `v_proj` is called once but also read in a `None` guard.
+
+    The guard is a fusion invariant (the fuser only binds instances where the
+    projection exists), so it folds to `True` and the call still fuses."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = (
+            self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            if self.v_proj is not None
+            else k
+        )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class TruthyGuardAttention(FakeAttention):
+    """`v_proj` guarded by a bare truthiness test instead of `is not None`.
+
+    An `nn.Linear` is always truthy, so the guard folds to `True` and the call
+    still fuses (the projection is a proven invariant, exactly as for a `None`
+    guard)."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = (
+            self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            if self.v_proj
+            else k
+        )
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class StatementGuardVAttention(FakeAttention):
+    """`v_proj` guarded by a statement-form `if self.v_proj:` block.
+
+    The `if`'s test is not an `ast.Compare`, so the identity-check scan skips it;
+    `_in_boolean_context` folds the test to `True` (an `nn.Linear` is always
+    truthy) and the call inside the now-`if True:` body still fuses, with the
+    live `else` surviving the rewrite."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.v_proj:
+            v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        else:
+            v = k
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class BranchedKVAttention(FakeAttention):
+    """Gemma 4-style: q at body level, k/v inside an untaken `else` branch.
+
+    The three calls do not share a block, so the fused GEMM must be hoisted to
+    the innermost block that dominates all of them (the function body). The
+    live `if`/`else` must survive the rewrite."""
+
+    is_kv_shared_layer = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.is_kv_shared_layer:
+            k = v = None
+        else:
+            k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1).contiguous()), None
+
+
+class RebindArgAttention(FakeAttention):
+    """The projection input is rebound (in an untaken branch) before k/v.
+
+    The branch is dead at trace time so the match succeeds, but the source
+    rewrite must refuse: hoisting the GEMM above the rebind would feed k/v a
+    different input. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states = hidden_states * 2
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class InPlaceMutatedArgAttention(FakeAttention):
+    """The shared input is mutated in place (in an untaken branch) before k/v.
+
+    Like `RebindArgAttention`, but the mutation keeps the name in a `Load`
+    context (`hidden_states.mul_(2)`), so a bare `Name`-store check would miss it.
+    The rewrite must still refuse: hoisting the GEMM above the mutation changes
+    the value k/v see. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states.mul_(2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class AliasMutatedArgAttention(FakeAttention):
+    """A view of the shared input is mutated before k/v.
+
+    `hidden_states.view(-1)` shares storage with its base, so `alias.mul_(2)`
+    changes what k/v read without ever naming `hidden_states` as a target. Only
+    tracking names that may alias the input catches it. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            alias = hidden_states.view(-1)
+            alias.mul_(2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class FunctionalInplaceArgAttention(FakeAttention):
+    """The shared input is mutated by a functional in-place call before k/v.
+
+    `F.relu(hidden_states, inplace=True)` writes through an argument, so the
+    name appears only in a `Load` context inside a call that is not a method on
+    it -- invisible to a trailing-underscore method check. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            F.relu(hidden_states, inplace=True)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class SubscriptMutatedArgAttention(FakeAttention):
+    """The shared input is written through a subscript (in an untaken branch).
+
+    `hidden_states[..., 0] = 0` leaves the name in a `Load` context on the
+    subscript's value, so it too evades a bare `Name`-store check. The rewrite
+    must refuse for the same reason. Result: no fusion."""
+
+    recompute = False
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if self.recompute:
+            hidden_states[..., 0] = 0
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
+
+
+class NonFoldableRefAttention(FakeAttention):
+    """A surviving `v_proj` reference that is not an existence guard -> no fusion.
+
+    Deleting `v_proj` would break `isinstance(self.v_proj, nn.Linear)`: it reads
+    the projection's type, not just whether it exists, so the fuser cannot fold
+    it and must refuse rather than rewrite it."""
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if isinstance(self.v_proj, nn.Linear):
+            v = v.contiguous()
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), None
 
 
 class PackedQKVAttention(nn.Module):
@@ -561,18 +901,246 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
 
 
-def test_merged_column_fuser_rejects_input_mutation():
-    """The later projections must not be moved ahead of an input mutation."""
+@pytest.mark.parametrize(
+    "attn_cls",
+    [
+        GuardedVAttention,
+        TruthyGuardAttention,
+        StatementGuardVAttention,
+        BranchedKVAttention,
+    ],
+)
+def test_fuses_gemma4_qkv_obstacles(attn_cls):
+    """A guarded `v_proj` (obstacle 1) or branch-split k/v (obstacle 2) fuses.
+
+    Both patterns leave `v_proj` referenced beyond its single call, or split the
+    calls across blocks; the rewrite folds the guard / hoists the GEMM and the
+    numerics still match. The guard may be a `None` comparison or a bare
+    truthiness test (ternary or statement form); all are proven invariants, so
+    folding them is sound. The naive "relax the reference count" fix fuses the
+    guarded cases but silently drops the guard's semantics.
+    """
     with torch.device("meta"):
-        module = MutatingParallelLinears()
+        meta = attn_cls()
+    fuser = get_fuser(meta, QKVFuser)
+    assert isinstance(fuser, QKVFuser)
+    assert (fuser.q_name, fuser.o_name) == ("q_proj", "o_proj")
+
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert "qkv_proj" in names
+    assert not {"q_proj", "k_proj", "v_proj"} & names
+    if attn_cls is BranchedKVAttention:
+        assert "is_kv_shared_layer" in names  # the live branch survives
+
+    real = attn_cls(kv_heads=4, layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    real.attn = FakeSelfAttn()
+    expected, _ = real(x)
+    fused = _apply_qkv_fuser_with_stubs(real, fuser)
+    out, _ = fused(x)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [
+        RebindArgAttention,
+        InPlaceMutatedArgAttention,
+        SubscriptMutatedArgAttention,
+        AliasMutatedArgAttention,
+        FunctionalInplaceArgAttention,
+        NonFoldableRefAttention,
+    ],
+)
+def test_qkv_refuses_unsound_rewrites(attn_cls):
+    """The match succeeds but the source rewrite must refuse, leaving no fuser.
+
+    `RebindArgAttention` rebinds the shared input before k/v; the `*Mutated*` and
+    `FunctionalInplace*` cases mutate it in place, directly (`x.mul_(...)`,
+    `x[...] = 0`), through a view that shares its storage, or through a call that
+    writes an argument (`F.relu(x, inplace=True)`) -- each would change what k/v
+    see if the GEMM were hoisted above them.
+    `NonFoldableRefAttention` reads `v_proj` outside an existence guard (the fuser
+    cannot fold it away). All fail closed in `update_forward`, so `get_fuser`
+    returns `None`.
+    """
+    with torch.device("meta"):
+        meta = attn_cls()
+    assert get_fuser(meta, QKVFuser) is None
+
+
+def _guard_funcdef(expr: str) -> tuple[ast.FunctionDef, ast.Attribute]:
+    """A `def f(self, a, b, T): return <expr>` and its `self.v_proj` reference."""
+    funcdef = ast.parse(f"def f(self, a, b, T):\n    return {expr}").body[0]
+    assert isinstance(funcdef, ast.FunctionDef)
+    ref = next(
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute) and node.attr == "v_proj"
+    )
+    return funcdef, ref
+
+
+@pytest.mark.parametrize(
+    "expr, expected",
+    [
+        ("a if self.v_proj is not None else b", True),
+        ("a if self.v_proj is None else b", False),
+        ("a if None is not self.v_proj else b", True),  # None on the left
+    ],
+)
+def test_bypass_existence_guard_folds_identity_none_check(expr, expected):
+    """`is`/`is not None`, either operand order, fold to a bool.
+
+    The projection is a proven invariant (it exists as an `nn.Linear`), so an
+    `is (not) None` guard has a constant truth value; folding it lets the call be
+    rewritten away without changing the guard's outcome. `==`/`!=` are excluded
+    (see the refusal test) because a subclass may override `__eq__`/`__ne__`."""
+    funcdef, ref = _guard_funcdef(expr)
+    bypass_existence_guard(funcdef, ref, "v_proj")
+    test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.IfExp)).test
+    assert isinstance(test, ast.Constant) and test.value is expected
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "a if self.v_proj else b",  # a ternary test
+        "not self.v_proj",  # a `not` operand
+    ],
+)
+def test_bypass_existence_guard_folds_bare_truthiness(expr):
+    """A bare truthiness test folds the reference itself to `True`.
+
+    An `nn.Linear` has no `__bool__`/`__len__`, so it is always truthy; in a pure
+    boolean position (a test, or a `not` operand) the reference can be replaced by
+    `True`, letting the projection be deleted."""
+    funcdef, ref = _guard_funcdef(expr)
+    bypass_existence_guard(funcdef, ref, "v_proj")
+    # No `self.v_proj` reference survives; a literal `True` took its place.
+    attrs = [n for n in ast.walk(funcdef) if isinstance(n, ast.Attribute)]
+    assert not any(n.attr == "v_proj" for n in attrs)
+    constants = [n for n in ast.walk(funcdef) if isinstance(n, ast.Constant)]
+    assert any(n.value is True for n in constants)
+
+
+def test_bypass_existence_guard_folds_bare_if_statement():
+    """A statement-form `if self.<name>:` folds its test to `True`.
+
+    The `len(node.ops) == 1` `Compare` scan skips it (it is not a comparison at
+    all); `_in_boolean_context` then matches the `if`'s test and folds it, so the
+    bare-truthiness statement form is handled, not silently dropped."""
+    funcdef = ast.parse(
+        "def f(self, a, b):\n    if self.v_proj:\n        return a\n    return b"
+    ).body[0]
+    assert isinstance(funcdef, ast.FunctionDef)
+    ref = next(
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute) and node.attr == "v_proj"
+    )
+    bypass_existence_guard(funcdef, ref, "v_proj")
+    test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.If)).test
+    assert isinstance(test, ast.Constant) and test.value is True
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "a if isinstance(self.v_proj, T) else b",  # a different predicate
+        "self.v_proj.weight",  # an attribute read, not a guard
+        "a and self.v_proj",  # `and` yields the operand, which may escape
+        "self.v_proj or a",  # `or` yields the module itself when truthy
+        "a if self.v_proj == None else b",  # `__eq__` may not track identity
+        "a if self.v_proj != None else b",  # `__ne__` may not track identity
+    ],
+)
+def test_bypass_existence_guard_refuses_non_guard_reference(expr):
+    """A surviving reference that is not an identity guard cannot be folded away.
+
+    Rewriting it is unsafe (its value depends on more than the projection's
+    existence), so the fuser refuses rather than change semantics. `==`/`!=` are
+    refused too: `is_linear` accepts `nn.Linear` subclasses that could override
+    `__eq__`/`__ne__`, so equality need not agree with `is (not) None`."""
+    funcdef, ref = _guard_funcdef(expr)
+    with pytest.raises(ValueError, match="outside an existence guard"):
+        bypass_existence_guard(funcdef, ref, "v_proj")
+
+
+@pytest.mark.parametrize("layer_idx", [0, 1])
+def test_fuses_real_gemma4_attention(layer_idx):
+    """The real Gemma 4 attention (both obstacles at once) fuses end to end."""
+    pytest.importorskip("transformers.models.gemma4")
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
+
+    config = Gemma4TextConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        head_dim=16,
+        intermediate_size=128,
+    )
+    with torch.device("meta"):
+        meta = Gemma4TextAttention(config, layer_idx=layer_idx)
+    fuser = get_fuser(meta, QKVFuser)
+    assert isinstance(fuser, QKVFuser)
+    assert (fuser.q_name, fuser.k_name, fuser.v_name) == (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    )
+    assert fuser.o_name == "o_proj"
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert not {"q_proj", "k_proj", "v_proj"} & names
+
+
+def test_merged_column_fuser_folds_existence_guard():
+    """A guarded projection fuses: the merged linear replaces the deleted names.
+
+    Guard folding lives on `StackedFuser`, not just `QKVFuser`, because every
+    stacked fuser deletes the projections it merges -- a surviving reference to
+    one would fail at runtime."""
+    with torch.device("meta"):
+        module = GuardedParallelLinears()
     fuser = MergedColumnParallelFuser.match(trace(module), module)
     assert fuser is not None
-    with pytest.raises(ValueError, match="cross other operations"):
+    fuser.update_forward(module)
+    names = set(fuser.fused_forward.__code__.co_names)
+    assert fuser.merged_name in names
+    assert not {"proj_a", "proj_b", "proj_c", "proj_d"} & names
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        MutatingParallelLinears,
+        AliasMutatingParallelLinears,
+        FunctionalInplaceParallelLinears,
+        UnderscoreInplaceParallelLinears,
+    ],
+)
+def test_merged_column_fuser_rejects_input_mutation(cls):
+    """The later projections must not be moved ahead of an input mutation.
+
+    The mutation may be direct (`x.add_(1)`), through a view that shares the
+    input's storage, or through a call that writes an argument in place
+    (`F.relu(x, inplace=True)`, `torch.relu_(x)`). Each one silently changes the
+    fused result, so the rewrite must refuse rather than fuse."""
+    with torch.device("meta"):
+        module = cls()
+    fuser = MergedColumnParallelFuser.match(trace(module), module)
+    assert fuser is not None
+    with pytest.raises(ValueError, match="rebound or mutated"):
         fuser.update_forward(module)
 
 
+@pytest.mark.parametrize("cls", [FourParallelLinears, GuardedParallelLinears])
 def test_merged_column_fuser_supports_any_number_of_linears(
-    default_vllm_config, monkeypatch
+    cls, default_vllm_config, monkeypatch
 ):
     from vllm.model_executor import parameter
     from vllm.model_executor.layers import linear
@@ -585,19 +1153,14 @@ def test_merged_column_fuser_supports_any_number_of_linears(
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
     with torch.device("meta"):
-        meta = FourParallelLinears()
+        meta = cls()
     fuser = MergedColumnParallelFuser.match(trace(meta), meta)
     assert fuser is not None
-    assert fuser.linear_names == ("proj_a", "proj_b", "proj_c", "proj_d")
-    assert fuser.shards == [
-        ("proj_a", 0),
-        ("proj_b", 1),
-        ("proj_c", 2),
-        ("proj_d", 3),
-    ]
+    assert set(fuser.linear_names) == {"proj_a", "proj_b", "proj_c", "proj_d"}
+    assert fuser.shards == [(name, i) for i, name in enumerate(fuser.linear_names)]
     fuser.update_forward(meta)
 
-    real = FourParallelLinears()
+    real = cls()
     x = torch.randn(2, 8)
     expected = real(x)
     weights = [
