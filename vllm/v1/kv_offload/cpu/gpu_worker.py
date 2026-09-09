@@ -71,6 +71,9 @@ class Transfer:
     batch_src: torch.Tensor
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
+    # Submitted but faulted: queued only so its stream can be drained before
+    # the job is reported. Carries no timing and never returns to the pools.
+    failed: bool = False
 
 
 def compute_sub_block_ptrs(
@@ -329,10 +332,6 @@ class SingleDirectionOffloadingHandler:
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
-        # jobs that failed before they could be queued on the transfer stream.
-        # They still have to be reported by get_finished(), or the scheduler
-        # would wait for a completion that never arrives.
-        self._submit_failures: deque[int] = deque()
         # list of CUDA streams available for re-use
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
@@ -674,22 +673,41 @@ class SingleDirectionOffloadingHandler:
             # Deliberately not broader: a missing op or a bad argument is a
             # programming error and must keep propagating, not be silently
             # downgraded to a degraded cache.
-            # A transfer fault must not take the engine down. Offloading is a
-            # best-effort cache (OffloadingConnector.requires_kv_delivery is
-            # False), so report the job as failed and let the connector decide:
-            # a failed store is dropped, a failed load is escalated so the
-            # affected blocks are recomputed.
             logger.exception(
                 "KV offload %s transfer failed for job %d",
                 "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
                 job_id,
             )
-            # Deliberately not returning the stream/events to their pools: the
-            # stream may carry a latched device error, and reusing it would
-            # spread this failure to unrelated transfers. The pinned descriptor
-            # buffers are plain host memory and are safe to reuse.
-            self._buffer_pool.append((batch_src, batch_dst, batch_sizes))
-            self._submit_failures.append(job_id)
+            # A transfer fault must not take the engine down: offloading is a
+            # best-effort cache (OffloadingConnector.requires_kv_delivery is
+            # False), so the job is reported as failed and the connector
+            # decides what to do. It cannot be reported yet, though. A batched
+            # copy can fail partway through - swap_blocks_batch checks each
+            # chunk of the descriptor list separately (ROCm caps a call at 8192
+            # descriptors) and hipMemcpyBatchAsync is itself a loop of async
+            # copies that breaks on the first failure - so copies submitted
+            # before the fault may still be reading the source blocks, writing
+            # the destination blocks and DMA-reading the pinned descriptors.
+            # Record the end event behind them and report the failure from
+            # get_finished() once the stream drains. Keeping the transfer
+            # queued also preserves the wait() fence and the ordering chain the
+            # next submission builds on. A failure to record leaves the
+            # in-flight copies unbounded and must propagate.
+            end_event.record(stream)
+            self._transfer_events[job_id] = end_event
+            self._transfers.append(
+                Transfer(
+                    job_id=job_id,
+                    stream=stream,
+                    start_event=start_event,
+                    end_event=end_event,
+                    num_bytes=0,
+                    batch_src=batch_src,
+                    batch_dst=batch_dst,
+                    batch_sizes=batch_sizes,
+                    failed=True,
+                )
+            )
             return True
 
         self._transfer_events[job_id] = end_event
@@ -711,19 +729,17 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._submit_failures:
-            job_id = self._submit_failures.popleft()
-            self._transfer_events.pop(job_id, None)
-            results.append(TransferResult(job_id=job_id, success=False))
-
         while self._transfers:
             transfer = self._transfers[0]
             try:
                 if not transfer.end_event.query():
                     break
                 transfer_time = (
-                    transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-                )  # elapsed_time is in milliseconds
+                    None
+                    if transfer.failed
+                    # elapsed_time is in milliseconds
+                    else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+                )
             except RuntimeError:
                 # A device error latched by this transfer (or by earlier work
                 # on its stream) surfaces here rather than at submit time.
@@ -736,13 +752,19 @@ class SingleDirectionOffloadingHandler:
                 )
                 self._transfers.popleft()
                 self._transfer_events.pop(transfer.job_id, None)
-                self._buffer_pool.append(
-                    (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
-                )
                 results.append(TransferResult(job_id=transfer.job_id, success=False))
                 continue
 
             self._transfers.popleft()
+            self._transfer_events.pop(transfer.job_id, None)
+            if transfer.failed:
+                # Drained: the blocks are quiescent and the scheduler may reuse
+                # them. The stream, events and descriptor buffers are dropped
+                # rather than pooled, since the stream may carry a latched
+                # device error that would spread to an unrelated transfer.
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
+
             results.append(
                 TransferResult(
                     job_id=transfer.job_id,
@@ -757,7 +779,6 @@ class SingleDirectionOffloadingHandler:
             self._buffer_pool.append(
                 (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
             )
-            del self._transfer_events[transfer.job_id]
         return results
 
     def wait(self, job_ids: set[int]):
@@ -795,7 +816,6 @@ class SingleDirectionOffloadingHandler:
             self._transfers.popleft()
 
         self._transfer_events.clear()
-        self._submit_failures.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
