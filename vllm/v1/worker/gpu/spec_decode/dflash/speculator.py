@@ -38,6 +38,14 @@ class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        parallel_config = vllm_config.parallel_config
+        self.replicated_pcp = parallel_config.prefill_context_parallel_size > 1
+        if self.replicated_pcp:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace(
+                parallel_config,
+                prefill_context_parallel_size=1,
+            )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
@@ -303,6 +311,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         causal: bool | Mapping[int, bool] = False,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        is_prefilling: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -317,6 +326,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=causal,
             query_start_loc_np=query_start_loc_np,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            is_prefilling=is_prefilling,
         )
 
     @torch.inference_mode()
@@ -387,6 +397,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             return self.draft_tokens[:num_reqs]
+
+        if self.replicated_pcp and not dummy_run:
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping, num_reqs_padded=num_reqs
+            )
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.

@@ -30,11 +30,18 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
+
+
+def _dspark_input_buffer_size(
+    max_num_tokens: int, max_num_reqs: int, num_query_per_req: int
+) -> int:
+    return max(max_num_tokens, max_num_reqs * num_query_per_req)
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -53,6 +60,16 @@ class DSparkSpeculator(DFlashSpeculator):
             self.num_query_per_req = self.num_speculative_steps
         else:
             self.num_query_per_req = 1 + self.num_speculative_steps
+
+        input_buffer_size = _dspark_input_buffer_size(
+            self.input_buffers.max_num_tokens,
+            self.max_num_reqs,
+            self.num_query_per_req,
+        )
+        if self.input_buffers.max_num_tokens < input_buffer_size:
+            self.input_buffers = InputBuffers(
+                self.max_num_reqs, input_buffer_size, device
+            )
 
         # DSpark consumes mean-pooled target aux hidden states at the target
         # layers, combined to hidden_size via main_proj. Store that combined

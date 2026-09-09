@@ -15,6 +15,14 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
+    _dspark_input_buffer_size,
+)
+
+
+def test_dspark_input_buffer_fits_all_request_queries():
+    assert _dspark_input_buffer_size(4096, 1024, 8) == 8192
+    assert _dspark_input_buffer_size(4096, 128, 8) == 4096
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
