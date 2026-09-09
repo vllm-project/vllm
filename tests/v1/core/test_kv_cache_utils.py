@@ -64,10 +64,8 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
-    KVCacheBlockPoolSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCachePlacement,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
@@ -92,47 +90,29 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.mark.parametrize(
-    "placements",
+    ("group_pool", "tensor_pool", "host_capacity", "error"),
     [
-        (KVCachePlacement.HOST,),
-        (KVCachePlacement.DEVICE, KVCachePlacement.DEVICE),
-        (KVCachePlacement.DEVICE, KVCachePlacement.HOST, KVCachePlacement.HOST),
-    ],
-)
-def test_kv_cache_config_rejects_unsupported_pool_layouts(placements):
-    """Reject pool layouts the runtime cannot allocate."""
-    with pytest.raises(ValueError, match="Expected device pool 0"):
-        KVCacheConfig(
-            num_blocks=4,
-            kv_cache_tensors=[],
-            kv_cache_groups=[],
-            block_pools=[
-                KVCacheBlockPoolSpec(4, placement) for placement in placements
-            ],
-        )
-
-
-@pytest.mark.parametrize(
-    ("group_pool", "tensor_pool", "error"),
-    [
-        (-1, 0, "Invalid group"),
-        (2, 0, "Invalid group"),
-        (0, -1, "Invalid tensor"),
-        (0, 2, "Invalid tensor"),
-        (0, 1, "Tensor and cache group"),
-        (1, 0, "Tensor and cache group"),
+        (-1, 0, 4, "Invalid group"),
+        (1, 0, 4, "Invalid group"),
+        (0, -1, 4, "Invalid tensor"),
+        (0, 1, 4, "Invalid tensor"),
+        (0, None, 4, "Tensor and cache group"),
+        (None, 0, 4, "Tensor and cache group"),
+        (None, None, None, "Invalid group"),
+        (0, None, None, "Invalid tensor"),
     ],
 )
 def test_kv_cache_config_rejects_inconsistent_pool_references(
-    group_pool, tensor_pool, error
+    group_pool, tensor_pool, host_capacity, error
 ):
-    """Copy routing and allocation must agree on the layer's block-ID space."""
+    """Allocation and copy routing must agree, with capacity for host references."""
     spec = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )
     with pytest.raises(ValueError, match=error):
         KVCacheConfig(
             num_blocks=4,
+            hisparse_host_num_blocks=host_capacity,
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer"], spec, block_pool_id=group_pool)
             ],
@@ -144,10 +124,6 @@ def test_kv_cache_config_rejects_inconsistent_pool_references(
                     block_stride=spec.page_size_bytes,
                     block_pool_id=tensor_pool,
                 )
-            ],
-            block_pools=[
-                KVCacheBlockPoolSpec(4),
-                KVCacheBlockPoolSpec(4, KVCachePlacement.HOST),
             ],
         )
 
@@ -206,10 +182,8 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
-    device_pool, host_pool = cache_config.block_pools
-    assert device_pool == KVCacheBlockPoolSpec(7)
-    assert host_pool.placement is KVCachePlacement.HOST
-    assert host_pool.num_blocks > 7
+    assert cache_config.hisparse_host_num_blocks is not None
+    assert cache_config.hisparse_host_num_blocks > 7
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert host_group.kv_cache_spec.block_size == gpu_block_size

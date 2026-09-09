@@ -51,7 +51,7 @@ from vllm.v1.request import Request
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @cached_property
     def prefix_completion_group_ids(self) -> frozenset[int]:
-        if self._kv_cache_config.host_block_pool_id is None:
+        if self._kv_cache_config.hisparse_host_num_blocks is None:
             return frozenset()
         return frozenset(get_offloading_group_ids(self._kv_cache_config))
 

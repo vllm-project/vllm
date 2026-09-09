@@ -97,10 +97,9 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
-        host_group_ids = kv_cache_config.host_group_ids
         device_caching = enable_caching and any(
-            group_id not in host_group_ids and group.enable_prefix_caching
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            group.block_pool_id is not None and group.enable_prefix_caching
+            for group in kv_cache_config.kv_cache_groups
         )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
@@ -112,7 +111,9 @@ class KVCacheCoordinator(ABC):
         )
 
         source_groups = [
-            kv_cache_config.kv_cache_groups[group_id] for group_id in host_group_ids
+            group
+            for group in kv_cache_config.kv_cache_groups
+            if group.block_pool_id is None
         ]
         host_block_pool = HiSparseCoordinator.create_host_block_pool(
             kv_cache_config,
@@ -126,11 +127,12 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
         )
         group_block_pools: list[BlockPool] = []
-        for group_id in range(len(kv_cache_config.kv_cache_groups)):
-            if group_id in host_group_ids:
+        for group in kv_cache_config.kv_cache_groups:
+            if group.block_pool_id is None:
                 assert host_block_pool is not None
                 group_block_pools.append(host_block_pool)
             else:
+                assert group.block_pool_id == 0
                 group_block_pools.append(self.block_pool)
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -179,7 +181,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=(
-                    kv_cache_group.block_pool_id == 0
+                    kv_cache_group.block_pool_id is not None
                     and self.kv_cache_config.needs_kv_cache_zeroing
                 ),
             )
@@ -221,10 +223,11 @@ class KVCacheCoordinator(ABC):
             and self.hisparse_coordinator.has_host_cache
         )
         required = 0
-        host_group_ids = self.kv_cache_config.host_group_ids
         for i, manager in enumerate(self.single_type_managers):
-            if i in host_group_ids:
+            group = self.kv_cache_config.kv_cache_groups[i]
+            if group.block_pool_id is None:
                 continue
+            assert group.block_pool_id == 0
             if host_import and isinstance(manager, HiSparseResidentManager):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(
                     request_id,

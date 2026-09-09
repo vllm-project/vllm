@@ -32,7 +32,6 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
-    KVCacheBlockPoolSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -190,7 +189,8 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
-    pool_id: int = 0  # index into ``KVCacheConfig.block_pools``
+    # Device block-pool domain, or None for a dedicated non-device owner.
+    pool_id: int | None = 0
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -234,7 +234,7 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
-    block_pool_id: int = 0
+    block_pool_id: int | None = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -1068,17 +1068,25 @@ def get_max_concurrency_for_kv_cache_config(
     table. Requirements are summed within each allocator domain, then the
     tightest domain determines concurrency.
     """
-    blocks_per_request = [0] * len(kv_cache_config.block_pools)
+    blocks_per_request = 0
+    host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        blocks_per_request[group.block_pool_id] += cdiv(
+        required = cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-    return min(
-        pool.num_blocks / required
-        for pool, required in zip(kv_cache_config.block_pools, blocks_per_request)
-        if required > 0
-    )
+        if group.block_pool_id is None:
+            host_blocks_per_request += required
+        else:
+            assert group.block_pool_id == 0
+            blocks_per_request += required
+    limits = [kv_cache_config.num_blocks / blocks_per_request]
+    if host_blocks_per_request:
+        assert kv_cache_config.hisparse_host_num_blocks is not None
+        limits.append(
+            kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request
+        )
+    return min(limits)
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -1633,7 +1641,7 @@ def _build_kv_cache_tensors(
     layout: KVCacheLayout,
     bytes_per_block: int,
     *,
-    block_pool_id: int = 0,
+    block_pool_id: int | None = 0,
 ) -> list[KVCacheTensor]:
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
     tensors: list[KVCacheTensor] = []
@@ -1814,7 +1822,7 @@ def get_kv_cache_config_from_groups(
             host_size,
             layout,
             host_bytes_per_block,
-            block_pool_id=hisparse_layout.source_group.block_pool_id,
+            block_pool_id=None,
         )
         logger.info_once(
             "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
@@ -1826,14 +1834,13 @@ def get_kv_cache_config_from_groups(
         )
         kv_cache_groups = [hisparse_layout.source_group, *kv_cache_groups]
 
-    block_pools = [KVCacheBlockPoolSpec(num_blocks)]
-    if hisparse_layout is not None:
-        block_pools.append(hisparse_layout.host_block_pool)
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
-        block_pools=block_pools,
+        hisparse_host_num_blocks=(
+            hisparse_layout.host_num_blocks if hisparse_layout is not None else None
+        ),
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
@@ -2381,7 +2388,8 @@ def generate_scheduler_kv_cache_config(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
     assert all(
-        cfg.block_pools == kv_cache_configs[0].block_pools for cfg in kv_cache_configs
+        cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
+        for cfg in kv_cache_configs
     )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.

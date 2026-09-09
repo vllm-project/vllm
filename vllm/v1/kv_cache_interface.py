@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
@@ -1342,22 +1342,7 @@ class KVCacheTensor:
     layer_stride: int
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
-    block_pool_id: int = 0  # index into ``KVCacheConfig.block_pools``
-
-
-class KVCachePlacement(str, Enum):
-    """Which memory a block pool is allocated from."""
-
-    DEVICE = "device"
-    HOST = "host"
-
-
-@dataclass
-class KVCacheBlockPoolSpec:
-    """Capacity and placement of one independent block-ID space."""
-
-    num_blocks: int
-    placement: KVCachePlacement = KVCachePlacement.DEVICE
+    block_pool_id: int | None = 0
 
 
 class KVCacheGroupRole(str, Enum):
@@ -1378,10 +1363,11 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
-    # Index into ``KVCacheConfig.block_pools``. Groups in the same pool share
-    # block IDs and may overlap in a packed layout; different pools have
-    # independent block-ID spaces.
-    block_pool_id: int = 0
+    # Physical block-pool domain used by this group. Groups in the same domain
+    # share block IDs and may overlap in a packed HMA layout. Groups in
+    # different domains have independent block-ID spaces. None identifies
+    # the dedicated HiSparse host pool.
+    block_pool_id: int | None = 0
     # Whether this group participates in persistent prefix-cache lookup.
     # Ephemeral accelerator-side replicas set this to False; their source
     # group remains authoritative and they are rebuilt when a prefix is reused.
@@ -1415,8 +1401,8 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
-    block_pools: list[KVCacheBlockPoolSpec] = field(default_factory=list)
-    """Device pool 0 and, optionally, a dedicated host pool 1."""
+    hisparse_host_num_blocks: int | None = None
+    """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
@@ -1455,66 +1441,40 @@ class KVCacheConfig:
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     def __post_init__(self) -> None:
-        if not self.block_pools:
-            self.block_pools = [KVCacheBlockPoolSpec(self.num_blocks)]
-        if any(pool.num_blocks < 0 for pool in self.block_pools):
-            raise ValueError("KV cache block-pool sizes must be non-negative.")
-        placements = tuple(pool.placement for pool in self.block_pools)
-        if placements not in (
-            (KVCachePlacement.DEVICE,),
-            (KVCachePlacement.DEVICE, KVCachePlacement.HOST),
+        if self.num_blocks < 0:
+            raise ValueError("KV cache block-pool size must be non-negative.")
+        if self.hisparse_host_num_blocks is not None and (
+            self.hisparse_host_num_blocks < 0
         ):
-            raise ValueError("Expected device pool 0 and at most one host pool 1.")
-        layer_pools: dict[str, int] = {}
+            raise ValueError("HiSparse host block-pool size must be non-negative.")
+        valid_pools = (0, None) if self.hisparse_host_num_blocks is not None else (0,)
+        layer_pools: dict[str, int | None] = {}
         for group in self.kv_cache_groups:
-            if not 0 <= group.block_pool_id < len(self.block_pools):
+            if group.block_pool_id not in valid_pools:
                 raise ValueError(f"Invalid group block_pool_id={group.block_pool_id}.")
             for name in group.layer_names:
                 if name in layer_pools and layer_pools[name] != group.block_pool_id:
                     raise ValueError(f"Conflicting block pools for layer {name}.")
                 layer_pools[name] = group.block_pool_id
         for tensor in self.kv_cache_tensors:
-            if not 0 <= tensor.block_pool_id < len(self.block_pools):
+            if tensor.block_pool_id not in valid_pools:
                 raise ValueError(
                     f"Invalid tensor block_pool_id={tensor.block_pool_id}."
                 )
             if any(
-                layer_pools.get(name) != tensor.block_pool_id for name in tensor.layers
+                name not in layer_pools or layer_pools[name] != tensor.block_pool_id
+                for name in tensor.layers
             ):
                 raise ValueError("Tensor and cache group block pools must match.")
         if len(self.host_group_ids) > 1:
             raise ValueError("Only one host cache group is supported.")
-        if self.num_blocks != self.block_pools[0].num_blocks:
-            raise ValueError("num_blocks must equal block_pools[0].num_blocks.")
-
-    @property
-    def host_block_pool_id(self) -> int | None:
-        """The host-placed block pool, if this configuration has one."""
-        return next(
-            (
-                pool_id
-                for pool_id, pool in enumerate(self.block_pools)
-                if pool.placement is KVCachePlacement.HOST
-            ),
-            None,
-        )
 
     @property
     def host_group_ids(self) -> tuple[int, ...]:
-        """Cache groups whose blocks are allocated from host memory."""
         return tuple(
             group_id
             for group_id, group in enumerate(self.kv_cache_groups)
-            if self.block_pools[group.block_pool_id].placement is KVCachePlacement.HOST
-        )
-
-    @property
-    def host_layer_names(self) -> frozenset[str]:
-        """Layers whose blocks are allocated from host memory."""
-        return frozenset(
-            layer_name
-            for group_id in self.host_group_ids
-            for layer_name in self.kv_cache_groups[group_id].layer_names
+            if group.block_pool_id is None
         )
 
     @property
@@ -1530,7 +1490,7 @@ class KVCacheConfig:
         """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
-            if group.block_pool_id != 0:
+            if group.block_pool_id is None:
                 continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)

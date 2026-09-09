@@ -91,11 +91,10 @@ class HiSparseConnectorScheduler:
             self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
-        host_pool_id = self.coordinator.host_block_pool_id
         host_block_copies = tuple(
             copy
             for copy in scheduler_output.kv_cache_block_copies or ()
-            if copy.block_pool_id == host_pool_id
+            if copy.block_pool_id is None
         )
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None
@@ -182,7 +181,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: KVCacheConfig,
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
-        if kv_cache_config.host_block_pool_id is None:
+        if kv_cache_config.hisparse_host_num_blocks is None:
             raise ValueError("HiSparseConnector requires a HiSparse host pool")
         self.connector_scheduler: HiSparseConnectorScheduler | None = None
         self.connector_worker: HiSparseConnectorWorker | None = None

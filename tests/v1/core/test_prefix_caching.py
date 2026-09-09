@@ -49,11 +49,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
-    KVCacheBlockPoolSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheGroupSpec,
-    KVCachePlacement,
     KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
@@ -167,7 +165,7 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
-            block_pool_id=1,
+            block_pool_id=None,
         ),
         KVCacheGroupSpec(
             ["indexer"],
@@ -205,10 +203,7 @@ def make_hisparse_kv_cache_config(
     )
     return KVCacheConfig(
         num_blocks=num_blocks,
-        block_pools=[
-            KVCacheBlockPoolSpec(num_blocks),
-            KVCacheBlockPoolSpec(host_num_blocks, KVCachePlacement.HOST),
-        ],
+        hisparse_host_num_blocks=host_num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=groups,
     )
@@ -530,7 +525,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 
     assert new_blocks and new_block_ids == []
     assert len(copies) == 1
-    assert copies[0].block_pool_id == manager.kv_cache_config.host_block_pool_id
+    assert copies[0].block_pool_id is None
     assert copies[0].src_block_id == source_block.block_id
     assert copies[0].dst_block_id == new_blocks[0].block_id
     assert retained == [source_block, new_blocks[0]]
