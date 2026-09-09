@@ -20,10 +20,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import (
-    DraftModelSpeculator,
-    DraftPrefillInputs,
-)
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 logger = init_logger(__name__)
@@ -253,14 +250,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
-        prefill = self.prepare_draft_prefill(
-            input_batch,
-            self.input_buffers.input_ids[:num_tokens_padded],
-            hidden_states,
-        )
-        hidden_states = prefill[2]
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
-
         self._copy_request_inputs(
             num_reqs,
             input_batch.idx_mapping,
@@ -280,6 +269,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             self.max_num_reqs,
         )
+
+        hidden_states = self.prepare_draft_prefill(
+            input_batch,
+            self.input_buffers.input_ids[:num_tokens_padded],
+            hidden_states,
+        )
+        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -326,7 +322,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
-                prefill=prefill,
             )
         self.on_prefill_end(num_reqs)
 
@@ -396,10 +391,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        prefill: DraftPrefillInputs | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_ids = self.input_buffers.input_ids if prefill is None else prefill[0]
-        positions = self.input_buffers.positions if prefill is None else prefill[1]
+        input_ids, positions, is_padding = self.draft_prefill_model_inputs()
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -409,7 +402,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
-            is_padding=None if prefill is None else prefill[3],
+            is_padding=is_padding,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
@@ -460,7 +453,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        prefill: DraftPrefillInputs | None = None,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -477,16 +469,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
-            prefill=prefill,
         )
-        if prefill is not None and (restore := prefill[4]) is not None:
-            local_last_hidden_states = last_hidden_states
-            last_hidden_states = restore(local_last_hidden_states)
-            hidden_states = (
-                last_hidden_states
-                if local_last_hidden_states is hidden_states
-                else restore(hidden_states)
-            )
+        last_hidden_states, hidden_states = self.restore_draft_prefill_outputs(
+            last_hidden_states, hidden_states
+        )
 
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(

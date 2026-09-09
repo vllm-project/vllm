@@ -667,10 +667,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.max_num_reqs,
         )
-        if self.pcp_manager is not None and self.speculator is not None:
-            self.speculator.draft_prefill_prepare = (
-                self.pcp_manager.prepare_draft_prefill
-            )
+        if self.speculator is not None:
+            self.speculator.pcp_manager = self.pcp_manager
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
             self.kv_cache_config,

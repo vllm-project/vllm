@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -28,6 +28,9 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
 
@@ -175,9 +178,8 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.supports_mm_inputs = False
-        self.draft_prefill_prepare: Callable[..., DraftPrefillInputs | None] | None = (
-            None
-        )
+        self.pcp_manager: PCPManager | None = None
+        self._draft_prefill_inputs: DraftPrefillInputs | None = None
 
     @abstractmethod
     def load_draft_model(
@@ -228,21 +230,44 @@ class DraftModelSpeculator(BaseSpeculator):
         input_batch: InputBatch,
         input_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> DraftPrefillInputs:
-        if self.draft_prefill_prepare is not None:
-            context = self.draft_prefill_prepare(input_batch, input_ids, hidden_states)
-            if context is not None:
-                return context
-        return (
-            input_ids,
-            self.input_buffers.positions,
-            hidden_states,
-            None,
-            None,
+    ) -> torch.Tensor:
+        self._draft_prefill_inputs = None
+        if self.pcp_manager is not None:
+            self._draft_prefill_inputs = self.pcp_manager.prepare_draft_prefill(
+                input_batch, input_ids, hidden_states
+            )
+        if self._draft_prefill_inputs is None:
+            return hidden_states
+        return self._draft_prefill_inputs[2]
+
+    def draft_prefill_model_inputs(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        context = getattr(self, "_draft_prefill_inputs", None)
+        if context is None:
+            return self.input_buffers.input_ids, self.input_buffers.positions, None
+        return context[0], context[1], context[3]
+
+    def restore_draft_prefill_outputs(
+        self,
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        context = getattr(self, "_draft_prefill_inputs", None)
+        self._draft_prefill_inputs = None
+        if context is None or (restore := context[4]) is None:
+            return last_hidden_states, hidden_states
+        local_last_hidden_states = last_hidden_states
+        last_hidden_states = restore(local_last_hidden_states)
+        hidden_states = (
+            last_hidden_states
+            if local_last_hidden_states is hidden_states
+            else restore(hidden_states)
         )
+        return last_hidden_states, hidden_states
 
     def draft_decode_is_prefilling(self, num_reqs: int) -> torch.Tensor | None:
-        if self.draft_prefill_prepare is None:
+        if self.pcp_manager is None:
             return None
         return torch.zeros(num_reqs, dtype=torch.bool)
 

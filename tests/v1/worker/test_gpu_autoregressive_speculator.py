@@ -351,6 +351,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         padding,
         restorer,
     )
+    speculator._draft_prefill_inputs = prefill
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
     speculator.last_token_indices = torch.tensor([1, 3])
     speculator.idx_mapping = torch.tensor([0, 1])
@@ -373,7 +374,6 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         num_tokens_across_dp=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
         mm_inputs=None,
-        prefill=prefill,
     )
 
     assert torch.equal(speculator.draft_tokens[:, 0], torch.tensor([11, 22]))
@@ -382,7 +382,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     assert torch.equal(
         speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
     )
-    assert speculator._run_model.call_args.kwargs["prefill"] is prefill
+    assert speculator._draft_prefill_inputs is None
 
 
 def test_pcp_manager_prepares_local_draft_prefill():
@@ -462,7 +462,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
 
 def test_pcp_multi_step_drafts_are_marked_as_decode():
     speculator = object.__new__(_TestSpeculator)
-    speculator.draft_prefill_prepare = Mock()
+    speculator.pcp_manager = Mock()
     is_prefilling = speculator.draft_decode_is_prefilling(2)
     assert torch.equal(is_prefilling, torch.zeros(2, dtype=torch.bool))
 
