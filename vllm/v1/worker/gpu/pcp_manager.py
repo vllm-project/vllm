@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftPrefillContext
 
 logger = init_logger(__name__)
 
@@ -684,6 +685,26 @@ class PCPManager:
         """
         assert local_batch is self._local_batch
         return self.localize_tensor(global_input_ids, local_batch.input_ids)
+
+    def prepare_draft_prefill(
+        self,
+        input_batch: InputBatch,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> DraftPrefillContext | None:
+        local_batch = self.local_batch_for(input_batch)
+        if local_batch is None:
+            return None
+        assert hidden_states.shape[0] == local_batch.num_tokens_after_padding
+        input_ids = self.localize_input_ids_for_draft(input_ids, local_batch)
+        return DraftPrefillContext(
+            input_batch=local_batch,
+            input_ids=input_ids,
+            positions=local_batch.positions,
+            hidden_states=hidden_states,
+            is_padding=local_batch.is_padding,
+            hidden_state_restorer=self.restore_hidden_states,
+        )
 
     def restore_for_sampling(
         self,

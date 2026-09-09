@@ -20,6 +20,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -28,7 +29,10 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    DraftModelSpeculator,
+    DraftPrefillContext,
+)
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
@@ -327,15 +331,15 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
-def test_set_pcp_manager_keeps_speculator_owned_buffers():
+def test_set_draft_prefill_adapter_keeps_speculator_owned_buffers():
     speculator = object.__new__(_TestSpeculator)
     input_buffers = object()
     speculator.input_buffers = input_buffers
 
-    manager = Mock()
-    speculator.set_pcp_manager(manager)
+    adapter = Mock()
+    speculator.set_draft_prefill_adapter(adapter)
 
-    assert speculator.pcp_manager is manager
+    assert speculator.draft_prefill_adapter is adapter
     assert speculator.input_buffers is input_buffers
 
 
@@ -345,15 +349,21 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     local_feedback = torch.tensor([[3.0], [4.0]])
     global_logits = torch.tensor([[1.0], [5.0], [2.0], [6.0]])
     global_feedback = torch.tensor([[3.0], [7.0], [4.0], [8.0]])
-    manager = Mock()
+    restorer = Mock(side_effect=[global_logits, global_feedback])
     padding = torch.tensor([False, True])
     local_batch = SimpleNamespace(
         input_ids=torch.arange(2),
         positions=torch.arange(2),
         is_padding=padding,
     )
-    manager.restore_hidden_states.side_effect = [global_logits, global_feedback]
-    speculator.pcp_manager = manager
+    prefill = DraftPrefillContext(
+        input_batch=local_batch,
+        input_ids=local_batch.input_ids,
+        positions=local_batch.positions,
+        hidden_states=torch.empty(2, 1),
+        is_padding=padding,
+        hidden_state_restorer=restorer,
+    )
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
     speculator.last_token_indices = torch.tensor([1, 3])
     speculator.idx_mapping = torch.tensor([0, 1])
@@ -375,7 +385,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         num_tokens_across_dp=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
         mm_inputs=None,
-        pcp_local_batch=local_batch,
+        prefill=prefill,
     )
 
     assert torch.equal(speculator.draft_tokens[:, 0], torch.tensor([11, 22]))
@@ -384,9 +394,33 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     assert torch.equal(
         speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
     )
-    assert torch.equal(speculator._run_model.call_args.kwargs["is_padding"], padding)
-    assert speculator._run_model.call_args.kwargs["input_ids"] is local_batch.input_ids
-    assert speculator._run_model.call_args.kwargs["positions"] is local_batch.positions
+    assert speculator._run_model.call_args.kwargs["prefill"] is prefill
+
+
+def test_pcp_manager_prepares_local_draft_prefill():
+    manager = object.__new__(PCPManager)
+    manager._local_gather_idx = torch.tensor([2, 0])
+    global_batch = object()
+    local_batch = SimpleNamespace(
+        input_ids=torch.full((2,), -1),
+        positions=torch.arange(2),
+        is_padding=torch.tensor([False, True]),
+        num_tokens_after_padding=2,
+    )
+    manager._global_batch = global_batch
+    manager._local_batch = local_batch
+    hidden_states = torch.arange(2).view(2, 1)
+
+    prefill = manager.prepare_draft_prefill(
+        global_batch,  # type: ignore[arg-type]
+        torch.tensor([10, 11, 12]),
+        hidden_states,
+    )
+
+    assert prefill is not None
+    assert prefill.input_batch is local_batch
+    assert prefill.input_ids.tolist() == [12, 10]
+    assert prefill.hidden_states is hidden_states
 
 
 @pytest.mark.parametrize(
@@ -452,7 +486,7 @@ def test_pcp_multi_step_drafts_are_marked_as_decode(monkeypatch):
         compute_slot_mappings=Mock(return_value=torch.arange(2))
     )
     speculator.kv_cache_config = object()
-    speculator.pcp_manager = object()
+    speculator.draft_prefill_adapter = object()
     speculator._build_draft_attn_metadata = Mock(return_value={})
     speculator._generate_draft = Mock()
     monkeypatch.setattr(
