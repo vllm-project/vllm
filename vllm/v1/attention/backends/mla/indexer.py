@@ -998,6 +998,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
         return self.global_decode_seq_lens_buffer[:num_decode_tokens]
 
+    def _split_prefill_chunks(
+        self,
+        compressed_seq_lens_cpu: torch.Tensor,
+        prefill_query_lens_cpu: torch.Tensor,
+        num_decodes: int,
+        max_logits_bytes: int,
+    ) -> list[tuple[slice, slice]]:
+        return split_indexer_prefill_chunks(
+            compressed_seq_lens_cpu[num_decodes:],
+            prefill_query_lens_cpu,
+            self.max_prefill_buffer_size,
+            max_logits_bytes,
+            request_offset=num_decodes,
+        )
+
     def _build_varlen_decode_indices(
         self,
         decode_lens: torch.Tensor,
@@ -1097,12 +1112,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-            chunk_specs = split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+            chunk_specs = self._split_prefill_chunks(
+                compressed_seq_lens_cpu,
                 prefill_query_lens_cpu,
-                self.max_prefill_buffer_size,
+                num_decodes,
                 max_logits_bytes,
-                request_offset=num_decodes,
             )
 
             chunks = []
