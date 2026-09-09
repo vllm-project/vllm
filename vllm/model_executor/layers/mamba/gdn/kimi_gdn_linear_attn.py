@@ -598,7 +598,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 assert non_spec_state_indices_tensor is not None
                 decode_conv_indices = non_spec_state_indices_tensor[
                     : mixed_qkv_ns.size(0)
-                ]
+                ].contiguous()
                 # Sibling beta and, for full-rank gates, output-gate views
                 # remain live, so write the conv output separately.
                 packed_conv_out = torch.empty(
