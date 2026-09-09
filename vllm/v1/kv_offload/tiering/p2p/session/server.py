@@ -593,7 +593,7 @@ class ServerRole:
         self.add_stored_blocks(
             lookup.kv_request_id,
             list(meta.keys),
-            meta.block_ids.tolist(),
+            meta.chunk_ids.tolist(),
             meta.job_id,
             round_seq=lookup.round_seq,
             from_lookup=True,
