@@ -315,7 +315,6 @@ class Sampler:
             top_k,
             top_p,
             use_flashinfer,
-            return_logprobs,
         )
 
     def _sample_random(
@@ -327,9 +326,7 @@ class Sampler:
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
         use_flashinfer: bool,
-        return_logprobs: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del return_logprobs
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:

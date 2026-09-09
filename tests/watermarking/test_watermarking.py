@@ -101,7 +101,6 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
         None,
         None,
         False,
-        False,
     )
 
     assert torch.equal(sampled, torch.tensor([7, 4]))
@@ -137,7 +136,6 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         None,
         None,
-        False,
         False,
     )
 
