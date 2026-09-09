@@ -9,11 +9,11 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
+from vllm.distributed.device_communicators.host_staged_all_reduce import (
     QUANT_BLOCK,
     KERNEL_BLOCK,
     NVFP4_SCALE_BLOCK,
-    Fp8HostStagedAllReduce,
+    HostStagedAllReduce,
     _quant_fp8_kernel,
     _quant_nvfp4_kernel,
     _load_fp4_cuda,
@@ -97,13 +97,13 @@ def _nvfp4_dequant_reference(
     return torch.stack([deq(even), deq(odd)], dim=1).reshape(-1) * s
 
 
-def _uninitialized_comm(device: torch.device) -> Fp8HostStagedAllReduce:
-    comm = Fp8HostStagedAllReduce.__new__(Fp8HostStagedAllReduce)
+def _uninitialized_comm(device: torch.device) -> HostStagedAllReduce:
+    comm = HostStagedAllReduce.__new__(HostStagedAllReduce)
     comm.rank = 0
     comm.peer = 1
     comm.device = device
     comm._cpu_group = None
-    comm._codec = "e4m3"
+    comm._codec = "fp8"
     comm._fp4_cuda = None
     comm._cap = 0
     comm._wire = None
@@ -322,13 +322,13 @@ def test_should_use_rejects_graph_capture(dev, monkeypatch):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def fp8_hs_ar_target(
+def host_staged_ar_target(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
     pp_size,
     rank,
     distributed_init_port,
-    codec: str = "e4m3",
+    codec: str = "fp8",
 ):
     # Ray workers must see all GPUs (the project never uses
     # CUDA_VISIBLE_DEVICES).
@@ -339,8 +339,8 @@ def fp8_hs_ar_target(
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     comm = get_tp_group().device_communicator
-    assert comm.fp8_hs_ar is not None, "FP8 host-staged AR was not constructed"
-    hs = comm.fp8_hs_ar
+    assert comm.hs_ar is not None, "host-staged AR was not constructed"
+    hs = comm.hs_ar
     assert hs.disabled is False
     assert hs._codec == codec
 
@@ -413,11 +413,11 @@ def fp8_hs_ar_target(
         comm.pynccl_comm.send = orig_send
 
 
-@pytest.mark.parametrize("codec", ["e4m3", "nvfp4"])
+@pytest.mark.parametrize("codec", ["fp8", "nvfp4"])
 @pytest.mark.parametrize("tp_size", [2])
-def test_fp8_hs_ar_2gpu(
+def test_host_staged_ar_2gpu(
     monkeypatch: pytest.MonkeyPatch, tp_size, codec
 ):
     if tp_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_parallel(monkeypatch, tp_size, 1, fp8_hs_ar_target, codec=codec)
+    multi_process_parallel(monkeypatch, tp_size, 1, host_staged_ar_target, codec=codec)
