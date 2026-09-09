@@ -104,6 +104,22 @@ class GroupOffloadConfig(NamedTuple):
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
 
+    def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
+        window = self.sliding_window_size_in_chunks
+        if isinstance(self.kv_cache_spec, SlidingWindowSpec):
+            assert window is not None
+            # Lookup rounds the right edge up, but allocation retains the
+            # window ending at the actual hit boundary, possibly one chunk left.
+            right_padding = -num_tokens % self.tokens_per_chunk
+            window = max(
+                window,
+                cdiv(
+                    self.kv_cache_spec.sliding_window - 1 + right_padding,
+                    self.tokens_per_chunk,
+                ),
+            )
+        return window
+
 
 def get_sliding_window_size_in_chunks(
     kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
@@ -208,7 +224,21 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.speculative_config.use_eagle_block_drop()
         )
         if use_eagle_block_drop and not eagle_groups:
-            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
+            # No group is annotated as holding drafter layers. This happens
+            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
+            # is a regular decoder layer merged into the target's
+            # full-attention group, and for separate-draft models that miss
+            # annotation. Treating every group as a drafter group here makes
+            # the volatile-tail pop apply to ALL groups, which can zero the
+            # whole request's offload hit whenever any group's servable
+            # window is a single chunk (issue #52735). Drafter KV served one
+            # chunk stale can only lower speculative acceptance rates — the
+            # target model verifies every draft — so fail toward serving.
+            logger.info_once(
+                "KV offloading: speculative decoding is enabled but no "
+                "KV-cache group is annotated as a drafter group; treating "
+                "all groups as non-draft for offloading."
+            )
 
         if eagle_groups:
             logger.info(
@@ -395,15 +425,19 @@ class RequestOffloadState:
         accepted position may be rewritten after spec-token rejection. During
         prefill the trailing chunk is stable (the draft input for a chunk's
         last position is the next prompt token), so it is stored immediately.
-        The exclusion must be applied consistently everywhere
-        ``next_stored_chunk_idx`` is derived: otherwise the trailing chunk of
-        each step is skipped on collection but jumped over by
-        ``next_stored_chunk_idx``, so it is never re-considered and a
-        permanent hole breaks prefix-reuse lookup.
+        Once the request has finished, no further spec-token rejection can
+        rewrite the tail, so the exclusion is lifted and the final chunk
+        becomes storable (issue #52735). The exclusion must be applied
+        consistently everywhere ``next_stored_chunk_idx`` is derived:
+        otherwise the trailing chunk of each step is skipped on collection but
+        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
+        and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
+        monotonic, so the finish-time calls all see the lifted exclusion.
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        if group_config.is_eagle_group and is_decoding:
+        # Finished requests have no pending speculation.
+        if group_config.is_eagle_group and is_decoding and not self.req.is_finished():
             num_chunks = max(0, num_chunks - 1)
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
@@ -639,12 +673,15 @@ class OffloadingConnectorScheduler:
         keys: Sequence[OffloadKey],
         sliding_window_size: int,
         req_context: ReqContext,
+        initial_window_size: int | None = None,
     ) -> int | None:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
+        The first run may need a larger window for a partial rightmost chunk.
         Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
         consecutive_hits = 0
+        required_window = initial_window_size or sliding_window_size
         for idx in range(len(keys) - 1, -1, -1):
             match self.manager.lookup(keys[idx], req_context):
                 case LookupResult.HIT:
@@ -661,10 +698,12 @@ class OffloadingConnectorScheduler:
                     # async lookups.
                     defer_lookup = True
                     consecutive_hits = 0
+                    required_window = sliding_window_size
                 case LookupResult.MISS:
                     consecutive_hits = 0
-            if consecutive_hits == sliding_window_size:
-                return idx + sliding_window_size if not defer_lookup else None
+                    required_window = sliding_window_size
+            if consecutive_hits == required_window:
+                return idx + required_window if not defer_lookup else None
         return consecutive_hits if not defer_lookup else None
 
     def _touch(self, req_status: RequestOffloadState):
@@ -761,9 +800,13 @@ class OffloadingConnectorScheduler:
                 )
 
                 # For eagle groups, query one extra chunk that will be popped.
-                # We only need to increase the query size for sliding window groups.
+                # Widening applies to every group type: without it, the pop
+                # below shrinks max_hit_size_tokens past what was queried,
+                # which can push the confirmed boundary under a coarser
+                # sibling group's chunk granularity and zero the whole
+                # request's hit (issue #52735).
                 query_max = max_hit_size_tokens
-                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
+                if is_eagle_unverified:
                     query_max = min(
                         max_hit_size_tokens + tokens_per_chunk,
                         len(offload_keys) * tokens_per_chunk,
@@ -788,10 +831,19 @@ class OffloadingConnectorScheduler:
                     required_window = sliding_window_size_in_chunks
                     if is_eagle_unverified:
                         required_window += 1
+                    candidate_end = min(
+                        max_hit_size_tokens,
+                        (num_chunks - int(is_eagle_unverified)) * tokens_per_chunk,
+                    )
+                    initial_window = group_config.load_window_size_in_chunks(
+                        candidate_end
+                    )
+                    assert initial_window is not None
                     num_hit_chunks = self._sliding_window_lookup(
                         offload_keys,
                         required_window,
                         req_status.req_context,
+                        initial_window + int(is_eagle_unverified),
                     )
                 if num_hit_chunks == 0:
                     return 0
@@ -842,8 +894,8 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 tokens_per_chunk = group_config.tokens_per_chunk
-                sliding_window_size_in_chunks = (
-                    group_config.sliding_window_size_in_chunks
+                sliding_window_size_in_chunks = group_config.load_window_size_in_chunks(
+                    num_computed_tokens + num_hit_tokens
                 )
                 offload_keys = group_state.offload_keys
                 num_chunks = cdiv(
