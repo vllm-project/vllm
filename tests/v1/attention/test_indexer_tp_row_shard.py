@@ -18,10 +18,13 @@ import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 import vllm.utils.deep_gemm as deep_gemm
 import vllm.v1.attention.backends.mla.indexer as indexer
 from vllm.config import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerPrefillChunkMetadata,
+    balanced_prefill_row_shard,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 
@@ -320,7 +323,7 @@ def test_kpool_sharded_prefill_exchanges_expanded_tail_and_excludes_padding(
     logits = torch.randn(
         num_tokens, _NUM_KV, generator=torch.Generator().manual_seed(54952)
     )
-    observations = []
+    observations: list[tuple[int, bool, tuple[int, ...], tuple[int, ...]]] = []
     outputs = _run_group(
         monkeypatch,
         4,
@@ -775,3 +778,51 @@ def test_runner_v2_builds_shards_from_scheduled_rows(
     else:
         assert len(sizes) == 4 and min(sizes) > 0
         assert sum(sizes) == rows
+
+
+def test_spec_decode_rows_are_excluded_from_prefill_row_sharding():
+    """MTP-5 rows stay in decode metadata when a long prefill is present.
+
+    DeepSeek's indexer uses ``1 + num_speculative_tokens`` as the decode
+    threshold.  With MTP-5, the two six-token requests below are speculative
+    decode rows and only the final long request may be assigned to TP row
+    shards.  This also checks the token offset consumed by the runtime
+    indexer, which is the boundary that matters for mixed SpecDecode batches.
+    """
+    num_speculative_tokens = 5
+    decode_threshold = 1 + num_speculative_tokens
+    query_lens = torch.tensor(
+        [decode_threshold, decode_threshold, 65536], dtype=torch.int32
+    )
+    query_start_loc = torch.cat(
+        (torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0))
+    )
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([128, 256, 1_000_000], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([128, 256, 1_000_000], dtype=torch.int32),
+        num_reqs=3,
+        num_actual_tokens=int(query_start_loc[-1]),
+        max_query_len=65536,
+        max_seq_len=1_000_000,
+        block_table_tensor=torch.zeros(3, 1, dtype=torch.int32),
+        slot_mapping=torch.zeros(int(query_start_loc[-1]), dtype=torch.int64),
+        is_prefilling=torch.tensor([False, False, True]),
+    )
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        split_decodes_and_prefills(common, decode_threshold=decode_threshold)
+    )
+    assert (num_decodes, num_prefills) == (2, 1)
+    assert (num_decode_tokens, num_prefill_tokens) == (12, 65536)
+
+    shard_sizes = balanced_prefill_row_shard(
+        common.seq_lens_cpu_upper_bound[num_decodes:],
+        torch.diff(common.query_start_loc_cpu[num_decodes:]),
+        compress_ratio=1,
+        tp_size=4,
+    )
+    assert shard_sizes is not None
+    assert sum(shard_sizes) == num_prefill_tokens
+    assert min(shard_sizes) > 0
