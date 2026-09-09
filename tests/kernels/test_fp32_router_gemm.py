@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from vllm._custom_ops import fp32_router_gemm
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.platforms import current_platform
 
 # (hidden_size, num_experts)
@@ -28,8 +29,8 @@ ATOL_BF16 = 2e-2  # bf16 activation has lower precision
 def _requires_sm90():
     # ROCm reports a CUDA-like device capability (gfx950 -> (9, 5)), which would
     # pass the SM90 check below for a kernel that is only built for CUDA.
-    if not current_platform.is_cuda():
-        pytest.skip("fp32_router_gemm is built for CUDA only")
+    if not current_platform.is_cuda() or not torch.cuda.is_available():
+        pytest.skip("fp32_router_gemm requires an available CUDA device")
     major, minor = torch.cuda.get_device_capability()
     if major * 10 + minor < 90:
         pytest.skip(f"fp32_router_gemm requires SM90+, got SM{major}{minor}")
@@ -99,7 +100,6 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
     business-level correctness of the router — numeric error only matters
     if it flips the argsort."""
     _requires_sm90()
-    top_k = 8
     device = torch.device("cuda")
     for seed in range(5):
         torch.manual_seed(1000 + seed)
@@ -107,21 +107,60 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
         mat_b = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device=device)
         out = fp32_router_gemm(mat_a, mat_b)
         ref = mat_a.double() @ mat_b.double().t()
-        kernel_idx = out.topk(top_k, dim=-1).indices
-        ref_vals, ref_idx = ref.topk(top_k, dim=-1)
-        for t in range(num_tokens):
-            got = set(kernel_idx[t].tolist())
-            want = set(ref_idx[t].tolist())
-            if got == want:
-                continue
-            # Tolerate genuine near-ties around the k-th value only.
-            kth = ref_vals[t, -1].item()
-            for e in got.symmetric_difference(want):
-                gap = abs(ref[t, e].item() - kth)
-                assert gap < 1e-3, (
-                    f"top-{top_k} mismatch beyond tie tolerance: token {t}, "
-                    f"expert {e}, gap {gap:.3e}"
-                )
+        _assert_topk_routing_consistency(out, ref)
+
+
+def _assert_topk_routing_consistency(out, ref):
+    top_k = 8
+    kernel_idx = out.topk(top_k, dim=-1).indices
+    ref_vals, ref_idx = ref.topk(top_k, dim=-1)
+    for t in range(out.shape[0]):
+        got = set(kernel_idx[t].tolist())
+        want = set(ref_idx[t].tolist())
+        if got == want:
+            continue
+        # Tolerate genuine near-ties around the k-th value only.
+        kth = ref_vals[t, -1].item()
+        for e in got.symmetric_difference(want):
+            gap = abs(ref[t, e].item() - kth)
+            assert gap < 1e-3, (
+                f"top-{top_k} mismatch beyond tie tolerance: token {t}, "
+                f"expert {e}, gap {gap:.3e}"
+            )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability((12, 0)),
+    reason="GateLinear SM120 integration requires exact capability (12, 0)",
+)
+@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
+@pytest.mark.parametrize("num_tokens", [0, 1, 32, 33, 64])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_sm120_gate_linear(dist_init, num_tokens, hidden_dim, num_experts, dtype):
+    """Preserve FP32 logits and expert selection across the M=32 kernel limit."""
+    torch.manual_seed(42)
+    with torch.device("cuda"):
+        gate = GateLinear(
+            hidden_dim,
+            num_experts,
+            params_dtype=torch.float32,
+            out_dtype=torch.float32,
+        )
+        gate.weight.normal_()
+        x = torch.randn(num_tokens, hidden_dim, dtype=dtype)
+
+    assert gate.allow_fp32_router_gemm
+    assert not gate.allow_bf16x3_router_gemm
+    out, bias = gate(x)
+    ref = x.double() @ gate.weight.double().t()
+
+    assert bias is None
+    assert out.dtype == torch.float32
+    assert out.shape == (num_tokens, num_experts)
+    torch.testing.assert_close(out, ref.float(), atol=ATOL_FP32, rtol=0)
+    _assert_topk_routing_consistency(out, ref)
 
 
 def test_zero_tokens_returns_empty():

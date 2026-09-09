@@ -44,6 +44,7 @@ class GateLinear(ReplicatedLinear):
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
         is_blackwell = current_platform.is_device_capability_family(100)
+        is_sm120 = current_platform.is_device_capability((12, 0))
         is_gfx950 = False
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx950
@@ -87,7 +88,7 @@ class GateLinear(ReplicatedLinear):
             and (
                 (
                     current_platform.is_cuda()
-                    and (is_hopper or is_blackwell)
+                    and (is_hopper or is_blackwell or is_sm120)
                     and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
                 )
                 or (is_gfx950 and is_rocm_fp32_shape)
@@ -184,6 +185,8 @@ class GateLinear(ReplicatedLinear):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(
                 x, self.weight, self.allow_bf16x3_router_gemm
             )
+            if self.out_dtype is not None and output.dtype != self.out_dtype:
+                output = output.to(self.out_dtype)
             return output, None
 
         # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
