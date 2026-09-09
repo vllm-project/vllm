@@ -397,9 +397,45 @@ def _iter_nodes_assign_messages_item(root: jinja2.nodes.Node):
 
 
 def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
+    """Yield loops that iterate over message content or macro-bound content."""
     message_varnames = [
         varname for _, varname in _iter_nodes_assign_messages_item(root)
     ]
+
+    # Track macro parameters that receive message.content as an argument.
+    # Some templates pass message.content through a macro parameter whose
+    # name is not literally "content".
+    macro_content_params_by_loop: dict[int, set[str]] = {}
+    loops_in_macros: set[int] = set()
+    for macro_node in root.find_all(jinja2.nodes.Macro):
+        macro_param_names = {arg.name for arg in macro_node.args}
+        macro_content_params: set[str] = set()
+        for call_node in root.find_all(jinja2.nodes.Call):
+            if (
+                isinstance(call_node.node, jinja2.nodes.Name)
+                and call_node.node.name == macro_node.name
+            ):
+                for i, arg in enumerate(call_node.args):
+                    if i < len(macro_node.args) and any(
+                        _is_var_or_elems_access(arg, varname, "content")
+                        for varname in message_varnames
+                    ):
+                        macro_content_params.add(macro_node.args[i].name)
+                for kwarg in call_node.kwargs:
+                    if (
+                        isinstance(kwarg, jinja2.nodes.Keyword)
+                        and kwarg.key in macro_param_names
+                        and any(
+                            _is_var_or_elems_access(kwarg.value, varname, "content")
+                            for varname in message_varnames
+                        )
+                    ):
+                        macro_content_params.add(kwarg.key)
+
+        for loop_ast in macro_node.find_all(jinja2.nodes.For):
+            loops_in_macros.add(id(loop_ast))
+            if macro_content_params:
+                macro_content_params_by_loop[id(loop_ast)] = macro_content_params
 
     # Search for {%- for content in message['content'] -%} loops
     # or {%- for item in content -%} loops
@@ -412,10 +448,26 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 assert isinstance(loop_target, jinja2.nodes.Name)
                 yield loop_ast, loop_target.name
                 break
+        else:
+            macro_content_params_for_loop = macro_content_params_by_loop.get(
+                id(loop_ast)
+            )
+            if (
+                isinstance(loop_iter, jinja2.nodes.Name)
+                and macro_content_params_for_loop is not None
+                and loop_iter.name in macro_content_params_for_loop
+            ):
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
+                continue
 
-        if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
-            assert isinstance(loop_target, jinja2.nodes.Name)
-            yield loop_ast, loop_target.name
+            if (
+                id(loop_ast) not in loops_in_macros
+                and isinstance(loop_iter, jinja2.nodes.Name)
+                and loop_iter.name == "content"
+            ):
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
