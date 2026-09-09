@@ -2971,7 +2971,7 @@ class Scheduler(SchedulerInterface):
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
-        """Device blocks needed to hold the request's full sequence."""
+        """Blocks `request` still needs to allocate to hold its full sequence."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
         return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
@@ -2985,10 +2985,10 @@ class Scheduler(SchedulerInterface):
         )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
-        """Device reservations needed by all in-flight prefills."""
+        """Num blocks in-flight prefills still need to finish (their reservation)."""
+
         return sum(
-            self._request_remaining_blocks(request)
-            for request in self._inflight_prefills
+            self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:

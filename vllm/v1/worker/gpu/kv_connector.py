@@ -63,9 +63,7 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_caches_dict: dict[str, torch.Tensor],
+        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
@@ -93,6 +91,7 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+
         if (
             scheduler_output.has_sync_kv_loads
             or self.kv_connector.requires_pre_forward_start
@@ -199,8 +198,7 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig,
-    kv_caches_dict: dict[str, torch.Tensor],
+    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.

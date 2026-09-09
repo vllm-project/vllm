@@ -212,13 +212,38 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
+        """
+        Get the number of device blocks needed to be allocated for the request.
+
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens that need a slot (including
+                tokens that are already allocated).
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+            num_encoder_tokens: The number of encoder tokens for allocating
+                blocks for cross-attention.
+            total_computed_tokens: Include both local and external tokens.
+            num_local_computed_tokens: The number of local prefix-cache computed
+                tokens.
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
+            apply_admission_cap: If True, apply the recycling-aware
+                per-request admission cap (SWA / chunked-local). Set only by
+                the full-sequence admission gate; per-step allocation must
+                leave it False so the predictor matches `allocate_new_blocks`.
+
+        Returns:
+            The number of blocks to allocate.
+        """
         needs_hot = self.hisparse_coordinator.needs_hot(new_computed_blocks)
         num_external_computed_tokens = total_computed_tokens - num_local_computed_tokens
         host_import = (
             num_external_computed_tokens > 0
             and self.hisparse_coordinator.has_host_cache
         )
-        required = 0
+        num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
             if group.host_resident:
@@ -233,6 +258,8 @@ class KVCacheCoordinator(ABC):
             elif isinstance(manager, HiSparseHotManager) and (host_import or needs_hot):
                 num_blocks = manager.get_num_required_blocks(request_id)
             elif isinstance(manager, CrossAttentionManager):
+                # For cross-attention, we issue a single static allocation
+                # of blocks based on the number of encoder input tokens.
                 num_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_encoder_tokens,
@@ -252,8 +279,8 @@ class KVCacheCoordinator(ABC):
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                 )
-            required += num_blocks
-        return required
+            num_blocks_to_allocate += num_blocks
+        return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(
         self,
@@ -775,11 +802,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
 
     def verify_and_split_kv_cache_groups(self) -> None:
-        """Group prefix-cache groups by spec type for efficient hit lookup.
-
-        Despite the coordinator name, this may leave one group: hybrid layouts
-        can contain auxiliary groups, such as HiSparse hot caches, that do not
-        participate in prefix caching.
+        """
+        Groups KV cache groups by their spec type for efficient batch processing
+        during cache hit lookup.
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -819,7 +844,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 )
 
         assert self.attention_groups, (
-            "Prefix caching requires at least one persistent KV cache group."
+            "HybridKVCacheCoordinator requires at least one cacheable group."
         )
 
         # Put full attention first: its efficient left-to-right scan provides

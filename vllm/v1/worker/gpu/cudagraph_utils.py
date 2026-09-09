@@ -37,9 +37,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.worker import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-from vllm.v1.worker.gpu.attn_utils import (
-    build_slot_mappings_by_layer,
-)
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers

@@ -1063,10 +1063,16 @@ def get_max_concurrency_for_kv_cache_config(
     Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
-    table. Requirements are summed within each allocator domain, then the
-    tightest domain determines concurrency.
+    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
+    device groups draw those block ids from one shared pool, so the per-request
+    total is the sum over groups. The memory/page ratio is identical whether
+    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
+    a representative per-layer spec (scheduler config), so both capacity
+    call sites agree.
+
+    Host groups use a separate pool; the smaller concurrency limit applies.
     """
-    blocks_per_request = 0
+    num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
         required = cdiv(
@@ -1076,8 +1082,8 @@ def get_max_concurrency_for_kv_cache_config(
         if group.host_resident:
             host_blocks_per_request += required
         else:
-            blocks_per_request += required
-    limits = [kv_cache_config.num_blocks / blocks_per_request]
+            num_blocks_per_request += required
+    limits = [kv_cache_config.num_blocks / num_blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(
@@ -1785,6 +1791,7 @@ def get_kv_cache_config_from_groups(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
         )
+
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
