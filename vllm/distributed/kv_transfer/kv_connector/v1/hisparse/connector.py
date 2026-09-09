@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -29,7 +30,7 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -200,11 +201,11 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             raise ValueError(f"Unsupported KV connector role: {role}")
 
-    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+    def bind_hisparse_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         if self.role != KVConnectorRole.SCHEDULER:
             raise ValueError("Only the scheduler connector accepts a coordinator")
         assert self.connector_scheduler is not None
-        self.connector_scheduler.bind_coordinator(kv_cache_manager.hisparse_coordinator)
+        self.connector_scheduler.bind_coordinator(coordinator)
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -306,3 +307,19 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         return False, None
+
+
+def find_hisparse_connector(
+    connector: KVConnectorBase_V1 | None,
+) -> HiSparseConnector | None:
+    if connector is None:
+        return None
+    if isinstance(connector, MultiConnector):
+        for child in connector.sub_connectors:
+            found = find_hisparse_connector(child)
+            if found is not None:
+                return found
+        return None
+    if isinstance(connector, HiSparseConnector):
+        return connector
+    return None

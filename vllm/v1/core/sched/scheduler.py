@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    find_hisparse_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -316,8 +319,19 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_fine_grained_prefix_cache
             ),
         )
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            # TODO(NickLucche): unify scheduler-side connector initialization.
+            hisparse_connector = find_hisparse_connector(self.connector)
+            assert hisparse_connector is not None, (
+                "HiSparse host pool requires a configured HiSparseConnector"
+            )
+            hisparse_connector.bind_hisparse_coordinator(
+                self.kv_cache_manager.hisparse_coordinator
+            )
+        # Bind GPU block pool to the KV connector. This must happen after
+        # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
-            self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
