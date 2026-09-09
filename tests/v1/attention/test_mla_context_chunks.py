@@ -52,6 +52,7 @@ def test_pageable_context_lengths_do_not_force_gpu_sync(monkeypatch):
     """Sparse MLA supplies pageable context lengths to the shared builder."""
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
     metadata = gsd.with_gpu_sync_check(build_chunked_context)(
         [2048, 320], [4, 4], 1024, device="cuda"
     )

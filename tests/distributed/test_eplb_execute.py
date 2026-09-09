@@ -32,6 +32,7 @@ def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
     """Gloo receives must reach the GPU without an implicit pageable copy."""
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
     monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
 
     def receive(ops):
