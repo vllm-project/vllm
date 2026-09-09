@@ -574,26 +574,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         else:
             num_local_tokens = None
 
-        # AITER's fused_moe silently corrupts output (all-zero rows) when its
-        # input buffer is much larger than the real valid-token count --
-        # common with EP dispatchers like MoRI that pre-allocate worst-case
-        # buffers. Trim to the valid prefix before calling AITER, then
-        # scatter the result into a zero-filled full-size buffer (padding
-        # rows are never read downstream).
+
         orig_num_tokens = hidden_states.shape[0]
         if num_local_tokens is None:
             valid_num_tokens = orig_num_tokens
         elif _is_uniform_full_graph_batch():
-            # `.item()` is unsafe mid-capture and a live-count shape breaks
-            # replay, so use a static worst-case bound instead: each of this
-            # rank's `graph_bs` tokens can select up to `topk` experts, and
-            # each selection can land on any of `dispatch_group_size` peer
-            # ranks, so a rank can receive up to
-            # `graph_bs * topk * dispatch_group_size` rows. A narrower bound
-            # that dropped the `topk` factor (assuming multiple topk
-            # selections landing on the same destination rank always get
-            # deduplicated into one send) is not safe to assume in general
-            # and risks under-counting real traffic.
+
             batch_descriptor = get_forward_context().batch_descriptor
             dispatch_group_size = (
                 self.moe_config.ep_size
@@ -607,10 +593,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
                 orig_num_tokens,
             )
         elif _is_stream_capturing():
-            # Mid-capture but not the uniform-full-graph case handled above
-            # (e.g. PIECEWISE cudagraphs, which can still wrap this call in a
-            # captured region): `.item()` is illegal here too, and there is no
-            # safe static bound available, so skip trimming for this call.
+
             valid_num_tokens = orig_num_tokens
         else:
             valid_num_tokens = int(num_local_tokens[0].item())
