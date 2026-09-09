@@ -9,6 +9,7 @@ import warnings
 import torch
 
 from vllm.config.watermarking import WatermarkPRFName
+from vllm.logger import init_logger
 from vllm.v1.watermarking.detector import (
     WatermarkDetector,
 )
@@ -18,6 +19,8 @@ from vllm.v1.watermarking.watermarker import (
     Watermarker,
     WatermarkSample,
 )
+
+logger = init_logger(__name__)
 
 
 def _gamma_survival_integer_shape(score: float, shape: int) -> float:
@@ -49,6 +52,10 @@ class GumbelWatermarker(Watermarker):
         _validate_context_width(context_width)
         self.prf = prf
         self._context_width = context_width
+        logger.warning_once(
+            "Using single-key Gumbel-max watermarking may increase degenerate "
+            "generations, including repetition loops."
+        )
 
     @property
     def context_width(self) -> int:
