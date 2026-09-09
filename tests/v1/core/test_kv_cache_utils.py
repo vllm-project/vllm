@@ -3,6 +3,8 @@
 import copy
 import hashlib
 import importlib
+import json
+import math
 import subprocess
 import sys
 from collections.abc import Callable
@@ -126,6 +128,85 @@ def make_request(
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
     )
+
+
+@pytest.mark.parametrize(
+    "dcp,pcp,uniform", [(1, 1, False), (2, 1, False), (8, 1, True), (2, 4, False)]
+)
+def test_group_metadata_matches_manager_and_events(dcp, pcp, uniform):
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.engine.core import EngineCore
+
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    if uniform:
+        full_spec = UniformTypeKVCacheSpecs(
+            block_size=16, kv_cache_specs={"full": full_spec}
+        )
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full_spec),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=64,
+                    shapes=((1, 8),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="all",
+                ),
+            ),
+        ],
+    )
+    if pcp > 1:
+        config.kv_cache_groups = config.kv_cache_groups[:1]
+    hash_block_size = 16 * dcp if pcp > 1 else 16
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([config]),
+        max_model_len=256,
+        scheduler_block_size=math.lcm(16 * dcp, 64),
+        hash_block_size=hash_block_size,
+        dcp_world_size=dcp,
+        pcp_world_size=pcp,
+        enable_kv_cache_events=True,
+    )
+    core = EngineCore.__new__(EngineCore)
+    core.scheduler = SimpleNamespace(kv_cache_manager=manager)
+    metadata = core.get_kv_cache_group_metadata()
+    fixture = (
+        Path(__file__).parents[3]
+        / "rust/src/engine-core-client/src/tests/kv_cache_group_metadata.json"
+    )
+    expected = json.loads(fixture.read_text())
+    expected[0]["logical_block_size"] = 16 * dcp
+    if pcp > 1:
+        expected = expected[:1]
+    assert metadata == expected
+
+    request = make_request(
+        "metadata", list(range(128)), block_size=hash_block_size, hash_fn=sha256
+    )
+    assert manager.allocate_slots(request, 128) is not None
+    events = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    assert {event.group_idx: event.block_size for event in events} == {
+        group["group_id"]: group["logical_block_size"] for group in metadata
+    }
+
+
+def test_group_metadata_distinguishes_unavailable_from_no_groups():
+    from vllm.v1.engine.core import EngineCore
+
+    core = EngineCore.__new__(EngineCore)
+    core.scheduler = SimpleNamespace()
+    assert core.get_kv_cache_group_metadata() is None
+    core.scheduler.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=())
+    )
+    assert core.get_kv_cache_group_metadata() == []
 
 
 def new_kv_cache_spec(

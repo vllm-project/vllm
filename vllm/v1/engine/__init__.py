@@ -5,7 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 import msgspec
 import numpy as np
@@ -69,6 +69,19 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
+class KVCacheGroupMetadata(TypedDict):
+    """Initialized cache geometry in tokens; group_id matches KV event group_idx.
+
+    logical_block_size describes a full block; partial events carry their own
+    actual size. An unrecognized cache spec has kind "unknown".
+    """
+
+    group_id: int
+    kind: str
+    block_size: int
+    logical_block_size: int
+
+
 @dataclass
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
@@ -102,6 +115,8 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    # None means unavailable; an empty list means the engine has no cache groups.
+    kv_cache_group_metadata: list[KVCacheGroupMetadata] | None = None
 
 
 class EngineCoreRequest(

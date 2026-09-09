@@ -1,0 +1,14 @@
+[
+  {
+    "group_id": 0,
+    "kind": "full_attention",
+    "block_size": 16,
+    "logical_block_size": 32
+  },
+  {
+    "group_id": 1,
+    "kind": "mamba",
+    "block_size": 64,
+    "logical_block_size": 64
+  }
+]

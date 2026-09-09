@@ -195,6 +195,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
+            kv_cache_metadata: kv_cache_metadata(&self.client().ready_responses())?,
         }))
     }
 
@@ -494,6 +495,28 @@ impl pb::control_server::Control for ControlServiceImpl {
             weight_version,
         }))
     }
+}
+
+pub(super) fn kv_cache_metadata(
+    responses: &[&EngineCoreReadyResponse],
+) -> Result<Option<pb::KvCacheMetadata>, Status> {
+    let groups = &responses[0].kv_cache_group_metadata;
+    if responses.iter().any(|ready| ready.kv_cache_group_metadata != *groups) {
+        return Err(Status::failed_precondition(
+            "KV cache group metadata differs across data-parallel ranks",
+        ));
+    }
+    Ok(groups.as_ref().map(|groups| pb::KvCacheMetadata {
+        groups: groups
+            .iter()
+            .map(|group| pb::KvCacheGroupMetadata {
+                group_id: group.group_id,
+                kind: group.kind.clone(),
+                block_size: group.block_size,
+                logical_block_size: group.logical_block_size,
+            })
+            .collect(),
+    }))
 }
 
 pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::KvEventSource> {

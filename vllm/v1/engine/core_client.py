@@ -43,6 +43,7 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    KVCacheGroupMetadata,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -174,6 +175,9 @@ class EngineCoreClient(ABC):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
+        raise NotImplementedError
+
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
@@ -262,6 +266,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
+        raise NotImplementedError
+
+    async def get_kv_cache_group_metadata_async(
+        self,
+    ) -> list[KVCacheGroupMetadata] | None:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -365,6 +374,9 @@ class InprocClient(EngineCoreClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
+
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
+        return self.engine_core.get_kv_cache_group_metadata()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
@@ -973,6 +985,9 @@ class SyncMPClient(MPClient):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
 
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
+        return self.call_utility("get_kv_cache_group_metadata")
+
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
@@ -1215,6 +1230,11 @@ class AsyncMPClient(MPClient):
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
+
+    async def get_kv_cache_group_metadata_async(
+        self,
+    ) -> list[KVCacheGroupMetadata] | None:
+        return await self.call_utility_async("get_kv_cache_group_metadata")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index

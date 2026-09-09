@@ -50,6 +50,24 @@ message ServerInfo {
   uint64 max_batched_tokens = 9;
   uint32 max_loras = 10;
   RlCapabilities rl_capabilities = 11;
+  // Absent when unavailable. All data-parallel ranks must report matching groups.
+  KvCacheMetadata kv_cache_metadata = 12;
+}
+
+message KvCacheMetadata {
+  // An empty list means the engine has no KV cache groups.
+  repeated KvCacheGroupMetadata groups = 1;
+}
+
+message KvCacheGroupMetadata {
+  // Matches group_idx in KV cache events.
+  uint32 group_id = 1;
+  // Cache spec kind, or "unknown" for an unrecognized spec.
+  string kind = 2;
+  // Physical cache block size in tokens.
+  uint64 block_size = 3;
+  // Effective full-block size in tokens; partial events carry their own size.
+  uint64 logical_block_size = 4;
 }
 
 message RlCapabilities {
