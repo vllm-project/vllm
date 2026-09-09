@@ -110,8 +110,9 @@ def normalize_audio(
         For mono output (target_channels=1), returns 1D array/tensor.
 
     Raises:
-        ValueError: If audio has unsupported dimensions or channel expansion
-            is requested (e.g., mono to stereo).
+        ValueError: If audio has unsupported dimensions, channel expansion
+            is requested (e.g., mono to stereo), or multi-channel reduction
+            (target_channels > 1) is attempted.
     """
     if not spec.needs_normalization:
         return audio
@@ -161,9 +162,11 @@ def normalize_audio(
             raise ValueError(f"Unknown reduction method: {spec.channel_reduction}")
         return result
     else:
-        # Reduce to N channels (take first N and apply reduction if needed)
-        # For now, just take first N channels
-        return audio[: spec.target_channels]
+        raise ValueError(
+            f"Reducing {num_channels} channels to {spec.target_channels} channels "
+            "is currently not supported. Only mono downmix (target_channels=1) "
+            "and exact pass-through are supported."
+        )
 
 
 # ============================================================

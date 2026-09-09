@@ -186,6 +186,16 @@ class TestNormalizeAudio:
         with pytest.raises(ValueError, match="Cannot expand"):
             normalize_audio(mono, spec)
 
+    def test_multichannel_reduction_unsupported_raises(self):
+        """Reducing to multi-channel (>1) should raise ValueError."""
+        audio_4ch = np.zeros((4, 100), dtype=np.float32)
+        spec = AudioSpec(target_channels=2, channel_reduction=ChannelReduction.MEAN)
+        with pytest.raises(
+            ValueError,
+            match="Reducing 4 channels to 2 channels is currently not supported",
+        ):
+            normalize_audio(audio_4ch, spec)
+
     def test_time_channels_format_numpy(self):
         """Audio in (time, channels) format should be transposed to (channels, time).
 
