@@ -103,6 +103,39 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
 }
 
 #[test]
+fn factory_routes_ling3_models() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-flash"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-tiny"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("inclusionAI/Ling-3.0-flash-base"),
+        Some(names::LING3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ling-3.0"),
+        Some(names::LING3)
+    );
+}
+
+#[test]
+fn factory_new_registers_ling3_reasoning_by_name() {
+    let tokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<think>", 256)
+            .with_regular_token("</think>", 257),
+    );
+    let factory = ReasoningParserFactory::new();
+    assert!(factory.contains(names::LING3));
+    factory.create(names::LING3, tokenizer).unwrap();
+}
+
+#[test]
 fn factory_rejects_unknown_parser_names() {
     let tokenizer = Arc::new(TestTokenizer::new());
     let factory = ReasoningParserFactory::new();
