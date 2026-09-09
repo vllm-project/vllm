@@ -769,3 +769,22 @@ def test_attention_scale_rejects_unresolvable_expression():
 
     with pytest.raises(ValueError, match="Cannot resolve attention scaling expression"):
         fuser.scale(Attention())
+
+
+class _ImageOnlyMRoPEModel:
+    """`get_rope_index` without `video_grid_thw` or `**kwargs` (e.g. HunYuanVL)."""
+
+    def get_rope_index(self, input_ids, image_grid_thw):
+        seq_len = input_ids.shape[-1]
+        positions = torch.arange(seq_len).view(1, 1, -1).expand(4, 1, -1)
+        return positions, torch.tensor([0])
+
+
+def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
+    """Optional grids the model can't accept must not be passed when empty."""
+    mixin = SimpleNamespace(model=_ImageOnlyMRoPEModel())
+
+    positions, delta = MultiModalMixin.get_mrope_input_positions(mixin, [1, 2, 3], [])
+
+    assert positions.shape == (4, 3)
+    assert delta == 0

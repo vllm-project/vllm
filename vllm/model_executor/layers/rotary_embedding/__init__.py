@@ -24,7 +24,6 @@ from .mrope_interleaved import MRotaryEmbeddingInterleaved
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .telechat3_scaling_rope import TeleChat3RoPEScaledRotaryEmbedding
-from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
@@ -228,18 +227,6 @@ def get_rope(
             raise ValueError(
                 "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
             )
-    elif scaling_type == "xdrope":
-        scaling_alpha = rope_parameters["alpha"]
-        rotary_emb = XDRotaryEmbedding(
-            head_size,
-            rotary_dim,
-            max_position,
-            base,
-            is_neox_style,
-            scaling_alpha,
-            dtype,
-            xdrope_section=rope_parameters["xdrope_section"],
-        )
     elif scaling_type == "yarn":
         scaling_factor = rope_parameters["factor"]
         original_max_position = rope_parameters["original_max_position_embeddings"]
