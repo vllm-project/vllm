@@ -3257,6 +3257,7 @@ def rocm_sparse_attn_prefill(
         and _get_aiter_sparse_prefill_opus() is not None
     ):
         if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
             indices_2d = indices.reshape(indices.shape[0], -1)
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
                 indices_2d,
