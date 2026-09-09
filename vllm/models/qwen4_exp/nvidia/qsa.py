@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -78,6 +79,36 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         return kv_cache_dtype is None or kv_cache_dtype in cls.supported_kv_cache_dtypes
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # QSA dequantizes the fp8 KV in its own Triton kernel and never runs
+        # flash-attn over the quantized cache, so the parent fp8-KV rejection
+        # does not apply; hand it an unquantized dtype to skip only that check.
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            kv_cache_dtype = "auto"
+        return super().supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            device_capability,
+        )
 
     @staticmethod
     def get_name() -> str:
