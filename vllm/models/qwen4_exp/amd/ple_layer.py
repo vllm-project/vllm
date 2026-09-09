@@ -358,6 +358,24 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
 
+        # FP8 checkpoints store the n-gram table shards as F8_E4M3 with one
+        # global per-tensor scale (`ngram_embedding.weight_scale`). Fold the
+        # scale in at load time and keep the in-memory table in bf16.
+        # `weights` may be a single-pass generator, and the PLE weights may
+        # arrive split across several load_weights calls (one per consecutive
+        # checkpoint-file group), with the scale in only one of them — so
+        # materialize the iterable and cache the scale on the module.
+        weight_scale: torch.Tensor | None = None
+        weights_list = list(weights)
+        for name, loaded_weight in weights_list:
+            if name.endswith("ngram_embedding.weight_scale"):
+                weight_scale = loaded_weight
+                break
+        if weight_scale is not None:
+            self._cached_ngram_weight_scale = weight_scale
+        else:
+            weight_scale = getattr(self, "_cached_ngram_weight_scale", None)
+
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
             "ngram_heads_offsets": self.ngram_heads_offsets,
@@ -367,7 +385,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         regular_weights: list[tuple[str, torch.Tensor]] = []
         shard_prefix = "ngram_embedding.shard_"
 
-        for name, loaded_weight in weights:
+        for name, loaded_weight in weights_list:
             leaf_name = name.rsplit(".", 1)[-1]
             if leaf_name.startswith("hashstats_") or leaf_name == "token_lookup":
                 continue
@@ -380,6 +398,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     )
                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
                 loaded.add(name)
+                continue
+            if name.endswith("ngram_embedding.weight_scale"):
+                # scale already folded into the shards at load time
                 continue
             if name.startswith(shard_prefix) and name.endswith(".weight"):
                 shard_text = name[len(shard_prefix) : -len(".weight")]
@@ -407,6 +428,19 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"Shape mismatch for PLE embedding shard {shard_index}: "
                         f"expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
+                    )
+                if weight_scale is not None and loaded_weight.dtype == (
+                    torch.float8_e4m3fn
+                ):
+                    # move to the destination device first so the fp8->bf16
+                    # cast always runs on a device that supports it
+                    loaded_weight = loaded_weight.to(
+                        device=embedding.weight.device
+                    )
+                    loaded_weight = loaded_weight.to(torch.bfloat16) * (
+                        weight_scale.to(
+                            device=embedding.weight.device, dtype=torch.bfloat16
+                        )
                     )
                 embedding.weight.weight_loader(
                     embedding.weight,
