@@ -19,7 +19,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
@@ -33,17 +32,6 @@ class StoreSpecGroup(NamedTuple):
     group_ids: list[int]
     manager_cls: type[SingleTypeKVCacheManager]
     use_eagle: bool
-
-
-def mooncake_store_group_ids(
-    kv_cache_config: KVCacheConfig,
-) -> tuple[int, ...]:
-    group_ids = kv_cache_config.prefix_cacheable_transfer_group_ids
-    if not group_ids:
-        raise ValueError(
-            "MooncakeStore requires at least one prefix-cacheable KV cache group"
-        )
-    return group_ids
 
 
 class ExternalCachedBlockPool:
@@ -464,7 +452,7 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
     hash_block_size: int,
     dcp_world_size: int = 1,
 ) -> bool:

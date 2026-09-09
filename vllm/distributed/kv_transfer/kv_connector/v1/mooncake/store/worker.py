@@ -40,7 +40,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
-    mooncake_store_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -1671,13 +1670,13 @@ class MooncakeStoreWorker:
 
         self._kv_cache_groups = [
             dataclasses.replace(
-                kv_cache_config.kv_cache_groups[group_id],
+                group,
                 kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    kv_cache_config.kv_cache_groups[group_id].kv_cache_spec,
+                    group.kv_cache_spec,
                     self.dcp_size,
                 ),
             )
-            for group_id in mooncake_store_group_ids(kv_cache_config)
+            for group in kv_cache_config.prefix_cacheable_groups
         ]
         spec_cfg = getattr(vllm_config, "speculative_config", None)
         use_eagle_block_drop = bool(

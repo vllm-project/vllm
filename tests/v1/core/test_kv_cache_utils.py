@@ -33,7 +33,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -303,7 +303,7 @@ def test_kv_cache_config_selects_only_transferable_groups():
     )
 
 
-def test_kv_cache_config_selects_prefix_cacheable_transfer_groups():
+def test_kv_cache_config_selects_prefix_cacheable_groups():
     """Prefix stores exclude scratch state without changing transfer groups."""
     full_group = KVCacheGroupSpec(["full"], new_kv_cache_spec())
     qsa_group = KVCacheGroupSpec(
@@ -324,18 +324,22 @@ def test_kv_cache_config_selects_prefix_cacheable_transfer_groups():
         kv_cache_tensors=[],
         kv_cache_groups=[full_group, qsa_group, disabled_group],
     )
-    block_ids = ([1], [2], [3])
-
     assert config.transfer_group_ids == (0, 1)
-    assert config.select_transfer_block_ids(block_ids) == ([1], [2])
-    assert config.prefix_cacheable_transfer_group_ids == (0,)
-    assert config.prefix_cacheable_transfer_groups == (full_group,)
-    assert config.select_block_ids(
-        block_ids, config.prefix_cacheable_transfer_group_ids
-    ) == ([1],)
+    assert config.select_transfer_block_ids(([1], [2], [3])) == ([1], [2])
+    assert config.prefix_cacheable_group_ids == (0,)
+    assert config.prefix_cacheable_groups == (full_group,)
 
-    with pytest.raises(ValueError, match="Expected 3 KV cache groups, got 1"):
-        config.select_block_ids(([1],), config.prefix_cacheable_transfer_group_ids)
+
+def test_kv_cache_blocks_selects_requested_groups():
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(1)],
+            [KVCacheBlock(2)],
+            [KVCacheBlock(3)],
+        )
+    )
+
+    assert blocks.get_block_ids(group_ids=(0, 2)) == ([1], [3])
 
 
 def new_sliding_window_spec(

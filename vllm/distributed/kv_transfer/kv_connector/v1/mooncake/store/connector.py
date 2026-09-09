@@ -46,7 +46,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .coordinator import mooncake_store_group_ids
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
@@ -133,7 +132,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 
         unsupported: list[str] = []
-        store_group_ids = mooncake_store_group_ids(kv_cache_config)
+        store_group_ids = kv_cache_config.prefix_cacheable_group_ids
+        if not store_group_ids:
+            raise ValueError(
+                "MooncakeStore requires at least one prefix-cacheable KV cache group"
+            )
         for group_id in store_group_ids:
             spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
