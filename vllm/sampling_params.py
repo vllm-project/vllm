@@ -544,6 +544,8 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
+        if self.extra_args:
+            self._verify_extra_args()
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -655,6 +657,26 @@ class SamplingParams(
                 f"Got bad_words={self.bad_words}"
             )
 
+    def _verify_extra_args(self) -> None:
+        # JSON accepts arbitrary integers, but the engine's MessagePack
+        # transport only supports signed/unsigned 64-bit integers.
+        pending: list[Any] = [self.extra_args]
+        visited: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, int) and not -(2**63) <= value < 2**64:
+                raise VLLMValidationError(
+                    "extra_args integers must be between -2**63 and 2**64 - 1.",
+                    parameter="extra_args",
+                )
+            if isinstance(value, (dict, list, tuple)) and id(value) not in visited:
+                visited.add(id(value))
+                if isinstance(value, dict):
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                else:
+                    pending.extend(value)
+
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
             raise VLLMValidationError(
@@ -706,6 +728,17 @@ class SamplingParams(
                 prompt_token_ids = tokenizer.encode(
                     text=prompt, add_special_tokens=False
                 )
+
+                if not prompt_token_ids:
+                    if not add_prefix_space:
+                        raise VLLMValidationError(
+                            "bad_words entries must tokenize to at least one token.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
+                    # The unprefixed form is still enforceable when only the
+                    # optional space-prefixed form tokenizes to nothing.
+                    continue
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
@@ -789,8 +822,9 @@ class SamplingParams(
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
+        self._validate_stop_token_ids(model_config)
         self._validate_logits_processors(model_config)
-        self._validate_allowed_token_ids(tokenizer)
+        self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
@@ -858,6 +892,31 @@ class SamplingParams(
                     parameter="prompt_logprobs",
                     value=num_prompt_logprobs,
                 )
+
+    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate stop_token_ids are within vocabulary range."""
+        if not self.stop_token_ids:
+            return
+
+        # stop_token_ids are used as column indices into the logits tensor,
+        # whose width is the model's vocab size (LogitsProcessor is built from
+        # config.vocab_size, InputBatch.vocab_size comes from
+        # model_config.get_vocab_size()), so use the same bound here — like
+        # _validate_logit_bias, which indexes the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.stop_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in stop_token_ids contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="stop_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
         """Validate logit_bias token IDs are within vocabulary range."""
@@ -941,7 +1000,7 @@ class SamplingParams(
 
         validate_logits_processors_parameters(model_config.logits_processors, self)
 
-    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+    def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
             return
@@ -953,19 +1012,24 @@ class SamplingParams(
                 value=allowed_token_ids,
             )
 
-        if tokenizer is not None:
-            vocab_size = len(tokenizer)
-            invalid_token_ids = [
-                token_id
-                for token_id in allowed_token_ids
-                if token_id < 0 or token_id >= vocab_size
-            ]
-            if invalid_token_ids:
-                raise VLLMValidationError(
-                    "allowed_token_ids contains out-of-vocab token id!",
-                    parameter="allowed_token_ids",
-                    value=invalid_token_ids,
-                )
+        # allowed_token_ids are client-supplied ids used as column indices
+        # into the logits tensor (the mask in InputBatch is sized by
+        # model_config.get_vocab_size(), and the ids are written as
+        # mask[req_index][allowed_token_ids]), so use the same bound here —
+        # like _validate_stop_token_ids and _validate_logit_bias, which
+        # index the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in allowed_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                "allowed_token_ids contains out-of-vocab token id!",
+                parameter="allowed_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_spec_decode(
         self,

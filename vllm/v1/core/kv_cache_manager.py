@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -132,6 +133,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        enable_mamba_fine_grained_prefix_cache: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -164,6 +166,21 @@ class KVCacheManager:
             metrics_collector=self.metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        # One predicate, read by both sides of the feature, so the scheduler
+        # cannot end a chunk at a junction the manager would refuse -- a refused
+        # junction costs a forward pass and displaces the block-boundary stop.
+        # Multi-module MTP is excluded because ``cache_blocks`` then hands the
+        # manager ``num_computed - num_reprefillable`` rather than the chunk end.
+        self.mamba_fine_grained_prefix_cache = (
+            enable_mamba_fine_grained_prefix_cache
+            and bool(self.coordinator.eagle_group_ids)
+            and self.coordinator.enable_partial_hash_hits
+            and self.coordinator.num_reprefillable_tokens == 0
+        )
+        if self.mamba_fine_grained_prefix_cache:
+            for manager in self.coordinator.single_type_managers:
+                if isinstance(manager, MambaManager):
+                    manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
@@ -188,10 +205,6 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
-
-        # Off-table cow blocks handed to a KV connector for partial-tail
-        # offload; pinned until the request's blocks are freed.
-        self._partial_tail_pins: dict[str, list[KVCacheBlock]] = {}
 
     @property
     def usage(self) -> float:
@@ -575,9 +588,6 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        pins = self._partial_tail_pins.pop(request.request_id, None)
-        if pins:
-            self.block_pool.free_blocks(pins)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -610,14 +620,7 @@ class KVCacheManager:
         Returns:
             The request's blocks in allocation order.
         """
-        blocks = self.coordinator.pop_blocks_for_free(request.request_id)
-        # Pins ride the same (possibly deferred) free as the request blocks.
-        # Preemption may release a pin under a still-queued offload — the same
-        # exposure normal saves of table blocks already have.
-        pins = self._partial_tail_pins.pop(request.request_id, None)
-        if pins:
-            blocks = pins + blocks
-        return blocks
+        return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -793,6 +796,14 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                # Scratch groups (e.g. the CSA compressor ring) hold a fixed
+                # block covering no token range, so a lookup result never
+                # carries computed blocks for them and their block size does
+                # not divide the endpoint.
+                assert not group_blocks
+                truncated.append([])
+                continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
             if isinstance(group.kv_cache_spec, MambaSpec):
@@ -854,18 +865,18 @@ class KVCacheManager:
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
-    def take_partial_tail_offloads(self) -> dict[str, list[tuple[int, int, int]]]:
-        """Drain producer partial-tail offload hand-offs per request.
+    def take_boundary_state_offloads(
+        self,
+    ) -> dict[str, list[tuple[int, int, int]]]:
+        """Drain this step's boundary-state hand-offs for a KV connector.
 
         Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
-        for the durable boundary blocks of producers' last-prompt-boundary
-        partial tails. Only mamba "align" groups contribute; empty otherwise.
-        A KV connector reads the referenced blocks and offloads them so a later
-        request can hit the sub-block prefix.
-
-        Each handed-off block lives off the request block table, so it is
-        pinned here and unpinned when the request's blocks are freed — for a
-        producer with saved tokens, after the connector reports sends done.
+        for mamba "align" boundary states: the
+        request's committed boundary-state snapshots and, on a sub-block partial
+        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
+        groups contribute; empty otherwise. A connector reads the referenced
+        blocks — never resolving them positionally — and offloads them so a
+        later request can hit that prefix.
         """
         offloads: dict[str, list[tuple[int, int, int]]] = {}
         for mgr in self.coordinator.single_type_managers:
@@ -874,12 +885,33 @@ class KVCacheManager:
                 group_id,
                 block,
                 boundary_tokens,
-            ) in mgr.take_pending_partial_tail_offloads():
-                self.block_pool.touch((block,))
-                self._partial_tail_pins.setdefault(req_id, []).append(block)
+            ) in mgr.take_pending_boundary_state_offloads():
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
+        return offloads
+
+    def finalize_partial_tail_offloads(
+        self, request: Request
+    ) -> list[tuple[int, int, int]]:
+        """Consume safe producer partial tails when a request finishes.
+
+        A mamba align table block is a valid boundary source only if no later
+        token was forwarded. The connector pins and queues the exact table
+        block before request cleanup, then releases the pin when every worker
+        reports the store job complete.
+        """
+        offloads: list[tuple[int, int, int]] = []
+        for mgr in self.coordinator.single_type_managers:
+            finalized = mgr.finalize_partial_tail_offload(
+                request.request_id,
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+            )
+            if finalized is None:
+                continue
+            group_id, block, boundary_tokens = finalized
+            offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
     def new_step_starts(self) -> None:

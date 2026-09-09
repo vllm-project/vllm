@@ -2,7 +2,7 @@ group: Model Executor
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Model Executor"
+- label: ":nvidia: (H200 MIG 35GB) Model Executor"
   device: h200_35gb
   key: model-executor
   timeout_in_minutes: 60
@@ -13,6 +13,8 @@ steps:
   - vllm/model_executor/warmup
   - tests/model_executor
   - tests/model_executor/test_jit_warmup.py
+  - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
+  - tests/model_executor/test_jit_warmup_triton_launcher.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
@@ -41,6 +43,8 @@ steps:
       - vllm/model_executor/warmup
       - tests/model_executor
       - tests/model_executor/test_jit_warmup.py
+      - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
+      - tests/model_executor/test_jit_warmup_triton_launcher.py
       - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
