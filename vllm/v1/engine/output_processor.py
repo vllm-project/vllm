@@ -533,16 +533,10 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                if iteration_stats is not None:
-                    self._update_stats_from_finished(
-                        req_state, FinishReason.ABORT, iteration_stats
-                    )
-                else:
-                    self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
-                # Produce final abort output.
-                if req_state.queue is not None and (
-                    request_output := req_state.make_request_output(
+                # Update parent completion state even without an output queue.
+                if req_state.queue is not None or req_state.parent_req is not None:
+                    request_output = req_state.make_request_output(
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
@@ -554,8 +548,16 @@ class OutputProcessor:
                         kv_transfer_params=None,
                         ec_transfer_params=None,
                     )
-                ):
-                    req_state.queue.put(request_output)
+                    if req_state.queue is not None and request_output is not None:
+                        req_state.queue.put(request_output)
+                if iteration_stats is not None:
+                    self._update_stats_from_finished(
+                        req_state, FinishReason.ABORT, iteration_stats
+                    )
+                else:
+                    self.lora_states.request_finished(request_id, req_state.lora_name)
+                if (parent := req_state.parent_req) and not parent.child_requests:
+                    self.parent_requests.pop(parent.request_id, None)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
