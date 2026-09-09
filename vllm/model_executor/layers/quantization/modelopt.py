@@ -979,8 +979,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if is_weights_pre_processed():
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise RuntimeError(
-                    "weight cache IPC for NVFP4 MoE is only verified with the "
-                    f"FLASHINFER_TRTLLM backend, got {self.nvfp4_backend}"
+                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
+                    f"moe backend, got {self.nvfp4_backend}"
                 )
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer)

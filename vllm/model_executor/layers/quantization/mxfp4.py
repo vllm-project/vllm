@@ -788,8 +788,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if is_weights_pre_processed():
             if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
                 raise RuntimeError(
-                    "weight cache IPC for MXFP4 MoE is only verified with the "
-                    f"FLASHINFER_TRTLLM_MXFP4_MXFP8 backend, got {self.mxfp4_backend}"
+                    "pre-processed weights require FLASHINFER_TRTLLM_MXFP4_MXFP8 "
+                    f"moe backend, got {self.mxfp4_backend}"
                 )
             self._build_moe_kernel(layer)
             return
