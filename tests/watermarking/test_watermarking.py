@@ -93,6 +93,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
 
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
+    sampler.deduplicate_contexts = True
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, False]), gpu=torch.tensor([True, False])
     )
@@ -137,6 +138,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
 
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
+    sampler.deduplicate_contexts = True
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, True]), gpu=torch.tensor([True, True])
     )
@@ -170,6 +172,44 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
     assert torch.equal(sampled, torch.tensor([3, 7]))
     assert torch.equal(output_logits[0], logits[0])
     assert torch.equal(output_logits[1], torch.full((8,), 10.0))
+
+
+def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
+    class StubWatermarker:
+        context_width = 1
+
+        def sample(self, logits, contexts, random_sample):
+            return WatermarkSample(torch.tensor([7, 7]), logits + 10)
+
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = StubWatermarker()
+    sampler.deduplicate_contexts = False
+    sampler.watermarking = SimpleNamespace(
+        np=np.array([True, True]), gpu=torch.tensor([True, True])
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(np=np.ones(2), gpu=torch.ones(2)),
+    )
+    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
+        2, 1, dtype=torch.int64
+    )
+    sampler._get_repeated_contexts = lambda *args: pytest.fail(
+        "context deduplication should not run"
+    )
+    logits = torch.zeros(2, 8)
+
+    sampled, output_logits = sampler._sample_random(
+        logits,
+        torch.tensor([0, 1]),
+        np.array([0, 1]),
+        torch.zeros(2, dtype=torch.int64),
+        None,
+        None,
+        False,
+    )
+
+    assert torch.equal(sampled, torch.tensor([7, 7]))
+    assert torch.equal(output_logits, torch.full((2, 8), 10.0))
 
 
 def test_repeated_context_mask_ignores_prompt_tokens():

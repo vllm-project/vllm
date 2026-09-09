@@ -68,7 +68,14 @@ When a generated-token context has already appeared in the same completion,
 generation uses ordinary sampling for that occurrence. Reusing the keyed random
 vector would otherwise correlate token choices and weaken the sequence-level
 distribution-preserving guarantee. The detector applies the matching context
-deduplication described below.
+deduplication described below. This behavior is enabled by default and can be
+disabled for comparison or compatibility with earlier behavior:
+
+```bash
+vllm serve MODEL \
+  --watermark-config \
+  '{"algorithm":"gumbel","key":42,"deduplicate_contexts":false}'
+```
 
 ### SynthID-Text
 

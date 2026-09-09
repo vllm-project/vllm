@@ -63,8 +63,22 @@ def test_watermark_config_cli():
     assert config.algorithm == "gumbel"
     assert config.key == 42
     assert config.context_width == 4
+    assert config.deduplicate_contexts
     assert config.prf == "philox"
     assert not config.supports_speculative_decoding
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":false}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert not config.deduplicate_contexts
 
 
 @pytest.mark.parametrize(

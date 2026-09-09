@@ -29,6 +29,8 @@ class WatermarkConfig:
     """Algorithm used to watermark generated text."""
     context_width: int = Field(default=4, ge=1)
     """Number of prior output tokens used by the watermark PRF."""
+    deduplicate_contexts: bool = True
+    """Use ordinary sampling when a generated-token context repeats."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
