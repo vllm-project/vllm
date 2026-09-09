@@ -807,7 +807,7 @@ class PrepareDflashInputsKernel(
             int64_ptr,  # out_seeds_ptr
             int64_ptr,  # target_positions_ptr
             int32_ptr,  # target_query_start_loc_ptr
-            int32_ptr,  # idx_mapping_ptr
+            int64_ptr,  # idx_mapping_ptr
             int64_ptr,  # last_sampled_ptr
             int32_ptr,  # next_prefill_tokens_ptr
             int32_ptr,  # num_sampled_ptr

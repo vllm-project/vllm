@@ -43,7 +43,7 @@ def triton_warmup_inputs(
         raise ValueError(
             f"Triton inputs passed twice: {', '.join(sorted(duplicate_names))}"
         )
-    return {"grid": grid, **inputs, **kwargs}
+    return {"kernel": kernel, "grid": grid, **inputs, **kwargs}
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -131,7 +131,11 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         self._warming = True
         self._warming_compile_key = compile_key
         try:
-            cast(Callable[..., None], self)(**inputs)
+            if "kernel" in inputs:
+                grid = inputs.pop("grid")
+                self.launch((grid, inputs), {})
+            else:
+                cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
             self._warming_compile_key = None
