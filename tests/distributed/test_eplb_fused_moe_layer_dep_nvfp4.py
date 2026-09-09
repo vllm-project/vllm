@@ -21,8 +21,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMoEMethod,
     ModelOptNvFp4Config,
-    ModelOptNvFp4FusedMoE,
+    resolve,
 )
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
@@ -66,7 +67,10 @@ def make_fused_moe_layer(
         quant_config=quant_config,
     )
 
-    nvfp4_fused_moe = ModelOptNvFp4FusedMoE(quant_config, fml)
+    spec, ctx, format_scheme = resolve("NVFP4", quant_config, "")
+    nvfp4_fused_moe = ModelOptMoEMethod(
+        spec, ctx, fml, quant_config=quant_config, format_scheme=format_scheme
+    )
     nvfp4_fused_moe.create_weights(
         fml,
         test_config.num_local_experts,
