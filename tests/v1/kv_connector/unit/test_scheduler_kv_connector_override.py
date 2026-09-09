@@ -6,6 +6,7 @@ import pytest
 
 import vllm.plugins as plugins_module
 from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory,
 )
@@ -15,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.core.sched.output import RequestBlockIds, SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -55,7 +56,11 @@ class DummyKVConnector(KVConnectorBase_V1):
         )
         block_state = scheduler_output.kv_connector_block_state
         assert block_state is not None
-        block_ids_by_req = block_state.block_ids
+        block_ids_by_req = {}
+        for req_id in block_state.req_ids:
+            block_ids = block_state.get_block_ids(req_id)
+            assert block_ids is not None
+            block_ids_by_req[req_id] = block_ids
         return DummyConnectorMetadata(
             block_hashes_by_req=block_hashes_by_req,
             block_ids_by_req=block_ids_by_req,
@@ -128,7 +133,8 @@ def test_connector_receives_block_hashes(_load_plugin):
 
     output = scheduler.schedule()
 
-    # Verify the connector metadata was built with block hashes.
+    # Exercise worker serialization without opening sockets or shared memory.
+    MessageQueue(n_reader=0, n_local_reader=0).enqueue(output)
     meta = output.kv_connector_metadata
     assert isinstance(meta, DummyConnectorMetadata)
     assert len(meta.block_hashes_by_req) == 3
@@ -185,15 +191,24 @@ def test_connector_block_state_covers_steps_without_new_blocks(_load_plugin):
     meta = output.kv_connector_metadata
     assert isinstance(meta, DummyConnectorMetadata)
     block_ids = meta.block_ids_by_req.get(request.request_id)
+    assert block_ids is not None
     assert block_ids == scheduler.kv_cache_manager.get_block_ids(request.request_id)
     assert len(block_ids[0]) == 3
 
 
-def test_request_block_ids_resolves_only_offered_requests():
+def test_connector_block_state_resolves_only_offered_requests():
     tables = {"a": ([1, 2],), "b": ([3],)}
-    block_ids = RequestBlockIds({"a"}, tables.__getitem__)
+    resolve_block_ids = MagicMock(side_effect=tables.__getitem__)
+    block_state = KVConnectorBlockState(
+        req_ids={"a"},
+        resolve_block_ids=resolve_block_ids,
+        boundary_state_offloads={},
+    )
 
-    assert block_ids["a"] == ([1, 2],)
-    assert block_ids.get("b") is None
-    assert dict(block_ids) == {"a": ([1, 2],)}
-    assert block_ids == {"a": ([1, 2],)}
+    assert block_state.get_block_ids("b") is None
+    resolve_block_ids.assert_not_called()
+    assert block_state.get_block_ids("a") == ([1, 2],)
+    resolve_block_ids.assert_called_once_with("a")
+
+    tables["a"] = ([4, 5],)
+    assert block_state.get_block_ids("a") == ([4, 5],)

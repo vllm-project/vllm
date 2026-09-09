@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -206,45 +206,21 @@ class ScheduledEncoderInputStats:
     output_tokens: int = 0
 
 
-class RequestBlockIds(Mapping[str, tuple[list[int], ...]]):
-    """Current block tables of the requests a connector may act on this step.
-
-    Resolved on access rather than copied: a connector cannot know up front
-    which requests it will emit jobs for (a store save lands on the step that
-    fills a block, not the one that allocated it), and copying every
-    scheduled request's table each step costs O(running x blocks) for tables
-    most connectors never read.
-    """
-
-    def __init__(
-        self,
-        req_ids: Collection[str],
-        get_block_ids: Callable[[str], tuple[list[int], ...]],
-    ) -> None:
-        self._req_ids = req_ids
-        self._get_block_ids = get_block_ids
-
-    def __getitem__(self, req_id: str) -> tuple[list[int], ...]:
-        if req_id not in self._req_ids:
-            raise KeyError(req_id)
-        return self._get_block_ids(req_id)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._req_ids)
-
-    def __len__(self) -> int:
-        return len(self._req_ids)
-
-
 @dataclass
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
-    # Authoritative current block tables of every request scheduled this step
-    # and of every boundary-state hand-off below.
-    block_ids: Mapping[str, tuple[list[int], ...]]
+    # Requests scheduled this step and requests with a boundary-state hand-off.
+    req_ids: set[str]
+    # Resolve on access to avoid copying tables the connector never reads.
+    resolve_block_ids: Callable[[str], tuple[list[int], ...]]
     # Exact Mamba "align" boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+
+    def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
+        if req_id not in self.req_ids:
+            return None
+        return self.resolve_block_ids(req_id)
 
 
 @dataclass

@@ -44,7 +44,6 @@ from vllm.v1.core.sched.output import (
     GrammarOutput,
     KVConnectorBlockState,
     NewRequestData,
-    RequestBlockIds,
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
@@ -1368,9 +1367,8 @@ class Scheduler(SchedulerInterface):
                 req_id for req_id in boundary_state_offloads if req_id in self.requests
             )
             kv_connector_block_state = KVConnectorBlockState(
-                block_ids=RequestBlockIds(
-                    block_state_req_ids, self.kv_cache_manager.get_block_ids
-                ),
+                req_ids=block_state_req_ids,
+                resolve_block_ids=self.kv_cache_manager.get_block_ids,
                 boundary_state_offloads=boundary_state_offloads,
             )
 
