@@ -41,6 +41,11 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
     per_block_cast_to_fp8,
 )
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    lock_workspace,
+    unlock_workspace,
+)
 
 BLOCK_SIZE = [128, 128]
 
@@ -657,71 +662,41 @@ def test_deepgemm_fp4_psum_layout_numeric(
         assert diff_layout < 0.02, f"psum vs non-psum diff too high: {diff_layout}"
 
 
-def _fp4_apply_poison_padding(
-    kernel, tokens_bf16, topk_weights, topk_ids, w1, w2, num_experts, poison
-):
-    """Like _fp4_apply (psum path) but optionally NaN-fills the padding.
+def _force_psum_layout(mp, kernel, m):
+    """Make prepare() hand back a DeepEP v2 decode-style carrier.
 
-    In decode mode the permuted activation buffer is sized to the worst-case
-    M_sum and only the real-token prefix of each expert slot is written by the
-    scatter; the alignment gaps and worst-case tail are left uninitialized. We
-    pre-fill the whole buffer with NaN so those padding rows carry garbage,
-    reproducing the real runtime condition deterministically.
+    psum_recv_per_rank is the sole gate for DeepGemmFP4Experts._use_psum_layout
+    and the standalone (non-EP) prepare/finalize never sets it, so it has to be
+    injected. Patching the prepare result is the smallest seam that turns the
+    psum path on while leaving the production apply path -- shape derivation,
+    buffer allocation, finalize -- running exactly as it does in deployment.
     """
-    impl = kernel.impl
-    experts = kernel.fused_experts
+    pf = kernel.prepare_finalize
+    assert not pf.supports_async(), "async prepare would bypass this patch"
+    orig_prepare = pf.prepare
 
-    a1q, a1q_scale, _real_meta, tk_ids, tk_w = impl._prepare(
-        hidden_states=tokens_bf16,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        global_num_experts=num_experts,
-        expert_map=None,
-        apply_router_weight_on_input=False,
-    )
-    meta = _make_decode_meta(tokens_bf16.size(0), tokens_bf16.device)
+    def prepare_with_psum(*args, **kwargs):
+        a1q, a1q_scale, _real_meta, tk_ids, tk_w = orig_prepare(*args, **kwargs)
+        return a1q, a1q_scale, _make_decode_meta(m, a1q.device), tk_ids, tk_w
 
-    _, m_full, n_dim, k_dim, top_k = experts.moe_problem_size(a1q, w1, w2, tk_ids)
-    ws13, ws2, out = impl._allocate_buffers(
-        tokens_bf16.dtype,
-        a1q.device,
-        m_full,
-        m_full,
-        n_dim,
-        k_dim,
-        top_k,
-        num_experts,
-        num_experts,
-        meta,
-        MoEActivation.SILU,
-    )
-    if poison:
-        # ws13 becomes the permuted-activation buffer (aq_out); NaN-fill so any
-        # padding row the scatter leaves untouched holds garbage.
-        ws13.fill_(float("nan"))
-        ws2.fill_(float("nan"))
-    else:
-        ws13.zero_()
-        ws2.zero_()
+    mp.setattr(pf, "prepare", prepare_with_psum)
 
-    experts.apply(
-        output=out,
-        hidden_states=a1q,
-        w1=w1,
-        w2=w2,
-        topk_weights=tk_w,
-        topk_ids=tk_ids,
-        activation=MoEActivation.SILU,
-        global_num_experts=num_experts,
-        expert_map=None,
-        a1q_scale=a1q_scale,
-        a2_scale=experts.a2_scale,
-        workspace13=ws13,
-        workspace2=ws2,
-        expert_tokens_meta=meta,
-        apply_router_weight_on_input=False,
-    )
-    return out.clone()
+
+def _fill_workspace_arena(byte: int) -> None:
+    """Byte-fill every allocated workspace buffer.
+
+    The modular kernel carves its workspaces out of this arena and does not
+    zero them, so whatever is left here is exactly what a padding row the
+    scatter never writes will contain at kernel time. 0xFF is a NaN bit pattern
+    in every float dtype the workspaces can take (bf16/fp16/fp32/fp8-e4m3), so
+    it poisons without the test having to know the workspace dtype.
+
+    Reaches into the manager's buffer list because poisoning uninitialized
+    memory is inherently white-box; there is no public accessor.
+    """
+    for ws in current_workspace_manager()._current_workspaces:
+        if ws is not None:
+            ws.fill_(byte)
 
 
 @pytest.mark.parametrize(("m", "n", "k"), [(128, 4096, 4096)])
@@ -733,13 +708,18 @@ def test_deepgemm_fp4_psum_layout_padding_robust(
 ):
     """psum output must be unaffected by garbage in the padding rows.
 
-    The decode-mode permuted buffer has a large uninitialized tail (worst-case
-    M_sum). This poisons that padding with NaN and asserts the reduced output
-    is finite and matches the clean-padding run bit-for-bit. Note this proves
-    robustness/correctness under garbage padding, not physical block-skipping:
-    MoE rows are independent and the unpermute reads only valid rows, so
-    skipping and compute-then-discard yield identical outputs (skipping is a
-    compute-savings property, covered by source review + a kernel microbench).
+    In decode mode the permuted activation buffer is sized to the worst-case
+    M_sum and only the real-token prefix of each expert slot is written by the
+    scatter; the alignment gaps and worst-case tail are left uninitialized.
+    Poisoning the workspace arena with NaN reproduces that condition
+    deterministically, and the reduced output must stay finite and match the
+    zero-padding run bit-for-bit.
+
+    Note this proves robustness/correctness under garbage padding, not physical
+    block-skipping: MoE rows are independent and the unpermute reads only valid
+    rows, so skipping and compute-then-discard yield identical outputs
+    (skipping is a compute-savings property, covered by source review + a
+    kernel microbench).
     """
     pytest.importorskip("deep_gemm.utils.math")
     with monkeypatch.context() as mp:
@@ -748,13 +728,30 @@ def test_deepgemm_fp4_psum_layout_padding_robust(
         kernel, tokens, tw, ti, (w1, w2), _ = _build_fp4_kernel(
             m, n, k, topk, num_experts
         )
+        _force_psum_layout(mp, kernel, m)
 
-        out_clean = _fp4_apply_poison_padding(
-            kernel, tokens, tw, ti, w1, w2, num_experts, poison=False
-        )
-        out_poison = _fp4_apply_poison_padding(
-            kernel, tokens, tw, ti, w1, w2, num_experts, poison=True
-        )
+        def run():
+            return kernel.apply(
+                hidden_states=tokens,
+                w1=w1,
+                w2=w2,
+                topk_weights=tw,
+                topk_ids=ti,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            ).clone()
+
+        run()  # size the arena so the fills below are not dropped by a resize
+        lock_workspace()  # a resize now raises rather than silently un-poisoning
+        try:
+            _fill_workspace_arena(0x00)
+            out_clean = run()
+            _fill_workspace_arena(0xFF)
+            out_poison = run()
+        finally:
+            unlock_workspace()
 
         assert torch.isfinite(out_poison).all(), "padding garbage leaked into output"
         torch.testing.assert_close(out_poison, out_clean, rtol=0, atol=0)
