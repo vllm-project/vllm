@@ -160,6 +160,9 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
             dtype=torch.float32,
             is_mm_prefix_lm=False,
         ),
+        kernel_config=SimpleNamespace(
+            linear_backend="auto",
+        ),
     )
     from vllm.platforms import current_platform
 

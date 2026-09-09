@@ -56,6 +56,40 @@ class AiterCustomAllreduce:
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
         return self._impl.custom_all_reduce(inp)
 
+    def use_1stage_fused_ar_rms(self, inp: torch.Tensor) -> bool:
+        """Whether AITER's fused allreduce+RMSNorm runs as its one-stage kernel.
+
+        Mirrors the launcher contract of aiter's ``fused_allreduce_rmsnorm``
+        (csrc/include/custom_all_reduce.cuh): rows of 16-byte packs, at most
+        1024 packs per row, at most 80 tokens, and the byte cap of the
+        one-stage custom allreduce for this TP size and topology. Outside it
+        the fused op runs the two-stage variant (cross-device reduce-scatter
+        + local norm), which is slower than an explicit ``all_reduce`` + norm,
+        so callers that can fall back should require this. Capture-static:
+        depends only on shape, dtype, TP size and topology.
+        """
+        hidden_dim = inp.shape[-1]
+        # Token cap first: prefill-sized inputs leave here with one comparison.
+        if inp.numel() // hidden_dim > 80:
+            return False
+        if inp.dtype not in (torch.bfloat16, torch.float16):
+            return False
+        pack_size = 16 // inp.element_size()
+        if hidden_dim % pack_size != 0 or hidden_dim // pack_size > 1024:
+            return False
+        ca = self._impl
+        world_size = ca.world_size
+        if world_size == 2:
+            return True
+        if not ca.fully_connected:
+            return False
+        total_bytes = inp.numel() * inp.element_size()
+        if world_size <= 4:
+            return total_bytes < 256 * 1024
+        if world_size <= 8:
+            return total_bytes < 128 * 1024
+        return False
+
     def capture(self):
         return self._impl.capture()
 

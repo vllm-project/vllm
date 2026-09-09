@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -147,6 +147,14 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
+        self._turn_boundary_token_ids: frozenset[int] = frozenset(
+            token_id
+            for token in parser_engine_config.turn_boundary_tokens
+            if (token_id := vocab.get(token)) is not None
+        )
+        self._reasoning_end_token_ids: frozenset[int] = (
+            self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -169,6 +177,14 @@ class ParserEngine(Parser):
     @skip_tool_parsing.setter
     def skip_tool_parsing(self, value: bool) -> None:
         self._engine.skip_tool_parsing = value
+
+    @property
+    def skip_reasoning_parsing(self) -> bool:
+        return self._engine.skip_reasoning_parsing
+
+    @skip_reasoning_parsing.setter
+    def skip_reasoning_parsing(self, value: bool) -> None:
+        self._engine.skip_reasoning_parsing = value
 
     @property
     def reasoning_ended(self) -> bool:
@@ -595,17 +611,59 @@ class ParserEngine(Parser):
 
     # ── Reasoning state queries ───────────────────────────────────────
 
+    @staticmethod
+    def _derive_reasoning_end_token_ids(
+        config: ParserEngineConfig, vocab: dict[str, int]
+    ) -> frozenset[int]:
+        end_terminals: dict[str, ParserState] = {}
+        for (state, terminal), transition in config.transitions.items():
+            if state != ParserState.REASONING:
+                continue
+            if EventType.REASONING_END in transition.events:
+                end_terminals.setdefault(terminal, transition.next_state)
+            elif transition.next_state != ParserState.REASONING:
+                return frozenset()
+
+        token_ids: set[int] = set()
+        for terminal, next_state in end_terminals.items():
+            text = config.token_id_terminals.get(terminal)
+            token_id = vocab.get(text) if text is not None else None
+            if token_id is not None:
+                token_ids.add(token_id)
+            elif next_state == ParserState.CONTENT:
+                return frozenset()
+        return frozenset(token_ids)
+
+    @property
+    def reasoning_end_token_ids(self) -> frozenset[int]:
+        return self._reasoning_end_token_ids
+
+    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+        end_ids = self._reasoning_end_token_ids
+        if not end_ids:
+            return None
+        for offset, token_id in enumerate(token_ids):
+            if token_id in end_ids:
+                return offset
+        return None
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_id = self._reasoning_end_token_id
         start_id = self._reasoning_start_token_id
         if end_id is not None:
             if not input_ids:
                 return self.parser_engine_config.initial_state != ParserState.REASONING
+            boundary_ids = self._turn_boundary_token_ids
             for i in range(len(input_ids) - 1, -1, -1):
-                if input_ids[i] == end_id:
+                token_id = input_ids[i]
+                if token_id == end_id:
                     return True
-                if start_id is not None and input_ids[i] == start_id:
+                if start_id is not None and token_id == start_id:
                     return False
+                if token_id in boundary_ids:
+                    return (
+                        self.parser_engine_config.initial_state != ParserState.REASONING
+                    )
             return False
         return self._reasoning_ended
 
@@ -703,6 +761,7 @@ class ParserEngine(Parser):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
 
+        carried_deferred = self._deferred_content
         seen_tool_event = False
         suppress = self._suppress_tool_calls
         for event in events:
@@ -739,7 +798,14 @@ class ParserEngine(Parser):
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
         if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
-            content_parts.insert(0, self._deferred_content)
+            # Deferred content carried in from a previous delta precedes this
+            # delta's content; content deferred during this call (text after
+            # an unpromoted tool event) follows it.
+            deferred_now = self._deferred_content[len(carried_deferred) :]
+            if carried_deferred:
+                content_parts.insert(0, carried_deferred)
+            if deferred_now:
+                content_parts.append(deferred_now)
             self._deferred_content = ""
 
         content_str = "".join(content_parts)

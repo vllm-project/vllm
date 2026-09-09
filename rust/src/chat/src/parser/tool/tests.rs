@@ -184,6 +184,10 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HY_V3)
     );
     assert_eq!(
+        factory.resolve_name_for_model("tencent/Hy4-preview"),
+        Some(names::HY_V4)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
         Some(names::MINIMAX_M3)
     );

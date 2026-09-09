@@ -166,6 +166,11 @@ impl WireNdArray {
     pub(crate) fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         self.data.extract_aux_frame(aux_frames, threshold);
     }
+
+    /// Resolve an auxiliary-frame reference into owned raw bytes.
+    pub(crate) fn resolve_aux_frame(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        self.data.resolve_aux_frame(frames)
+    }
 }
 
 /// Validate that the number of elements implied by the shape matches the length
@@ -207,6 +212,22 @@ pub enum WireArrayData {
 }
 
 impl WireArrayData {
+    /// Resolve an auxiliary-frame reference into owned raw bytes.
+    pub(crate) fn resolve_aux_frame(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        let Self::AuxIndex(index) = self else {
+            return Ok(());
+        };
+        let index = *index;
+        let frame = frames.get(index).ok_or_else(|| {
+            format!(
+                "auxiliary frame index {index} is out of range for {} frames",
+                frames.len()
+            )
+        })?;
+        *self = Self::RawView(frame.clone());
+        Ok(())
+    }
+
     /// Replace a sufficiently large raw view with its one-based auxiliary-frame index.
     fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         let Self::RawView(bytes) = self else {
@@ -343,5 +364,22 @@ mod tests {
     fn constructors_validate_shape_product() {
         let err = WireNdArray::from_f32(vec![2, 2], vec![1.0, 2.0]).unwrap_err();
         assert!(err.contains("does not match shape"));
+    }
+
+    #[test]
+    fn resolve_aux_frame_shares_bytes_using_one_based_message_index() {
+        let mut tensor = WireNdArray {
+            dtype: "float32".to_string(),
+            shape: vec![2],
+            data: WireArrayData::AuxIndex(1),
+        };
+        let bytes = Bytes::from_static(b"payload");
+        let bytes_ptr = bytes.as_ptr();
+
+        tensor.resolve_aux_frame(&[Bytes::new(), bytes]).unwrap();
+
+        let resolved = tensor.data.as_raw_view().unwrap();
+        assert_eq!(resolved.as_ptr(), bytes_ptr);
+        assert_eq!(resolved.as_ref(), b"payload");
     }
 }

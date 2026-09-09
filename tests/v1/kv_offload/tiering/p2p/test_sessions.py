@@ -534,6 +534,94 @@ class TestClientFlows:
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
         assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
 
+    def test_finish_preserves_active_load_until_terminal_result(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+
+        session.finish_request("req-1")
+
+        load = _client_load(session, "req-1")
+        assert load.job_id == 7
+        assert load.aborted_at is not None
+        aborted_at = load.aborted_at
+        assert session._client.has_active_loads is True
+        session.finish_request("req-1")
+        assert _client_load(session, "req-1").aborted_at == aborted_at
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert len(aborts) == 1
+        assert aborts[0][AbortFetchMsg.ROUND_SEQ] == 0
+
+    def test_finish_abort_ack_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=8, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=8, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_finish_abort_timeout_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=9, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+        _client_load(session, "req-1").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=9, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_late_transfer_done_after_abort_ack_is_ignored(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=10, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=10, kv_request_id="req-1", success=False)
+        ]
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is False
+
     def test_active_loads_work_list_tracks_in_flight(self):
         """collect_results / has_active_loads use the _active_loads work-list,
         armed when a fetch is issued and discarded exactly when its load

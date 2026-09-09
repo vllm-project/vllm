@@ -157,6 +157,9 @@ class OffloadingEvent:
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
+    # Secondary tier identifier that generated the event, or None for primary.
+    ownership: str | None = None
+    removal_expected: bool = False
 
 
 """
@@ -400,7 +403,7 @@ class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
 
     def __init__(self, block_ids: list[int]):
-        self.block_ids = np.array(block_ids, dtype=np.int64)
+        self.block_ids = np.array(block_ids, dtype=np.int32)
 
     def __repr__(self) -> str:
         return repr(self.block_ids)

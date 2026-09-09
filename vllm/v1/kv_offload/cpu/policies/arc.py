@@ -145,9 +145,15 @@ class ARCCachePolicy(CachePolicy):
 
             if candidate is None:
                 entry = next_candidate(t2_iter)
+                if entry is not None:
+                    candidate = (*entry, False)
+
+            if candidate is None:
+                entry = next_candidate(t1_iter)
                 if entry is None:
                     return None
-                candidate = (*entry, False)
+                candidate = (*entry, True)
+                virtual_t1_size -= 1
 
             candidates.append(candidate)
 
