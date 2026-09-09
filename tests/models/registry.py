@@ -800,6 +800,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "inclusionAI/Ling-3.0-flash-VL",
         trust_remote_code=True,
         is_available_online=True,
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 6,
+                "layer_types": ["linear_attention"] * 5 + ["full_attention"],
+            }
+        },
     ),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
