@@ -67,7 +67,7 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     if isinstance(connector, MultiConnector):
         connector = next(
             child
-            for child in connector.sub_connectors
+            for child in connector._connectors
             if isinstance(child, HiSparseConnector)
         )
     assert isinstance(connector, HiSparseConnector)

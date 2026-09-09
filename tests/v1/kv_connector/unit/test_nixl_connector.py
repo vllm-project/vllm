@@ -29,10 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorRole,
-    KVConnectorTransferResults,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -633,12 +630,6 @@ class TestNixlHandshake:
         done_sending, done_recving = connector.get_finished(set())
         assert done_sending == ({"sent"} if pcp_rank == 0 else set())
         assert done_recving == set()
-
-        worker.get_transfer_results = MagicMock(
-            return_value=KVConnectorTransferResults(finished_sending={"sent"})
-        )
-        results = connector.get_transfer_results(set())
-        assert results.finished_sending == ({"sent"} if pcp_rank == 0 else set())
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
@@ -3002,7 +2993,7 @@ def test_failed_request_skips_kv_postprocessing(
     default_vllm_config, dist_init, failure_mode
 ):
     """Test that failed requests skip KV sync and post-processing in
-    get_transfer_results().
+    get_finished().
 
     This is the core safety behavior: when a KV transfer fails at any stage,
     the request must still appear in done_recving (so the scheduler can apply
@@ -3087,10 +3078,11 @@ def test_failed_request_skips_kv_postprocessing(
         patch.object(worker, "sync_recved_kv_to_device") as mock_sync,
         patch.object(worker, "post_process_device_kv_on_receive") as mock_postprocess,
     ):
-        results = connector.get_transfer_results(finished_req_ids=set())
+        _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id in results.finished_recving
-    assert results.failed_recving == {request_id}
+    # The failed request must appear in done_recving so the scheduler
+    # can handle it (e.g., trigger recompute via kv_load_failure_policy).
+    assert request_id in done_recving
 
     # Critical: KV sync and post-processing must NOT have been called
     # since no valid KV data was received for the failed request.

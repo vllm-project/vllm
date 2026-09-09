@@ -121,9 +121,13 @@ class HiSparseCoordinator:
             if isinstance(manager, HiSparseSourceManager):
                 if self.host_manager is not None:
                     raise ValueError("Only one HiSparse host group is supported.")
+                num_host_blocks = kv_cache_config.hisparse_host_num_blocks
+                if num_host_blocks is None:
+                    raise ValueError("HiSparse host group needs host capacity.")
                 self.host_group_id = group_id
                 self.host_manager = manager
                 manager.coordinator = self
+                manager.bind_host_pool(num_host_blocks)
         self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.transition_watermark = 0
@@ -679,10 +683,20 @@ class HiSparseCoordinator:
 def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
 ) -> HiSparseCoordinator:
-    """Return the coordinator shared by a KV cache manager's HiSparse groups."""
-    for manager in kv_cache_manager.coordinator.single_type_managers:
+    """Return the coordinator shared by a KV cache manager's HiSparse groups.
+
+    Built on first call and memoised on the HiSparse managers it binds itself
+    to. Must run before the first request is admitted.
+    """
+    managers = tuple(kv_cache_manager.coordinator.single_type_managers)
+    for manager in managers:
         coordinator = getattr(manager, "coordinator", None)
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
             return coordinator
-    raise ValueError("No HiSparse cache group is configured.")
+    coordinator = HiSparseCoordinator(
+        kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
+    )
+    if coordinator.host_manager is None:
+        raise ValueError("No HiSparse cache group is configured.")
+    return coordinator

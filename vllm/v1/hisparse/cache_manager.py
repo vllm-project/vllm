@@ -5,8 +5,8 @@
 The host group owns a private host block pool and publishes prefix hashes only
 once its pages are durable; the resident and hot groups are per-request GPU
 state whose lifecycle is driven by ``HiSparseCoordinator`` through the
-standard manager hooks. Whichever HiSparse manager is attached first builds
-the shared coordinator, which binds itself to all of them.
+standard manager hooks. ``HiSparseCoordinator`` binds itself to every HiSparse
+manager when the scheduler binds the KV cache manager to the connector.
 """
 
 from collections.abc import Sequence
@@ -20,25 +20,11 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
 )
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheSpec
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
-
-
-def _attach_hisparse_coordinator(
-    manager: SingleTypeKVCacheManager,
-    managers: Sequence[SingleTypeKVCacheManager],
-    kv_cache_config: KVCacheConfig,
-    max_model_len: int,
-) -> None:
-    """Build the shared coordinator once; it binds itself to every HiSparse manager."""
-    if getattr(manager, "coordinator", None) is not None:
-        return
-    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
-
-    HiSparseCoordinator(kv_cache_config, tuple(managers), max_model_len)
 
 
 class HiSparseSourceManager(FullAttentionManager):
@@ -58,15 +44,8 @@ class HiSparseSourceManager(FullAttentionManager):
         self.new_block_ids = []
         return []
 
-    def attach(
-        self,
-        managers: Sequence[SingleTypeKVCacheManager],
-        kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-    ) -> None:
-        super().attach(managers, kv_cache_config, max_model_len)
-        num_blocks = kv_cache_config.hisparse_host_num_blocks
-        assert num_blocks is not None, "HiSparse host group needs host capacity."
+    def bind_host_pool(self, num_blocks: int) -> None:
+        """Replace the device pool this group was built with by a host one."""
         device_pool = self.block_pool
         self.block_pool = BlockPool(
             num_gpu_blocks=num_blocks,
@@ -77,7 +56,6 @@ class HiSparseSourceManager(FullAttentionManager):
             medium=MEDIUM_CPU,
         )
         self._null_block = self.block_pool.null_block
-        _attach_hisparse_coordinator(self, managers, kv_cache_config, max_model_len)
 
     def get_num_blocks_to_allocate(
         self,
@@ -121,14 +99,7 @@ class HiSparseSourceManager(FullAttentionManager):
         *,
         replay_boundary: int,
     ) -> None:
-        if self.coordinator is None:
-            self.publish_blocks(
-                request,
-                num_tokens,
-                retention_interval=retention_interval,
-                replay_boundary=replay_boundary,
-            )
-            return
+        assert self.coordinator is not None
         self.coordinator.publish_when_ready(
             request,
             num_tokens,
@@ -152,8 +123,8 @@ class HiSparseSourceManager(FullAttentionManager):
         )
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        if self.coordinator is not None:
-            self.coordinator.free(request_id)
+        assert self.coordinator is not None
+        self.coordinator.free(request_id)
         return super().pop_blocks_for_free(request_id)
 
 
@@ -167,15 +138,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         # residency work runs, so stay opted in regardless of prefix caching.
         kwargs["enable_caching"] = True
         super().__init__(kv_cache_spec, **kwargs)
-
-    def attach(
-        self,
-        managers: Sequence[SingleTypeKVCacheManager],
-        kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-    ) -> None:
-        super().attach(managers, kv_cache_config, max_model_len)
-        _attach_hisparse_coordinator(self, managers, kv_cache_config, max_model_len)
 
     def cache_blocks(
         self,
@@ -257,10 +219,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     ) -> None:
         assert not new_computed_blocks
         self.num_cached_block[request_id] = 0
-        coordinator = self.coordinator
-        if num_local_computed_tokens > 0 or (
-            coordinator is not None and not coordinator.resident_managers
-        ):
+        assert self.coordinator is not None
+        if num_local_computed_tokens > 0 or not self.coordinator.resident_managers:
             self.require_hot(request_id)
 
     def allocate_external_computed_blocks(
@@ -348,8 +308,8 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
-        if self.coordinator is not None:
-            self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+        assert self.coordinator is not None
+        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
 
     def cache_blocks(
         self,
@@ -359,8 +319,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         *,
         replay_boundary: int,
     ) -> None:
-        if self.coordinator is None:
-            return
+        assert self.coordinator is not None
         self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
         self.coordinator.update_residency(request.request_id)
 
@@ -377,31 +336,9 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         return new_blocks
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        if self.coordinator is not None:
-            self.coordinator.free(request_id)
+        assert self.coordinator is not None
+        self.coordinator.free(request_id)
         return super().pop_blocks_for_free(request_id)
-
-    @property
-    def _speaks_for_coordinator(self) -> bool:
-        coordinator = self.coordinator
-        return coordinator is not None and coordinator.resident_managers[0] is self
-
-    def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
-        if self._speaks_for_coordinator:
-            assert self.coordinator is not None
-            self.coordinator.complete_host_import(request_id, num_computed_tokens)
-
-    def has_pending_work(self) -> bool:
-        if not self._speaks_for_coordinator:
-            return False
-        assert self.coordinator is not None
-        return self.coordinator.has_pending_work()
-
-    def has_pending_frees(self) -> bool:
-        if not self._speaks_for_coordinator:
-            return False
-        assert self.coordinator is not None
-        return self.coordinator.has_pending_reclamation()
 
     def adopt_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock

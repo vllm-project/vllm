@@ -10,6 +10,7 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import MEDIUM_GPU, BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
@@ -22,7 +23,6 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -30,6 +30,13 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
+
+
+def _pool_index_of(pools: tuple[BlockPool, ...], block: KVCacheBlock) -> int:
+    for idx, pool in enumerate(pools):
+        if block.block_id < len(pool.blocks) and pool.blocks[block.block_id] is block:
+            return idx
+    raise ValueError(f"Block {block.block_id} belongs to no pool.")
 
 
 @dataclass
@@ -184,13 +191,18 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        # Distinct pools backing the groups, in group order; more than one when
-        # a group's cache lives in a different medium.
-        self.block_pools = tuple(
-            dict.fromkeys(
-                manager.block_pool for manager in self.coordinator.single_type_managers
-            )
-        )
+        # Groups cached in host memory have their own block pool and can retain
+        # a deeper prefix than the device groups they back.
+        self.host_cached_group_ids = [
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.host_resident
+        ]
+        self.device_cached_group_ids = [
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if not group.host_resident and group.kv_cache_spec.prefix_cacheable
+        ]
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -335,6 +347,12 @@ class KVCacheManager:
         boundary if the connector supplies it, so the caller must fall back to
         ``get_computed_blocks`` to reconcile when no external tokens are found.
 
+        Hits also diverge when a group is cached in a slower medium than the
+        device groups it backs: the host copy of a prefix outlives the device
+        one. Report the device boundary as the local prefix and keep the deeper
+        host blocks, so the connector can restore the device groups into the
+        gap; the caller truncates the host blocks to whatever it restores.
+
         Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
 
         Returns:
@@ -342,9 +360,9 @@ class KVCacheManager:
             tokens, shared-prefix boundary) plus ``hit_diverged``.
         """
         coordinator = self.coordinator
-        if not (
-            self.kv_cache_config.has_mamba_layers
-            and isinstance(coordinator, HybridKVCacheCoordinator)
+        if not isinstance(coordinator, HybridKVCacheCoordinator) or not (
+            self.host_cached_group_ids
+            or self.kv_cache_config.has_mamba_layers
             and coordinator.full_attention_group_id is not None
         ):
             return *self.get_computed_blocks(request), False
@@ -352,10 +370,21 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
-        fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
+        if self.host_cached_group_ids:
+            num_local = min(
+                per_group_hits[group_id] for group_id in self.device_cached_group_ids
+            )
+            if min(per_group_hits[gid] for gid in self.host_cached_group_ids) <= (
+                num_local
+            ):
+                return *self.get_computed_blocks(request), False
+            return self.create_kv_cache_blocks(computed), num_local, 0, True
+
+        fa_group_id = coordinator.full_attention_group_id
+        assert fa_group_id is not None
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
@@ -590,18 +619,6 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
-        """A connector finished loading external KV for the request."""
-        self.coordinator.complete_external_load(request_id, num_computed_tokens)
-
-    def has_pending_work(self) -> bool:
-        """Whether worker-side KV cache work must complete before quiescing."""
-        return self.coordinator.has_pending_work()
-
-    def has_pending_frees(self) -> bool:
-        """Whether in-flight worker work will free blocks without preemption."""
-        return self.coordinator.has_pending_frees()
-
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
@@ -644,25 +661,28 @@ class KVCacheManager:
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
+    @property
+    def block_pools(self) -> tuple[BlockPool, ...]:
+        """Distinct pools backing the groups, in group order."""
+        if not self.host_cached_group_ids:
+            return (self.block_pool,)
+        return tuple(
+            dict.fromkeys(
+                manager.block_pool for manager in self.coordinator.single_type_managers
+            )
+        )
+
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Return blocks to the pool each was allocated from."""
-        if len(self.block_pools) == 1:
+        if not self.host_cached_group_ids:
             self.block_pool.free_blocks(blocks)
             return
+        pools = self.block_pools
         by_pool: defaultdict[int, list[KVCacheBlock]] = defaultdict(list)
         for block in blocks:
-            by_pool[self._pool_index_of(block)].append(block)
+            by_pool[_pool_index_of(pools, block)].append(block)
         for pool_idx, pool_blocks in by_pool.items():
-            self.block_pools[pool_idx].free_blocks(pool_blocks)
-
-    def _pool_index_of(self, block: KVCacheBlock) -> int:
-        for idx, pool in enumerate(self.block_pools):
-            if (
-                block.block_id < len(pool.blocks)
-                and pool.blocks[block.block_id] is block
-            ):
-                return idx
-        raise ValueError(f"Block {block.block_id} belongs to no pool.")
+            pools[pool_idx].free_blocks(pool_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -835,8 +855,9 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
-        An external hit can supply the final Mamba state even when the local
-        Mamba group ends before this endpoint. Other groups must cover it.
+        A group whose own hit stops before the endpoint keeps its shorter list:
+        an external hit supplies the rest (e.g. the final Mamba state, or the
+        device copy of a prefix that only survived in a slower medium).
         Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
@@ -854,12 +875,11 @@ class KVCacheManager:
                 assert not group_blocks
                 truncated.append([])
                 continue
-            assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if isinstance(group.kv_cache_spec, MambaSpec):
-                num_blocks = min(num_blocks, len(group_blocks))
+            if num_blocks < len(group_blocks):
+                assert num_computed_tokens % manager.block_size == 0
             else:
-                assert num_blocks <= len(group_blocks)
+                num_blocks = len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
@@ -910,7 +930,7 @@ class KVCacheManager:
                     KVCacheBlockCopy(
                         src_block_id=source_block.block_id,
                         dst_block_id=cow_block.block_id,
-                        host_resident=mgr.host_resident,
+                        host_resident=mgr.block_pool.medium != MEDIUM_GPU,
                     )
                 )
                 retained_blocks.extend((source_block, cow_block))

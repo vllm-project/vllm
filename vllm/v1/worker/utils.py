@@ -166,6 +166,9 @@ class KVBlockZeroer:
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
+                if kv.device.type != self.device.type:
+                    # Host-resident groups are not zeroed by the GPU kernel.
+                    continue
                 dp = kv.data_ptr()
 
                 assert kv.shape[0] % num_blocks == 0, (

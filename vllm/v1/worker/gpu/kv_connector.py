@@ -29,21 +29,10 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def pre_forward(
-        self,
-        scheduler_output: "SchedulerOutput",
-        batch_request_indices: torch.Tensor | None = None,
-        batch_request_ids: list[str] | None = None,
-        attn_metadata: dict[str, Any] | None = None,
-    ) -> None:
+    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         pass
 
     def finish_forward(self) -> None:
-        pass
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
         pass
 
     def post_forward(
@@ -71,16 +60,11 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        self._pending_load_kwargs: dict[str, Any] | None = None
+        self._pending_load_start = False
+        self._load_kwargs: dict[str, Any] = {}
         self._disabled = False
 
-    def pre_forward(
-        self,
-        scheduler_output: "SchedulerOutput",
-        batch_request_indices: torch.Tensor | None = None,
-        batch_request_ids: list[str] | None = None,
-        attn_metadata: dict[str, Any] | None = None,
-    ) -> None:
+    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         if self._disabled:
             return
 
@@ -88,47 +72,30 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self._pending_load_kwargs = {
-            "request_state_indices": batch_request_indices,
-            "request_ids": batch_request_ids,
-            "attn_metadata": attn_metadata,
-        }
+        self._load_kwargs = kwargs
 
-        if (
-            scheduler_output.has_sync_kv_loads
-            or self.kv_connector.requires_pre_forward_start
-        ):
+        if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
-        # Otherwise defer the async load to post-forward, keeping its host-side
-        # submission cost off the critical path.
+        else:
+            # Start any async loads in post-forward instead, keeping
+            # their host-side submission cost off the critical path.
+            self._pending_load_start = True
 
     def _start_load_kv(self) -> None:
-        worker_kwargs = self._pending_load_kwargs
-        assert worker_kwargs is not None
-        self._pending_load_kwargs = None
+        self._pending_load_start = False
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
-            self.kv_connector.start_load_kv(
-                get_forward_context(),
-                **worker_kwargs,
-            )
+            self.kv_connector.start_load_kv(get_forward_context(), **self._load_kwargs)
         else:
             with set_forward_context(None, self.vllm_config):
                 self.kv_connector.start_load_kv(
-                    get_forward_context(),
-                    **worker_kwargs,
+                    get_forward_context(), **self._load_kwargs
                 )
 
     def finish_forward(self) -> None:
         if not self._disabled:
             self.kv_connector.finish_forward()
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        if not self._disabled:
-            self.kv_connector.stage_host_mirror_mapping(slot_mappings, num_tokens)
 
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
@@ -139,16 +106,15 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return None
 
-        if self._pending_load_kwargs is not None:
+        if self._pending_load_start:
             self._start_load_kv()
 
         output = KVConnectorOutput()
         if wait_for_save:
             self.kv_connector.wait_for_save()
-        transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
-        output.finished_sending = transfer_results.finished_sending or None
-        output.finished_recving = transfer_results.finished_recving or None
-        output.failed_recving = transfer_results.failed_recving
+        output.finished_sending, output.finished_recving = (
+            self.kv_connector.get_finished(finished_req_ids)
+        )
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()

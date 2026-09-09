@@ -148,10 +148,12 @@ def test_get_num_unfinished_requests():
 
 
 def test_pending_kv_cache_work_keeps_scheduler_alive(monkeypatch):
-    """Worker-side KV cache work must finish after the last request does."""
+    """Connector-side KV cache work must finish after the last request does."""
     scheduler = create_scheduler()
     monkeypatch.setattr(
-        scheduler.kv_cache_manager, "has_pending_work", Mock(return_value=True)
+        scheduler,
+        "connector",
+        Mock(has_pending_push_work=Mock(return_value=True)),
     )
 
     assert scheduler.has_requests()
@@ -1212,7 +1214,9 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
         scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
     )
     monkeypatch.setattr(
-        scheduler.kv_cache_manager, "has_pending_frees", Mock(return_value=True)
+        scheduler,
+        "connector",
+        Mock(has_pending_block_frees=Mock(return_value=True)),
     )
 
     deferred_output = scheduler.schedule()

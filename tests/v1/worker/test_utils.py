@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
@@ -101,8 +100,10 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
-    handle = SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1))
-    worker.cache_layer_names = ["layer"]
+    handle = SimpleNamespace(
+        slot_mapping=torch.tensor([7, 8], dtype=torch.int64),
+        runtime=SimpleNamespace(resident_source_index=1),
+    )
     worker.cache_handles = [handle]
     worker._layer_mirror_callbacks = (MagicMock(),)
     worker._row_mirror_num_rows = 1
@@ -111,14 +112,9 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: main_stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
 
-    worker.stage_row_mirror_mapping(
-        {"layer" + HISPARSE_RESIDENT_SUFFIX: torch.tensor([7, 8], dtype=torch.int64)},
-        2,
-    )
-    worker.stage_row_mirror_mapping(
-        {"layer" + HISPARSE_RESIDENT_SUFFIX: torch.tensor([9, 10], dtype=torch.int64)},
-        2,
-    )
+    worker._stage_row_mirror_mapping(2)
+    handle.slot_mapping = torch.tensor([9, 10], dtype=torch.int64)
+    worker._stage_row_mirror_mapping(2)
 
     torch.testing.assert_close(state.slots, torch.tensor([7, 8, 9, 10]))
     assert state.stream.wait_stream.call_args_list == [call(main_stream)] * 2

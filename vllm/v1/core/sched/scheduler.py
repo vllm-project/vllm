@@ -54,10 +54,6 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.hisparse.prefix_cache import (
-    get_computed_blocks_for_group_completion,
-    truncate_group_completion_blocks,
-)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -533,22 +529,15 @@ class Scheduler(SchedulerInterface):
 
     def _get_local_prefix_cache_hit(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
+    ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
-        if connector is not None and connector.prefix_completion_group_ids:
-            return get_computed_blocks_for_group_completion(
-                self.kv_cache_manager, request, connector.prefix_completion_group_ids
-            )
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return (
-                *self.kv_cache_manager.get_computed_blocks_for_connector(request),
-                None,
-            )
+            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
             self.kv_cache_manager.get_computed_blocks(request)
         )
-        return blocks, num_local, shared_prefix_boundary, False, None
+        return blocks, num_local, shared_prefix_boundary, False
 
     def _reserve_prefill_lookahead(
         self,
@@ -753,7 +742,10 @@ class Scheduler(SchedulerInterface):
                     # once the worker acknowledges it. Yield this scheduling
                     # iteration instead of preempting a request whose blocks
                     # are already being reclaimed.
-                    if self.kv_cache_manager.has_pending_frees():
+                    if (
+                        self.connector is not None
+                        and self.connector.has_pending_block_frees()
+                    ):
                         break
 
                     # The request cannot be scheduled.
@@ -933,7 +925,6 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                        max_group_completion_tokens,
                     ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
@@ -945,20 +936,11 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        if max_group_completion_tokens is None:
-                            ext_tokens, load_kv_async = (
-                                self.connector.get_num_new_matched_tokens(
-                                    request, block_aligned_local
-                                )
+                        ext_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, block_aligned_local
                             )
-                        else:
-                            ext_tokens, load_kv_async = (
-                                self.connector.get_num_new_matched_tokens_capped(
-                                    request,
-                                    block_aligned_local,
-                                    max_group_completion_tokens + partial_tail,
-                                )
-                            )
+                        )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -999,17 +981,15 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
-                        elif max_group_completion_tokens is not None:
-                            completed_prefix = (
-                                num_new_local_computed_tokens
-                                + num_external_computed_tokens
-                            )
-                            new_computed_blocks = truncate_group_completion_blocks(
-                                self.kv_cache_manager,
-                                new_computed_blocks,
-                                num_new_local_computed_tokens,
-                                completed_prefix,
-                                self.connector.prefix_completion_group_ids,
+                        elif hit_diverged:
+                            # A group that hit deeper than the reconciled
+                            # boundary must not adopt blocks past it.
+                            new_computed_blocks = (
+                                self.kv_cache_manager.truncate_computed_blocks(
+                                    new_computed_blocks,
+                                    num_new_local_computed_tokens
+                                    + num_external_computed_tokens,
+                                )
                             )
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1933,20 +1913,14 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
-        failed_kv_load_req_ids: set[str] = set()
-        if kv_connector_output and kv_connector_output.failed_recving:
-            failed_kv_load_req_ids.update(
-                self._handle_failed_recving(kv_connector_output.failed_recving)
-            )
+        failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids.update(
-                self._handle_invalid_blocks(
-                    kv_connector_output.invalid_block_ids,
-                    num_scheduled_tokens,
-                )
+            failed_kv_load_req_ids = self._handle_invalid_blocks(
+                kv_connector_output.invalid_block_ids,
+                num_scheduled_tokens,
             )
 
         # Persist per-step routed experts into the scheduler-side slot
@@ -2725,7 +2699,6 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
-            or self.kv_cache_manager.has_pending_work()
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -2998,9 +2971,6 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.complete_external_load(
-                request.request_id, request.num_computed_tokens
-            )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
             # on a full prompt hit, we need to re-compute the last token
@@ -3177,21 +3147,6 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
-
-    def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
-        """Fail closed for layouts whose block IDs are not globally unique."""
-        affected_req_ids: set[str] = set()
-        for req_id in failed_req_ids:
-            request = self.requests.get(req_id)
-            if (
-                request is not None
-                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-            ):
-                affected_req_ids.add(req_id)
-                if self.recompute_kv_load_failures:
-                    request.num_computed_tokens = 0
-                    self.failed_recving_kv_req_ids.add(req_id)
-        return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]

@@ -25,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -48,10 +51,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.prefix_cache import (
-    get_computed_blocks_for_group_completion,
-    truncate_group_completion_blocks,
-)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -221,13 +220,24 @@ def make_hisparse_kv_cache_manager(
     **config_kwargs,
 ) -> KVCacheManager:
     config = make_hisparse_kv_cache_config(num_blocks, host_num_blocks, **config_kwargs)
-    return make_kv_cache_manager(
+    manager = make_kv_cache_manager(
         config,
         max_model_len=max_model_len,
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
     )
+    # The scheduler builds the coordinator when it binds the connector.
+    get_hisparse_coordinator(manager)
+    return manager
+
+
+def make_hisparse_offloading_connector(manager: KVCacheManager) -> OffloadingConnector:
+    """An offloading connector bound to `manager`, without its transfer stack."""
+    connector = object.__new__(OffloadingConnector)
+    connector._kv_cache_config = manager.kv_cache_config
+    connector._kv_cache_manager = manager
+    return connector
 
 
 def test_hisparse_builds_dma_row_mirrors_across_pages():
@@ -335,22 +345,19 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     manager.block_pool.evict_blocks({evicted_indexer_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    blocks, num_local, _, diverged, max_completion = (
-        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
-    )
+    blocks, num_local, _, diverged = manager.get_computed_blocks_for_connector(resumed)
 
     assert diverged
     assert num_local == 2 * HISPARSE_BLOCK_SIZE
-    assert max_completion == HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
 
-    completed = truncate_group_completion_blocks(
-        manager,
-        blocks,
-        num_local,
-        num_local + max_completion,
-        frozenset({1}),
-    )
+    # The connector caps its own lookup at the depth of the host group.
+    connector = make_hisparse_offloading_connector(manager)
+    assert connector._bounding_group_ids == (0,)
+    max_completion = connector._max_loadable_tokens(resumed, num_local)
+    assert max_completion == HISPARSE_BLOCK_SIZE
+
+    completed = manager.truncate_computed_blocks(blocks, num_local + max_completion)
     allocated = manager.allocate_slots(
         resumed,
         num_new_tokens=1,
@@ -388,13 +395,12 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     manager.evict_blocks({evicted_host_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    _, num_local, _, diverged, max_completion = (
-        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
-    )
+    _, num_local, _, diverged = manager.get_computed_blocks_for_connector(resumed)
+    connector = make_hisparse_offloading_connector(manager)
 
     assert not diverged
     assert num_local == 0
-    assert max_completion == 0
+    assert connector._max_loadable_tokens(resumed, num_local) == 0
 
 
 def allocate_external_prefix(
@@ -657,6 +663,7 @@ def test_hisparse_events_report_host_and_device_placement():
         hash_block_size=HISPARSE_BLOCK_SIZE,
         enable_kv_cache_events=True,
     )
+    get_hisparse_coordinator(manager)
     request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(request, 64) is not None
     _publish_hisparse_pages(manager)

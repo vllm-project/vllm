@@ -157,9 +157,6 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
 
-        for manager in self.single_type_managers:
-            manager.attach(self.single_type_managers, kv_cache_config, max_model_len)
-
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
@@ -167,16 +164,6 @@ class KVCacheCoordinator(ABC):
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
-
-    def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
-        for manager in self.single_type_managers:
-            manager.complete_external_load(request_id, num_computed_tokens)
-
-    def has_pending_work(self) -> bool:
-        return any(manager.has_pending_work() for manager in self.single_type_managers)
-
-    def has_pending_frees(self) -> bool:
-        return any(manager.has_pending_frees() for manager in self.single_type_managers)
 
     def get_num_blocks_to_allocate(
         self,
@@ -738,16 +725,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
 
-            # Try to find an existing group with the same spec
+            # Try to find an existing group with the same spec and manager
             for idx, group in enumerate(self.attention_groups):
-                if (
-                    group.spec == spec
-                    and self.single_type_managers[group.group_ids[0]].block_pool
-                    is self.single_type_managers[i].block_pool
-                ):
-                    assert manager_cls is group.manager_cls, (
-                        "Expected same manager class for identical KV cache specs."
-                    )
+                if group.spec == spec and manager_cls is group.manager_cls:
                     group.group_ids.append(i)
                     if use_eagle and not group.use_eagle:
                         self.attention_groups[idx] = group._replace(use_eagle=True)

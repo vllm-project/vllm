@@ -34,8 +34,8 @@ The class provides the following primitives:
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
 
-        get_transfer_results() - returns async send/receive completions and
-            receive failures in one snapshot.
+        get_finished() - called with ids of finished requests, returns
+            ids of requests that have completed async sending/recving.
         build_connector_worker_meta() - builds metadata to be sent
             back to the scheduler-side connector
 """
@@ -43,7 +43,6 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -81,19 +80,6 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class KVConnectorTransferResults:
-    """Asynchronous transfer completions from one worker snapshot.
-
-    Failed receives also appear in ``finished_recving`` so the scheduler can
-    release the request from its transfer wait state.
-    """
-
-    finished_sending: set[str] = field(default_factory=set)
-    finished_recving: set[str] = field(default_factory=set)
-    failed_recving: set[str] = field(default_factory=set)
 
 
 class SupportsHMA(ABC):
@@ -197,11 +183,6 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
-    def prefix_completion_group_ids(self) -> frozenset[int]:
-        """Cache groups this connector can restore behind a deeper local hit."""
-        return frozenset()
-
-    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
@@ -212,11 +193,6 @@ class KVConnectorBase_V1(ABC):
         return False, as a dropped save is just a future cache miss.
         """
         return self._kv_transfer_config.is_kv_producer
-
-    @property
-    def requires_pre_forward_start(self) -> bool:
-        """Whether every step's connector state must be bound before forward."""
-        return False
 
     def __init__(
         self,
@@ -235,6 +211,7 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
+        self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
 
     @property
@@ -305,12 +282,6 @@ class KVConnectorBase_V1(ABC):
     # TODO(NickLucche): group model-runner lifecycle hooks in the interface.
     def finish_forward(self) -> None:
         """Notify the connector that the model no longer reads this step's KV."""
-        return
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        """Stage GPU slot mappings for host mirroring."""
         return
 
     def reset_capture_state(self) -> None:
@@ -407,16 +378,6 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
-    def get_transfer_results(
-        self, finished_req_ids: set[str]
-    ) -> KVConnectorTransferResults:
-        """Return completed sends, receives, and receive failures together."""
-        finished_sending, finished_recving = self.get_finished(finished_req_ids)
-        return KVConnectorTransferResults(
-            finished_sending=set(finished_sending or ()),
-            finished_recving=set(finished_recving or ()),
-        )
-
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Get the set of block IDs that failed to load.
@@ -429,9 +390,9 @@ class KVConnectorBase_V1(ABC):
             - Applies to both sync- and async-loading requests.
             - Async loading: failed blocks may be reported in any forward pass
               up to and including the pass where the request ID is returned by
-              `get_transfer_results()`. Even if failures occur, the request
-              must still be reported as finished receiving, and the failed
-              block IDs must appear here no later than that same pass.
+              `get_finished()`. Even if failures occur, the request must still
+              be reported via `get_finished()`, and the failed block IDs must
+              appear here no later than that same pass.
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
@@ -486,11 +447,8 @@ class KVConnectorBase_V1(ABC):
     # ==============================
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
-        """Bind the scheduler's KV cache manager once it has been built.
-
-        Args:
-            kv_cache_manager: the scheduler-side KV cache manager.
-        """
+        """Bind the scheduler's KV cache manager once it has been built."""
+        self._kv_cache_manager = kv_cache_manager
         self.bind_gpu_block_pool(kv_cache_manager.block_pool)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
@@ -537,15 +495,6 @@ class KVConnectorBase_V1(ABC):
             into account.
         """
         pass
-
-    def get_num_new_matched_tokens_capped(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
-        max_num_new_tokens: int,
-    ) -> tuple[int | None, bool]:
-        """Like get_num_new_matched_tokens, bounded by a local prefix source."""
-        raise NotImplementedError
 
     @abstractmethod
     def update_state_after_alloc(
@@ -659,6 +608,13 @@ class KVConnectorBase_V1(ABC):
         """
         # TODO: replace with a more general connector hook for keeping the
         # scheduler alive (e.g. extend has_unfinished_requests).
+        return False
+
+    def has_pending_block_frees(self) -> bool:
+        """Return True if in-flight connector work will free KV blocks.
+
+        Lets the scheduler wait for that reclamation instead of preempting.
+        """
         return False
 
     @classmethod

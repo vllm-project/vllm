@@ -54,7 +54,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     worker.is_host_writer = True
     worker._enqueue_row_dma = MagicMock()
     worker.start_step = MagicMock(
-        side_effect=lambda *_args: worker._clear_forward_mirror_state()
+        side_effect=lambda *_args, **_kwargs: worker._clear_forward_mirror_state()
     )
 
     connector = object.__new__(HiSparseConnector)

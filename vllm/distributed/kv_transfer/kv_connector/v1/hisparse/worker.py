@@ -21,10 +21,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.layout import (
-    HISPARSE_HOT_SUFFIX,
-    HISPARSE_RESIDENT_SUFFIX,
-)
+from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
@@ -365,7 +362,9 @@ class HiSparseConnectorWorker:
         metadata: HiSparseConnectorMetadata,
         request_state_indices: torch.Tensor | None,
         request_ids: list[str] | None = None,
+        num_tokens: int = 0,
     ) -> None:
+        self._stage_row_mirror_mapping(num_tokens)
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
@@ -412,31 +411,19 @@ class HiSparseConnectorWorker:
             if metadata is not None:
                 handle.prepare_group_for_batch(metadata)
 
-    def stage_row_mirror_mapping(
-        self, slot_mappings: Mapping[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        if not self.is_host_writer:
-            return
+    def _stage_row_mirror_mapping(self, num_tokens: int) -> None:
+        """Snapshot the rows this forward will write, off the compute stream.
+
+        The resident slot mapping is a persistent view bound at registration
+        time, so the rows are already staged by the time the forward launches.
+        """
         state = self._slot_mapping_staging
-        assert state is not None
-        mapping = next(
-            (
-                (
-                    slot_mappings[layer_name + HISPARSE_RESIDENT_SUFFIX],
-                    handle.runtime.resident_source_index,
-                )
-                for layer_name, handle in zip(
-                    self.cache_layer_names, self.cache_handles, strict=True
-                )
-                if layer_name + HISPARSE_RESIDENT_SUFFIX in slot_mappings
-            ),
-            None,
-        )
-        if mapping is None:
+        if state is None or not num_tokens:
             return
-        slots, source_index = mapping
-        if slots.ndim != 1:
-            raise ValueError("HiSparse requires per-layer slot mappings.")
+        handle = self.cache_handles[0]
+        slots = handle.slot_mapping
+        assert slots is not None
+        source_index = handle.runtime.resident_source_index
         start = state.num_tokens
         end = start + num_tokens
         if end > state.slots.shape[0]:
@@ -444,8 +431,6 @@ class HiSparseConnectorWorker:
                 "HiSparse row mapping exceeds staging capacity: "
                 f"{end} > {state.slots.shape[0]}."
             )
-        if start and state.source_index != source_index:
-            raise ValueError("HiSparse mirror phase mixed resident cache groups.")
         main_stream = current_stream()
         state.stream.wait_stream(main_stream)
         with torch.cuda.stream(state.stream):

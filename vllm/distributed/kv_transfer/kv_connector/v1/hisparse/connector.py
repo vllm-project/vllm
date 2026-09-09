@@ -83,19 +83,31 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is None
         self.coordinator = coordinator
 
+    def has_pending_push_work(self) -> bool:
+        assert self.coordinator is not None
+        return self.coordinator.has_pending_work()
+
+    def has_pending_block_frees(self) -> bool:
+        assert self.coordinator is not None
+        return self.coordinator.has_pending_reclamation()
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
         assert self.coordinator is not None
+        # HiSparse rebinds worker state every step, so the load must start
+        # before the forward rather than being deferred to post-forward.
+        scheduler_output.has_sync_kv_loads = True
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
-        host_block_copies = tuple(
-            copy
-            for copy in scheduler_output.kv_cache_block_copies or ()
-            if copy.host_resident
-        )
+        block_copies = scheduler_output.kv_cache_block_copies or ()
+        host_block_copies = tuple(copy for copy in block_copies if copy.host_resident)
+        if host_block_copies:
+            scheduler_output.kv_cache_block_copies = [
+                copy for copy in block_copies if not copy.host_resident
+            ]
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None
         source_block_ids = [
@@ -155,11 +167,18 @@ class HiSparseConnectorScheduler:
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        assert self.coordinator is not None
+        for request_id in connector_output.finished_recving or ():
+            # An external load populated host pages directly; publish them.
+            request = self.requests.get(request_id)
+            if request is not None:
+                self.coordinator.complete_host_import(
+                    request_id, request.num_computed_tokens
+                )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        assert self.coordinator is not None
         self.coordinator.update_spills(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
@@ -213,18 +232,22 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         return False
 
     @property
-    def requires_pre_forward_start(self) -> bool:
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        # The host tier keeps prefixes the device groups have lost, so the
+        # local hit reported for a HiSparse model is routinely divergent.
         return True
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
+
+    def has_pending_block_frees(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_block_frees()
 
     def finish_forward(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.finish_forward()
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.stage_row_mirror_mapping(slot_mappings, num_tokens)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None
@@ -250,6 +273,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             metadata,
             request_state_indices,
             request_ids,
+            num_tokens=int(kwargs.get("num_tokens") or 0),
         )
         self.connector_worker.prepare_forward(attn_metadata)
 

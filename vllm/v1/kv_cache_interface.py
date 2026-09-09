@@ -178,6 +178,15 @@ class KVCacheSpec:
         return True
 
     @property
+    def uses_slot_mapping(self) -> bool:
+        """Whether the worker computes a per-token slot mapping for this spec.
+
+        Specs that address their pages themselves (raw storage, ring buffers)
+        take no slot mapping row.
+        """
+        return True
+
+    @property
     def num_heads(self) -> int:
         raise NotImplementedError
 
@@ -412,6 +421,10 @@ class HiSparseHotSpec(KVCacheSpec):
 
     @property
     def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
         return False
 
     @property
@@ -877,6 +890,10 @@ class CircularBufferSpec(AttentionSpec):
     def prefix_cacheable(self) -> bool:
         return False
 
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
@@ -1168,6 +1185,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def prefix_cacheable(self) -> bool:
         return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return self.first_spec.uses_slot_mapping
 
     @property
     def first_spec(self) -> KVCacheSpec:
