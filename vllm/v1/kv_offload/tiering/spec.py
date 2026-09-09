@@ -245,8 +245,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of per-job promotion latency from secondary tiers"
-                    " to the primary tier, labeled by tier, in seconds."
+                    "Histogram of per-job promotion latency from secondary tiers "
+                    "to the primary tier, labeled by tier, in seconds."
                 ),
                 labelnames=(TIER_LABEL,),
                 buckets=(

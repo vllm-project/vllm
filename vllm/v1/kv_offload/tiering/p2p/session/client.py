@@ -92,6 +92,10 @@ class LoadResult(NamedTuple):
     job_id: int
     kv_request_id: str
     success: bool
+    # Elapsed seconds when the peer signals completion via TransferDoneMsg
+    # (success or failure). None when the load is aborted.
+    # e.g. a timeout, or the owning request finishing early.
+    transfer_time: float | None = None
 
 
 class ClientCloseResult(NamedTuple):
@@ -287,6 +291,7 @@ class ClientRole:
                     job_id=load.job_id,
                     kv_request_id=kv_request_id,
                     success=success,
+                    transfer_time=time.monotonic() - load.submitted_at,
                 )
             )
             self._on_load_terminal(kv_request_id, st)
