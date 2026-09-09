@@ -434,6 +434,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
         return
 
+    kv_transfer_config = getattr(args, "kv_transfer_config", None)
+    if (
+        kv_transfer_config is not None
+        and kv_transfer_config.pd_role is not None
+        and (getattr(args, "grpc", False) or envs.VLLM_USE_RUST_FRONTEND)
+    ):
+        raise ValueError("Runtime P/D role switching requires the Python HTTP frontend")
+
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
 
