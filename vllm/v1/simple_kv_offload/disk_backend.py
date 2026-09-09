@@ -68,6 +68,8 @@ class DiskBackend:
         self._store_thread: threading.Thread | None = None
         self._load_thread: threading.Thread | None = None
         self._shutdown: bool = False
+        self._error: tuple[str, Exception] | None = None
+        self._error_lock = threading.Lock()
         self._fd: int = -1
         self._disk_path: str = ""
         self._total_block_bytes: int = 0
@@ -171,13 +173,13 @@ class DiskBackend:
         )
 
         self._store_thread = threading.Thread(
-            target=self._store_loop,
-            args=(device, store_stream),
+            target=self._io_loop,
+            args=(True, device, store_stream),
             daemon=True,
         )
         self._load_thread = threading.Thread(
-            target=self._load_loop,
-            args=(device, load_stream),
+            target=self._io_loop,
+            args=(False, device, load_stream),
             daemon=True,
         )
         self._store_thread.start()
@@ -192,8 +194,49 @@ class DiskBackend:
         events_list: list[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
+        self.check_error()
         q = self._store_queue if is_store else self._load_queue
         q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
+
+    def check_error(self) -> None:
+        """Surface a failed I/O thread without reporting its transfers complete."""
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            message, cause = error
+            raise RuntimeError(message) from cause
+
+    def _io_loop(
+        self, is_store: bool, device: torch.device, stream: torch.cuda.Stream
+    ) -> None:
+        q = self._store_queue if is_store else self._load_queue
+        transfer = self._do_store if is_store else self._do_load
+        event_idx: int | None = None
+        try:
+            current_platform.set_device(device)
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
+                self.check_error()
+                if wait_event is not None:
+                    stream.wait_event(wait_event)
+                transfer(src_blocks, dst_blocks, stream)
+                event = torch.Event()
+                event.record(stream)
+                events_list.append((event_idx, event))
+        except Exception as error:
+            operation = "store" if is_store else "load"
+            context = "initialization" if event_idx is None else f"event {event_idx}"
+            message = (
+                f"Disk KV offload {operation} failed during {context} "
+                f"(path={self._disk_path!r}): {error}"
+            )
+            # Both threads can fail; preserve the first failure and its context.
+            with self._error_lock:
+                if self._error is None:
+                    self._error = (message, error)
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -230,24 +273,6 @@ class DiskBackend:
         os.close(self._fd)
         self._fd = -1
 
-    def _store_loop(
-        self,
-        device: torch.device,
-        stream: torch.cuda.Stream,
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = self._store_queue.get()
-            if item is None:
-                return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
-            if wait_event is not None:
-                stream.wait_event(wait_event)
-            self._do_store(src_blocks, dst_blocks, stream)
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
-
     def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
         written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
         if written < self._total_block_bytes:
@@ -263,24 +288,6 @@ class DiskBackend:
                 f"Short read: expected {self._total_block_bytes} bytes, "
                 f"read {bytes_read}"
             )
-
-    def _load_loop(
-        self,
-        device: torch.device,
-        stream: torch.cuda.Stream,
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = self._load_queue.get()
-            if item is None:
-                return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
-            if wait_event is not None:
-                stream.wait_event(wait_event)
-            self._do_load(src_blocks, dst_blocks, stream)
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
 
     def _do_store(
         self,

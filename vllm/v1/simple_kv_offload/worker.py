@@ -305,6 +305,8 @@ class SimpleCPUOffloadWorker:
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
         """
+        if isinstance(self._backend, DiskBackend):
+            self._backend.check_error()
         metadata = self._connector_metadata
         finished_recving: set[str] = set()
 
