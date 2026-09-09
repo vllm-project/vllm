@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -16,7 +17,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     RoutedExperts,
 )
 from vllm.model_executor.layers.linear import (
@@ -93,8 +94,11 @@ class DbrxExperts(RoutedExperts):
         param: nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
-        param_name: str,
-    ):
+        shard_id: str,
+        expert_id: int | None = None,
+        return_success: Any = False,
+    ) -> Any:
+        param_name = shard_id
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
@@ -134,6 +138,7 @@ class DbrxExperts(RoutedExperts):
                 param_data[:] = loaded_weight[:, :, shard]
             else:
                 param_data[:] = loaded_weight
+        return True if return_success else None
 
 
 class DbrxMoE(nn.Module):
@@ -159,7 +164,7 @@ class DbrxMoE(nn.Module):
 
         self.router = DbrxRouter(config, self.params_dtype)
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.ffn_config.moe_num_experts,
             top_k=config.ffn_config.moe_top_k,
             hidden_size=config.d_model,
@@ -409,9 +414,10 @@ class DbrxModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

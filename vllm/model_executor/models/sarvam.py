@@ -28,6 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -35,11 +36,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    MoERunner,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -55,15 +52,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -339,7 +341,7 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -447,7 +449,29 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
-class SarvamMLAModel(nn.Module):
+# PEP 563 stringifies annotations in this module, so the decorator cannot infer
+# these; they are the set DeepSeek-V2 infers for the same forward signature.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
+class SarvamMLAModel(nn.Module, EagleModelMixin):
+    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -503,7 +527,17 @@ class SarvamMLAModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Run this stage and optionally return its auxiliary hidden states.
+
+        Auxiliary captures are local to this stage, matching Qwen3 MoE.
+        Pipeline transport carries only hidden states and residual; EAGLE3
+        capture across pipeline stages is not supported by this model.
+
+        Returns:
+            Intermediate tensors on non-final stages. On the final stage,
+            normalized hidden states, paired with auxiliary states if captured.
+        """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -516,12 +550,22 @@ class SarvamMLAModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(
                 hidden_states,
                 positions,
                 residual,
             )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -530,99 +574,19 @@ class SarvamMLAModel(nn.Module):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        """Load weights with stacked gate+up and MoE expert remapping."""
-        weights = _normalized_weights(weights)
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                new_name = name.replace(weight_name, param_name)
-                if new_name.endswith(".bias") and new_name not in params_dict:
-                    continue
-                if new_name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(new_name, self):
-                    continue
-
-                param = params_dict[new_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(new_name)
-                break
-            else:
-                mapped = False
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-
-                    new_name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(new_name, self):
-                        continue
-                    if new_name not in params_dict:
-                        continue
-
-                    param = params_dict[new_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    loaded_params.add(new_name)
-                    mapped = True
-                    break
-
-                if mapped:
-                    continue
-
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            _normalized_weights(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
@@ -669,7 +633,9 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
                 moe.set_eplb_state(eplb_state)
 
 
-class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
+class SarvamMLAForCausalLM(
+    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, SarvamMixtureOfExperts
+):
     packed_modules_mapping = {
         "q_proj": ["q_proj"],
         "q_a_proj": ["q_a_proj"],
@@ -693,15 +659,14 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
 
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if self.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
@@ -737,7 +702,8 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Return backbone outputs, including auxiliary states when captured."""
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -758,14 +724,8 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
 
 
 class SarvamMoEForCausalLM(BailingMoeForCausalLM):

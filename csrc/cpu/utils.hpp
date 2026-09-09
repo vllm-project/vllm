@@ -9,7 +9,7 @@
 #include "cpu/cpu_types.hpp"
 
 namespace cpu_utils {
-enum class ISA { AMX, VEC, RVV, NEON };
+enum class ISA { AMX, VEC, RVV, NEON, VSX };
 
 inline ISA get_isa(const std::string& isa) {
   if (isa == "amx") {
@@ -20,6 +20,8 @@ inline ISA get_isa(const std::string& isa) {
     return ISA::RVV;
   } else if (isa == "neon") {
     return ISA::NEON;
+  } else if (isa == "vsx") {
+    return ISA::VSX;
   } else {
     TORCH_CHECK(false, "Invalid isa type: " + isa);
   }
@@ -40,12 +42,10 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
-#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
-#endif
 
 struct Counter {
   std::atomic<int64_t> counter;

@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.attention import (
     ChunkedLocalAttention,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -131,7 +131,7 @@ class Llama4MoE(nn.Module):
         self.n_physical_experts = self.n_local_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -576,6 +576,7 @@ class Llama4Model(LlamaModel):
         params_dict = dict(self.named_parameters())
         # The module parameters that have been loaded.
         loaded_params: set[str] = set()
+        weight_loader: Callable[..., object]
 
         # Iterate over all the weights and load them into module parameters.
         for name, loaded_weight in weights:
@@ -612,9 +613,10 @@ class Llama4Model(LlamaModel):
                 # quant config's `get_cache_scale_mapper` does not cover
                 # (idempotent for names already renamed by the mapper).
                 if name.endswith("scale"):
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                 # Load the weight into the module parameter with corresponding
                 # shard id and exit the for loop and the else block.
@@ -792,10 +794,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         # Use a generator (not a list comprehension) so the weights iterator is
         # consumed lazily by AutoWeightsLoader. Materializing it here would hold
         # the entire language-model checkpoint in host memory at once, which can

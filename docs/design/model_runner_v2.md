@@ -191,6 +191,14 @@ V1's CUDA graph handling is implicit and hard to reason about. MRV2 uses a `CUDA
 
 This makes graph lifecycle and execution mode decisions more understandable and easier to extend. Example: MRV2 can capture multiple draft-model forward passes into one CUDA graph.
 
+### Fused Multi-Step Draft Decoding
+
+Autoregressive speculative decoding executes several dependent draft steps per scheduler step. In the fused path, MRV2 captures all post-prefill draft steps in one full CUDA graph instead of replaying a separate graph for each draft token. Attention metadata is built once before the loop, while common step-dependent tensors keep stable addresses and are updated in place between draft steps.
+
+Some attention backends also materialize derived state, such as scheduler metadata or sparse indices. Before opting into the fused path, these backends must implement `AttentionMetadataBuilder.update_draft_decode_metadata()` to update or invalidate that state after the draft inputs advance. The hook runs during CUDA graph capture, so only the GPU operations it issues are recorded and executed during replay; its Python body is not run again. Implementations must therefore use capture-safe operations and keep all replayed tensor state in persistent storage.
+
+For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.

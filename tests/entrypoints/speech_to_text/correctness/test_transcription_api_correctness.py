@@ -17,7 +17,7 @@ import pytest
 import soundfile
 import torch
 from datasets import Audio, load_dataset
-from evaluate import load
+from jiwer import wer
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.benchmarks.datasets.datasets import ASRDataset
@@ -202,8 +202,7 @@ def run_evaluation(
     # Compute WER
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * wer(references, predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -302,8 +301,7 @@ def run_longform_evaluation(
 
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
-    wer = load("wer")
-    wer_score = 100 * wer.compute(references=references, predictions=predictions)
+    wer_score = 100 * wer(references, predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -358,7 +356,12 @@ def test_wer_correctness(
         print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
 
         if expected_wer:
-            torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
+            wer_atol, wer_rtol = 1e-1, 1e-2
+            max_wer = expected_wer + wer_atol + wer_rtol * abs(expected_wer)
+            assert wer <= max_wer, (
+                f"WER {wer:.6f} exceeds maximum allowed {max_wer:.6f} "
+                f"(baseline {expected_wer:.6f})"
+            )
 
 
 # 14-22mins of 6 audio samples of total ~115 mins and just 37MB.

@@ -14,6 +14,7 @@ from tests.models.utils import (
     RerankModelInfo,
 )
 from vllm import PoolingParams
+from vllm.platforms import current_platform
 
 from .mteb_embed_utils import mteb_test_embed_models
 from .mteb_score_utils import mteb_test_rerank_models
@@ -37,6 +38,15 @@ EMBEDDING_MODELS = [
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
+    ),
+    EmbedModelInfo(
+        "jinaai/jina-embeddings-v5-text-nano",
+        architecture="JinaEmbeddingsV5Model",
+        dtype="bfloat16" if current_platform.is_rocm() else "auto",
+        seq_pooling_type="LAST",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
 ]
 

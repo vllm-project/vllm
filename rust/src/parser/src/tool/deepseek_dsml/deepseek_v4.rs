@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V4 models.
 ///
@@ -50,8 +50,8 @@ impl ToolParser for DeepSeekV4ToolParser {
         true
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::DeepSeekV4)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::DeepSeekV4.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -73,7 +73,8 @@ mod tests {
 
     use super::DeepSeekV4ToolParser;
     use crate::tool::test_utils::{collect_stream, test_tools};
-    use crate::tool::{StructuralTagModel, ToolParser, ToolParserTestExt as _};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
+    use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -91,13 +92,10 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_exposes_structural_tag_model() {
+    fn deepseek_v4_exposes_structural_tag_builder() {
         let parser = DeepSeekV4ToolParser::new(&test_tools());
 
-        assert_eq!(
-            parser.structural_tag_model(),
-            Some(StructuralTagModel::DeepSeekV4)
-        );
+        assert!(parser.structural_tag_builder().is_some());
     }
 
     #[test]
@@ -146,6 +144,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Beijing" })
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<DeepSeekV4ToolParser>(
+            "\n\n",
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"></｜DSML｜invoke></｜DSML｜tool_calls>",
         );
     }
 }
