@@ -554,6 +554,9 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
     ],
+    PlatformEnum.XPU: [
+        EmulationNvFp4LinearKernel,
+    ],
 }
 
 _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
