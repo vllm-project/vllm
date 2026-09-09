@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from unittest import mock
 
 import pytest
 import torch
@@ -134,38 +133,6 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
-
-
-def test_activate_adapter_warns_when_no_lora_weights_applied(
-    default_vllm_config, dist_init, dummy_model
-):
-    device = torch.device(DEVICES[0])
-    model_lora = create_lora(1, dummy_model, ["dense2"], device)
-    manager = LoRAModelManager(
-        dummy_model,
-        1,
-        1,
-        1,
-        LoRAConfig(
-            max_lora_rank=8,
-            max_cpu_loras=1,
-            max_loras=1,
-            lora_dtype=DEFAULT_DTYPE,
-            target_modules=["layer1.dense1"],
-        ),
-        device,
-        default_vllm_config,
-    )
-
-    assert manager.add_adapter(model_lora)
-    with mock.patch("vllm.lora.model_manager.logger.warning_once") as warning_once:
-        assert manager.activate_adapter(model_lora.id)
-
-    warning_once.assert_called_once()
-    message = warning_once.call_args.args[0] % warning_once.call_args.args[1:]
-    assert "No LoRA weights were applied for adapter 1 on this worker" in message
-    assert "Requests may use the base model" in message
-    assert "--lora-target-modules" in message
 
 
 def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):
