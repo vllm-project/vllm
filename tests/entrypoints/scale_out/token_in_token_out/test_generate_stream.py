@@ -362,7 +362,7 @@ async def test_stream_error_with_empty_delta():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_empty", [False, True])
 async def test_stream_skips_empty_token_output(terminal_empty):
-    """Outputs with empty token_ids are skipped (no chunk emitted)."""
+    """Skip empty nonterminal outputs, but retain the terminal finish reason."""
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
