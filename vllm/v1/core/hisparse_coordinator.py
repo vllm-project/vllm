@@ -544,6 +544,7 @@ class HiSparseCoordinator:
         replay_boundary: int,
     ) -> None:
         """Publish host-source hashes only after their pages are durable."""
+        self.plan_prefix_materialization(request.request_id, num_computed_tokens)
         manager = self.host_manager
         if manager is None:
             return

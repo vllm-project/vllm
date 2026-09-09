@@ -427,9 +427,6 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
                 replay_boundary=replay_boundary,
             )
-        self.hisparse_coordinator.plan_prefix_materialization(
-            request.request_id, num_tokens_to_cache
-        )
         self.hisparse_coordinator.cache_host_blocks_when_ready(
             request,
             num_tokens_to_cache,
@@ -900,9 +897,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 retention_interval=self.retention_interval,
                 replay_boundary=replay_boundary,
             )
-        self.hisparse_coordinator.plan_prefix_materialization(
-            request.request_id, cached_num_computed_tokens
-        )
         self.hisparse_coordinator.cache_host_blocks_when_ready(
             request,
             cached_num_computed_tokens,
