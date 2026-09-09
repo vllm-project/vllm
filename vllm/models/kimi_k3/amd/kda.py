@@ -41,9 +41,6 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
-from vllm.models.kimi_k3.amd.ops.kda_chunk import (
-    is_fused_kda_chunk_supported,
-)
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
@@ -178,24 +175,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             if isinstance(additional_config, dict)
             else "auto"
         )
-        backend = resolve_kda_prefill_backend(requested_prefill_backend)
-        if backend == "fused" and not is_fused_kda_chunk_supported():
-            raise RuntimeError(
-                "The fused KDA chunk kernel requires gfx950 and a build that "
-                "includes it."
-            )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
+        self.kda_prefill_backend = resolve_kda_prefill_backend(
+            requested_prefill_backend
         )
-        if backend == "flashkda":
-            self.kda_prefill_backend = "flashkda"
-        elif self.use_fused_chunk:
-            self.kda_prefill_backend = "fused"
-        else:
-            self.kda_prefill_backend = "triton"
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend
-        )
+        self.use_fused_chunk = self.kda_prefill_backend == "fused"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
 
         prefill_conv1d_weight = None
         if self.kda_prefill_backend == "flashkda":
