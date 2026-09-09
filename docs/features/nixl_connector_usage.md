@@ -13,11 +13,7 @@ Install the NIXL library: `uv pip install nixl`, as a quick start on Nvidia plat
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
 - The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
-For ROCm platform, the [ROCm docker file](../../docker/Dockerfile.rocm) includes RIXL and ucx already.
-
-- Refer to [RIXL official repository](https://github.com/rocm/rixl) for more information
-- The supportive libraries for RIXL can be found in [requirements/kv_connectors_rocm.txt](../../requirements/kv_connectors_rocm.txt)
-- In the future we may remove RIXL from docker image file and users will be able to install from pre-compiled binary packages
+For ROCm, the [ROCm Dockerfile](../../docker/Dockerfile.rocm) builds NIXL and UCX with ROCm support from source.
 
 For non-cuda platform, please install nixl with ucx build from source, instructed as below.
 
@@ -408,19 +404,10 @@ GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVC
 
 ### Heterogeneous KV Layout support
 
-Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
+Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental configuration
 
 ```bash
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
-```
-
-### Cross layers blocks
-
-By default, this feature is disabled. On attention backends that support this feature, each logical block is contiguous in physical memory. This reduces the number of buffers that need to be transferred.
-To enable this feature:
-
-```bash
---kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
 ## Metrics Reference

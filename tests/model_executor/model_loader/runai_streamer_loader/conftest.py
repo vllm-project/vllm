@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 from vllm.v1.executor import UniProcExecutor
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -11,7 +11,7 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 # The worker process reimports the patched entities, and the patch is not applied.
 class RunaiDummyExecutor(UniProcExecutor):
     def _init_executor(self) -> None:
-        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
+        distributed_init_method = get_file_store_init_method()
 
         local_rank = 0
         rank = 0

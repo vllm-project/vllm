@@ -21,6 +21,9 @@ def test_ppl(hf_runner, vllm_runner, model_info: GenerateModelInfo):
     vllm_extra_kwargs = {}
     if model_info.name == "Qwen/Qwen3.5-0.8B":
         vllm_extra_kwargs["language_model_only"] = True
+        # Qwen3.5 is a hybrid model; its default mamba cache mode ('align')
+        # for prefix caching requires chunked prefill.
+        vllm_extra_kwargs["enable_chunked_prefill"] = True
 
     wikitext_ppl_test(
         hf_runner, vllm_runner, model_info, vllm_extra_kwargs=vllm_extra_kwargs

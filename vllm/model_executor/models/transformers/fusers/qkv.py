@@ -10,13 +10,16 @@ from torch import fx, nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVParallelLinear
-from vllm.model_executor.models.transformers.fusers.base import StackedFuser
+from vllm.model_executor.models.transformers.fusers.base import (
+    StackedFuser,
+    fused_head_size,
+)
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     innermost_block,
     is_linear,
     recover_forward,
-    replace_expr,
+    returned_linear,
     single_self_call,
 )
 from vllm.model_executor.models.transformers.utils import (
@@ -26,8 +29,7 @@ from vllm.model_executor.models.transformers.utils import (
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -41,7 +43,7 @@ class QKVFuser(StackedFuser):
     v_name: str
     o_name: str | None
     merged_name: ClassVar[str] = "qkv_proj"
-    merged_cls: ClassVar[str] = "QKVParallelLinear"
+    merged_cls_name: ClassVar[str] = "QKVParallelLinear"
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:
@@ -84,15 +86,16 @@ class QKVFuser(StackedFuser):
             return None
         q, k, v = qkv_nodes
         names = dict(q_name=q.target, k_name=k.target, v_name=v.target)
-        attn_width = module.get_submodule(q.target).out_features
-        candidates = [
-            name
-            for name, child in module.named_children()
-            if isinstance(child, nn.Linear)
-            and name not in names.values()
-            and child.in_features == attn_width
-        ]
-        names["o_name"] = candidates[0] if len(candidates) == 1 else None
+        # o_proj produces the module's output.
+        o_name = returned_linear(graph, module)
+        # o_proj must be compatible with the q/k/v projections.
+        if o_name in names.values() or (
+            o_name is not None
+            and module.get_submodule(o_name).in_features
+            != module.get_submodule(q.target).out_features
+        ):
+            o_name = None
+        names["o_name"] = o_name
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
@@ -128,33 +131,17 @@ class QKVFuser(StackedFuser):
             raise ValueError("projection calls are in different blocks")
 
         # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
-        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
-        temps = [f"{name}_fused" for name in (self.q_name, self.k_name, self.v_name)]
-        if names & set(temps):
-            raise ValueError("fused temporaries would shadow existing names")
-        merged = f"self.{self.merged_name}"
-        sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
-        template = f"{', '.join(temps)} = {merged}(__arg__).split({sections}, -1)"
-        assign = ast.parse(template).body[0]
-        arg = next(
-            node
-            for node in ast.walk(assign)
-            if isinstance(node, ast.Name) and node.id == "__arg__"
-        )
-        replace_expr(assign, arg, calls[0].args[0])
-        block, index = blocks[0]
-        ast.copy_location(assign, block[index])
-        block.insert(min(index for _, index in blocks), assign)
-        for call, temp in zip(calls, temps):
-            replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
+        block = blocks[0][0]
+        index = min(index for _, index in blocks)
+        self._splice_merged_split(funcdef, calls, block, index)
         self.fused_forward = compile_forward(funcdef, fn)
 
-    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+    def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         """Shapes must be compatible for a single merged, head-sharded GEMM."""
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         v = module.get_submodule(self.v_name)
-        head_size = model_config.get_head_size()
+        head_size = fused_head_size(module, vllm_config)
         compatible = (
             q.in_features == k.in_features == v.in_features
             and len({proj.bias is None for proj in (q, k, v)}) == 1
@@ -167,13 +154,10 @@ class QKVFuser(StackedFuser):
         return compatible
 
     def update_attrs(
-        self,
-        module: nn.Module,
-        prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
-        head_size = model_config.get_head_size()
+        quant_config = vllm_config.quant_config
+        head_size = fused_head_size(module, vllm_config)
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         merged = QKVParallelLinear(

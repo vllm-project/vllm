@@ -57,6 +57,7 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_hf_config(self):
@@ -139,16 +140,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         return _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        """vLLM이 prompt 업데이트를 처리하도록 False 반환."""
-        return False
 
     def _get_prompt_updates(
         self,

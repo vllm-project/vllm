@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Fast GPT-2 byte-level detokenization that writes into a single `Vec<u8>`,
 //! avoiding the `Vec<String>` / `String::join` assembly in fastokens' generic
 //! `Decoder::decode` pipeline.

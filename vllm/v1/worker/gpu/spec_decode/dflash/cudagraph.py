@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     AttentionState,
     BatchExecutionDescriptor,
@@ -41,6 +42,17 @@ def _prepare_dflash_inputs_to_capture(
     attn_metadata = None
     if not skip_attn:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        dcp_local_seq_lens = None
+        if block_tables.cp_size > 1:
+            prepare_dcp_local_seq_lens(
+                input_buffers.dcp_local_seq_lens,
+                input_buffers.seq_lens,
+                num_reqs,
+                block_tables.cp_size,
+                block_tables.cp_rank,
+                block_tables.cp_interleave,
+            )
+            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -49,6 +61,7 @@ def _prepare_dflash_inputs_to_capture(
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=num_tokens // num_reqs,
             seq_lens=input_batch.seq_lens,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             max_seq_len=max_model_len,
             block_tables=input_block_tables,
             slot_mappings=slot_mappings,
@@ -77,7 +90,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
-        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -98,7 +111,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
             )
             attn_metadata, slot_mappings = attn_state
 
-            fwd = lambda cg_mode: forward_fn(
+            return lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,
                 attn_metadata,
@@ -106,6 +119,5 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 num_tokens_across_dp,
                 cg_mode,
             )
-            return fwd, attn_state
 
         super().capture(create_forward_fn, progress_bar_desc)
