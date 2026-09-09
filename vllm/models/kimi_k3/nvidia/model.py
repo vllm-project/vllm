@@ -1723,13 +1723,11 @@ class KimiLinearForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def process_weights_after_loading(self) -> None:
-        # The weight cache IPC path skips load_weights(); finalize here.
         self.model.finalize_mega_moe_weights()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights)
-        self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
         # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
         # hook for any AttentionLayerBase, so no manual trigger is needed here.
@@ -1813,8 +1811,6 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            # Meta-device init (IPC loader): the loader materializes the
-            # tower afterwards; .to() here would fail on meta storage.
             if is_meta_module(self.vision_tower):
                 pass
             elif self._maybe_ignore_quant_config(quant_config) is not None:
@@ -1857,7 +1853,6 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            # Skip the device move under meta-device init (IPC loader).
             if not is_meta_module(self.mm_projector):
                 self.mm_projector = self.mm_projector.to(
                     device=self.device, dtype=model_config.dtype
