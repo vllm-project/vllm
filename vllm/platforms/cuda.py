@@ -12,7 +12,7 @@ import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -749,6 +749,40 @@ class CudaPlatformBase(Platform):
         return IrOpPriorityConfig.with_default(
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
         )
+
+    @classmethod
+    def launch_multi_stream(
+        cls,
+        default_fn: Callable[[], Any],
+        aux_fns: list[Callable[[], Any] | None],
+        start_event: torch.cuda.Event,
+        done_events: list[torch.cuda.Event],
+        aux_streams: list[torch.cuda.Stream],
+        queue_aux_before_default: bool,
+    ) -> tuple[Any, list[Any]]:
+        """Default CUDA event-based implementation of the multi-stream hook."""
+        aux_results: list[Any] = [None] * len(aux_fns)
+        pending: list[torch.cuda.Event] = []
+
+        def launch_aux() -> None:
+            for i, fn in enumerate(aux_fns):
+                if fn is None:
+                    continue
+                with torch.cuda.stream(aux_streams[i]):
+                    start_event.wait()
+                    aux_results[i] = fn()
+                    done_events[i].record()
+                pending.append(done_events[i])
+
+        start_event.record()
+        if queue_aux_before_default:
+            launch_aux()
+        default_result = default_fn()
+        if not queue_aux_before_default:
+            launch_aux()
+        for event in pending:
+            event.wait()
+        return default_result, aux_results
 
     @classmethod
     def is_arch_support_pdl(cls) -> bool:

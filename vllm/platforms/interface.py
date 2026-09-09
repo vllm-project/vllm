@@ -1320,30 +1320,12 @@ class Platform:
     ) -> tuple[Any, list[Any]]:
         """Launch stream work with the default CUDA event synchronization.
 
+        The CUDA platform provides the default event-based implementation.
         ROCm overrides this hook because its overlap requires stream waits.
         """
-        aux_results: list[Any] = [None] * len(aux_fns)
-        pending: list[torch.cuda.Event] = []
-
-        def launch_aux() -> None:
-            for i, fn in enumerate(aux_fns):
-                if fn is None:
-                    continue
-                with torch.cuda.stream(aux_streams[i]):
-                    start_event.wait()
-                    aux_results[i] = fn()
-                    done_events[i].record()
-                pending.append(done_events[i])
-
-        start_event.record()
-        if queue_aux_before_default:
-            launch_aux()
-        default_result = default_fn()
-        if not queue_aux_before_default:
-            launch_aux()
-        for event in pending:
-            event.wait()
-        return default_result, aux_results
+        raise NotImplementedError(
+            "launch_multi_stream is not implemented for the current platform."
+        )
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
