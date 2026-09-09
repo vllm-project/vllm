@@ -2863,11 +2863,14 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]], *, is_send: bool = False
+    ) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
+            is_send: Whether these are outgoing WRITEs rather than incoming READs.
         Returns:
             set of req_ids that have all done xfers
         """
@@ -2904,12 +2907,14 @@ class NixlBaseConnectorWorker:
 
             if not in_progress:
                 # Only report request as completed when all transfers are done.
-                # A request failed in an earlier poll was already reported via
+                # A receive failed in an earlier poll was already reported via
                 # _failed_recv_reqs and its metadata popped by get_finished();
                 # don't report it again, just drop the remaining handles.
-                if req_id in self._recving_metadata:
+                # Outgoing WRITEs have no receive-side metadata.
+                if is_send or req_id in self._recving_metadata:
                     done_req_ids.add(req_id)
-                    self._send_pending_recv_notifs(req_id)
+                    if not is_send:
+                        self._send_pending_recv_notifs(req_id)
                 del transfers[req_id]
             else:
                 transfers[req_id] = in_progress

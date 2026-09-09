@@ -727,6 +727,38 @@ def test_stale_engine_evicted_on_push():
 
 
 class TestPushWriterNotifs:
+    @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
+    def test_completed_writes_release_the_producer_lease(self, pp_size, is_hma):
+        """WRITE completion does not depend on receive-side request metadata."""
+        w = _StubWriterWorker.fresh()
+        w.pp_size = pp_size
+        w._is_hma_required = is_hma
+        w.transfer_topo = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.xfer_stats = MagicMock()
+        w._failed_recv_reqs = queue.Queue()
+        w._pending_recv_notifs = {}
+        w._reqs_to_process.add("req-send")
+        w._reqs_to_send["req-send"] = time.perf_counter() + 60
+        w._sending_transfers["req-send"] = [1, 2]
+        w.nixl_wrapper.check_xfer_state.side_effect = ["DONE", "PROC", "DONE"]
+
+        # The lease stays active until every destination handle completes.
+        assert w.get_finished() == (set(), set())
+        assert w._sending_transfers["req-send"] == [2]
+        assert "req-send" in w._reqs_to_send
+
+        assert w.get_finished() == ({"req-send"}, set())
+        assert not w._sending_transfers
+        assert not w._reqs_to_send
+        assert not w._reqs_to_process
+        assert not w._recving_metadata
+        assert w._evict_finished_inbox.get_nowait() == "req-send"
+        assert w.get_finished() == (set(), set())
+        assert w._evict_finished_inbox.empty()
+        assert w.nixl_wrapper.release_xfer_handle.call_count == 2
+        w.xfer_stats.record_kv_expired_req.assert_not_called()
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside ``_get_new_notifs``."""
