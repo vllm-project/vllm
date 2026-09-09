@@ -74,6 +74,7 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
     assert torch.equal(actual.query_start_loc, expected_query_start_loc)
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, expected_backend_path",
     [
@@ -143,11 +144,12 @@ def test_standard_attention_backend_selection(
     env_vars,
     selected_backend,
     expected_backend_path,
+    use_dcp,
     mock_vllm_config,
     mock_get_cdna_version,
     monkeypatch,
 ):
-    """Test standard attention backend selection with various configurations."""
+    """Standard ROCm backends remain selectable without DCP and reject DCP."""
     # Set environment variables
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -176,7 +178,13 @@ def test_standard_attention_backend_selection(
         use_mla=False,
         has_sink=False,
         use_sparse=False,
+        use_dcp=use_dcp,
     )
+
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(backend_enum, attn_selector_config)
+        return
 
     backend_path = RocmPlatform.get_attn_backend_cls(
         selected_backend=backend_enum, attn_selector_config=attn_selector_config
@@ -185,6 +193,7 @@ def test_standard_attention_backend_selection(
     assert backend_path == expected_backend_path
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [
@@ -261,10 +270,11 @@ def test_mla_backend_selection(
     block_size,
     expected_backend_path,
     should_raise,
+    use_dcp,
     mock_vllm_config,
     monkeypatch,
 ):
-    """Test MLA backend selection with various configurations."""
+    """Dense MLA remains selectable with DCP for valid block sizes."""
     # Set environment variables
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -303,6 +313,7 @@ def test_mla_backend_selection(
                     use_mla=True,
                     has_sink=False,
                     use_sparse=False,
+                    use_dcp=use_dcp,
                 )
                 attn_selector_config = AttentionSelectorConfig(
                     head_size=128,
@@ -312,6 +323,7 @@ def test_mla_backend_selection(
                     use_mla=True,
                     has_sink=False,
                     use_sparse=False,
+                    use_dcp=use_dcp,
                 )
                 backend_path = RocmPlatform.get_attn_backend_cls(
                     selected_backend=backend_enum,
@@ -327,6 +339,7 @@ def test_mla_backend_selection(
                 use_mla=True,
                 has_sink=False,
                 use_sparse=False,
+                use_dcp=use_dcp,
             )
 
             backend_path = RocmPlatform.get_attn_backend_cls(
@@ -334,6 +347,63 @@ def test_mla_backend_selection(
             )
 
             assert backend_path == expected_backend_path
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+@pytest.mark.parametrize(
+    "selected_backend", [None, AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
+)
+def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
+    """Sparse MLA remains selectable without DCP and fails early with DCP."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    selector_config = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=True,
+        use_sparse=True,
+        use_dcp=use_dcp,
+    )
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
+    else:
+        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+        )
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+@pytest.mark.parametrize(
+    "selected_backend, head_size, kv_cache_dtype",
+    [
+        (AttentionBackendEnum.TRITON_ATTN_DIFFKV, 192, "bfloat16"),
+        # A 128-dimensional head uses 118 packed bytes, or 59 fp16 elements.
+        (AttentionBackendEnum.TURBOQUANT, 59, "turboquant_k3v4_nc"),
+    ],
+)
+def test_specialized_attention_backends_reject_dcp(
+    selected_backend, head_size, kv_cache_dtype, use_dcp
+):
+    """Valid DiffKV and compressed-cache configurations must reject DCP."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    selector_config = AttentionSelectorConfig(
+        head_size=head_size,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=16,
+        use_dcp=use_dcp,
+    )
+    if use_dcp:
+        with pytest.raises(ValueError, match="DCP not supported"):
+            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
+    else:
+        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+            selected_backend.get_path()
+        )
 
 
 def test_aiter_fa_requires_mi3xx(mock_vllm_config):
