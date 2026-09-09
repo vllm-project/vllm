@@ -187,16 +187,16 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+            self.language_model = language_model
+            assert supports_pp(language_model)
 
         self.img_context_token_id: int | None = None
         self.visual_token_mask = None
-        language_model = self.get_language_model()
-        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
             language_model.make_empty_intermediate_tensors
         )

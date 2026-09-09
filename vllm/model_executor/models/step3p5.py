@@ -45,8 +45,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 from vllm.v1.attention.backend import AttentionType
+
+if typing.TYPE_CHECKING:
+    from vllm.transformers_utils.configs.step3p5 import Step3p5Config
+else:
+    from transformers import PretrainedConfig as Step3p5Config
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
