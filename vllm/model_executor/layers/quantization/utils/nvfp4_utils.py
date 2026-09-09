@@ -121,3 +121,61 @@ def slice_nvfp4_output(
     if out.shape[-1] != output_size:
         return out[..., :output_size].contiguous()
     return out
+
+
+def requantize_nvfp4_moe_w13_scale_2(
+    w13_weight_scale: torch.Tensor,
+    w13_weight_scale_2: torch.Tensor,
+) -> torch.Tensor:
+    """Rescale a fused w13's block scales onto one shared per-expert scale.
+
+    A fused w13 keeps only one *global* scale per expert for both halves
+    (gate and up), even when the checkpoint quantized them independently and
+    the two differ (see https://github.com/vllm-project/vllm/issues/54974).
+    Using one half's global scale for the other dequantizes it as
+    ``fp4 * block_scale * gs_other`` instead of ``* gs_self``, scaling that
+    half's contribution by ``gs_other / gs_self``.
+
+    Mirrors the FP8 precedent for the same fused-w13 problem
+    (``requantize_with_max_scale`` / ``process_fp8_weight_tensor_strategy_moe``):
+    pick one shared scale, here ``max(gs_gate, gs_up)`` per expert, and
+    rescale the other half's *block* scales -- not the fp4 payload -- so both
+    halves dequantize correctly under that one global scale. The rescale
+    factor is always <= 1, so the e4m3 block scales only shrink and cannot
+    overflow.
+
+    Parameters
+    ----------
+    w13_weight_scale:
+        ``[num_experts, 2 * intermediate_size, hidden_size // group_size]``
+        e4m3 block scales, gate half first. Rescaled in place.
+    w13_weight_scale_2:
+        ``[num_experts, 2]`` per-expert global scales, gate then up.
+
+    Returns
+    -------
+    torch.Tensor
+        The shared per-expert global scale, shape ``[num_experts]``.
+    """
+    assert w13_weight_scale_2.shape[1] == 2, (
+        "expected one gate and one up global scale per expert"
+    )
+    num_experts, fused_dim, _ = w13_weight_scale.shape
+    assert fused_dim % 2 == 0, "expected gate and up halves of equal size"
+    half = fused_dim // 2
+
+    gs_gate = w13_weight_scale_2[:, 0]
+    gs_up = w13_weight_scale_2[:, 1]
+    gs = torch.maximum(gs_gate, gs_up)
+
+    for half_slice, gs_half in (
+        (slice(0, half), gs_gate),
+        (slice(half, fused_dim), gs_up),
+    ):
+        block_scale = w13_weight_scale[:, half_slice, :].to(torch.float32)
+        factor = (gs_half / gs).view(num_experts, 1, 1)
+        w13_weight_scale[:, half_slice, :] = (block_scale * factor).to(
+            torch.float8_e4m3fn
+        )
+
+    return gs.contiguous()

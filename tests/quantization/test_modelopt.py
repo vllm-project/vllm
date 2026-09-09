@@ -773,6 +773,91 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
 
 
 @pytest.mark.parametrize(
+    "backend, expect_requantize",
+    [
+        ("VLLM_CUTLASS", True),
+        ("HUMMING", False),
+    ],
+)
+def test_modelopt_nvfp4_moe_requantizes_mismatched_w13_except_for_humming(
+    backend, expect_requantize
+):
+    """Mismatched w1/w3 global scales (#54974) get requantized onto a shared
+    per-expert max for every backend except HUMMING.
+
+    HUMMING's own converter re-reads ``layer.w13_weight_scale_2`` (both
+    halves) directly and folds each half's scale into its own bf16 block
+    scales; pre-requantizing ``layer.w13_weight_scale`` for it would
+    double-apply the correction. So HUMMING must see the original,
+    un-requantized block scales and the plain gate-column ``w13_scale_2``,
+    while every other backend must see the requantized block scales and the
+    shared max scale.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+    from vllm.model_executor.layers.quantization import modelopt as mo
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
+
+    layer = torch.nn.Module()
+    layer.w13_weight = torch.zeros(1)
+    layer.w13_weight_scale = torch.full((2, 4, 2), 0.5, dtype=torch.float8_e4m3fn)
+    # expert 0: gate != up (mismatched); expert 1: tied (no-op case).
+    layer.w13_weight_scale_2 = torch.tensor([[1.0, 2.0], [1.0, 1.0]])
+    layer.w13_input_scale = torch.zeros(1)
+    layer.w2_weight = torch.zeros(1)
+    layer.w2_weight_scale = torch.zeros(1)
+    layer.w2_weight_scale_2 = torch.zeros(1)
+    layer.w2_input_scale = torch.zeros(1)
+    layer._expert_routing_tables = Mock(return_value=Mock())
+    original_block_scale = layer.w13_weight_scale.clone()
+
+    method = ModelOptNvFp4FusedMoE.__new__(ModelOptNvFp4FusedMoE)
+    method.moe = Mock(is_act_and_mul=True)
+    method.nvfp4_backend = NvFp4MoeBackend[backend]
+    method.experts_cls = Mock()
+    method.use_a16 = False
+
+    mock_convert = Mock(
+        return_value=(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            torch.zeros(2),
+            layer.w13_input_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            layer.w2_input_scale,
+        )
+    )
+    with (
+        patch.object(mo, "convert_to_nvfp4_moe_kernel_format", mock_convert),
+        patch.object(
+            ModelOptNvFp4FusedMoE,
+            "get_fused_moe_quant_config",
+            Mock(return_value=Mock()),
+        ),
+        patch.object(mo, "make_nvfp4_moe_kernel", Mock(return_value=Mock())),
+    ):
+        method.process_weights_after_loading(layer)
+
+    passed_w13_scale_2 = mock_convert.call_args.kwargs["w13_scale_2"]
+    if expect_requantize:
+        # Expert 0's block scales shrank (gs_gate=1 < gs_up=2, so the gate
+        # half's factor is 1/2); expert 1 was already tied, a no-op.
+        assert not torch.equal(
+            layer.w13_weight_scale.to(torch.float32),
+            original_block_scale.to(torch.float32),
+        )
+        torch.testing.assert_close(passed_w13_scale_2, torch.tensor([2.0, 1.0]))
+    else:
+        # HUMMING: untouched block scales, plain gate-column scale_2.
+        assert torch.equal(
+            layer.w13_weight_scale.to(torch.float32),
+            original_block_scale.to(torch.float32),
+        )
+        torch.testing.assert_close(passed_w13_scale_2, torch.tensor([1.0, 1.0]))
+
+
+@pytest.mark.parametrize(
     "per_layer_algo, expected_weight, expected_activation",
     [
         ("NVFP4", kNvfp4Static, kNvfp4Dynamic),

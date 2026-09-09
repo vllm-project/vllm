@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -75,6 +76,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    requantize_nvfp4_moe_w13_scale_2,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -971,14 +975,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
 
         # Use a single gscale for w13.
-        if self.moe.is_act_and_mul and not torch.allclose(
+        mismatched = self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ):
+        )
+        # HUMMING never receives this method's w13_scale_2: its own converter
+        # re-reads layer.w13_weight_scale_2 (both halves) directly and folds
+        # each half's scale into its own bf16 block scales, so requantizing
+        # layer.w13_weight_scale here first would double-apply the fix.
+        if mismatched and self.nvfp4_backend != NvFp4MoeBackend.HUMMING:
             logger.warning_once(
-                "w1_weight_scale_2 must match w3_weight_scale_2. "
-                "Accuracy may be affected."
+                "w1_weight_scale_2 does not match w3_weight_scale_2 for "
+                "some experts. Requantizing the mismatched half's block "
+                "scales onto their per-expert max so both halves stay "
+                "correctly scaled."
             )
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
+            w13_weight_scale_2 = requantize_nvfp4_moe_w13_scale_2(
+                layer.w13_weight_scale, layer.w13_weight_scale_2
+            )
+        else:
+            if mismatched:
+                logger.warning_once(
+                    "w1_weight_scale_2 does not match w3_weight_scale_2 for "
+                    "some experts. Accuracy may be affected."
+                )
+            w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         (
             w13,
