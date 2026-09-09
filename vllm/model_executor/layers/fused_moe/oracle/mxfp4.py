@@ -577,6 +577,19 @@ def select_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
+    # GPU/CPU mixed mode: expert weights live on the host (see
+    # VLLM_EXPERTS_LOAD_DEVICE), so a GPU expert kernel cannot consume them.
+    # Select the CPU backend unconditionally rather than preferring the GPU
+    # kernels (Marlin WNA16 etc.), which would only fail with "not on GPU".
+    if envs.VLLM_EXPERTS_LOAD_DEVICE == "cpu":
+        return _return_or_raise(
+            Mxfp4MoeBackend.CPU,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
     if _requires_qwen38_tep8_emulation(config, requested_activation_key):
         backend = Mxfp4MoeBackend.EMULATION
         logger.warning_once(
@@ -627,7 +640,10 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cpu():
+    # CPU/GPU mixed mode: the expert weights live on the host while the rest of
+    # the model runs on the GPU, so the CPU backend is a valid fallback even
+    # though the platform is not CPU-only.
+    if current_platform.is_cpu() or envs.VLLM_EXPERTS_LOAD_DEVICE == "cpu":
         backend = Mxfp4MoeBackend.CPU
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
@@ -1302,6 +1318,19 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_mxfp4_moe_layer_for_cpu,
         )
+
+        if envs.VLLM_EXPERTS_LOAD_DEVICE == "cpu":
+            # GPU/CPU mixed mode: the CPU backend is an out-of-tree engine that
+            # consumes the raw [E, 2I, H//2] / [E, H, I//2] uint8 weights and
+            # raw e8m0 scales directly, so skip the AMX prepack.
+            return (
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+                w13_bias,
+                w2_bias,
+            )
 
         packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
             prepare_mxfp4_moe_layer_for_cpu(
