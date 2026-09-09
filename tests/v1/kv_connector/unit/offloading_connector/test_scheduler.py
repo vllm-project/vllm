@@ -96,7 +96,7 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         groups.append(
             KVCacheGroupSpec([f"layer{i}"], kv_spec, is_eagle_group=eagle and i == 1)
         )
-    manager = CPUOffloadingManager(num_blocks=100)
+    manager = CPUOffloadingManager(num_chunks=100)
     spec = SimpleNamespace(
         tokens_per_block=(256, 64, 8),
         tokens_per_hash=8,
@@ -226,7 +226,8 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
 
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
-            block_ids={},
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
@@ -285,7 +286,8 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
 
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
-            block_ids={},
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
@@ -310,7 +312,8 @@ def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
 
     output = SchedulerOutput.make_empty()
     output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
         boundary_state_offloads={"req": [(1, 99, 16)]},
     )
     meta = scheduler.build_connector_meta(output)
@@ -2885,7 +2888,7 @@ class TestEagle:
             req=req,
             req_context=ReqContext(req_id="test-req"),
             offloading_context=RequestOffloadingContext(
-                policy=OffloadPolicy.BLOCK_LEVEL
+                policy=OffloadPolicy.CHUNK_LEVEL
             ),
             num_locally_computed_tokens=num_computed_tokens,
         )
@@ -4495,7 +4498,8 @@ class TestMambaHybridOffloadServing:
             num_scheduled_tokens={"A": self.PROMPT_TOKENS},
             finished_req_ids=set(),
             kv_connector_block_state=KVConnectorBlockState(
-                block_ids={},
+                req_ids=set(),
+                resolve_block_ids={}.__getitem__,
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
