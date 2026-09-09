@@ -5,6 +5,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -44,6 +45,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
+    SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.request import Request, RequestStatus
@@ -666,6 +668,51 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
+
+
+def test_update_from_output_routes_sampling_masks_by_request():
+    """Each request receives the sampler row at its own batch index."""
+    scheduler = create_scheduler()
+    scheduler.return_sampling_mask = True
+    requests = create_requests(num_requests=3, max_tokens=10)
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[1], [3], [4]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        sampling_masks=SamplingMaskLists(
+            np.array([1, 2, 3, 4, 5, 6], dtype=np.int32), np.array([0, 2, 3, 6])
+        ),
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+
+    assert [out.request_id for out in outputs] == [req.request_id for req in requests]
+    assert [out.new_sampling_mask.token_ids.tolist() for out in outputs] == [
+        [1, 2],
+        [3],
+        [4, 5, 6],
+    ]
+    assert all(out.new_sampling_mask.offsets is None for out in outputs)
 
 
 def test_stop_via_update_from_output():
@@ -1780,6 +1827,22 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+
+
+def test_spec_decode_padding_resumed_request_without_running_requests():
+    """Pad a synchronously resumed request even without local running work."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    (resumed,) = create_requests(num_requests=1, num_tokens=33, max_tokens=16)
+
+    scheduler.add_request(resumed)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[resumed.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
 
 
 def test_spec_decode_padding_skipped_for_diffusion():
@@ -5581,6 +5644,68 @@ def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     assert manager.get_cached_input_ids(request) == set()
 
 
+def test_free_encoder_inputs_notifies_the_ec_connector():
+    """The connector learns the item is consumed, not just that the request ended.
+
+    Connectors hold per-item transfer state (remote buffers, reservations);
+    waiting for `request_finished` pins it for the whole generation.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    mm_start_pos, mm_length = 50, 100
+    request = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length + 10,
+        mm_positions=[[PlaceholderRange(offset=mm_start_pos, length=mm_length)]],
+    )[0]
+    scheduler.encoder_cache_manager.allocate(request, 0)
+    scheduler.ec_connector = Mock()
+
+    request.num_computed_tokens = mm_start_pos + mm_length - 1
+    scheduler._free_encoder_inputs(request)
+    scheduler.ec_connector.update_state_after_free.assert_not_called()
+
+    request.num_computed_tokens = mm_start_pos + mm_length
+    scheduler._free_encoder_inputs(request)
+    scheduler.ec_connector.update_state_after_free.assert_called_once_with(request, 0)
+
+
+def test_unavailable_encoder_input_fails_the_request_as_retryable():
+    """An encoder input the connector gave up on must end the request.
+
+    `FinishReason.ERROR` is the retryable channel the KV connector already uses
+    for load failures, so the caller can re-issue; deferring instead parked the
+    request until the client timed out.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+    )[0]
+    scheduler.add_request(request)
+    scheduler.ec_connector = Mock()
+    scheduler.ec_connector.take_unavailable_requests.return_value = {request.request_id}
+    # `request_finished` reports (delay_free, params) for the request teardown.
+    scheduler.ec_connector.request_finished.return_value = (False, None)
+
+    scheduler_output = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    engine_outputs = outputs[0].outputs
+    assert [o.finish_reason for o in engine_outputs] == [FinishReason.ERROR]
+
+
 def test_free_encoder_inputs_defers_for_eagle_lookahead():
     """With EAGLE speculative decoding, the encoder input is retained one extra
     position so the drafter's +1 look-ahead mm-embedding gather (which reads one
@@ -5778,9 +5903,8 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
 
     # ensure_cache_available must have been called with (request, num_computed_tokens=0)
     # for a brand-new request that has no cached tokens yet.
-    scheduler.ec_connector.ensure_cache_available.assert_called_once_with(
-        request_deferred, 0
-    )
+    ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
+    assert ensure_call.args == (request_deferred, 0)
     # Deferred request must NOT be scheduled
     assert request_deferred.request_id not in output.num_scheduled_tokens
     _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
@@ -5810,6 +5934,31 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     )
     # No local encoder compute — all loaded externally
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+def test_ec_connector_defers_running_request_for_async_reload():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=32,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[[PlaceholderRange(offset=48, length=32)]],
+        req_ids=["request"],
+    )[0]
+    scheduler.ec_connector.ensure_cache_available = Mock(side_effect=[True, False])
+
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    assert first_output.num_scheduled_tokens[request.request_id] == 32
+
+    second_output = scheduler.schedule()
+    assert request.request_id not in second_output.num_scheduled_tokens
+    ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
+    assert ensure_call.args[:2] == (request, 32)
 
 
 def test_ec_connector_pending_prefetch_only_checks_future_mm_features():

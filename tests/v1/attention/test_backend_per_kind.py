@@ -5,10 +5,31 @@
 import pytest
 
 from vllm.config.attention import AttentionConfig
-from vllm.v1.attention.backend import AttentionType
+from vllm.model_executor.layers.attention.attention import (
+    _largest_kernel_block_within,
+)
+from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+
+@pytest.mark.parametrize(
+    "supported_sizes,expected",
+    [
+        ([MultipleOf(16)], 1536),
+        ([16, 32], 32),
+        ([2048], 2048),
+        ([MultipleOf(2048)], 2048),
+    ],
+)
+def test_largest_kernel_block_within(supported_sizes, expected):
+    class Backend:
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return supported_sizes
+
+    assert _largest_kernel_block_within(Backend, 1024, 1024 * 1536, 2048) == expected
 
 
 @pytest.mark.parametrize(
