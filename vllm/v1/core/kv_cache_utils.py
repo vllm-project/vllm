@@ -16,19 +16,21 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.hisparse.cache_config import (
+from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
-    get_hisparse_kv_cache_config,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupRole,
@@ -1599,6 +1601,13 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
+    hot_page_sizes = [
+        group.kv_cache_spec.page_size_bytes
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    if hot_page_sizes:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
     return bytes_per_block
 
 
@@ -1664,18 +1673,17 @@ def get_kv_cache_config_from_groups(
             ),
         )
 
-    hisparse_host_budget = get_hisparse_host_pool_bytes(vllm_config)
-    if hisparse_host_budget is not None and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        return get_hisparse_kv_cache_config(
-            vllm_config,
-            kv_cache_groups,
-            available_memory,
-            hisparse_host_budget,
+    hisparse_layout = None
+    if (host_budget := get_hisparse_host_pool_bytes(vllm_config)) is not None:
+        hisparse_layout = create_hisparse_layout(
+            vllm_config, kv_cache_groups, host_budget
         )
+        kv_cache_groups = hisparse_layout.device_groups
 
-    if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
+    if (
+        hisparse_layout is None
+        and (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None
+    ):
         (
             attn_group,
             mamba_groups,
@@ -1757,7 +1765,9 @@ def get_kv_cache_config_from_groups(
     # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
-    kv_cache_tensors = []
+    kv_cache_tensors = (
+        list(hisparse_layout.host_tensors) if hisparse_layout is not None else []
+    )
     for group in kv_cache_groups:
         group_spec = group.kv_cache_spec
         layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
@@ -1769,13 +1779,19 @@ def get_kv_cache_config_from_groups(
 
         byte_offset = 0
         for spec, layer_names in layers_by_spec.items():
-            layer_stride, block_stride, _, _, _ = compute_layout_strides(
-                spec,
-                num_blocks,
-                len(layer_names),
-                layout,
-                fixed_strides=(None, interleaved_block_stride, None, None, None),
-            )
+            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
+                if not layout.is_block_outermost:
+                    raise ValueError("HiSparse requires a block-outermost KV layout.")
+                layer_stride = spec.page_size_bytes
+                block_stride = bytes_per_block
+            else:
+                layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                    spec,
+                    num_blocks,
+                    len(layer_names),
+                    layout,
+                    fixed_strides=(None, interleaved_block_stride, None, None, None),
+                )
             offset = (
                 byte_offset
                 * max(layer_stride, spec.page_size_bytes)
@@ -1792,10 +1808,24 @@ def get_kv_cache_config_from_groups(
             )
             byte_offset += len(layer_names) * spec.page_size_bytes
 
+    if hisparse_layout is not None:
+        logger.info_once(
+            "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
+            "GPU indexer/resident/hot pool (%d blocks).",
+            sum(tensor.size for tensor in hisparse_layout.host_tensors) / 2**30,
+            hisparse_layout.host_num_blocks,
+            size / 2**30,
+            num_blocks,
+        )
+        kv_cache_groups = [hisparse_layout.source_group, *kv_cache_groups]
+
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        hisparse_host_num_blocks=(
+            hisparse_layout.host_num_blocks if hisparse_layout is not None else None
+        ),
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
@@ -2468,12 +2498,8 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = model_len
         if hisparse_host_budget is not None:
             try:
-                config = get_hisparse_kv_cache_config(
-                    vllm_config,
-                    kv_cache_groups,
-                    available_memory,
-                    hisparse_host_budget,
-                    log_layout=False,
+                config = get_kv_cache_config_from_groups(
+                    vllm_config, kv_cache_groups, available_memory
                 )
             except ValueError:
                 return False
@@ -2708,6 +2734,9 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    if get_hisparse_host_pool_bytes(vllm_config) is not None:
+        available_memory = [min(available_memory)] * len(available_memory)
+
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
@@ -2743,39 +2772,14 @@ def get_kv_cache_configs(
             )
         )
 
-    if any(config.hisparse_host_num_blocks is not None for config in kv_cache_configs):
-        min_device_blocks = min(config.num_blocks for config in kv_cache_configs)
-        min_host_blocks = min(
-            config.hisparse_host_num_blocks
-            for config in kv_cache_configs
-            if config.hisparse_host_num_blocks is not None
+    min_num_blocks = min(config.num_blocks for config in kv_cache_configs)
+    for i, config in enumerate(kv_cache_configs):
+        if config.num_blocks == min_num_blocks:
+            continue
+        groups = config.kv_cache_groups
+        kv_cache_configs[i] = get_kv_cache_config_from_groups(
+            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
         )
-        for config in kv_cache_configs:
-            old_device_blocks = config.num_blocks
-            old_host_blocks = config.hisparse_host_num_blocks
-            assert old_host_blocks is not None
-            config.num_blocks = min_device_blocks
-            config.hisparse_host_num_blocks = min_host_blocks
-            for tensor in config.kv_cache_tensors:
-                old_blocks = (
-                    old_host_blocks if tensor.host_resident else old_device_blocks
-                )
-                new_blocks = (
-                    min_host_blocks if tensor.host_resident else min_device_blocks
-                )
-                assert tensor.size % old_blocks == 0
-                tensor.size = tensor.size // old_blocks * new_blocks
-                if tensor.host_resident:
-                    tensor.layer_stride = tensor.size
-    else:
-        min_num_blocks = min(config.num_blocks for config in kv_cache_configs)
-        for i, config in enumerate(kv_cache_configs):
-            if config.num_blocks == min_num_blocks:
-                continue
-            groups = config.kv_cache_groups
-            kv_cache_configs[i] = get_kv_cache_config_from_groups(
-                vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
-            )
 
     return kv_cache_configs
 

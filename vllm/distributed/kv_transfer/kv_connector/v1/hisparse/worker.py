@@ -21,7 +21,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.cache_config import (
+from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
 )

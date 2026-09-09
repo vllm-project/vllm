@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.cache_config import HISPARSE_RESIDENT_SUFFIX
+from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 

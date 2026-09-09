@@ -53,9 +53,9 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     tensor_data,
 )
-from vllm.v1.hisparse.cache_config import (
+from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
-    get_hisparse_kv_cache_config,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
     is_full_attention_spec,
     iter_layer_specs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -96,7 +97,7 @@ pytestmark = pytest.mark.cpu_test
     ],
 )
 def test_hisparse_hma_uses_backend_gpu_block_size(
-    block_size, main_sizes, indexer_sizes, gpu_block_size
+    monkeypatch, block_size, main_sizes, indexer_sizes, gpu_block_size
 ):
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -126,19 +127,20 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             max_model_len=block_size,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
     )
     indexer_spec = specs["model.layers.0.self_attn.indexer"]
     assert get_hisparse_gpu_memory_usage(config, [group]) == (
         indexer_spec.max_memory_usage_bytes(config)
     )
 
-    cache_config = get_hisparse_kv_cache_config(
-        config,
-        [group],
-        available_memory=2**30,
-        host_budget=2**30,
-        log_layout=False,
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -196,12 +198,10 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        get_hisparse_kv_cache_config(
+        create_hisparse_layout(
             config,
             [group],
-            available_memory=2**30,
             host_budget=2**30,
-            log_layout=False,
         )
 
 

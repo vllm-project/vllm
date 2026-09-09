@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -16,7 +16,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.core.kv_cache_utils import get_unique_kv_cache_group_id
-from vllm.v1.hisparse.cache_config import (
+from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
 )
@@ -268,31 +268,28 @@ def _allocate_hisparse_kv_cache(
             num_blocks = kv_cache_config.num_blocks
 
         for layer_name in tensor.layers:
-            group_id, group = next(
-                (group_id, group)
-                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-                if layer_name in group.layer_names
-            )
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[layer_name]
             raw_tensors[layer_name] = backing
-            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
-                continue
-            layer_tensor = replace(
-                tensor,
-                layers=[layer_name],
-                layer_stride=tensor.layer_stride or tensor.size,
-            )
-            (kv_cache,) = create_kv_cache_views(
-                backing,
-                spec,
-                num_blocks,
-                layout,
-                layer_tensor,
-                kernel_block_size=kernel_block_sizes[group_id],
-            )
-            kv_caches[layer_name] = kv_cache
+
+        first_layer = tensor.layers[0]
+        group_id, group = next(
+            (group_id, group)
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if first_layer in group.layer_names
+        )
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = spec.kv_cache_specs[first_layer]
+        if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
+            continue
+        views = create_kv_cache_views(
+            backing,
+            spec,
+            num_blocks,
+            layout,
+            tensor,
+            kernel_block_size=kernel_block_sizes[group_id],
+        )
+        kv_caches.update(zip(tensor.layers, views))
 
     return kv_caches, raw_tensors, pinned_host_pools
 
