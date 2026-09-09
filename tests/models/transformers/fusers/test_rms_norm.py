@@ -533,13 +533,20 @@ def test_info_names_the_implementation_that_runs(default_vllm_config):
     the log can never disagree with the module that actually runs."""
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
+    def qualname(cls):
+        return f"{cls.__module__}.{cls.__name__}"
+
     fuser = RMSNormFuser(zero_centered=False, source_cls="HFRMSNorm")
     module = RMSNorm(16)
     with _registered(VLLMRMSNorm, None):
         built = fuser.fuse(module, "norm", default_vllm_config)
-        assert f"-> {type(built).__name__} (CustomOp)" in fuser.info("norm")
+        in_tree = fuser.info("norm")
+        assert f"-> {qualname(type(built))} (CustomOp)" in in_tree
         assert type(built).__name__ == "TPAwareRMSNorm"
-    with _registered(VLLMRMSNorm, _plugin_norm(VLLMRMSNorm, "LoggedPluginRMSNorm")):
+    # A plugin usually registers under the in-tree name *and* reuses it for its
+    # own class, so the class name alone cannot tell the two logs apart.
+    with _registered(VLLMRMSNorm, _plugin_norm(VLLMRMSNorm, "RMSNorm")):
         built = fuser.fuse(module, "norm", default_vllm_config)
-        assert f"-> {type(built).__name__} (CustomOp)" in fuser.info("norm")
-        assert "LoggedPlugin" in type(built).__name__
+        assert f"-> {qualname(type(built))} (CustomOp)" in fuser.info("norm")
+        assert type(built).__name__ == "TPAwareRMSNorm"
+        assert fuser.info("norm") != in_tree

@@ -168,11 +168,16 @@ def _build_tp_aware(impl: type[nn.Module]) -> type[nn.Module]:
     for the in-tree path; this memo holds it once an override makes the class
     dynamic.
 
-    Named after `impl`, so a module repr or stack trace names the implementation
-    that actually runs. `impl` alone keys the cache: `RMSNorm` and `GemmaRMSNorm`
-    are siblings, so no single class can be a usable override for both.
+    Named and moduled after `impl`, so a repr, stack trace or fuse log names the
+    implementation that actually runs: an override typically registers under the
+    in-tree name and reuses it for its own class, so the name alone would read
+    identically whether or not the override was picked up. `impl` alone keys the
+    cache: `RMSNorm` and `GemmaRMSNorm` are siblings, so no single class can be a
+    usable override for both.
     """
-    return type(f"TPAware{impl.__name__}", (TPAwareNormMixin, impl), {})
+    built = type(f"TPAware{impl.__name__}", (TPAwareNormMixin, impl), {})
+    built.__module__ = impl.__module__
+    return built
 
 
 def _tp_aware(base: type[nn.Module]) -> type[nn.Module]:
@@ -206,9 +211,9 @@ class RMSNormFuser(BaseFuser):
     """The class `fuse` installed, stashed so `info` names exactly that."""
 
     def info(self, name: str) -> str:
-        return (
-            f"Fused: {name} ({self.source_cls}) -> {self.fused_cls.__name__} (CustomOp)"
-        )
+        cls = self.fused_cls
+        impl = f"{cls.__module__}.{cls.__name__}"
+        return f"Fused: {name} ({self.source_cls}) -> {impl} (CustomOp)"
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
