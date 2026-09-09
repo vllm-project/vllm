@@ -5,9 +5,18 @@
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import torch
-
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
@@ -478,6 +487,148 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
+class CausalConv1dFwdKernel(VllmTritonJitKernel["CausalConv1dFwdKernel.CompileKey"]):
+    kernel = staticmethod(_causal_conv1d_fwd_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dim: int
+        width: int
+        conv_state_len: int
+        dtype: torch.dtype
+        launch_pdl: bool
+
+    def dispatch(
+        self,
+        *,
+        dim: int,
+        width: int,
+        conv_state_len: int,
+        dtype: torch.dtype,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dim=dim,
+            width=width,
+            conv_state_len=conv_state_len,
+            dtype=dtype,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self, *, dim: int, width: int, conv_state_len: int, dtype: torch.dtype
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            dim=dim,
+            width=width,
+            conv_state_len=conv_state_len,
+            dtype=dtype,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        dim, width, dtype = compile_key.dim, compile_key.width, compile_key.dtype
+        state_len = compile_key.conv_state_len
+        return {
+            "x_ptr": TritonWarmupTensor(dtype, shape=(dim, 1), strides=(1, dim)),
+            "w_ptr": TritonWarmupTensor(torch.float32, shape=(dim, width)),
+            "bias_ptr": None,
+            "initial_states_ptr": TritonWarmupTensor(dtype, shape=(2, dim, state_len)),
+            "cache_indices_ptr": TritonWarmupTensor(torch.int32, shape=(1,)),
+            "has_initial_states_ptr": TritonWarmupTensor(torch.bool, shape=(1,)),
+            "query_start_loc_ptr": TritonWarmupTensor(torch.int32, shape=(2,)),
+            "batch_ptr": TritonWarmupTensor(torch.int32, shape=(1,)),
+            "token_chunk_offset_ptr": TritonWarmupTensor(torch.int32, shape=(1,)),
+            "block_idx_first_scheduled_token": None,
+            "block_idx_last_scheduled_token": None,
+            "initial_state_idx": None,
+            "num_computed_tokens": None,
+            "o_ptr": TritonWarmupTensor(dtype, shape=(dim, 1), strides=(1, dim)),
+            "dim": dim,
+            "num_cache_lines": 2,
+            "stride_x_dim": 1,
+            "stride_x_token": dim,
+            "stride_w_dim": width,
+            "stride_w_width": 1,
+            "stride_istate_seq": dim * state_len,
+            "stride_istate_dim": state_len,
+            "stride_istate_token": 1,
+            "stride_cache_indices": 1,
+            "stride_o_dim": 1,
+            "stride_o_token": dim,
+            "stride_block_m": 0,
+            "pad_slot_id": PAD_SLOT_ID,
+            "null_block_id": NULL_BLOCK_ID,
+            "width": width,
+            "activation": "silu",
+            "is_apc_enabled": False,
+            "np2_statelen": triton.next_power_of_2(width - 1),
+            "launch_pdl": compile_key.launch_pdl,
+            "num_program": lambda _meta, _args: 1,
+            "grid_args": None,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        x_ptr,
+        w_ptr,
+        bias_ptr,
+        initial_states_ptr,
+        cache_indices_ptr,
+        has_initial_states_ptr,
+        query_start_loc_ptr,
+        batch_ptr,
+        token_chunk_offset_ptr,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
+        num_computed_tokens,
+        o_ptr,
+        dim: int,
+        num_cache_lines: int,
+        stride_x_dim: int,
+        stride_x_token: int,
+        stride_w_dim: int,
+        stride_w_width: int,
+        stride_istate_seq: int,
+        stride_istate_dim: int,
+        stride_istate_token: int,
+        stride_cache_indices: int,
+        stride_o_dim: int,
+        stride_o_token: int,
+        stride_block_m: int,
+        pad_slot_id: int,
+        null_block_id: int,
+        *,
+        width: int,
+        activation: str | None,
+        is_apc_enabled: bool,
+        np2_statelen: int,
+        launch_pdl: bool,
+        num_program,
+        grid_args,
+    ) -> LaunchSpec:
+        def grid(meta):
+            return (
+                num_program(meta, grid_args),
+                triton.cdiv(dim, meta["BLOCK_N"]),
+            )
+
+        return grid, {
+            "HAS_BIAS": bias_ptr is not None,
+            "KERNEL_WIDTH": width,
+            "SILU_ACTIVATION": activation in ["silu", "swish"],
+            "IS_APC_ENABLED": is_apc_enabled,
+            "HAS_NULL_BLOCK": null_block_id is not None,
+            "NP2_STATELEN": np2_statelen,
+            "BLOCK_M": 8,
+            "BLOCK_N": 256,
+            "num_stages": 2,
+            "launch_pdl": launch_pdl,
+        }
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -709,7 +860,7 @@ def causal_conv1d_fn(
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
 
-    _causal_conv1d_fwd_kernel[grid](
+    _CAUSAL_CONV1D_FWD_KERNEL(
         # Pointers to matrices
         x,
         weight,
@@ -744,17 +895,13 @@ def causal_conv1d_fn(
         pad_slot_id,
         null_block_id,
         # META
-        HAS_BIAS=bias is not None,
-        KERNEL_WIDTH=width,
-        SILU_ACTIVATION=activation in ["silu", "swish"],
-        IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
-        HAS_NULL_BLOCK=null_block_id is not None,
-        NP2_STATELEN=np2_statelen,
-        # launch_cooperative_grid=True
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=256,
-        num_stages=2,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        width=width,
+        activation=activation,
+        is_apc_enabled=block_idx_last_scheduled_token is not None,
+        np2_statelen=np2_statelen,
+        num_program=num_program,
+        grid_args=args,
     )
     return out.to(original_x_dtype)
 
@@ -1093,6 +1240,167 @@ def _causal_conv1d_update_kernel(
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
+class CausalConv1dUpdateKernel(
+    VllmTritonJitKernel["CausalConv1dUpdateKernel.CompileKey"]
+):
+    kernel = staticmethod(_causal_conv1d_update_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dim: int
+        width: int
+        conv_state_len: int
+        dtype: torch.dtype
+        seqlen: int
+        is_spec_decoding: bool
+        launch_pdl: bool
+
+    def dispatch(
+        self,
+        *,
+        dim: int,
+        width: int,
+        conv_state_len: int,
+        dtype: torch.dtype,
+        seqlen: int,
+        is_spec_decoding: bool,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dim=dim,
+            width=width,
+            conv_state_len=conv_state_len,
+            dtype=dtype,
+            seqlen=seqlen,
+            is_spec_decoding=is_spec_decoding,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        dim: int,
+        width: int,
+        conv_state_len: int,
+        dtype: torch.dtype,
+        max_query_len: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            dim=dim,
+            width=width,
+            conv_state_len=conv_state_len,
+            dtype=dtype,
+            seqlen=WarmupIntRange(1, max_query_len + 1),
+            is_spec_decoding=(False, True),
+            launch_pdl=current_platform.is_arch_support_pdl(),
+            _when=lambda seqlen, is_spec_decoding: is_spec_decoding or seqlen == 1,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        dim, width, dtype = compile_key.dim, compile_key.width, compile_key.dtype
+        n = compile_key.seqlen
+        spec = compile_key.is_spec_decoding
+        state_len = width - 1 + (n - 1 if spec else 0)
+        physical_state_len = compile_key.conv_state_len
+        x_shape = (n, dim) if spec else (1, dim, 1)
+        return {
+            "x_ptr": TritonWarmupTensor(dtype, shape=x_shape),
+            "w_ptr": TritonWarmupTensor(torch.float32, shape=(dim, width)),
+            "bias_ptr": None,
+            "conv_state_ptr": TritonWarmupTensor(
+                dtype, shape=(2, dim, physical_state_len)
+            ),
+            "conv_state_indices_ptr": TritonWarmupTensor(torch.int32, shape=(1,)),
+            "num_accepted_tokens_ptr": (
+                TritonWarmupTensor(torch.int32, shape=(1,)) if spec else None
+            ),
+            "query_start_loc_ptr": (
+                TritonWarmupTensor(torch.int32, shape=(2,)) if spec else None
+            ),
+            "block_idx_last_scheduled_token": None,
+            "initial_state_idx": None,
+            "o_ptr": TritonWarmupTensor(dtype, shape=x_shape),
+            "batch": 1,
+            "dim": dim,
+            "seqlen": n,
+            "state_len": state_len,
+            "num_cache_lines": 2,
+            "stride_x_seq": 0 if spec else dim,
+            "stride_x_dim": 1,
+            "stride_x_token": dim if spec else 1,
+            "stride_w_dim": width,
+            "stride_w_width": 1,
+            "stride_conv_state_seq": dim * physical_state_len,
+            "stride_conv_state_dim": physical_state_len,
+            "stride_conv_state_tok": 1,
+            "stride_state_indices": 1,
+            "stride_o_seq": 0 if spec else dim,
+            "stride_o_dim": 1,
+            "stride_o_token": dim if spec else 1,
+            "null_block_id": NULL_BLOCK_ID,
+            "width": width,
+            "activation": "silu",
+            "is_varlen": spec,
+            "is_apc_enabled": False,
+            "is_spec_decoding": spec,
+            "np2_statelen": triton.next_power_of_2(state_len),
+            "launch_pdl": compile_key.launch_pdl,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        x_ptr,
+        w_ptr,
+        bias_ptr,
+        conv_state_ptr,
+        conv_state_indices_ptr,
+        num_accepted_tokens_ptr,
+        query_start_loc_ptr,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
+        o_ptr,
+        batch: int,
+        dim: int,
+        seqlen: int,
+        state_len: int,
+        num_cache_lines: int,
+        stride_x_seq: int,
+        stride_x_dim: int,
+        stride_x_token: int,
+        stride_w_dim: int,
+        stride_w_width: int,
+        stride_conv_state_seq: int,
+        stride_conv_state_dim: int,
+        stride_conv_state_tok: int,
+        stride_state_indices: int,
+        stride_o_seq: int,
+        stride_o_dim: int,
+        stride_o_token: int,
+        null_block_id: int,
+        *,
+        width: int,
+        activation: str | None,
+        is_varlen: bool,
+        is_apc_enabled: bool,
+        is_spec_decoding: bool,
+        np2_statelen: int,
+        launch_pdl: bool,
+    ) -> LaunchSpec:
+        return (batch, triton.cdiv(dim, 256)), {
+            "HAS_BIAS": bias_ptr is not None,
+            "KERNEL_WIDTH": width,
+            "SILU_ACTIVATION": activation in ["silu", "swish"],
+            "IS_VARLEN": is_varlen,
+            "IS_APC_ENABLED": is_apc_enabled,
+            "IS_SPEC_DECODING": is_spec_decoding,
+            "NP2_STATELEN": np2_statelen,
+            "HAS_NULL_BLOCK": null_block_id is not None,
+            "BLOCK_N": 256,
+            "launch_pdl": launch_pdl,
+        }
+
+
 def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -1223,13 +1531,7 @@ def causal_conv1d_update(
         state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
 
-    def grid(META):
-        return (
-            batch,
-            triton.cdiv(dim, META["BLOCK_N"]),
-        )
-
-    _causal_conv1d_update_kernel[grid](
+    _CAUSAL_CONV1D_UPDATE_KERNEL(
         # Pointers to matrices
         x,
         weight,
@@ -1263,20 +1565,21 @@ def causal_conv1d_update(
         # others
         null_block_id,
         # META
-        HAS_BIAS=bias is not None,
-        KERNEL_WIDTH=width,
-        SILU_ACTIVATION=activation in ["silu", "swish"],
-        IS_VARLEN=query_start_loc is not None,
-        IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
-        IS_SPEC_DECODING=num_accepted_tokens is not None,
-        NP2_STATELEN=np2_statelen,
-        HAS_NULL_BLOCK=null_block_id is not None,
-        BLOCK_N=256,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        width=width,
+        activation=activation,
+        is_varlen=query_start_loc is not None,
+        is_apc_enabled=block_idx_last_scheduled_token is not None,
+        is_spec_decoding=num_accepted_tokens is not None,
+        np2_statelen=np2_statelen,
     )
     if unsqueeze:
         out = out.squeeze(-1)
     return out.to(original_x_dtype)
+
+
+_CAUSAL_CONV1D_FWD_KERNEL = CausalConv1dFwdKernel()
+_CAUSAL_CONV1D_UPDATE_KERNEL = CausalConv1dUpdateKernel()
 
 
 if current_platform.is_cpu():

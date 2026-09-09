@@ -16,6 +16,9 @@ the full on-rank table unlocks --
 Self-contained (no model-local imports) so it can live under ``layers/``.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 import vllm.envs as envs
@@ -23,6 +26,13 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+)
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 
@@ -107,6 +117,101 @@ def _fused_embed_norm_kernel(
         tl.store(normed_ptr + tok * H + off, y, mask=mask)
 
 
+class FusedEmbedNormKernel(VllmTritonJitKernel["FusedEmbedNormKernel.CompileKey"]):
+    kernel = staticmethod(_fused_embed_norm_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        ids_dtype: torch.dtype
+        table_dtype: torch.dtype
+        table_stride: int
+        hidden_size: int
+        block_size: int
+        has_norm: bool
+        num_warps: int
+
+    def dispatch(
+        self,
+        *,
+        ids_dtype: torch.dtype,
+        table_dtype: torch.dtype,
+        table_stride: int,
+        hidden_size: int,
+        has_norm: bool,
+    ) -> CompileKey:
+        block_size = triton.next_power_of_2(hidden_size)
+        return self.CompileKey(
+            ids_dtype=ids_dtype,
+            table_dtype=table_dtype,
+            table_stride=triton_scalar_specialization_rep(table_stride),
+            hidden_size=hidden_size,
+            block_size=block_size,
+            has_norm=has_norm,
+            num_warps=min(32, max(4, block_size // 512)),
+        )
+
+    def get_warmup_keys(self, **kwargs: Any) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(**kwargs)
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        table = TritonWarmupTensor(
+            compile_key.table_dtype,
+            shape=(1, compile_key.hidden_size),
+        )
+        chain_weight = TritonWarmupTensor(
+            compile_key.table_dtype,
+            shape=(compile_key.hidden_size,),
+        )
+        return dict(
+            input_ids=TritonWarmupTensor(compile_key.ids_dtype),
+            embed_table=table,
+            chain_weight=(chain_weight if compile_key.has_norm else None),
+            eps=0.0,
+            _outputs=(
+                table,
+                table if compile_key.has_norm else None,
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        input_ids: torch.Tensor,
+        embed_table: torch.Tensor,
+        chain_weight: torch.Tensor | None = None,
+        eps: float = 0.0,
+        *,
+        _outputs: tuple[Any, Any] | None = None,
+    ) -> LaunchSpec:
+        ids = input_ids if _outputs is not None else input_ids.view(-1)
+        t = ids.shape[0]
+        h = embed_table.shape[1]
+        if chain_weight is not None:
+            assert chain_weight.shape == (h,), (chain_weight.shape, h)
+        if _outputs is None:
+            out = torch.empty(
+                (t, h), dtype=embed_table.dtype, device=embed_table.device
+            )
+            normed = torch.empty_like(out) if chain_weight is not None else None
+        else:
+            out, normed = _outputs
+        block = triton.next_power_of_2(h)
+        outputs = (out, normed) if normed is not None else out
+        return (t,) if t else None, dict(
+            ids_ptr=ids,
+            table_ptr=embed_table,
+            table_stride_0=embed_table.stride(0),
+            out_ptr=out,
+            normed_ptr=normed if normed is not None else out,
+            chain_w_ptr=chain_weight if chain_weight is not None else embed_table,
+            eps=eps,
+            H=h,
+            BLOCK=block,
+            HAS_NORM=chain_weight is not None,
+            num_warps=min(32, max(4, block // 512)),
+        ), outputs
+
+
 # Base model fusion
 def fused_embed_norm(
     input_ids: torch.Tensor,
@@ -123,31 +228,7 @@ def fused_embed_norm(
     vs a plain gather followed by an ``RMSNorm``.
     """
     assert embed_table.ndim == 2, embed_table.shape
-    ids = input_ids.view(-1)
-    (t,) = ids.shape
-    h = embed_table.shape[1]
-    if chain_weight is not None:
-        assert chain_weight.shape == (h,), (chain_weight.shape, h)
-    out = torch.empty((t, h), dtype=embed_table.dtype, device=embed_table.device)
-    normed = torch.empty_like(out) if chain_weight is not None else None
-    if t > 0:
-        block = triton.next_power_of_2(h)
-        _fused_embed_norm_kernel[(t,)](
-            ids,
-            embed_table,
-            embed_table.stride(0),
-            out,
-            normed if normed is not None else out,
-            chain_weight if chain_weight is not None else embed_table,
-            eps,
-            h,
-            block,
-            HAS_NORM=chain_weight is not None,
-            num_warps=min(32, max(4, block // 512)),
-        )
-    if normed is not None:
-        return out, normed
-    return out
+    return _FUSED_EMBED_NORM_KERNEL(input_ids, embed_table, chain_weight, eps)
 
 
 @triton.jit
@@ -189,6 +270,102 @@ def _fused_embed_eh_norm_kernel(
     tl.store(out_ptr + tok * out_stride + H + off, p_normed, mask=mask)
 
 
+class FusedEmbedEhNormKernel(
+    VllmTritonJitKernel["FusedEmbedEhNormKernel.CompileKey"]
+):
+    kernel = staticmethod(_fused_embed_eh_norm_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        ids_dtype: torch.dtype
+        table_dtype: torch.dtype
+        hidden_dtype: torch.dtype
+        hidden_size: int
+        block_size: int
+        table_stride: int
+        hidden_stride: int
+        output_stride: int
+
+    def dispatch(
+        self,
+        *,
+        ids_dtype: torch.dtype,
+        table_dtype: torch.dtype,
+        hidden_dtype: torch.dtype,
+        hidden_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            ids_dtype=ids_dtype,
+            table_dtype=table_dtype,
+            hidden_dtype=hidden_dtype,
+            hidden_size=hidden_size,
+            block_size=triton.next_power_of_2(hidden_size),
+            table_stride=triton_scalar_specialization_rep(hidden_size),
+            hidden_stride=triton_scalar_specialization_rep(hidden_size),
+            output_stride=triton_scalar_specialization_rep(2 * hidden_size),
+        )
+
+    def get_warmup_keys(self, **kwargs: Any) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(**kwargs)
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        hidden = TritonWarmupTensor(
+            compile_key.hidden_dtype,
+            shape=(1, compile_key.hidden_size),
+        )
+        return dict(
+            positions=TritonWarmupTensor(torch.int64),
+            input_ids=TritonWarmupTensor(compile_key.ids_dtype),
+            embed_table=TritonWarmupTensor(
+                compile_key.table_dtype,
+                shape=(1, compile_key.hidden_size),
+            ),
+            previous_hidden=hidden,
+            enorm_w=hidden,
+            hnorm_w=hidden,
+            eps=0.0,
+            _output=TritonWarmupTensor(
+                compile_key.hidden_dtype,
+                shape=(1, 2 * compile_key.hidden_size),
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor,
+        embed_table: torch.Tensor,
+        previous_hidden: torch.Tensor,
+        enorm_w: torch.Tensor,
+        hnorm_w: torch.Tensor,
+        eps: float,
+        *,
+        _output: Any | None = None,
+    ) -> LaunchSpec:
+        n, h = previous_hidden.shape
+        out = _output
+        if out is None:
+            out = torch.empty(
+                n, 2 * h, dtype=previous_hidden.dtype, device=previous_hidden.device
+            )
+        return (n,), dict(
+            pos_ptr=positions,
+            ids_ptr=input_ids,
+            table_ptr=embed_table,
+            table_stride=embed_table.stride(0),
+            prev_ptr=previous_hidden,
+            prev_stride=previous_hidden.stride(0),
+            enorm_w_ptr=enorm_w,
+            hnorm_w_ptr=hnorm_w,
+            eps=eps,
+            out_ptr=out,
+            out_stride=out.stride(0),
+            H=h,
+            BLOCK=triton.next_power_of_2(h),
+        ), out
+
+
 # MTP fusion
 def fused_embed_eh_norm(
     positions: torch.Tensor,
@@ -210,22 +387,16 @@ def fused_embed_eh_norm(
     assert positions.shape == (n,) and input_ids.view(-1).shape == (n,)
     assert embed_table.shape[1] == h, (embed_table.shape, h)
     assert enorm_w.shape == (h,) and hnorm_w.shape == (h,)
-    out = torch.empty(
-        n, 2 * h, dtype=previous_hidden.dtype, device=previous_hidden.device
-    )
-    _fused_embed_eh_norm_kernel[(n,)](
+    return _FUSED_EMBED_EH_NORM_KERNEL(
         positions,
         input_ids,
         embed_table,
-        embed_table.stride(0),
         previous_hidden,
-        previous_hidden.stride(0),
         enorm_w,
         hnorm_w,
         eps,
-        out,
-        out.stride(0),
-        h,
-        triton.next_power_of_2(h),
     )
-    return out
+
+
+_FUSED_EMBED_NORM_KERNEL = FusedEmbedNormKernel()
+_FUSED_EMBED_EH_NORM_KERNEL = FusedEmbedEhNormKernel()

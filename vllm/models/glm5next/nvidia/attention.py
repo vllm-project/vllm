@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -30,8 +29,26 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
+from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+    _FWHT_QUANT_KERNEL,
+    fwht128_quant_fp8,
+)
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.glm5next.amd.ops.kpool_compress import (
+        _EXPAND_POOLS_AND_APPEND_TAIL_KERNEL,
+        _KPOOL_COMPRESS_KERNEL,
+        _KPOOL_DECODE_UPDATE_KERNEL,
+        _KPOOL_TAIL_SEED_KERNEL,
+    )
+else:
+    from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+        _EXPAND_POOLS_AND_APPEND_TAIL_KERNEL,
+        _KPOOL_COMPRESS_KERNEL,
+        _KPOOL_DECODE_UPDATE_KERNEL,
+        _KPOOL_TAIL_SEED_KERNEL,
+    )
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
@@ -274,6 +291,29 @@ class Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
         self._wp_fp32: torch.Tensor | None = None
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            page_sizes = tuple(PAGED_MQA_PAGE_SIZES)
+            _FWHT_QUANT_KERNEL.register_warmup(q_dtype=torch.bfloat16)
+            _KPOOL_COMPRESS_KERNEL.register_warmup(
+                page_sizes=page_sizes,
+                pool_size=self.index_kpool,
+                head_dim=self.head_dim,
+                round_scale=self.scale_fmt == "ue8m0",
+            )
+            _KPOOL_TAIL_SEED_KERNEL.register_warmup(
+                pool_size=self.index_kpool, head_dim=self.head_dim
+            )
+            _KPOOL_DECODE_UPDATE_KERNEL.register_warmup(
+                page_sizes=page_sizes,
+                pool_size=self.index_kpool,
+                head_dim=self.head_dim,
+                round_scale=self.scale_fmt == "ue8m0",
+            )
+            _EXPAND_POOLS_AND_APPEND_TAIL_KERNEL.register_warmup(
+                pool_size=self.index_kpool,
+                topk=self.topk_tokens,
+            )
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32

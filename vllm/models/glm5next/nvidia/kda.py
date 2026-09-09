@@ -4,7 +4,6 @@
 
 import torch
 from torch import nn
-
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
@@ -21,30 +20,60 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    _CAUSAL_CONV1D_FWD_KERNEL,
+    _CAUSAL_CONV1D_UPDATE_KERNEL,
     causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    GATHER_INITIAL_STATES_KERNEL,
     gather_initial_states,
 )
-from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
+from vllm.model_executor.layers.mamba.ops.scatter_states import (
+    _SCATTER_STATES_KERNEL,
+    scatter_states,
+)
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
+    _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL,
+)
+from vllm.third_party.flash_linear_attention.ops.kda import (
+    _LAYER_NORM_GATED_FWD_KERNEL,
+    FusedRMSNormGated,
+)
+from vllm.third_party.flash_linear_attention.ops.l2norm import (
+    _L2NORM_FWD_KERNEL,
+    _L2NORM_FWD_KERNEL2,
+    USE_DEFAULT_FLA_NORM,
+)
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
+        _CHUNK_GLA_FWD_O_KERNEL,
+        _FUSED_RECURRENT_GATED_DELTA_RULE_FWD_KERNEL,
+        _KDA_GATE_CUMSUM_KERNEL,
+        _KDA_INTER_CHUNK_KERNEL,
+        _KDA_INTRA_CHUNK_KERNEL,
+        _RECOMPUTE_WU_KERNEL,
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
 else:
     from vllm.models.glm5next.nvidia.ops.third_party.kda import (
+        _CHUNK_GLA_FWD_O_KERNEL,
+        _FUSED_RECURRENT_GATED_DELTA_RULE_FWD_KERNEL,
+        _KDA_GATE_CUMSUM_KERNEL,
+        _KDA_INTER_CHUNK_KERNEL,
+        _KDA_INTRA_CHUNK_KERNEL,
+        _RECOMPUTE_WU_KERNEL,
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
@@ -281,6 +310,190 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+                _resolve_gdn_prefill_backend,
+            )
+
+            _, gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+            if gdn_prefill_backend == "cutedsl":
+                from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                    _GDN_PREP_META_KERNEL,
+                )
+
+                _GDN_PREP_META_KERNEL.register_warmup(chunk_size=64)
+            GATHER_INITIAL_STATES_KERNEL.register_warmup(
+                row_size=self.local_num_heads * self.head_dim * self.head_dim,
+                state_dtype=self.get_state_dtype()[1],
+                indices_dtype=torch.int32,
+                launch_pdl=current_platform.is_arch_support_pdl(),
+            )
+            io_dtype = vllm_config.model_config.dtype
+            state_dtype = self.get_state_dtype()[1]
+            _KDA_GATE_CUMSUM_KERNEL.register_warmup(
+                g_dtype=io_dtype,
+                a_dtype=self.A_log.dtype,
+                y_dtype=torch.float32,
+                bias_dtype=self.dt_bias.dtype,
+                num_heads=self.local_num_heads,
+                gate_dim=self.head_dim,
+                block_t=64,
+                safe_gate=True,
+                lower_bound=self.kda_lower_bound,
+                has_bias=True,
+                is_varlen=True,
+            )
+            _KDA_INTER_CHUNK_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                k_dtype=io_dtype,
+                g_dtype=torch.float32,
+                beta_dtype=torch.float32,
+                a_dtype=torch.float32,
+                aqk_dtype=torch.float32,
+                num_heads=self.local_num_heads,
+                head_dim=self.head_dim,
+                block_t=64,
+                block_c=16,
+                num_chunks=4,
+                is_varlen=True,
+            )
+            _KDA_INTRA_CHUNK_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                k_dtype=io_dtype,
+                g_dtype=torch.float32,
+                beta_dtype=torch.float32,
+                a_dtype=torch.float32,
+                aqk_dtype=torch.float32,
+                num_heads=self.local_num_heads,
+                head_dim=self.head_dim,
+                block_t=64,
+                block_c=16,
+                block_k=next_power_of_2(self.head_dim),
+                is_varlen=True,
+            )
+            _RECOMPUTE_WU_KERNEL.register_warmup(
+                k_dtype=io_dtype,
+                kg_dtype=io_dtype,
+                v_dtype=io_dtype,
+                beta_dtype=torch.float32,
+                w_dtype=io_dtype,
+                u_dtype=io_dtype,
+                a_dtype=io_dtype,
+                gk_dtype=torch.float32,
+                num_heads=self.local_num_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                block_t=64,
+                block_k=64,
+                block_v=64,
+                store_qg=False,
+                store_kg=True,
+                is_varlen=True,
+                dot_precision="ieee",
+            )
+            _CHUNK_GLA_FWD_O_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                v_dtype=io_dtype,
+                g_dtype=torch.float32,
+                h_dtype=io_dtype,
+                out_dtype=io_dtype,
+                a_dtype=torch.float32,
+                num_heads=self.local_num_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                block_t=64,
+                is_varlen=True,
+            )
+            l2norm_bd = min(
+                65536 // io_dtype.itemsize,
+                next_power_of_2(self.head_dim),
+            )
+            if USE_DEFAULT_FLA_NORM:
+                _L2NORM_FWD_KERNEL.register_warmup(
+                    x_dtype=io_dtype,
+                    y_dtype=io_dtype,
+                    eps=1e-6,
+                    d=self.head_dim,
+                    bd=l2norm_bd,
+                )
+            else:
+                _L2NORM_FWD_KERNEL2.register_warmup(
+                    x_dtype=io_dtype,
+                    y_dtype=io_dtype,
+                    eps=1e-6,
+                    n=self.head_dim,
+                    bd=l2norm_bd,
+                    mblock=32,
+                )
+            _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL.register_warmup(
+                k_dtype=io_dtype,
+                v_dtype=io_dtype,
+                w_dtype=io_dtype,
+                gk_dtype=torch.float32,
+                h0_dtype=state_dtype,
+                ht_dtype=torch.float32,
+                num_heads=self.local_num_heads,
+                num_k_heads=self.local_num_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                block_t=64,
+                use_g=False,
+                use_gk=True,
+                use_initial_state=True,
+                store_final_state=True,
+                save_new_value=True,
+                is_varlen=True,
+                use_exp2=True,
+            )
+            _CAUSAL_CONV1D_FWD_KERNEL.register_warmup(
+                dim=3 * self.local_projection_size,
+                width=self.conv_size,
+                conv_state_len=self.get_state_shape()[0][-1],
+                dtype=self.get_state_dtype()[0],
+            )
+            _CAUSAL_CONV1D_UPDATE_KERNEL.register_warmup(
+                dim=3 * self.local_projection_size,
+                width=self.conv_size,
+                conv_state_len=self.get_state_shape()[0][-1],
+                dtype=self.get_state_dtype()[0],
+                max_query_len=max(1, self.num_spec + 1),
+            )
+            _FUSED_RECURRENT_GATED_DELTA_RULE_FWD_KERNEL.register_warmup(
+                io_dtype=io_dtype,
+                state_dtype=state_dtype,
+                scale=self.head_dim**-0.5,
+                num_heads=self.local_num_heads,
+                head_dim=self.head_dim,
+                max_query_len=max(1, self.num_spec + 1),
+                lower_bound=self.kda_lower_bound,
+            )
+            _SCATTER_STATES_KERNEL.register_warmup(
+                row_size=self.local_num_heads * self.head_dim * self.head_dim,
+                dtype=self.get_state_dtype()[1],
+                indices_dtype=torch.int32,
+            )
+            _LAYER_NORM_GATED_FWD_KERNEL.register_warmup(
+                x_dtype=vllm_config.model_config.dtype,
+                y_dtype=vllm_config.model_config.dtype,
+                g_dtype=vllm_config.model_config.dtype,
+                w_dtype=self.o_norm.weight.dtype,
+                eps=self.o_norm.eps,
+                num_heads=self.local_num_heads,
+                g_stride_n=self.local_num_heads * self.head_dim,
+                d=self.head_dim,
+                block_t=16,
+                block_d=min(
+                    65536 // vllm_config.model_config.dtype.itemsize,
+                    next_power_of_2(self.head_dim),
+                ),
+                activation=self.o_norm.activation,
+                is_rms_norm=True,
+                store_residual_out=False,
+                has_residual=False,
+                has_weight=True,
+                has_bias=False,
+            )
 
     def forward(
         self,
