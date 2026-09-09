@@ -778,6 +778,9 @@ class SimpleCPUOffloadScheduler:
             for g in range(num_groups):
                 state.num_stored_blocks[g] += advanced_per_group[g]
 
+        # A request can contribute both boundary and positional blocks to the
+        # same event. Completion tracking is set-based, so keep one request ID.
+        req_ids = list(dict.fromkeys(req_ids))
         return merged_gpu_block_ids, merged_cpu_block_ids, req_ids, merged_block_meta
 
     def _select_eager_blocks_to_store(

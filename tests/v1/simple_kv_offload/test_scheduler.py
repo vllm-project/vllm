@@ -2771,6 +2771,9 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
     )
     kv_blocks = KVCacheBlocks(blocks=(attn_blocks, mamba_blocks))
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    # Make the FA blocks positionally eligible in the same event as the
+    # explicit Mamba boundary handoff.
+    req.num_computed_tokens = 2 * block_size
 
     output = make_scheduler_output(
         {req.request_id: 2 * block_size},
@@ -2783,7 +2786,12 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
         },
     )
 
-    gpu_ids, cpu_ids, _, block_meta = sched.prepare_store_specs(output)
+    gpu_ids, cpu_ids, req_ids, block_meta = sched.prepare_store_specs(output)
     assert mamba_blocks[1].block_id in gpu_ids
+    assert set(gpu_ids) == {
+        *(block.block_id for block in attn_blocks),
+        mamba_blocks[1].block_id,
+    }
+    assert req_ids == [req.request_id]
     assert block_meta is not None
     assert len(block_meta) == len(gpu_ids) == len(cpu_ids)
