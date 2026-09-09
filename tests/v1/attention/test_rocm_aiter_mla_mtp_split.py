@@ -16,6 +16,7 @@ if not current_platform.is_rocm():
 
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
+    AiterMLABackend,
     AiterMLAHelper,
     AiterMLAImpl,
     AiterMLAMetadataBuilder,
@@ -87,6 +88,7 @@ def _builder(
     kv_cache_dtype: str = "auto",
     dcp_world_size: int = 1,
     dcp_rank: int = 0,
+    non_causal: bool = False,
 ):
     stub = SimpleNamespace(
         device=torch.device("cpu"),
@@ -96,6 +98,7 @@ def _builder(
         _decode_num_heads=num_heads * dcp_world_size,
         dcp_world_size=dcp_world_size,
         dcp_rank=dcp_rank,
+        non_causal_multi_token_decode=non_causal,
         cp_kv_cache_interleave_size=1,
         # Mirrors the production constructor: configuration decides whether the
         # segmented route is available, query length decides per batch.
@@ -153,6 +156,42 @@ def test_backend_declares_uniform_batch_support():
         AiterMLAMetadataBuilder._cudagraph_support
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+def test_non_causal_capability_fails_closed_on_old_aiter(monkeypatch):
+    import vllm.platforms.rocm as rocm_platform
+
+    def old_decode(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: True)
+    monkeypatch.setitem(
+        sys.modules, "aiter.mla", SimpleNamespace(mla_decode_fwd=old_decode)
+    )
+    rocm_aiter_mla._aiter_mla_non_causal_supported.cache_clear()
+    try:
+        assert not AiterMLABackend.supports_non_causal()
+    finally:
+        rocm_aiter_mla._aiter_mla_non_causal_supported.cache_clear()
+
+
+def test_non_causal_capability_accepts_aiter_mask0_api(monkeypatch):
+    import vllm.platforms.rocm as rocm_platform
+
+    def mask0_decode(*args, causal=True, **kwargs):
+        pass
+
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: True)
+    monkeypatch.setitem(
+        sys.modules, "aiter.mla", SimpleNamespace(mla_decode_fwd=mask0_decode)
+    )
+    rocm_aiter_mla._aiter_mla_non_causal_supported.cache_clear()
+    try:
+        assert AiterMLABackend.supports_non_causal()
+        assert AiterMLAMetadataBuilder.supports_non_causal_multi_token_decode
+        assert AiterMLAMetadataBuilder.supports_non_causal_multi_token_dcp
+    finally:
+        rocm_aiter_mla._aiter_mla_non_causal_supported.cache_clear()
 
 
 def test_dcp_verify_row_view_is_causal_per_row():
@@ -241,7 +280,7 @@ def test_dcp_verify_row_view_uses_static_graph_bound():
     assert view.max_kv_seq_len == 3072
 
 
-def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
+def test_dcp_fp8_causal_warmup_uses_segmented_for_noncausal_group(monkeypatch):
     qlen = 4
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
 
@@ -251,6 +290,7 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
             dcp_world_size=2,
             kv_cache_dtype="fp8",
             kernel_block_size=2,
+            non_causal=True,
         ),
         block_table_tensor=torch.tensor([[0, 1, 2], [10, 11, 12]], dtype=torch.int32),
         seq_lens_device=torch.tensor([5, 6], dtype=torch.int32),
@@ -319,6 +359,52 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     assert lse is not None
     assert output.shape[1] == decode_heads
     assert lse.shape == (num_tokens, decode_heads)
+
+
+def test_non_causal_dcp_decode_calls_aiter_mask0_and_returns_lse(monkeypatch):
+    """K3 DSpark's 4-token DCP block reaches native AITER with mask0."""
+    num_heads, dcp_world_size, qlen = 8, 8, 4
+    decode_heads = num_heads * dcp_world_size
+    head_dim = 576
+    captured = {}
+
+    def fake_aiter_decode(q, kv_buffer, out, *args, **kwargs):
+        captured.update(kwargs)
+        return out, torch.zeros(qlen, q.shape[1], dtype=torch.float32)
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
+    )
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = num_heads
+    impl.dcp_world_size = dcp_world_size
+    impl.kv_cache_dtype = "fp8"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = head_dim**-0.5
+    decode = SimpleNamespace(
+        max_qo_len=qlen,
+        qo_indptr=torch.tensor([0, qlen], dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 8], dtype=torch.int32),
+        paged_kv_indices=torch.arange(8, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
+        use_gluon_decode=False,
+        use_gluon_verify=False,
+        dcp_verify=None,
+        has_persistent_metadata=False,
+        attn_out_dtype=torch.bfloat16,
+    )
+    attn_metadata = SimpleNamespace(decode=decode, causal=False, work_meta_data=None)
+    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
+    q = torch.zeros(qlen, decode_heads, head_dim, dtype=torch.bfloat16)
+
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, head_dim), attn_metadata, layer)
+
+    assert captured["causal"] is False
+    assert captured["return_lse"] is True
+    assert output.shape == (qlen, decode_heads, 512)
+    assert lse is not None and lse.shape == (qlen, decode_heads)
 
 
 def test_verify_partial_attention_merge():
@@ -623,6 +709,45 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
     assert metadata.has_persistent_metadata
     assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == 4
     assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == 4
+
+
+def test_non_causal_dcp_uses_native_mask0_metadata(monkeypatch):
+    """DSpark DCP must use AITER mask0 metadata, not causal segmented verify."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    builder = _builder(
+        mtp_decode_qlen=4,
+        num_heads=8,
+        kv_cache_dtype="fp8",
+        dcp_world_size=8,
+        non_causal=True,
+    )
+    # Prove causality, rather than missing segmented-kernel support, selects the
+    # native path.
+    builder._supports_segmented_dcp_verify = True
+    builder._current_build_is_causal = False
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
+        max_seq_len=7,
+        query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, 4, 8], dtype=torch.int32),
+        num_decode_tokens=8,
+        dcp_tot_seq_lens_device=torch.tensor([56, 40], dtype=torch.int32),
+    )
+
+    assert metadata.dcp_verify is None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.args[5] is False
 
 
 def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):

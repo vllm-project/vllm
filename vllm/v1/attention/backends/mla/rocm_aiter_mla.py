@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Final
@@ -144,6 +145,26 @@ def _aiter_mla_native_h24_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _aiter_mla_non_causal_supported() -> bool:
+    """Whether AITER ships the gfx950 MLA mask0 API used by DSpark.
+
+    AITER added the ``causal`` argument and the corresponding persistent mask0
+    kernels in v0.1.21. Older wheels silently have causal-only MLA decode, so
+    capability selection must fail closed instead of routing DSpark into them.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            return False
+        from aiter.mla import mla_decode_fwd
+
+        return "causal" in inspect.signature(mla_decode_fwd).parameters
+    except (ImportError, ModuleNotFoundError, ValueError, TypeError):
+        return False
+
+
+@functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
@@ -259,6 +280,10 @@ class AiterMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return _aiter_mla_non_causal_supported()
+
 
 @dataclass
 class AiterMLADCPVerifyMetadata:
@@ -346,6 +371,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -918,6 +945,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
         device = self.device
+        # build() sets this for the synchronous super().build() call. Use a
+        # causal default for direct helper calls in tests and future callers.
+        is_causal = getattr(self, "_current_build_is_causal", True)
         num_reqs = seq_lens_device.size(0)
         qo_len = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_qo_len = qo_len.max().item()
@@ -963,14 +993,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             int(max_qo_len),
             self._kv_cache_dtype_str,
         )
-        use_gluon_verify = AiterMLAHelper.use_gluon_verify(
-            self._decode_num_heads,
-            int(max_qo_len),
-            self._kv_cache_dtype_str,
-            self.dcp_world_size,
+        use_gluon_verify = (
+            AiterMLAHelper.use_gluon_verify(
+                self._decode_num_heads,
+                int(max_qo_len),
+                self._kv_cache_dtype_str,
+                self.dcp_world_size,
+            )
+            and is_causal
         )
         use_segmented_dcp_verify = (
-            self._supports_segmented_dcp_verify and max_qo_len > 1
+            self._supports_segmented_dcp_verify and max_qo_len > 1 and is_causal
         )
 
         # Segmented DCP verify carries its own per-row subpage table, so the
@@ -1065,7 +1098,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
-                True,
+                is_causal,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
                 self._mla_work_indptr,
@@ -1135,9 +1168,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AiterMLAMetadata:
-        attn_metadata = super().build(
-            common_prefix_len, common_attn_metadata, fast_build
-        )
+        self._current_build_is_causal = common_attn_metadata.causal
+        try:
+            attn_metadata = super().build(
+                common_prefix_len, common_attn_metadata, fast_build
+            )
+        finally:
+            del self._current_build_is_causal
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
@@ -1889,7 +1926,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.attn_out_dtype,
             )
 
-        if self.dcp_world_size > 1 and int(decode.max_qo_len) > 1:
+        if (
+            attn_metadata.causal
+            and self.dcp_world_size > 1
+            and int(decode.max_qo_len) > 1
+        ):
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires segmented MLA."
             )
@@ -1940,7 +1981,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
 
         lse = None
-        if self.dcp_world_size > 1:
+        if self.dcp_world_size > 1 or not attn_metadata.causal:
             # The vLLM custom-op wrapper exposes only the in-place output and
             # drops aiter's final LSE, which the cross-shard merge needs, so go
             # through aiter's native entry point on the DCP path.
@@ -1954,13 +1995,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.paged_kv_last_page_len,
                 decode.max_qo_len,
                 sm_scale=self.scale,
-                return_lse=True,
+                return_lse=self.dcp_world_size > 1,
+                causal=attn_metadata.causal,
                 **mla_kwargs,
             )
-            assert lse is not None, (
-                "aiter mla_decode_fwd(return_lse=True) returned no LSE; upgrade "
-                "aiter to a build with decode LSE support."
-            )
+            if self.dcp_world_size > 1:
+                assert lse is not None, (
+                    "aiter mla_decode_fwd(return_lse=True) returned no LSE; "
+                    "upgrade aiter to a build with decode LSE support."
+                )
         else:
             rocm_aiter_ops.mla_decode_fwd(
                 mla_padded_q,
