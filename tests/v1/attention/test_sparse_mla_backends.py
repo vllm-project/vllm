@@ -24,6 +24,7 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
+    _is_masked_mha_available,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
 )
@@ -1070,6 +1071,33 @@ def test_masked_mha_workspace_guards_long_routing_policy(
     )
 
 
+@pytest.mark.parametrize(
+    ("model_dims", "kv_cache_dtype", "fa_version", "expected"),
+    [
+        pytest.param((128, 512, 128, 64, 128), "auto", 4, True, id="deepseek_v32"),
+        pytest.param((64, 512, 192, 64, 256), "auto", 4, True, id="glm5"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 4, True, id="glm53_flash_nope"),
+        pytest.param((64, 512, 256, 0, 256), "fp8", 4, False, id="quantized_kv"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 3, False, id="no_fa4"),
+        pytest.param((64, 512, 256, 64, 256), "auto", 4, False, id="rope_320"),
+        pytest.param((128, 512, 256, 0, 256), "auto", 4, False, id="wrong_heads"),
+    ],
+)
+def test_is_masked_mha_available_model_dims(
+    monkeypatch, model_dims, kv_cache_dtype, fa_version, expected
+):
+    """The allow-list gates masked MHA per exact model geometry: the DeepSeek-V3.2,
+    GLM-5 and NoPE GLM-5.3-Flash layouts on an SM100-family GPU with FA4 and an
+    unquantized KV cache, nothing else."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as mod
+
+    monkeypatch.setattr(
+        mod.current_platform, "is_device_capability_family", lambda family: True
+    )
+    monkeypatch.setattr(mod, "get_flash_attn_version", lambda **kwargs: fa_version)
+    assert _is_masked_mha_available(*model_dims, kv_cache_dtype) is expected
+
+
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
     base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
@@ -1103,6 +1131,7 @@ PREFILL_BATCH_SPECS = {
     [
         pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
         pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+        pytest.param(64, 256, 0, 256, id="glm53_flash_nope_hd256_v256"),
     ],
 )
 def test_sparse_backend_prefill_correctness(
