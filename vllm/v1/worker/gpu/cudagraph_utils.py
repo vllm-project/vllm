@@ -435,16 +435,9 @@ class CudaGraphManager:
 
     def captured_token_counts(self) -> list[int]:
         """Sorted token counts with a captured graph, ignoring LoRA variants."""
-        token_counts = {
-            desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0
-        }
-        if not token_counts and self.breakable_cg_runner is not None:
-            token_counts.update(
-                desc.num_tokens
-                for desc in self.breakable_cg_runner.entries
-                if desc.num_active_loras == 0
-            )
-        return sorted(token_counts)
+        return sorted(
+            {desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0}
+        )
 
     def dispatch(
         self,
