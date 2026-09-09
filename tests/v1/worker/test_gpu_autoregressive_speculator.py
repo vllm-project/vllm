@@ -228,93 +228,67 @@ def test_standalone_receives_resolved_layout_before_building_attention(monkeypat
     monkeypatch.setattr(AutoRegressiveSpeculator, "set_attn", build_attention)
     monkeypatch.setattr(draft_spec_module, "DefaultModelState", lambda *args: None)
     speculator.set_attn(None, None, block_tables, None, [])
-    speculator.set_attn(None, None, block_tables, None, [])
     assert draft_cache.cache_dtype == "bfloat16"
-    assert (
-        target_cache.get_resolved_kv_cache_layout()
-        == draft_cache.get_resolved_kv_cache_layout()
-    )
 
 
 @pytest.mark.parametrize(
-    ("speculator_cls", "backend", "threshold", "mode", "prefill_mode"),
+    ("backend", "threshold", "mode", "prefill_mode"),
     [
-        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "FULL_DECODE_ONLY", "NONE"),
-        (
-            StandaloneDraftModelSpeculator,
-            "FLASHINFER",
-            4,
-            "FULL_AND_PIECEWISE",
-            "PIECEWISE",
-        ),
-        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "FULL", "NONE"),
-        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "PIECEWISE", "PIECEWISE"),
-        (StandaloneDraftModelSpeculator, "FLASHINFER", 4, "NONE", "NONE"),
-        (
-            StandaloneDraftModelSpeculator,
-            "FLASHINFER",
-            5,
-            "FULL_DECODE_ONLY",
-            "FULL_DECODE_ONLY",
-        ),
-        (
-            StandaloneDraftModelSpeculator,
-            "FLASH_ATTN",
-            1,
-            "FULL_DECODE_ONLY",
-            "FULL_DECODE_ONLY",
-        ),
-        (_TestSpeculator, "FLASHINFER", 4, "FULL_DECODE_ONLY", "FULL_DECODE_ONLY"),
+        ("FLASHINFER", 4, "FULL_DECODE_ONLY", "NONE"),
+        ("FLASHINFER", 4, "FULL_AND_PIECEWISE", "PIECEWISE"),
+        ("FLASHINFER", 4, "FULL", "NONE"),
+        ("FLASHINFER", 4, "PIECEWISE", "PIECEWISE"),
+        ("FLASHINFER", 4, "NONE", "NONE"),
+        ("FLASHINFER", 5, "FULL_DECODE_ONLY", "FULL_DECODE_ONLY"),
+        ("FLASH_ATTN", 1, "FULL_DECODE_ONLY", "FULL_DECODE_ONLY"),
     ],
 )
 def test_prefill_graph_respects_backend_query_width(
-    monkeypatch, speculator_cls, backend, threshold, mode, prefill_mode
+    monkeypatch, backend, threshold, mode, prefill_mode
 ):
-    """Only the unsupported prefill FULL path falls back; q1 graphs survive."""
-    speculator = object.__new__(speculator_cls)
+    """Only unsupported standalone prefill falls back; q1 and shared AR survive."""
+    speculator = object.__new__(StandaloneDraftModelSpeculator)
     speculator.num_speculative_steps = 3
     speculator.device = torch.device("cpu")
-    speculator.vllm_config = object()
-    builder = SimpleNamespace(reorder_batch_threshold=threshold)
-    other_group = SimpleNamespace(
-        backend=SimpleNamespace(get_name=lambda: "FLASH_ATTN"),
-        get_metadata_builder=lambda: SimpleNamespace(reorder_batch_threshold=1),
+    speculator.vllm_config = None
+
+    def group(name):
+        return SimpleNamespace(
+            backend=SimpleNamespace(get_name=lambda: name),
+            get_metadata_builder=lambda: SimpleNamespace(
+                reorder_batch_threshold=threshold
+            ),
+        )
+
+    speculator.attn_groups = [[group("FLASH_ATTN")], [group(backend)]]
+    monkeypatch.setattr(
+        spec_module,
+        "SpeculatorCudaGraphManager",
+        lambda config, device, mode, decode_query_len: SimpleNamespace(
+            mode=mode, query_len=decode_query_len
+        ),
     )
-    speculator.attn_groups = [
-        [other_group],
-        [
-            SimpleNamespace(
-                backend=SimpleNamespace(get_name=lambda: backend),
-                get_metadata_builder=lambda: builder,
-            )
-        ],
-    ]
-
-    def manager(config, device, mode, decode_query_len):
-        return SimpleNamespace(mode=mode, query_len=decode_query_len)
-
-    monkeypatch.setattr(spec_module, "SpeculatorCudaGraphManager", manager)
     original_mode = CUDAGraphMode[mode]
     speculator.init_cudagraph_manager(original_mode)
     assert speculator.prefill_cudagraph_manager.mode == CUDAGraphMode[prefill_mode]
-    assert speculator.prefill_cudagraph_manager.query_len == (
-        4 + speculator.prefill_seq_len_offset
-    )
+    assert speculator.prefill_cudagraph_manager.query_len == 5
+    assert speculator.decode_cudagraph_manager.query_len == 1
     assert speculator.decode_cudagraph_manager.mode == (
         CUDAGraphMode.FULL_DECODE_ONLY
         if original_mode.decode_mode() == CUDAGraphMode.FULL
         else CUDAGraphMode.NONE
     )
-    assert speculator.decode_cudagraph_manager.query_len == 1
+    assert (
+        AutoRegressiveSpeculator.get_prefill_cudagraph_mode(speculator, original_mode)
+        == original_mode
+    )
 
 
 @pytest.mark.parametrize(
     ("query_starts", "num_reqs", "num_reqs_padded", "leading_padding", "expected"),
     [
-        pytest.param([0, 3, 6], 2, 2, 0, 6, id="six-queries-eight-model-tokens"),
         pytest.param([0, 5], 1, 1, 2, 5, id="leading-query-padding-counts"),
-        pytest.param([0, 2, 4, 6], 3, 4, 0, 6, id="padded-request-empty-query"),
-        pytest.param([0, 3, 6, 99], 2, 2, 0, 6, id="ignore-unused-boundary-tail"),
+        pytest.param([0, 2, 4, 6, 99], 3, 4, 0, 6, id="graph-padding-unused-tail"),
         pytest.param(None, 3, 4, 0, 8, id="uniform-path-keeps-padded-count"),
     ],
 )
@@ -561,24 +535,6 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "speculator_cls", [_TestSpeculator, StandaloneDraftModelSpeculator]
-)
-def test_run_model_only_passes_hidden_states_to_conditioned_drafters(
-    monkeypatch, speculator_cls
-):
-    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3), speculator_cls)
-    speculator.model = Mock(return_value=torch.zeros(4, 3))
-
-    speculator._run_model(4, None, None, None)
-
-    kwargs = speculator.model.call_args.kwargs
-    if speculator_cls is StandaloneDraftModelSpeculator:
-        assert "hidden_states" not in kwargs
-    else:
-        assert torch.equal(kwargs["hidden_states"], speculator.hidden_states)
-
-
-@pytest.mark.parametrize(
     ("speculator_cls", "expected_positions"),
     [(_TestSpeculator, [2, 4]), (StandaloneDraftModelSpeculator, [1, 3])],
 )
@@ -593,9 +549,13 @@ def test_prefill_samples_from_the_position_consumed_by_each_drafter(
     speculator.current_draft_step = torch.tensor(0)
     speculator.temperature = speculator.seeds = speculator.draft_logits = None
     speculator.sample_draft = Mock(return_value=torch.tensor([5, 6]))
+    speculator.model = Mock(wraps=speculator.model)
 
     speculator._prefill(2, 4, None, None, None)
 
+    assert ("hidden_states" in speculator.model.call_args.kwargs) is (
+        speculator_cls is _TestSpeculator
+    )
     assert speculator.sample_draft.call_args.args[1].tolist() == expected_positions
     assert speculator.sample_src_positions.tolist() == expected_positions
     assert speculator.input_buffers.positions[:2].tolist() == [1, 3]

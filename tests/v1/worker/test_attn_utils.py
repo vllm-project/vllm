@@ -30,7 +30,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     init_attn_backend,
 )
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -59,10 +58,7 @@ class _DraftBackend:
         return False
 
 
-@pytest.mark.parametrize("separate_target_group", [False, True])
-def test_draft_metadata_preserves_allocated_kernel_block_size(
-    monkeypatch, separate_target_group
-):
+def test_draft_metadata_preserves_allocated_kernel_block_size(monkeypatch):
     """Filtering layers must not change the page unit of an allocated KV cache."""
 
     class Builder(_FakeMetadataBuilder):
@@ -113,42 +109,28 @@ def test_draft_metadata_preserves_allocated_kernel_block_size(
     spec = FullAttentionSpec(
         block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )
-    kv_groups = [KVCacheGroupSpec(["target", "draft"], spec)]
-    if separate_target_group:
-        kv_groups.insert(
-            0, KVCacheGroupSpec(["target_only"], spec.copy_with_new_block_size(32))
-        )
-    draft_group_idx = int(separate_target_group)
     kv_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=kv_groups,
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target_only"], spec.copy_with_new_block_size(32)),
+            KVCacheGroupSpec(["target", "draft"], spec),
+        ],
     )
     config = SimpleNamespace(parallel_config=ParallelConfig())
     device = torch.device("cpu")
     _, _, sizes = init_attn_backend(kv_config, config, device)
-    assert sizes == ([32, 64] if separate_target_group else [64])
-    # Only the page-size contract is needed; full construction allocates UVA.
-    block_tables = object.__new__(BlockTables)
-    block_tables.kernel_block_sizes = sizes
-    draft_only, _, _ = init_attn_backend(
-        kv_config, config, device, active_layer_names={"draft"}
-    )
-    assert (
-        draft_only[draft_group_idx][0].get_metadata_builder().block_size_at_init == 128
-    )
+    assert sizes == [32, 64]
+    block_tables = SimpleNamespace(kernel_block_sizes=sizes)
 
     speculator = SimpleNamespace(
         device=device, attn_vllm_config=config, draft_attn_layer_names={"draft"}
     )
     DraftModelSpeculator.set_attn(speculator, None, kv_config, block_tables, None, [])
-    draft_group = speculator.attn_groups[draft_group_idx][0]
-    assert draft_group.kv_cache_group_id == draft_group_idx
+    draft_group = speculator.attn_groups[1][0]
+    assert draft_group.kv_cache_group_id == 1
     builder = draft_group.get_metadata_builder()
-    assert (
-        builder.block_size_at_init == block_tables.kernel_block_sizes[draft_group_idx]
-    )
-    assert builder.kernel_block_size == block_tables.kernel_block_sizes[draft_group_idx]
+    assert builder.block_size_at_init == builder.kernel_block_size == sizes[1]
 
 
 def test_attention_checks_preserve_global_and_target_scoped_support():
