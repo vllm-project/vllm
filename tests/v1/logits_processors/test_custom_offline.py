@@ -25,6 +25,7 @@ from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
     LogitsProcessor,
+    _load_logitsprocs_by_fqcns,
 )
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
@@ -68,6 +69,16 @@ def test_fake_entrypoint_preserves_other_groups(monkeypatch):
         is other_group_entrypoints
     )
     assert importlib.metadata.entry_points() is other_group_entrypoints
+
+
+def test_invalid_fqcn_missing_colon():
+    with pytest.raises(ValueError, match="is missing the required ':' separator"):
+        _load_logitsprocs_by_fqcns(["invalid_fqcn_without_colon"])
+
+
+def test_invalid_fqcn_too_many_colons():
+    with pytest.raises(ValueError, match="Invalid logits processor FQCN"):
+        _load_logitsprocs_by_fqcns(["invalid:fqcn:with:multiple:colons"])
 
 
 def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
