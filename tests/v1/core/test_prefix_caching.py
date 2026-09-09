@@ -204,7 +204,6 @@ def make_hisparse_kv_cache_config(
     )
     return KVCacheConfig(
         num_blocks=num_blocks,
-        num_blocks_by_pool=[num_blocks],
         hisparse_host_num_blocks=host_num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=groups,

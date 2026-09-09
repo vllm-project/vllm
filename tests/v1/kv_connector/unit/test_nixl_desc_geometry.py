@@ -220,7 +220,6 @@ def test_overlaid_transfer_groups_share_region_geometry():
             for name in caches
         ],
         kv_cache_groups=groups,
-        num_blocks_by_pool=[num_blocks],
     )
 
     transfer_topology = MagicMock()

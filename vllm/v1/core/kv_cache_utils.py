@@ -14,21 +14,21 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import select_common_block_size_from_constraints
-from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
+from vllm.v1.hisparse.cache_config import (
+    get_hisparse_gpu_memory_usage,
+    get_hisparse_host_pool_bytes,
+    get_hisparse_kv_cache_config,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupRole,
@@ -40,7 +40,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
     iter_layer_specs,
@@ -1078,7 +1077,7 @@ def get_max_concurrency_for_kv_cache_config(
     table. Requirements are summed within each allocator domain, then the
     tightest domain determines concurrency.
     """
-    blocks_per_request = [0] * len(kv_cache_config.num_blocks_by_pool)
+    blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
         required = cdiv(
@@ -1088,15 +1087,9 @@ def get_max_concurrency_for_kv_cache_config(
         if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
             host_blocks_per_request += required
         else:
-            assert group.block_pool_id is not None
-            blocks_per_request[group.block_pool_id] += required
-    limits = [
-        num_blocks / required
-        for num_blocks, required in zip(
-            kv_cache_config.num_blocks_by_pool, blocks_per_request
-        )
-        if required > 0
-    ]
+            assert group.block_pool_id == 0
+            blocks_per_request += required
+    limits = [kv_cache_config.num_blocks / blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(
@@ -1606,14 +1599,7 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    alignment = math.lcm(
-        *(
-            getattr(_get_per_layer_spec(group, layer_name), "alignment", None) or 1
-            for group in kv_cache_groups
-            for layer_name in group.layer_names
-        )
-    )
-    return round_up(bytes_per_block, alignment)
+    return bytes_per_block
 
 
 def validate_kv_cache_layout(
@@ -1650,300 +1636,6 @@ def validate_kv_cache_layout(
         )
 
 
-def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
-    """Return per-replica HiSparse host-cache capacity in bytes."""
-    host_pool_gib = hisparse_host_pool_gib(vllm_config.kv_transfer_config)
-    hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
-    if hisparse_enabled != (host_pool_gib is not None):
-        raise ValueError(
-            "HiSparse requires both attention_config.hisparse_config and "
-            "HiSparseConnector with host_pool_gib"
-        )
-    return int(host_pool_gib * 2**30) if host_pool_gib is not None else None
-
-
-HISPARSE_HOT_SUFFIX = ".hisparse_hot"
-HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
-
-
-def _get_hisparse_hma_config(
-    vllm_config: VllmConfig,
-    groups: KVCacheGroupSpec | list[KVCacheGroupSpec],
-    available_memory: int,
-    host_budget: int,
-    *,
-    log_layout: bool = True,
-) -> KVCacheConfig:
-    """Build independent host-source and GPU-HMA allocator domains."""
-    if isinstance(groups, KVCacheGroupSpec):
-        groups = [groups]
-    group = groups[0]
-    assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    all_full_specs = group.kv_cache_spec.kv_cache_specs
-    if any(
-        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
-        for spec in all_full_specs.values()
-    ):
-        raise ValueError("HiSparse does not support DeepSeek V4.")
-    specs = all_full_specs
-    host_specs = {
-        name: spec
-        for name, spec in specs.items()
-        if not isinstance(spec, MLAAttentionSpec)
-        or spec.cache_role is SparseCacheRole.SPARSE
-    }
-    indexer_specs = {
-        name: spec
-        for name, spec in specs.items()
-        if isinstance(spec, MLAAttentionSpec)
-        and spec.cache_role is SparseCacheRole.INDEXER
-    }
-    assert host_specs and indexer_specs
-
-    block_sizes = {spec.block_size for spec in specs.values()}
-    assert len(block_sizes) == 1, "HiSparse HMA requires one scheduler block size."
-    block_size = block_sizes.pop()
-    constraints = [
-        spec.supported_kernel_block_sizes
-        for spec in specs.values()
-        if isinstance(spec, AttentionSpec)
-    ]
-    try:
-        gpu_block_size = select_common_block_size_from_constraints(
-            block_size, constraints
-        )
-    except ValueError as error:
-        raise ValueError(
-            "HiSparse requires a GPU block size supported by every sparse "
-            f"attention and indexer backend: {error}"
-        ) from error
-    config = ResolvedHiSparseConfig.from_vllm_config(
-        vllm_config,
-        vllm_config.model_config.hf_config.index_topk,
-        gpu_block_size,
-    )
-    assert config is not None
-
-    host_specs = {
-        name: spec.copy_with_new_block_size(gpu_block_size)
-        for name, spec in host_specs.items()
-    }
-    gpu_indexer_specs: dict[str, KVCacheSpec] = {
-        name: spec.copy_with_new_block_size(gpu_block_size)
-        for name, spec in indexer_specs.items()
-    }
-    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
-    assert indexer_group_spec is not None
-    indexer_group = KVCacheGroupSpec(
-        list(indexer_specs),
-        indexer_group_spec,
-        block_pool_id=0,
-        enable_prefix_caching=True,
-        enable_kv_transfer=True,
-        role=KVCacheGroupRole.HISPARSE_INDEXER,
-    )
-
-    indexer_page = sum(spec.page_size_bytes for spec in gpu_indexer_specs.values())
-    hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
-
-    hot_units: list[list[tuple[str, KVCacheSpec]]] = []
-    for layer_name, layer_spec in host_specs.items():
-        if (
-            isinstance(layer_spec, MLAAttentionSpec)
-            and layer_spec.is_index_group_leader
-        ) or not hot_units:
-            hot_units.append([])
-        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
-
-    resident_groups: list[KVCacheGroupSpec] = []
-    hot_groups: list[KVCacheGroupSpec] = []
-    current: list[tuple[str, KVCacheSpec]] = []
-    current_page = 0
-
-    def append_hot_group(layers: list[tuple[str, KVCacheSpec]]) -> None:
-        page_sizes = {spec.page_size_bytes for _, spec in layers}
-        if len(page_sizes) != 1:
-            raise ValueError(
-                "HiSparse hot-cache groups require one page size, got "
-                f"{sorted(page_sizes)}."
-            )
-        page_size = page_sizes.pop()
-        resident_groups.append(
-            KVCacheGroupSpec(
-                [
-                    name[: -len(HISPARSE_HOT_SUFFIX)] + HISPARSE_RESIDENT_SUFFIX
-                    for name, _ in layers
-                ],
-                HiSparseResidentSpec(
-                    block_size=gpu_block_size,
-                    page_size=page_size,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            )
-        )
-        hot_groups.append(
-            KVCacheGroupSpec(
-                [name for name, _ in layers],
-                HiSparseHotSpec(
-                    block_size=gpu_block_size,
-                    page_size=page_size,
-                    blocks_per_request=hot_blocks_per_request,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            )
-        )
-
-    for unit in hot_units:
-        unit_page = sum(spec.page_size_bytes for _, spec in unit)
-        if current and current_page + unit_page > indexer_page:
-            append_hot_group(current)
-            current = []
-            current_page = 0
-        current.extend(unit)
-        current_page += unit_page
-    if current:
-        append_hot_group(current)
-
-    source_group_spec = UniformTypeKVCacheSpecs.from_specs(host_specs)
-    assert source_group_spec is not None
-    source_group = KVCacheGroupSpec(
-        list(host_specs),
-        source_group_spec,
-        block_pool_id=None,
-        enable_kv_transfer=True,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
-    )
-
-    gpu_other_regular_groups = [
-        KVCacheGroupSpec(
-            layer_names=regular.layer_names,
-            kv_cache_spec=regular.kv_cache_spec,
-            is_eagle_group=regular.is_eagle_group,
-            block_pool_id=0,
-            enable_prefix_caching=regular.enable_prefix_caching,
-            enable_kv_transfer=regular.enable_kv_transfer,
-            role=regular.role,
-        )
-        for regular in groups[1:]
-    ]
-    gpu_groups = [
-        indexer_group,
-        *resident_groups,
-        *hot_groups,
-        *gpu_other_regular_groups,
-    ]
-    gpu_stride = _get_kv_cache_bytes_per_block(gpu_groups)
-    gpu_layers_by_offset: defaultdict[int, list[str]] = defaultdict(list)
-    for gpu_group in gpu_groups:
-        byte_offset = 0
-        for layer_name in gpu_group.layer_names:
-            gpu_layers_by_offset[byte_offset].append(layer_name)
-            byte_offset += _get_per_layer_spec(gpu_group, layer_name).page_size_bytes
-    hot_page_alignment = math.lcm(
-        *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
-    )
-    gpu_stride = round_up(gpu_stride, hot_page_alignment)
-    host_page = sum(spec.page_size_bytes for spec in host_specs.values())
-    host_num_blocks = host_budget // host_page
-    gpu_num_blocks = available_memory // gpu_stride
-    override = vllm_config.cache_config.num_gpu_blocks_override
-    if override is not None:
-        gpu_num_blocks = override
-    if host_num_blocks <= 0 or gpu_num_blocks <= 0:
-        raise ValueError(
-            "HiSparse HMA has no allocatable blocks: "
-            f"host={host_num_blocks}, gpu={gpu_num_blocks}."
-        )
-
-    tensors = [
-        KVCacheTensor(
-            size=spec.page_size_bytes * host_num_blocks,
-            layers=[name],
-            layer_stride=spec.page_size_bytes * host_num_blocks,
-            block_stride=spec.page_size_bytes,
-            host_resident=True,
-            block_pool_id=None,
-        )
-        for name, spec in host_specs.items()
-    ]
-    gpu_size = gpu_stride * gpu_num_blocks
-    tensors.extend(
-        KVCacheTensor(
-            size=gpu_size,
-            layers=names,
-            layer_stride=0,
-            offset=offset,
-            block_stride=gpu_stride,
-            block_pool_id=0,
-        )
-        for offset, names in sorted(gpu_layers_by_offset.items())
-    )
-    if log_layout:
-        logger.info(
-            "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
-            "GPU indexer/resident/hot pool (%d blocks, %d resident/hot groups).",
-            host_num_blocks * host_page / 2**30,
-            host_num_blocks,
-            gpu_num_blocks * gpu_stride / 2**30,
-            gpu_num_blocks,
-            len(hot_groups),
-        )
-    return KVCacheConfig(
-        num_blocks=gpu_num_blocks,
-        num_blocks_by_pool=[gpu_num_blocks],
-        kv_cache_tensors=tensors,
-        kv_cache_groups=[
-            source_group,
-            indexer_group,
-            *resident_groups,
-            *hot_groups,
-            *gpu_other_regular_groups,
-        ],
-        hisparse_host_num_blocks=host_num_blocks,
-        prefix_cache_retention_interval=getattr(
-            vllm_config.cache_config, "prefix_cache_retention_interval", None
-        ),
-    )
-
-
-def _hisparse_gpu_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """GPU bytes for one max-length request under a HiSparse layout.
-
-    Host-resident MLA layers consume host-cache capacity (see
-    ``get_kv_cache_config_from_groups``), so admission and auto-fit must not
-    count their bytes against GPU memory.
-    """
-    if vllm_config.attention_config.hisparse_config is None:
-        return None
-    if not kv_cache_groups or not isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        return None
-    per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-    if any(
-        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
-        for spec in per_layer_specs.values()
-    ):
-        raise ValueError("HiSparse does not support DeepSeek V4.")
-    full_group_bytes = sum(
-        spec.max_memory_usage_bytes(vllm_config)
-        for spec in per_layer_specs.values()
-        if isinstance(spec, MLAAttentionSpec)
-        and spec.cache_role is SparseCacheRole.INDEXER
-    )
-    return full_group_bytes + sum(
-        group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
-        for group in kv_cache_groups[1:]
-    )
-
-
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1972,11 +1664,11 @@ def get_kv_cache_config_from_groups(
             ),
         )
 
-    hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
+    hisparse_host_budget = get_hisparse_host_pool_bytes(vllm_config)
     if hisparse_host_budget is not None and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
-        return _get_hisparse_hma_config(
+        return get_hisparse_kv_cache_config(
             vllm_config,
             kv_cache_groups,
             available_memory,
@@ -2651,10 +2343,6 @@ def generate_scheduler_kv_cache_config(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
     assert all(
-        cfg.num_blocks_by_pool == kv_cache_configs[0].num_blocks_by_pool
-        for cfg in kv_cache_configs
-    )
-    assert all(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
     )
@@ -2718,7 +2406,7 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
-    hisparse_gpu_bytes = _hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
+    hisparse_gpu_bytes = get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
     if hisparse_gpu_bytes is not None:
         return hisparse_gpu_bytes
 
@@ -2771,8 +2459,8 @@ def _estimate_max_model_len_from_groups(
     """
     original_max = vllm_config.model_config.max_model_len
     hisparse_host_budget = (
-        _hisparse_host_pool_bytes(vllm_config)
-        if _hisparse_gpu_memory_usage(vllm_config, kv_cache_groups) is not None
+        get_hisparse_host_pool_bytes(vllm_config)
+        if get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups) is not None
         else None
     )
 
@@ -2780,7 +2468,7 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = model_len
         if hisparse_host_budget is not None:
             try:
-                config = _get_hisparse_hma_config(
+                config = get_hisparse_kv_cache_config(
                     vllm_config,
                     kv_cache_groups,
                     available_memory,
@@ -3067,7 +2755,6 @@ def get_kv_cache_configs(
             old_host_blocks = config.hisparse_host_num_blocks
             assert old_host_blocks is not None
             config.num_blocks = min_device_blocks
-            config.num_blocks_by_pool = [min_device_blocks]
             config.hisparse_host_num_blocks = min_host_blocks
             for tensor in config.kv_cache_tensors:
                 old_blocks = (

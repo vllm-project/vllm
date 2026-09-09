@@ -20,10 +20,10 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.cache_config import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
-    KVCacheBlockCopy,
 )
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror

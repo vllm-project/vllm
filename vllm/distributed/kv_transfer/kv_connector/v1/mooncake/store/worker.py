@@ -1989,8 +1989,8 @@ class MooncakeStoreWorker:
                         if tensor_config is not None
                         else group.block_pool_id
                     )
-                    assert block_pool_id is not None
-                    num_blocks = self._kv_cache_config.num_blocks_by_pool[block_pool_id]
+                    assert block_pool_id == 0
+                    num_blocks = self._kv_cache_config.num_blocks
                 cache = group_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:

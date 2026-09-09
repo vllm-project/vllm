@@ -53,6 +53,10 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     tensor_data,
 )
+from vllm.v1.hisparse.cache_config import (
+    get_hisparse_gpu_memory_usage,
+    get_hisparse_kv_cache_config,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -125,13 +129,13 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
     )
     indexer_spec = specs["model.layers.0.self_attn.indexer"]
-    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == (
+    assert get_hisparse_gpu_memory_usage(config, [group]) == (
         indexer_spec.max_memory_usage_bytes(config)
     )
 
-    cache_config = kv_cache_utils._get_hisparse_hma_config(
+    cache_config = get_hisparse_kv_cache_config(
         config,
-        group,
+        [group],
         available_memory=2**30,
         host_budget=2**30,
         log_layout=False,
@@ -192,9 +196,9 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        kv_cache_utils._get_hisparse_hma_config(
+        get_hisparse_kv_cache_config(
             config,
-            group,
+            [group],
             available_memory=2**30,
             host_budget=2**30,
             log_layout=False,

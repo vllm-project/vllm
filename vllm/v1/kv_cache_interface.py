@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
@@ -1408,12 +1408,6 @@ class KVCacheConfig:
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
 
-    num_blocks_by_pool: list[int] = field(default_factory=list)
-    """Number of blocks in each physical block-pool domain.
-
-    An omitted list preserves the traditional single pool of ``num_blocks`` blocks.
-    """
-
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
@@ -1454,19 +1448,12 @@ class KVCacheConfig:
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     def __post_init__(self) -> None:
-        if not self.num_blocks_by_pool:
-            self.num_blocks_by_pool = [self.num_blocks]
-        if any(n < 0 for n in self.num_blocks_by_pool):
-            raise ValueError("KV cache block-pool sizes must be non-negative.")
+        if self.num_blocks < 0:
+            raise ValueError("KV cache block-pool size must be non-negative.")
         if self.hisparse_host_num_blocks is not None and (
             self.hisparse_host_num_blocks < 0
         ):
             raise ValueError("HiSparse host block-pool size must be non-negative.")
-        if self.num_blocks != self.num_blocks_by_pool[0]:
-            raise ValueError(
-                "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]."
-            )
-        num_pools = len(self.num_blocks_by_pool)
         for group in self.kv_cache_groups:
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
                 if (
@@ -1477,12 +1464,9 @@ class KVCacheConfig:
                         "HiSparse source groups require a dedicated host block pool."
                     )
                 continue
-            if group.block_pool_id is None or not (
-                0 <= group.block_pool_id < num_pools
-            ):
+            if group.block_pool_id != 0:
                 raise ValueError(
-                    f"Invalid block_pool_id={group.block_pool_id}; "
-                    f"configuration has {num_pools} block pools."
+                    f"Invalid device block_pool_id={group.block_pool_id}; expected 0."
                 )
         for tensor in self.kv_cache_tensors:
             if tensor.host_resident:
@@ -1494,12 +1478,10 @@ class KVCacheConfig:
                         "Host-resident tensors require the HiSparse host pool."
                     )
                 continue
-            if tensor.block_pool_id is None or not (
-                0 <= tensor.block_pool_id < num_pools
-            ):
+            if tensor.block_pool_id != 0:
                 raise ValueError(
-                    f"Invalid tensor block_pool_id={tensor.block_pool_id}; "
-                    f"configuration has {num_pools} block pools."
+                    "Invalid device tensor block_pool_id="
+                    f"{tensor.block_pool_id}; expected 0."
                 )
 
     @property

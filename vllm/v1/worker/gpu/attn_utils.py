@@ -15,10 +15,10 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_utils import get_unique_kv_cache_group_id
+from vllm.v1.hisparse.cache_config import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
-    get_unique_kv_cache_group_id,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -265,7 +265,7 @@ def _allocate_hisparse_kv_cache(
                 device_backings[tensor.block_pool_id] = backing
             else:
                 assert backing.numel() == tensor.size
-            num_blocks = kv_cache_config.num_blocks_by_pool[tensor.block_pool_id]
+            num_blocks = kv_cache_config.num_blocks
 
         for layer_name in tensor.layers:
             group_id, group = next(
@@ -348,8 +348,6 @@ def _bind_hisparse_kv_caches(
         for tensor_config in kv_cache_config.kv_cache_tensors
         for name in tensor_config.layers
     }
-    num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
-
     resident_source_index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
@@ -364,7 +362,7 @@ def _bind_hisparse_kv_caches(
                 raw_tensors[cache_name],
                 byte_offset=tensor_config.offset,
                 block_stride=tensor_config.block_stride,
-                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
                 block_table=block_tables.input_block_tables[group_id],
                 slot_mapping=block_tables.slot_mappings[group_id],
@@ -396,7 +394,7 @@ def _bind_hisparse_kv_caches(
                 raw_tensor,
                 byte_offset=tensor_config.offset,
                 block_stride=tensor_config.block_stride,
-                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
                 block_table=block_tables.input_block_tables[group_id],
             )

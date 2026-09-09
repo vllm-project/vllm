@@ -190,11 +190,8 @@ class KVCacheManager:
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
-        self.watermark_blocks_by_pool = tuple(
-            int(watermark * num_blocks)
-            for num_blocks in kv_cache_config.num_blocks_by_pool
-        )
-        self.watermark_blocks = self.watermark_blocks_by_pool[0]
+        self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        self.watermark_blocks_by_pool = (self.watermark_blocks,)
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,

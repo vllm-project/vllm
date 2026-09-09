@@ -253,7 +253,6 @@ class SimpleCPUOffloadScheduler:
         return replace(
             gpu_config,
             num_blocks=num_cpu_blocks,
-            num_blocks_by_pool=[num_cpu_blocks],
             kv_cache_tensors=cpu_tensors,
         )
 

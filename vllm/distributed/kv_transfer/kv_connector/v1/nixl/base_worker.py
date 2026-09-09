@@ -1339,9 +1339,8 @@ class NixlBaseConnectorWorker:
                     cache.shape[0] // self._physical_blocks_per_logical_kv_block
                 )
             else:
-                logical_num_blocks = self.kv_cache_config.num_blocks_by_pool[
-                    group.block_pool_id
-                ]
+                assert group.block_pool_id == 0
+                logical_num_blocks = self.kv_cache_config.num_blocks
             group_id = group_index
             num_blocks = (
                 logical_num_blocks

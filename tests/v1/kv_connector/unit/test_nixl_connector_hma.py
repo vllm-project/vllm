@@ -1845,7 +1845,6 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=gpu_num_blocks,
-        num_blocks_by_pool=[gpu_num_blocks],
         hisparse_host_num_blocks=host_num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(

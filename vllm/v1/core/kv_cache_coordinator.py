@@ -99,28 +99,20 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
-        pool_enable_caching = [False] * len(kv_cache_config.num_blocks_by_pool)
-        for group in kv_cache_config.kv_cache_groups:
-            if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
-                continue
-            assert group.block_pool_id is not None
-            pool_enable_caching[group.block_pool_id] |= (
-                enable_caching and group.enable_prefix_caching
-            )
-        self.block_pools = tuple(
-            BlockPool(
-                num_gpu_blocks=num_blocks,
-                enable_caching=pool_enable_caching[pool_id],
-                hash_block_size=hash_block_size,
-                enable_kv_cache_events=enable_kv_cache_events,
-                metrics_collector=metrics_collector,
-                block_pool_id=pool_id,
-            )
-            for pool_id, num_blocks in enumerate(kv_cache_config.num_blocks_by_pool)
+        device_caching = enable_caching and any(
+            group.role is not KVCacheGroupRole.HISPARSE_SOURCE
+            and group.enable_prefix_caching
+            for group in kv_cache_config.kv_cache_groups
         )
-        # Compatibility alias for callers that only support the traditional
-        # single-domain layout.
-        self.block_pool = self.block_pools[0]
+        self.block_pool = BlockPool(
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=device_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
+            block_pool_id=0,
+        )
+        self.block_pools = (self.block_pool,)
 
         source_groups = [
             group
@@ -144,8 +136,8 @@ class KVCacheCoordinator(ABC):
                 assert host_block_pool is not None
                 group_block_pools.append(host_block_pool)
             else:
-                assert group.block_pool_id is not None
-                group_block_pools.append(self.block_pools[group.block_pool_id])
+                assert group.block_pool_id == 0
+                group_block_pools.append(self.block_pool)
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {
@@ -259,12 +251,12 @@ class KVCacheCoordinator(ABC):
             num_external_computed_tokens > 0
             and self.hisparse_coordinator.has_host_cache
         )
-        required = [0] * len(self.block_pools)
+        required = 0
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
                 continue
-            assert group.block_pool_id is not None
+            assert group.block_pool_id == 0
             if host_import and isinstance(manager, HiSparseResidentManager):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(
                     request_id,
@@ -296,8 +288,8 @@ class KVCacheCoordinator(ABC):
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                 )
-            required[group.block_pool_id] += num_blocks
-        return tuple(required)
+            required += num_blocks
+        return (required,)
 
     def allocate_new_computed_blocks(
         self,
