@@ -1201,7 +1201,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         num_extend_tokens = attn_metadata.num_extend_tokens
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
-            if num_prefills > 0:
+            if num_prefills > 0 and key is not None and value is not None:
                 assert attn_metadata.prefill_metadata is not None
 
                 prefill_query = query[num_decode_tokens + num_extend_tokens :]
@@ -1227,7 +1227,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 )
 
             # calculate for extends
-            if num_extends > 0:
+            if num_extends > 0 and key is not None and value is not None:
                 assert attn_metadata.extend_metadata is not None
                 extend_tokens_slice = slice(
                     num_decode_tokens, num_decode_tokens + num_extend_tokens
