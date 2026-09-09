@@ -4,8 +4,9 @@
 """Host-staged FP8 (E4M3) allreduce for TP2 on PCIe fabrics without P2P.
 
 Quantizes the local input (per-128-element E4M3 payload + FP32 scale,
-following the measured b12x codec) and exchanges the two payloads over
-NCCL send/recv in two one-way phases separated by a CPU barrier:
+following the measured b12x codec) and exchanges the two [payload|scale]
+wire messages over NCCL send/recv in two one-way phases (one message per
+phase) separated by a CPU barrier:
 interleaved bidirectional P2P faults in the NCCL SHM transport on
 P2P-dead platforms (Xid 31), while one-way exchanges are stable at all
 sizes. The NCCL SHM transport stages the payloads through host memory
@@ -100,16 +101,17 @@ class Fp8HostStagedAllReduce:
         self.device = device
         self._cpu_group = cpu_group
         self._cap = 0
-        self._payload: torch.Tensor | None = None
-        self._scale: torch.Tensor | None = None
+        self._wire: torch.Tensor | None = None
         self.disabled = False
 
     def _ensure_capacity(self, n: int) -> None:
         if n <= self._cap:
             return
-        self._payload = torch.empty((2, n), dtype=torch.uint8, device=self.device)
-        self._scale = torch.empty(
-            (2, n // QUANT_BLOCK), dtype=torch.float32, device=self.device
+        # One buffer per side: [fp8 payload | fp32 scales] as a single uint8
+        # region, so each one-way phase is one NCCL message (n % 1024 == 0
+        # by admission keeps the fp32 view 4-byte aligned).
+        self._wire = torch.empty(
+            (2, n + 4 * (n // QUANT_BLOCK)), dtype=torch.uint8, device=self.device
         )
         self._cap = n
 
@@ -126,8 +128,9 @@ class Fp8HostStagedAllReduce:
         """Quantize a contiguous BF16 tensor to (E4M3 payload, FP32 scales)."""
         n = input_.numel()
         self._ensure_capacity(n)
-        payload = self._payload[0, :n].view(torch.float8_e4m3fn)
-        scale = self._scale[0, : n // QUANT_BLOCK]
+        wire = self._wire[0, : n + 4 * (n // QUANT_BLOCK)]
+        payload = wire[:n].view(torch.float8_e4m3fn)
+        scale = wire[n:].view(torch.float32)
         _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
             input_, payload, scale,
             BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
@@ -163,12 +166,18 @@ class Fp8HostStagedAllReduce:
             out = torch.empty_like(input_)
         n = input_.numel()
         self._ensure_capacity(n)
-        own = self._payload[0, :n].view(torch.float8_e4m3fn)
-        peer = self._payload[1, :n].view(torch.float8_e4m3fn)
-        s_own = self._scale[0, : n // QUANT_BLOCK]
-        s_peer = self._scale[1, : n // QUANT_BLOCK]
+        # One wire message per direction: [fp8 payload | fp32 scales]. The
+        # on-wire bytes are the concatenation the previous two-message
+        # exchange carried, so results stay bit-identical.
+        w = n + 4 * (n // QUANT_BLOCK)
+        own = self._wire[0, :w]
+        peer = self._wire[1, :w]
+        p_own = own[:n].view(torch.float8_e4m3fn)
+        s_own = own[n:].view(torch.float32)
+        p_peer = peer[:n].view(torch.float8_e4m3fn)
+        s_peer = peer[n:].view(torch.float32)
         _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
-            input_, own, s_own,
+            input_, p_own, s_own,
             BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         # Two one-way phases: rank 0 -> rank 1, CPU barrier, rank 1 -> rank
@@ -176,18 +185,14 @@ class Fp8HostStagedAllReduce:
         # on the destination before the reverse direction starts.
         if self.rank == 0:
             self._comm.send(own, 1)
-            self._comm.send(s_own, 1)
             dist.barrier(group=self._cpu_group)
             self._comm.recv(peer, 1)
-            self._comm.recv(s_peer, 1)
         else:
             self._comm.recv(peer, 0)
-            self._comm.recv(s_peer, 0)
             dist.barrier(group=self._cpu_group)
             self._comm.send(own, 0)
-            self._comm.send(s_own, 0)
         _dequant_add_kernel[(n // KERNEL_BLOCK,)](
-            own, s_own, peer, s_peer, out,
+            p_own, s_own, p_peer, s_peer, out,
             BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
         )
         return out

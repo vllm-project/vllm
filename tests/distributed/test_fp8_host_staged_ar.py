@@ -48,8 +48,7 @@ def _uninitialized_comm(device: torch.device) -> Fp8HostStagedAllReduce:
     comm.device = device
     comm._cpu_group = None
     comm._cap = 0
-    comm._payload = None
-    comm._scale = None
+    comm._wire = None
     comm.disabled = False
     return comm
 
@@ -227,9 +226,10 @@ def fp8_hs_ar_target(
     err = (out.float() - ref).abs().max().item()
     assert err <= bound, f"max err {err} exceeds bound {bound.item()}"
 
-    # dispatch: admitted message => exactly 2 NCCL sends on this rank (one
-    # per phase of the one-way exchange), no ncclAllReduce; sub-MIN message
-    # => plain NCCL allreduce (0 sends), bit-exact result
+    # dispatch: admitted message => exactly 1 NCCL send on this rank (the
+    # combined [payload|scale] wire message of the one-way exchange), no
+    # ncclAllReduce; sub-MIN message => plain NCCL allreduce (0 sends),
+    # bit-exact result
     counts = {"send": 0}
     orig_send = comm.pynccl_comm.send
 
@@ -242,7 +242,7 @@ def fp8_hs_ar_target(
         big = torch.randn(4096, 5120, dtype=torch.bfloat16, device=device)
         tensor_model_parallel_all_reduce(big)
         torch.accelerator.synchronize()
-        assert counts["send"] == 2, f"expected 2 sends, got {counts['send']}"
+        assert counts["send"] == 1, f"expected 1 send, got {counts['send']}"
         counts["send"] = 0
         small = torch.randn(5120, dtype=torch.bfloat16, device=device)
         out_small = tensor_model_parallel_all_reduce(small)
