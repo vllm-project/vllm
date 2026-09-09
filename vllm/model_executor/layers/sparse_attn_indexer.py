@@ -621,6 +621,8 @@ def sparse_attn_indexer(
             and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
+            # SM110 (Jetson Thor) cannot launch the thread-block-cluster kernel.
+            and not current_platform.is_device_capability_family(110)
         )
         use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
             512,
