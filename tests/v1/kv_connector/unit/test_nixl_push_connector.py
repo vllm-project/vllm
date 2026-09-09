@@ -30,6 +30,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
@@ -48,7 +49,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMappi
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_push_scheduler
@@ -1448,6 +1452,8 @@ def _member_worker(
     worker.block_size = 16
     worker._has_mamba = False
     worker._is_hma_required = is_hma
+    num_groups = max(group_by_member.values(), default=0) + 1
+    worker._group_spec_types = (FullAttentionSpec,) * num_groups
     worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=group_by_member)
     worker.transfer_topo = MagicMock()
     worker._set_region_members(region_members)
@@ -1774,3 +1780,124 @@ def test_member_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+# KimiLinear-shaped stage: one MLA layer pooled with two KDA layers per region.
+_HYBRID_MEMBERS = [["mla.0", "kda_a.0", "kda_b.0"], ["mla.1", "kda_a.1", "kda_b.1"]]
+_HYBRID_GROUPS = {
+    "mla.0": 0,
+    "kda_a.0": 1,
+    "kda_b.0": 2,
+    "mla.1": 0,
+    "kda_a.1": 1,
+    "kda_b.1": 2,
+}
+# GDN-style conv Q|K|V = 2|2|4 columns x 3 rows of fp16, then 64 bytes of state.
+_HYBRID_CONV = MambaConvSplitInfo(
+    conv_rows=3, local_proj_dims=(2, 2, 4), conv_dtype_size=2, ssm_sizes=(48, 64)
+)
+_HYBRID_SSM_OFFSETS = [(0, 12), (12, 12), (24, 24), (48, 64)]
+_PAGE = 256
+
+
+def _hybrid_member_worker(num_blocks: int = 4) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = 2
+    worker.dcp_size = 1
+    worker.block_size = 16
+    worker.use_mla = True
+    worker._has_mamba = True
+    worker._is_hma_required = True
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec, MambaSpec)
+    worker._conv_decomp = _HYBRID_CONV
+    worker._mamba_ssm_size = _HYBRID_CONV.ssm_sizes
+    worker._ssm_region_indices = [0, 1]
+    worker._ple_region_index = None
+    worker._ple_group_index = None
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.num_blocks = num_blocks
+    worker._logical_num_blocks = num_blocks
+    worker.block_len_per_layer = [_PAGE, _PAGE]
+    worker.block_stride_per_layer = [_PAGE, _PAGE]
+    worker.region_num_blocks = [num_blocks, num_blocks]
+    worker._region_is_mla = [True, True]
+    worker.device_id = 0
+    worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=_HYBRID_GROUPS)
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(_HYBRID_MEMBERS)
+    return worker
+
+
+def _ssm_rows(block_addr: int, device_id: int) -> list[list[int]]:
+    return [[block_addr + off, size, device_id] for off, size in _HYBRID_SSM_OFFSETS]
+
+
+def test_hybrid_members_split_by_cache_kind():
+    worker = _hybrid_member_worker()
+    assert worker._requires_member_identity()
+    assert worker._member_attention_positions == (0, 3)
+    assert worker._member_ssm_positions == (1, 2, 4, 5)
+
+
+def test_hybrid_member_descriptors_address_each_kind_once_per_layer():
+    """A pooled region backs one MLA and two KDA layers. Each member's blocks
+    must resolve to that layer's own descriptors: the FA page for the MLA
+    member, the conv sub-projections and temporal state for the KDA members."""
+    worker = _hybrid_member_worker()
+    bases = [0x10000, 0x20000]
+    descs = np.concatenate(
+        [
+            worker._build_fa_local(bases, block_size_ratio=1),
+            worker._build_mamba_local(bases),
+        ]
+    )
+    # 2 attention members x 4 blocks, then 4 SSM members x 4 sub-regions x 4 blocks.
+    assert descs.shape == (8 + 64, 3)
+
+    rows = descs[worker._compute_desc_ids([[1], [2], [3]], 4, None, 1)].tolist()
+    assert rows[0] == [0x10000 + _PAGE, _PAGE, 0]
+    assert rows[1:5] == _ssm_rows(0x10000 + 2 * _PAGE, 0)
+    assert rows[5:9] == _ssm_rows(0x10000 + 3 * _PAGE, 0)
+    assert rows[9] == [0x20000 + _PAGE, _PAGE, 0]
+    assert rows[10:14] == _ssm_rows(0x20000 + 2 * _PAGE, 0)
+    assert rows[14:18] == _ssm_rows(0x20000 + 3 * _PAGE, 0)
+
+
+def test_hybrid_member_alignment_pairs_layers_with_an_unsharded_consumer():
+    """A PP stage writing to a PP=1 consumer that pools the same layer kinds per
+    region but advertises them in another order and holds layers we do not."""
+    worker = _hybrid_member_worker()
+    consumer = _agent_metadata(
+        [
+            ["mla.9", "kda_a.9", "kda_b.9"],
+            ["mla.1", "kda_a.1", "kda_b.1"],
+            ["mla.0", "kda_a.0", "kda_b.0"],
+        ],
+        [0xC000, 0xB000, 0xA000],
+        [_PAGE, _PAGE, _PAGE],
+    )
+    consumer.num_blocks = 4
+    consumer.ssm_sizes = _HYBRID_CONV.ssm_sizes
+    worker._align_remote_regions_by_member(consumer)
+    assert consumer.kv_caches_base_addr == [0xA000] * 3 + [0xB000] * 3
+
+    plan = TPMapping(((0,), (0,), (0,)), (0,), {0: 0}, 0)
+    transfer_info = MagicMock(remote_physical_blocks_per_logical=1)
+    descs = np.concatenate(
+        [
+            worker._build_fa_remote(plan, consumer, block_size_ratio=1),
+            worker._build_mamba_remote(
+                consumer, tp_ratio=1, transfer_info=transfer_info
+            ),
+        ]
+    )
+    assert descs.shape == (8 + 64, 3)
+
+    dev = consumer.device_id
+    rows = descs[worker._compute_desc_ids([[0], [1], [2]], 4, None, 1)].tolist()
+    assert rows[0] == [0xA000, _PAGE, dev]
+    assert rows[1:5] == _ssm_rows(0xA000 + _PAGE, dev)
+    assert rows[5:9] == _ssm_rows(0xA000 + 2 * _PAGE, dev)
+    assert rows[9] == [0xB000, _PAGE, dev]
+    assert rows[10:14] == _ssm_rows(0xB000 + _PAGE, dev)
+    assert rows[14:18] == _ssm_rows(0xB000 + 2 * _PAGE, dev)

@@ -167,6 +167,11 @@ class NixlBaseConnectorWorker:
     _member_names: tuple[str, ...] = ()
     _member_local_regions: tuple[int, ...] = ()
     _member_group_ids: tuple[int, ...] = ()
+    # Member positions by cache kind. Attention members are described by FA
+    # descriptors and SSM members by conv + temporal descriptors, so a pooled
+    # region backing both kinds (KDA + MLA) is addressed once per kind.
+    _member_attention_positions: tuple[int, ...] = ()
+    _member_ssm_positions: tuple[int, ...] = ()
     _has_packed_cache: bool = False
 
     def _compute_desc_ids(
@@ -181,6 +186,7 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
+        ssm_regions_per_layer = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
             # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
@@ -209,12 +215,34 @@ class NixlBaseConnectorWorker:
 
         if self._member_group_ids:
             # Member-major descriptors, using each member's KV-cache group.
-            return np.concatenate(
-                [
-                    np.asarray(block_ids[g], dtype=np.int32) + region_offsets[k]
-                    for k, g in enumerate(self._member_group_ids)
-                ]
-            )
+            # Layout follows _build_fa_local / _build_mamba_local emission
+            # order: one block run per attention member, then
+            # ssm_regions_per_layer block runs per SSM member.
+            fa_positions = self._member_attention_positions
+            fa_counts = [region_num_blocks[k] for k in fa_positions]
+            fa_offsets = dict(zip(fa_positions, np.cumsum([0, *fa_counts[:-1]])))
+            num_fa_descs = sum(fa_counts)
+            ssm_ordinal = {k: j for j, k in enumerate(self._member_ssm_positions)}
+            logical_blocks = dst_num_blocks // physical_blocks_per_logical
+            parts: list[np.ndarray] = []
+            for k, g in enumerate(self._member_group_ids):
+                group_arr = np.asarray(block_ids[g], dtype=np.int32)
+                if k in fa_offsets:
+                    parts.append(group_arr + fa_offsets[k])
+                    continue
+                ssm_base = (
+                    num_fa_descs
+                    + ssm_ordinal[k] * ssm_regions_per_layer * logical_blocks
+                )
+                sub_region_ids = np.arange(ssm_regions_per_layer, dtype=np.int32)
+                parts.append(
+                    (
+                        sub_region_ids[:, None] * logical_blocks
+                        + group_arr[None, :]
+                        + ssm_base
+                    ).ravel()
+                )
+            return np.concatenate(parts)
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
@@ -379,12 +407,17 @@ class NixlBaseConnectorWorker:
         (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
-        n_regions = len(self.block_len_per_layer)
-        if n_regions == 0 or self.num_regions == 0:
+        if self._member_local_regions:
+            fa_regions = [
+                self._member_local_regions[k] for k in self._member_attention_positions
+            ]
+        else:
+            fa_regions = list(range(len(self.block_len_per_layer)))
+        if not fa_regions or self.num_regions == 0:
             return [False] * num_fa_descs
-        nblk = num_fa_descs // self.num_regions
+        nblk = num_fa_descs // len(fa_regions)
         flags: list[bool] = []
-        for i in range(n_regions):
+        for i in fa_regions:
             replicated = self._is_region_replicated(i)
             flags.extend([replicated] * nblk)
         assert len(flags) == num_fa_descs, (
@@ -420,6 +453,19 @@ class NixlBaseConnectorWorker:
             for _ in region
         )
         self._member_group_ids = tuple(group_by_member[member] for member in members)
+        attention: list[int] = []
+        ssm: list[int] = []
+        for position, group_id in enumerate(self._member_group_ids):
+            if _is_ssm_spec(self._group_spec_types[group_id]):
+                ssm.append(position)
+            else:
+                attention.append(position)
+        if ssm and self._is_csa_linear:
+            raise NotImplementedError(
+                "PP push member routing does not support CSA-linear PLE caches"
+            )
+        self._member_attention_positions = tuple(attention)
+        self._member_ssm_positions = tuple(ssm)
 
     def _requires_member_identity(self) -> bool:
         """Whether PP push must match HMA/packed layers by name, not region index."""
@@ -427,7 +473,6 @@ class NixlBaseConnectorWorker:
             self._supports_member_identity
             and self.pp_size > 1
             and (self._is_hma_required or self._has_packed_cache)
-            and not self._has_mamba
         )
 
     def _align_remote_regions_by_member(
@@ -750,13 +795,6 @@ class NixlBaseConnectorWorker:
                 "NixlConnector (pull) does not support pipeline_parallel_size "
                 "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                 "for PP + HMA."
-            )
-        # PP push routes HMA (hybrid) attention layouts by pooled-member
-        # identity; Mamba/SSM hybrids are not yet supported under PP.
-        if self.pp_size > 1 and self._has_mamba:
-            raise NotImplementedError(
-                "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                "with Mamba/SSM hybrid KV cache layouts yet."
             )
         # Decode-side PP is unsupported (completions counted per consumer rank).
         if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and self.pp_size > 1:
@@ -1403,7 +1441,9 @@ class NixlBaseConnectorWorker:
             self._requires_member_identity()
             and self._has_packed_cache
             and any(
-                not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                not isinstance(
+                    spec, (MLAAttentionSpec, SlidingWindowMLASpec, MambaSpec)
+                )
                 for spec in self._layer_specs.values()
             )
         ):
@@ -1434,10 +1474,8 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_members = (
-            self._supports_member_identity
-            and (self._is_hma_required or self._has_packed_cache)
-            and not self._has_mamba
+        track_region_members = self._supports_member_identity and (
+            self._is_hma_required or self._has_packed_cache
         )
         region_members: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
@@ -1715,12 +1753,20 @@ class NixlBaseConnectorWorker:
             self._remote_region_offset = regions_per_layer * start_layer
 
         # Total local FA descriptors (boundary between FA and mamba descs).
-        xfer_region_num_blocks = (
-            [self.region_num_blocks[i] for i in self._member_local_regions]
-            if self._member_local_regions
-            else self.region_num_blocks
-        )
-        self.num_descs = sum(xfer_region_num_blocks)
+        # Member routing emits one FA run per attention member; a pooled region
+        # can carry several members, and its SSM members are described by
+        # _build_mamba_local instead.
+        if self._member_local_regions:
+            xfer_region_num_blocks = [
+                self.region_num_blocks[i] for i in self._member_local_regions
+            ]
+            fa_region_num_blocks = [
+                xfer_region_num_blocks[k] for k in self._member_attention_positions
+            ]
+        else:
+            xfer_region_num_blocks = self.region_num_blocks
+            fa_region_num_blocks = xfer_region_num_blocks
+        self.num_descs = sum(fa_region_num_blocks)
 
         for mem_type in sorted(set(region_mem_types)):
             ranges = [
@@ -1841,7 +1887,14 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
 
-        region_indices = self._ssm_region_indices or range(len(base_addresses))
+        if self._member_ssm_positions:
+            region_indices = [
+                self._member_local_regions[k] for k in self._member_ssm_positions
+            ]
+        else:
+            region_indices = list(
+                self._ssm_region_indices or range(len(base_addresses))
+            )
         for i in region_indices:
             base_addr = base_addresses[i]
             block_stride = self.block_stride_per_layer[i] * physical_per_logical
@@ -1894,9 +1947,14 @@ class NixlBaseConnectorWorker:
         parts: list[np.ndarray] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        region_indices = self._ssm_region_indices or range(
-            len(nixl_agent_meta.kv_caches_base_addr)
-        )
+        if self._member_ssm_positions:
+            # Remote lists are in local member order after alignment.
+            region_indices = list(self._member_ssm_positions)
+        else:
+            region_indices = list(
+                self._ssm_region_indices
+                or range(len(nixl_agent_meta.kv_caches_base_addr))
+            )
         for i in region_indices:
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
@@ -1951,7 +2009,14 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         assert base_addresses, "Local KV cache base addresses must not be empty."
         device_id = self.device_id
-        region_indices = self._member_local_regions or range(len(base_addresses))
+        if self._member_local_regions:
+            # Attention members only; an SSM member over the same pooled region
+            # is described by _build_mamba_local.
+            region_indices = [
+                self._member_local_regions[k] for k in self._member_attention_positions
+            ]
+        else:
+            region_indices = list(range(len(base_addresses)))
         parts: list[np.ndarray] = []
         for i in region_indices:
             base_addr = base_addresses[i]
@@ -1995,9 +2060,16 @@ class NixlBaseConnectorWorker:
         device_id = nixl_agent_meta.device_id
         block_strides = nixl_agent_meta.block_strides
         parts: list[np.ndarray] = []
-        member_order = bool(self._member_local_regions)
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            local_region = self._member_local_regions[i] if member_order else i
+        if self._member_local_regions:
+            # Remote lists are in local member order; attention members only.
+            entries = [
+                (k, self._member_local_regions[k])
+                for k in self._member_attention_positions
+            ]
+        else:
+            entries = [(i, i) for i in range(len(nixl_agent_meta.kv_caches_base_addr))]
+        for i, local_region in entries:
+            base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             replicated = self._is_region_replicated(local_region)
             # Read our whole local region size from remote..
             local_block_len = self.block_len_per_layer[local_region]
@@ -2503,12 +2575,13 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == [
+            local_lens = [self.block_len_per_layer[i] for i in local_regions]
+            assert local_lens == [
                 block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
                 f"between P and D (block_size_ratio={block_size_ratio}): "
-                f"local={self.block_len_per_layer}, "
+                f"local={local_lens}, "
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
