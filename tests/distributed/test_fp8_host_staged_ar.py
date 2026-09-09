@@ -15,6 +15,7 @@ from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
     NVFP4_SCALE_BLOCK,
     Fp8HostStagedAllReduce,
     _quant_fp8_kernel,
+    _quant_nvfp4_kernel,
 )
 from vllm.distributed.parallel_state import get_tp_group
 
@@ -196,6 +197,54 @@ def test_quant_nvfp4_roundtrip_error_bound(dev):
     )
     bound = 0.25 * amax * 1.002
     assert (err <= bound).all(), f"max err {err.max().item():.6f}"
+
+
+def test_dequant_add_nvfp4_bitexact(dev):
+    """NVFP4 dequant+add kernel is bit-identical to the bf16-first torch
+    reference, the same commutativity protection as the E4M3 path: each
+    dequantized side is rounded to BF16 before the FP32 add (exact), and
+    the sum is cast to BF16. Bitwise commutativity across the operand
+    roles is what keeps the replicated TP outputs bit-identical.
+    """
+    n = 4096 * 5120
+    torch.manual_seed(0)
+    x0 = (torch.randn(n, dtype=torch.float32, device=dev) * 3).to(
+        torch.bfloat16
+    )
+    torch.manual_seed(1)
+    x1 = (torch.randn(n, dtype=torch.float32, device=dev) * 3).to(
+        torch.bfloat16
+    )
+    payload_buf = torch.empty((2, n // 2), dtype=torch.uint8, device=dev)
+    scale_buf = torch.empty(
+        (2, n // NVFP4_SCALE_BLOCK), dtype=torch.uint8, device=dev
+    )
+    for row, x in enumerate((x0, x1)):
+        _quant_nvfp4_kernel[(n // KERNEL_BLOCK,)](
+            x,
+            payload_buf[row],
+            scale_buf[row].view(torch.float8_e4m3fn),
+            BLOCK=KERNEL_BLOCK, GROUP=NVFP4_SCALE_BLOCK, num_warps=4
+        )
+    out = torch.empty_like(x0)
+    comm = _uninitialized_comm(dev)
+    comm.dequant_add(
+        payload_buf[0],
+        scale_buf[0].view(torch.float8_e4m3fn),
+        payload_buf[1],
+        scale_buf[1].view(torch.float8_e4m3fn),
+        out,
+    )
+    side = lambda row: _nvfp4_dequant_reference(  # noqa: E731
+        payload_buf[row], scale_buf[row].view(torch.float8_e4m3fn)
+    )
+    ref = (side(0).bfloat16().float() + side(1).bfloat16().float()).bfloat16()
+    assert torch.equal(
+        out.cpu(), ref
+    ), (
+        "NVFP4 dequant+add not bit-identical to the bf16-first reference; "
+        f"max err {(out.cpu().float() - ref.float()).abs().max().item()}"
+    )
 
 
 def test_dequant_add_bitexact(dev):
