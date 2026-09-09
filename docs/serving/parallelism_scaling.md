@@ -158,6 +158,34 @@ vllm serve /path/to/the/model/in/the/container \
   --master-addr <HEAD_NODE_IP> --headless
 ```
 
+### Node-local pipeline parallelism
+
+To place a fixed number of pipeline stages on each node, use `--pipeline-parallel-size-local` (PPL) for the number of pipeline stages on each node. Set `--pipeline-parallel-size` (PP) so that `PP = nnodes * PPL`; omitting PP keeps its default of 1, and PPL does not infer or override it. The data-parallel size per node is `DPL = DP`: an omitted `--data-parallel-size-local` defaults to DP, and an explicit value must match. Each homogeneous node requires `TP * PPL * DP` GPUs when prefill context parallelism is disabled (`PCP=1`).
+
+For multi-node placement with PPL, explicitly set `--nnodes` to the total number of nodes and `--node-rank` to each node's zero-based index. The node count is not discovered automatically: omitting `--nnodes` uses its default of 1, even if other nodes are available. The `PP = nnodes * PPL` validation applies only when PPL is set; existing deployments that omit PPL are unaffected by this validation.
+
+Node-local placement requires the multiprocessing executor and MP data-parallel backend. The current implementation supports internal data-parallel load balancing only; external, multi-port external, and hybrid load-balancing launch modes have not been adapted to this placement. This is an implementation scope limitation, not an inherent restriction of pipeline parallelism. Elastic EP is also outside the current support scope. See [Data Parallel Deployment](data_parallel_deployment.md) for data-parallel deployment modes.
+
+For dense models with `DP > 1`, reserve the inclusive master-port range `[base, base + DP - 1]`. Set the same `--master-port base` on every node; all ports must be unused and the range must be within `1..65535`.
+
+For example, this two-node deployment uses `TP=2`, `PP=2`, `DP=2`, and `PPL=1`, so each node requires 4 GPUs. Use the same master address and port on both nodes:
+
+```bash
+# Head node (node rank 0)
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 2 --pipeline-parallel-size 2 --data-parallel-size 2 \
+  --pipeline-parallel-size-local 1 --nnodes 2 --node-rank 0 \
+  --distributed-executor-backend mp --data-parallel-backend mp \
+  --master-addr <HEAD_NODE_IP> --master-port 29500
+
+# Worker node (node rank 1)
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 2 --pipeline-parallel-size 2 --data-parallel-size 2 \
+  --pipeline-parallel-size-local 1 --nnodes 2 --node-rank 1 \
+  --distributed-executor-backend mp --data-parallel-backend mp \
+  --master-addr <HEAD_NODE_IP> --master-port 29500 --headless
+```
+
 ## Optimizing network communication for tensor parallelism
 
 Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.

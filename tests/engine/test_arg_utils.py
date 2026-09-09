@@ -2,14 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError
+from argparse import ArgumentError, Namespace
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CompilationConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -212,6 +219,86 @@ def test_jit_monitor_verbose_arg():
 
     assert args.jit_monitor_verbose
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
+
+
+def test_pipeline_parallel_size_local_rejects_conflicting_local_dp():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    cli_args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "-n",
+            "2",
+            "-dp",
+            "2",
+            "-pp",
+            "2",
+            "-ppl",
+            "1",
+            "-dpl",
+            "1",
+        ]
+    )
+    args = EngineArgs.from_cli_args(cli_args)
+    with pytest.raises(ValueError, match="data_parallel_size_local"):
+        args.create_engine_config()
+
+
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_pipeline_parallel_size_local_changes_cli_placement(node_rank):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    common_args = [
+        "--model",
+        "facebook/opt-125m",
+        "--distributed-executor-backend",
+        "mp",
+        "-n",
+        "2",
+        "-dp",
+        "2",
+        "-pp",
+        "2",
+        "-r",
+        str(node_rank),
+    ]
+    default_args = EngineArgs.from_cli_args(parser.parse_args(common_args))
+    stage_local_args = EngineArgs.from_cli_args(
+        parser.parse_args([*common_args, "-ppl", "1"])
+    )
+
+    default_config = default_args.create_engine_config().parallel_config
+    stage_local_config = stage_local_args.create_engine_config(
+        headless=node_rank > 0
+    ).parallel_config
+
+    assert default_config.data_parallel_size_local == 1
+    assert default_config.data_parallel_rank == node_rank
+    assert stage_local_config.data_parallel_size_local == 2
+    assert stage_local_config.data_parallel_rank == 0
+
+
+def test_pipeline_parallel_size_local_rejects_hybrid_lb_before_normalization():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(
+            [
+                "--model",
+                "facebook/opt-125m",
+                "-n",
+                "2",
+                "-dp",
+                "2",
+                "-pp",
+                "2",
+                "-ppl",
+                "1",
+                "--data-parallel-hybrid-lb",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="pipeline_parallel_size_local"):
+        args.create_engine_config()
 
 
 @pytest.mark.parametrize("mode", ["warn", "error"])
@@ -882,15 +969,47 @@ class TestDeviceIds:
 
 
 class TestDpDeviceIdSharding:
+    def test_pipeline_local_size_changes_dp_device_sharding(self):
+        from vllm.v1.engine.utils import set_assigned_physical_gpu_ids_for_dp_rank
+
+        default_config = VllmConfig.__new__(VllmConfig)
+        default_config.parallel_config = ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            data_parallel_size=2,
+            data_parallel_size_local=1,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        )
+        stage_local_config = VllmConfig.__new__(VllmConfig)
+        stage_local_config.parallel_config = ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=1,
+            data_parallel_size=2,
+            data_parallel_size_local=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        )
+        device_ids = [0, 1, 2, 3]
+
+        set_assigned_physical_gpu_ids_for_dp_rank(
+            default_config, 0, user_assigned_gpu_ids=device_ids
+        )
+        set_assigned_physical_gpu_ids_for_dp_rank(
+            stage_local_config, 1, user_assigned_gpu_ids=device_ids
+        )
+
+        assert default_config.parallel_config.assigned_physical_gpu_ids == device_ids
+        assert stage_local_config.parallel_config.assigned_physical_gpu_ids == [2, 3]
+
     def test_dp_supervisor_device_ids_stay_env_relative(self):
         """Regression test: the DP supervisor must pass env-relative indices,
         not physical IDs, because each child re-resolves --device-ids
         against its inherited device-control env var."""
-        import argparse
-
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
-        args = argparse.Namespace(
+        args = Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
         )
         assert _build_device_ids(args, local_rank=0) == [0, 1]
@@ -898,11 +1017,9 @@ class TestDpDeviceIdSharding:
 
     def test_dp_supervisor_shards_user_device_ids(self):
         """User-provided --device-ids are sharded across DP children."""
-        import argparse
-
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
-        args = argparse.Namespace(
+        args = Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
         )
         assert _build_device_ids(args, local_rank=0) == [4, 5]
@@ -918,9 +1035,15 @@ class TestDpDeviceIdSharding:
 
         evar = current_platform.device_control_env_var
         assert get_physical_gpu_ids_for_local_dp_rank(
-            evar, local_dp_rank=1, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+            evar,
+            local_dp_rank=1,
+            world_size=2,
+            user_assigned_gpu_ids=[4, 5, 6, 7],
         ) == [6, 7]
         with pytest.raises(ValueError, match="needs devices"):
             get_physical_gpu_ids_for_local_dp_rank(
-                evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+                evar,
+                local_dp_rank=2,
+                world_size=2,
+                user_assigned_gpu_ids=[4, 5, 6, 7],
             )

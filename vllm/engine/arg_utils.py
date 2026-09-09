@@ -467,6 +467,9 @@ class EngineArgs:
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    pipeline_parallel_size_local: int | None = (
+        ParallelConfig.pipeline_parallel_size_local
+    )
     master_addr: str = ParallelConfig.master_addr
     master_port: int = ParallelConfig.master_port
     nnodes: int = ParallelConfig.nnodes
@@ -1043,6 +1046,11 @@ class EngineArgs:
             "--pipeline-parallel-size",
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--pipeline-parallel-size-local",
+            "-ppl",
+            **parallel_kwargs["pipeline_parallel_size_local"],
         )
         parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
@@ -2144,6 +2152,28 @@ class EngineArgs:
                 f"`--data-parallel-backend {self.data_parallel_backend}`. "
                 "Use the MP backend or set `--nnodes 1`."
             )
+        stage_local_pipeline = self.pipeline_parallel_size_local is not None
+        if stage_local_pipeline:
+            if self.data_parallel_rank is not None:
+                raise ValueError(
+                    "pipeline_parallel_size_local currently does not support "
+                    "--data-parallel-rank."
+                )
+            if self.data_parallel_start_rank is not None:
+                raise ValueError(
+                    "pipeline_parallel_size_local currently does not support "
+                    "--data-parallel-start-rank."
+                )
+            if (
+                self.data_parallel_external_lb
+                or self.data_parallel_hybrid_lb
+                or self.data_parallel_multi_port_external_lb
+            ):
+                raise ValueError(
+                    "pipeline_parallel_size_local currently supports internal DP "
+                    "load balancing only; external, hybrid, and multi-port external "
+                    "launch modes are not implemented for this placement."
+                )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size_within_dp = (
@@ -2168,9 +2198,10 @@ class EngineArgs:
                     "zero-based index."
                 )
             local_world_size = world_size // self.nnodes
-            inferred_data_parallel_rank = (
-                self.node_rank * local_world_size
-            ) // world_size_within_dp
+            if not stage_local_pipeline:
+                inferred_data_parallel_rank = (
+                    self.node_rank * local_world_size
+                ) // world_size_within_dp
             if self.data_parallel_size > 1 and self.data_parallel_external_lb:
                 self.data_parallel_rank = inferred_data_parallel_rank
                 logger.info(
@@ -2180,8 +2211,10 @@ class EngineArgs:
                 )
             elif self.data_parallel_size_local is None:
                 # Infer data parallel size local for internal dplb:
-                self.data_parallel_size_local = max(
-                    local_world_size // world_size_within_dp, 1
+                self.data_parallel_size_local = (
+                    self.data_parallel_size
+                    if stage_local_pipeline
+                    else max(local_world_size // world_size_within_dp, 1)
                 )
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
@@ -2249,11 +2282,17 @@ class EngineArgs:
                 else inferred_data_parallel_rank
             )
             if self.nnodes > 1:
-                logger.info(
-                    "Inferred data_parallel_rank %d from node_rank %d",
-                    self.data_parallel_rank,
-                    self.node_rank,
-                )
+                if stage_local_pipeline:
+                    logger.info(
+                        "Pipeline-local placement assigns all DP ranks to node %d",
+                        self.node_rank,
+                    )
+                else:
+                    logger.info(
+                        "Inferred data_parallel_rank %d from node_rank %d",
+                        self.data_parallel_rank,
+                        self.node_rank,
+                    )
         else:
             if self.data_parallel_hybrid_lb:
                 raise ValueError(
@@ -2307,6 +2346,7 @@ class EngineArgs:
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
+            pipeline_parallel_size_local=self.pipeline_parallel_size_local,
             tensor_parallel_size=self.tensor_parallel_size,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
