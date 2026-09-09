@@ -20,9 +20,10 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
+    get_hisparse_kv_cache_config,
+    get_hisparse_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -30,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
-    HiSparseResidentSpec,
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -1637,60 +1637,6 @@ def validate_kv_cache_layout(
         )
 
 
-def _build_kv_cache_tensors(
-    kv_cache_groups: list[KVCacheGroupSpec],
-    num_blocks: int,
-    size: int,
-    layout: KVCacheLayout,
-    bytes_per_block: int,
-    *,
-    host_resident: bool = False,
-) -> list[KVCacheTensor]:
-    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
-    tensors: list[KVCacheTensor] = []
-    for group in kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
-            for layer_name, spec in group_spec.kv_cache_specs.items():
-                layers_by_spec[spec].append(layer_name)
-        elif group.layer_names:
-            layers_by_spec[group_spec].extend(group.layer_names)
-
-        byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
-            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
-                if not layout.is_block_outermost:
-                    raise ValueError("HiSparse requires a block-outermost KV layout.")
-                layer_stride = spec.page_size_bytes
-                block_stride = bytes_per_block
-            else:
-                layer_stride, block_stride, _, _, _ = compute_layout_strides(
-                    spec,
-                    num_blocks,
-                    len(layer_names),
-                    layout,
-                    fixed_strides=(None, interleaved_block_stride, None, None, None),
-                )
-            offset = (
-                byte_offset
-                * max(layer_stride, spec.page_size_bytes)
-                // spec.page_size_bytes
-            )
-            tensors.append(
-                KVCacheTensor(
-                    size=size,
-                    layers=layer_names,
-                    layer_stride=layer_stride,
-                    block_stride=block_stride,
-                    offset=offset,
-                    host_resident=host_resident,
-                )
-            )
-            byte_offset += len(layer_names) * spec.page_size_bytes
-    return tensors
-
-
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1719,17 +1665,12 @@ def get_kv_cache_config_from_groups(
             ),
         )
 
-    hisparse_layout = None
     if (host_budget := get_hisparse_host_pool_bytes(vllm_config)) is not None:
-        hisparse_layout = create_hisparse_layout(
-            vllm_config, kv_cache_groups, host_budget
+        return get_hisparse_kv_cache_config(
+            vllm_config, kv_cache_groups, available_memory, host_budget
         )
-        kv_cache_groups = hisparse_layout.device_groups
 
-    if (
-        hisparse_layout is None
-        and (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None
-    ):
+    if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
             attn_group,
             mamba_groups,
@@ -1795,6 +1736,7 @@ def get_kv_cache_config_from_groups(
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
@@ -1811,40 +1753,45 @@ def get_kv_cache_config_from_groups(
     # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
-    kv_cache_tensors = _build_kv_cache_tensors(
-        kv_cache_groups, num_blocks, size, layout, bytes_per_block
-    )
+    kv_cache_tensors = []
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name, spec in group_spec.kv_cache_specs.items():
+                layers_by_spec[spec].append(layer_name)
+        elif group.layer_names:
+            layers_by_spec[group_spec].extend(group.layer_names)
 
-    if hisparse_layout is not None:
-        host_groups = [hisparse_layout.source_group]
-        validate_kv_cache_layout(layout, host_groups)
-        host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
-        host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
-        kv_cache_tensors[:0] = _build_kv_cache_tensors(
-            host_groups,
-            hisparse_layout.host_num_blocks,
-            host_size,
-            layout,
-            host_bytes_per_block,
-            host_resident=True,
-        )
-        logger.info_once(
-            "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
-            "GPU indexer/resident/hot pool (%d blocks).",
-            host_size / 2**30,
-            hisparse_layout.host_num_blocks,
-            size / 2**30,
-            num_blocks,
-        )
-        kv_cache_groups = [hisparse_layout.source_group, *kv_cache_groups]
+        byte_offset = 0
+        for spec, layer_names in layers_by_spec.items():
+            layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                spec,
+                num_blocks,
+                len(layer_names),
+                layout,
+                fixed_strides=(None, interleaved_block_stride, None, None, None),
+            )
+            offset = (
+                byte_offset
+                * max(layer_stride, spec.page_size_bytes)
+                // spec.page_size_bytes
+            )
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    layers=layer_names,
+                    layer_stride=layer_stride,
+                    block_stride=block_stride,
+                    offset=offset,
+                )
+            )
+            byte_offset += len(layer_names) * spec.page_size_bytes
 
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
-        hisparse_host_num_blocks=(
-            hisparse_layout.host_num_blocks if hisparse_layout is not None else None
-        ),
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
@@ -2263,32 +2210,6 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
-def _get_hisparse_kv_cache_groups(
-    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
-) -> list[KVCacheGroupSpec] | None:
-    attention_config = getattr(vllm_config, "attention_config", None)
-    if attention_config is None or attention_config.hisparse_config is None:
-        return None
-
-    mla_specs: dict[str, KVCacheSpec] = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
-    }
-    other_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if not isinstance(spec, MLAAttentionSpec)
-    }
-    if not mla_specs or not other_specs:
-        return None
-
-    mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
-    assert mla_group_spec is not None
-    mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
-    return [mla_group, *get_kv_cache_groups(vllm_config, other_specs)]
-
-
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -2311,7 +2232,7 @@ def get_kv_cache_groups(
         # attention free models.
         return []
 
-    if hisparse_groups := _get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
+    if hisparse_groups := get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
         return hisparse_groups
 
     if is_kv_cache_spec_uniform(kv_cache_spec):

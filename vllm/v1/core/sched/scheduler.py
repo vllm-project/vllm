@@ -57,6 +57,10 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.hisparse.prefix_cache import (
+    get_computed_blocks_for_group_completion,
+    truncate_group_completion_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -544,8 +548,8 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
         connector = self.connector
         if connector is not None and connector.prefix_completion_group_ids:
-            return self.kv_cache_manager.get_computed_blocks_for_group_completion(
-                request, connector.prefix_completion_group_ids
+            return get_computed_blocks_for_group_completion(
+                self.kv_cache_manager, request, connector.prefix_completion_group_ids
             )
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
             return (
@@ -1013,13 +1017,12 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens
                                 + num_external_computed_tokens
                             )
-                            new_computed_blocks = (
-                                self.kv_cache_manager.truncate_group_completion_blocks(
-                                    new_computed_blocks,
-                                    num_new_local_computed_tokens,
-                                    completed_prefix,
-                                    self.connector.prefix_completion_group_ids,
-                                )
+                            new_computed_blocks = truncate_group_completion_blocks(
+                                self.kv_cache_manager,
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                completed_prefix,
+                                self.connector.prefix_completion_group_ids,
                             )
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens

@@ -45,6 +45,10 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.hisparse.prefix_cache import (
+    get_computed_blocks_for_group_completion,
+    truncate_group_completion_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -317,7 +321,7 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     blocks, num_local, _, diverged, max_completion = (
-        manager.get_computed_blocks_for_group_completion(resumed, frozenset({1}))
+        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
     )
 
     assert diverged
@@ -325,7 +329,8 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert max_completion == HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
 
-    completed = manager.truncate_group_completion_blocks(
+    completed = truncate_group_completion_blocks(
+        manager,
         blocks,
         num_local,
         num_local + max_completion,
@@ -369,7 +374,7 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, num_local, _, diverged, max_completion = (
-        manager.get_computed_blocks_for_group_completion(resumed, frozenset({1}))
+        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
     )
 
     assert not diverged

@@ -7,7 +7,6 @@ from typing import NamedTuple
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -20,7 +19,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
-from vllm.v1.hisparse.cache_manager import HiSparseHotManager, HiSparseResidentManager
+from vllm.v1.hisparse.cache_manager import HiSparseHotManager
+from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -237,14 +237,7 @@ class KVCacheCoordinator(ABC):
             group = self.kv_cache_config.kv_cache_groups[i]
             if group.host_resident:
                 continue
-            if host_import and isinstance(manager, HiSparseResidentManager):
-                num_blocks = manager.get_num_host_import_blocks_to_allocate(
-                    request_id,
-                    num_tokens,
-                    num_local_computed_tokens,
-                    num_external_computed_tokens,
-                )
-            elif isinstance(manager, HiSparseHotManager) and (host_import or needs_hot):
+            if isinstance(manager, HiSparseHotManager) and (host_import or needs_hot):
                 num_blocks = manager.get_num_required_blocks(request_id)
             elif isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
@@ -313,27 +306,7 @@ class KVCacheCoordinator(ABC):
             request_id,
             new_computed_blocks,
         )
-        host_import = (
-            num_external_computed_tokens > 0
-            and self.hisparse_coordinator.has_host_cache
-        )
-        if host_import:
-            for manager in self.single_type_managers:
-                if isinstance(manager, HiSparseHotManager):
-                    manager.require_hot(request_id)
-                elif isinstance(manager, HiSparseResidentManager):
-                    manager.allocate_host_import_blocks(
-                        request_id,
-                        num_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-                else:
-                    manager.allocate_external_computed_blocks(
-                        request_id,
-                        num_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-        elif num_external_computed_tokens > 0:
+        if num_external_computed_tokens > 0:
             for manager in self.single_type_managers:
                 manager.allocate_external_computed_blocks(
                     request_id,

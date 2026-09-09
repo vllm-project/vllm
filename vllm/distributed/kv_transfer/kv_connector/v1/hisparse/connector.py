@@ -29,8 +29,8 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 

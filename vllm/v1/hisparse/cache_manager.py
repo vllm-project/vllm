@@ -14,14 +14,6 @@ from vllm.v1.request import Request
 class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     """Base for ephemeral groups whose host source owns prefix caching."""
 
-    def allocate_external_computed_blocks(
-        self,
-        request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        return None
-
     def cache_blocks(
         self,
         request: Request,
@@ -61,6 +53,14 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        self.require_hot(request_id)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -129,6 +129,13 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     ) -> int:
         del num_tokens_main_model
         assert not new_computed_blocks
+        if total_computed_tokens > num_local_computed_tokens:
+            if total_computed_tokens % self.block_size != 0:
+                raise ValueError(
+                    "A host-only HiSparse import must end on a cache-block boundary."
+                )
+            imported_pages = total_computed_tokens // self.block_size
+            return max(cdiv(num_tokens, self.block_size) - imported_pages, 0)
         existing = len(self.req_to_blocks.get(request_id, ()))
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
@@ -137,31 +144,13 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             required = min(required, self._max_admission_blocks_per_request)
         return max(required - max(existing, host_pages), 0)
 
-    def get_num_host_import_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> int:
-        """Return the hard resident footprint of a host-backed import."""
-        if num_external_computed_tokens <= 0:
-            return 0
-        num_imported_tokens = num_local_computed_tokens + num_external_computed_tokens
-        if num_imported_tokens % self.block_size != 0:
-            raise ValueError(
-                "A host-only HiSparse import must end on a cache-block boundary."
-            )
-        imported_pages = num_imported_tokens // self.block_size
-        return max(cdiv(num_tokens, self.block_size) - imported_pages, 0)
-
-    def allocate_host_import_blocks(
+    def allocate_external_computed_blocks(
         self,
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        """Represent imported CPU history and allocate any transferred tail."""
+        """Represent imported host history with null resident pages."""
         assert num_external_computed_tokens > 0
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
         blocks = self.req_to_blocks[request_id]
