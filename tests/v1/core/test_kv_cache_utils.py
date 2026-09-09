@@ -98,6 +98,7 @@ def make_request(
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
+    rope_profile_id: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
 ):
     mm_features = []
@@ -123,6 +124,7 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
+        rope_profile_id=rope_profile_id,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
     )
@@ -662,6 +664,20 @@ def test_generate_block_hash_extra_keys_cache_salt():
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
     assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
+
+
+def test_generate_block_hash_extra_keys_rope_profile():
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=list(range(6)),
+        rope_profile_id="yarn:factor-2",
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == (("rope_profile", "yarn:factor-2"),)
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 3, 6, 0)
+    assert extra_keys is None
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds():

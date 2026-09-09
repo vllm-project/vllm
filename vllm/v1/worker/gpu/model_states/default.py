@@ -151,6 +151,11 @@ class DefaultModelState(ModelState):
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
+            (
+                req_states.rope_position_offset.gpu
+                if self.model_config.request_static_yarn_config is not None
+                else None
+            ),
         )
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}

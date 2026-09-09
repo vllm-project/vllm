@@ -68,3 +68,35 @@ The following parameters are specific to vLLM:
 
 - `max_model_len`: The new maximum sequence length after extension (original * factor).
   Used for KV cache pre‑allocation and request limit at serving time.
+
+## Request-static YaRN
+
+Static YaRN applies the configured factor to every request, including requests
+inside the model's native context window. For mRoPE models, vLLM can instead
+precompute several immutable YaRN tables and select one when each request is
+admitted:
+
+```bash
+vllm serve Qwen/Qwen3.8-27B \
+  --hf-overrides '{"text_config":{"rope_parameters":{"factor":4.0,"original_max_position_embeddings":262144,"rope_theta":10000000,"rope_type":"yarn","mrope_section":[11,11,10],"mrope_interleaved":true,"partial_rotary_factor":0.25}}}' \
+  --request-static-yarn-factors 1 2 4 \
+  --max-model-len 1000000
+```
+
+The selected factor is the smallest configured factor that covers
+`prompt_tokens + max_tokens`. It remains fixed for the request lifetime, so
+cached keys never require cross-factor conversion. Prefix-cache block hashes
+and LMCache request tags include the complete RoPE profile identity, preventing
+cross-profile cache reuse.
+
+Completed request counts are exposed as:
+
+```text
+vllm:request_static_yarn_factor_total{factor="1",...}
+vllm:request_static_yarn_factor_total{factor="2",...}
+vllm:request_static_yarn_factor_total{factor="4",...}
+```
+
+The factors must be sorted and unique, and the largest value must equal the
+`factor` in `rope_parameters`. Request-static YaRN currently requires mRoPE and
+does not support resumable requests.

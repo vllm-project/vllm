@@ -415,11 +415,38 @@ class InputProcessor:
                     )
                 )
 
+        rope_profile_factor = None
+        rope_profile_id = None
+        request_static_yarn = self.model_config.request_static_yarn_config
+        if request_static_yarn is not None:
+            if resumable:
+                raise VLLMValidationError(
+                    "Request-static YaRN does not yet support resumable requests"
+                )
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                prompt_token_ids, prompt_embeds
+            )
+            max_tokens = (
+                sampling_params.max_tokens if sampling_params is not None else 1
+            )
+            assert max_tokens is not None
+            try:
+                rope_profile_factor = request_static_yarn.select_factor(
+                    prompt_len + max_tokens
+                )
+            except ValueError as error:
+                raise VLLMValidationError(str(error)) from error
+            rope_profile_id = request_static_yarn.profile_id_for_factor(
+                rope_profile_factor
+            )
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
             prompt_is_token_ids=prompt_is_token_ids,
+            rope_profile_factor=rope_profile_factor,
+            rope_profile_id=rope_profile_id,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,

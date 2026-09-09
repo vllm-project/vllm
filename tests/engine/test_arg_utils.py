@@ -543,6 +543,14 @@ def test_composite_arg_parser(arg, expected, option):
     assert getattr(args, option.replace("-", "_")) == expected
 
 
+def test_request_static_yarn_factors_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--request-static-yarn-factors", "1", "2", "4"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+
+    assert engine_args.request_static_yarn_factors == [1.0, 2.0, 4.0]
+
+
 def test_human_readable_model_len():
     # `exit_on_error` disabled to test invalid values below
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))

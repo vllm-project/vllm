@@ -241,7 +241,8 @@ def get_rope(
             xdrope_section=rope_parameters["xdrope_section"],
         )
     elif scaling_type == "yarn":
-        scaling_factor = rope_parameters["factor"]
+        request_static_factors = rope_parameters.get("request_static_factors")
+        scaling_factor = request_static_factors or rope_parameters["factor"]
         original_max_position = rope_parameters["original_max_position_embeddings"]
         extra_kwargs = {
             k: v

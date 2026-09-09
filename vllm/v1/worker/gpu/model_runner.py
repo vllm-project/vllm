@@ -214,6 +214,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
+        self.request_static_yarn = self.model_config.request_static_yarn_config
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
@@ -319,6 +320,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        self.request_static_yarn_model_positions: torch.Tensor | None = None
+        if self.request_static_yarn is not None:
+            self.request_static_yarn_model_positions = torch.zeros_like(
+                self.input_buffers.positions
+            )
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -1064,12 +1070,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
+            max_tokens = sampling_params.max_tokens if sampling_params else 1
+            rope_position_offset = 0
+            assert max_tokens is not None
+
+            if self.request_static_yarn is not None:
+                factor = new_req_data.rope_profile_factor
+                assert factor is not None
+                rope_position_offset = self.request_static_yarn.offset_for_factor(
+                    factor
+                )
+                logger.debug(
+                    "Request %s selected request-static YaRN factor %g",
+                    req_id,
+                    factor,
+                )
+            else:
+                assert new_req_data.rope_profile_factor is None
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                max_tokens=max_tokens,
+                rope_position_offset=rope_position_offset,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
@@ -1313,7 +1337,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            self.request_static_yarn_model_positions,
+            (
+                self.req_states.rope_position_offset.gpu
+                if self.request_static_yarn is not None
+                else None
+            ),
         )
+        if (
+            self.request_static_yarn_model_positions is not None
+            and num_tokens_after_padding > num_tokens
+        ):
+            self.request_static_yarn_model_positions[
+                num_tokens:num_tokens_after_padding
+            ].zero_()
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
         dcp_local_seq_lens = None
@@ -1762,15 +1799,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
+        model_state_inputs = self.model_state.prepare_inputs(
+            input_batch, self.req_states
+        )
         model_inputs = {
             "input_ids": input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
             "intermediate_tensors": None,
-            # NOTE: Values returned by `prepare_inputs` will override the default
-            # values above.
-            **self.model_state.prepare_inputs(input_batch, self.req_states),
+            **model_state_inputs,
         }
+        if (
+            self.request_static_yarn_model_positions is not None
+            and "positions" not in model_state_inputs
+        ):
+            model_inputs["positions"] = self.request_static_yarn_model_positions[
+                : input_batch.num_tokens_after_padding
+            ]
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None

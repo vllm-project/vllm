@@ -152,6 +152,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        rope_profile_factor: float | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -172,6 +173,7 @@ class RequestState:
         self.top_p = top_p
         self.n = n
         self.temperature = temperature
+        self.rope_profile_factor = rope_profile_factor
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
@@ -278,6 +280,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            rope_profile_factor=request.rope_profile_factor,
         )
 
     def make_request_output(
@@ -868,6 +871,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            rope_profile_factor=req_state.rope_profile_factor,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

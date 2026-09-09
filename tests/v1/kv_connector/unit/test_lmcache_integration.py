@@ -159,6 +159,7 @@ def test_request_interface():
     assumes(req, "sampling_params")
     assumes(req, "num_tokens")
     assumes(req, "kv_transfer_params", is_instance_of=(dict, NoneType))
+    assumes(req, "rope_profile_id", is_instance_of=(str, NoneType))
 
     from vllm.multimodal.inputs import MultiModalFeatureSpec
 
@@ -174,6 +175,7 @@ def test_new_request_interface():
     assumes(NewRequestData, "block_ids")
     assumes(NewRequestData, "prompt_token_ids")
     assumes(NewRequestData, "sampling_params")
+    assumes(NewRequestData, "rope_profile_id")
 
 
 def test_sampling_params_interface():
@@ -191,6 +193,20 @@ def test_sampling_params_interface():
         extra_args={"kv_transfer_params": kv_transfer_params}
     )
     assert sampling_params.extra_args["kv_transfer_params"] == kv_transfer_params
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_request_config import (
+        extract_request_configs,
+    )
+
+    assert extract_request_configs(None, "yarn:factor-2") == {
+        "lmcache.tag.rope_profile": "yarn:factor-2"
+    }
+    assert extract_request_configs(SamplingParams(), "yarn:factor-2") == {
+        "lmcache.tag.rope_profile": "yarn:factor-2"
+    }
+    assert extract_request_configs(sampling_params, "yarn:factor-2") == {
+        **kv_transfer_params,
+        "lmcache.tag.rope_profile": "yarn:factor-2",
+    }
 
 
 def test_tp_interface():
