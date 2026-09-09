@@ -35,10 +35,15 @@ sampling_params = SamplingParams(temperature=0.0)
 
 
 def main():
-    # Create an LLM without prefix caching as a baseline.
-    regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
+    # Create an LLM with prefix caching disabled as a baseline.
+    # APC is enabled by default for supported models, so disable it explicitly.
+    regular_llm = LLM(
+        model="facebook/opt-125m",
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.4,
+    )
 
-    print("Results without `enable_prefix_caching`")
+    print("Results with `enable_prefix_caching=False`")
 
     # ruff: noqa: E501
     # Generate texts from the prompts. The output is a list of RequestOutput objects
