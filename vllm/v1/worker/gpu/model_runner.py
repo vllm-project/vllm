@@ -469,8 +469,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
             else:
-                watermarker = create_watermarker(self.vllm_config.watermark_config)
-                self.sampler = GPUWatermarkSampler(watermarker, **sampler_kwargs)
+                watermark_config = self.vllm_config.watermark_config
+                watermarker = create_watermarker(watermark_config)
+                self.sampler = GPUWatermarkSampler(
+                    watermarker,
+                    deduplicate_contexts=watermark_config.deduplicate_contexts,
+                    **sampler_kwargs,
+                )
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:

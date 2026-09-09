@@ -21,10 +21,12 @@ class GPUWatermarkSampler(Sampler):
         self,
         watermarker: Watermarker,
         *args,
+        deduplicate_contexts: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.watermarker = watermarker
+        self.deduplicate_contexts = deduplicate_contexts
         self.watermarking = UvaBackedTensor(
             self.sampling_states.max_num_reqs, dtype=torch.bool
         )
@@ -73,7 +75,11 @@ class GPUWatermarkSampler(Sampler):
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
-        repeated_contexts = self._get_repeated_contexts(expanded_idx_mapping, contexts)
+        repeated_contexts = None
+        if self.deduplicate_contexts:
+            repeated_contexts = self._get_repeated_contexts(
+                expanded_idx_mapping, contexts
+            )
 
         def random_sample(sample_logits: torch.Tensor) -> torch.Tensor:
             return gumbel_sample(
@@ -93,18 +99,20 @@ class GPUWatermarkSampler(Sampler):
             random_sample,
         )
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
-        watermarking = (
-            self.watermarking.gpu[expanded_idx_mapping]
-            & (temperatures != 0)
-            & ~repeated_contexts
-        )
-        unwatermarked = random_sample(processed_logits)
-        sampled = torch.where(watermarking, output.token_ids, unwatermarked)
-        output_logits = output.logits
-        if output.logits is not processed_logits:
-            output_logits = torch.where(
-                watermarking.unsqueeze(-1), output.logits, processed_logits
-            )
+        watermarking = self.watermarking.gpu[expanded_idx_mapping] & (temperatures != 0)
+        if repeated_contexts is not None:
+            watermarking &= ~repeated_contexts
+        if repeated_contexts is not None or not np.all(enabled):
+            unwatermarked = random_sample(processed_logits)
+            sampled = torch.where(watermarking, output.token_ids, unwatermarked)
+            output_logits = output.logits
+            if output.logits is not processed_logits:
+                output_logits = torch.where(
+                    watermarking.unsqueeze(-1), output.logits, processed_logits
+                )
+        else:
+            sampled = output.token_ids
+            output_logits = output.logits
         sampled = torch.where(
             temperatures == 0,
             processed_logits.argmax(dim=-1),
