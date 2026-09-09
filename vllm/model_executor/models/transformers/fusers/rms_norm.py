@@ -38,48 +38,61 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _operand(node: fx.Node, index: int, name: str) -> object | None:
+    """Operand `index` of `node`, whether it was passed positionally or as `name`.
+
+    The functional spellings (`torch.pow(input=v, exponent=-0.5)`) are as valid
+    as the positional ones, so every operand is read through here rather than
+    off `node.args` directly.
+    """
+    if len(node.args) > index:
+        return node.args[index]
+    return node.kwargs.get(name)
+
+
 def _is_squared(node: object, x: fx.Node) -> bool:
     """`x**2`, `x.square()` or `x * x`, through any dtype casts."""
     node = peel(node)
     if is_op(node, "pow"):
-        base, exp = node.args
-        return peel(base) is x and exp == 2
+        return (
+            peel(_operand(node, 0, "input")) is x and _operand(node, 1, "exponent") == 2
+        )
     if is_op(node, "square"):
-        return peel(node.args[0]) is x
+        return peel(_operand(node, 0, "input")) is x
     if is_op(node, "mul"):
-        a, b = node.args
-        return peel(a) is x and peel(b) is x
+        return (
+            peel(_operand(node, 0, "input")) is x
+            and peel(_operand(node, 1, "other")) is x
+        )
     return False
 
 
 def _is_inverse_sqrt(node: object) -> bool:
     """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it.
 
-    `v` is `node.args[0]` in every spelling, so callers can read it directly;
-    the exponent may be positional (`pow(v, -0.5)`, `v ** -0.5`) or keyword
-    (`torch.pow(v, exponent=-0.5)`).
+    Read `v` back with `_operand(node, 0, "input")`.
     """
     if is_op(node, "rsqrt"):
         return True
     if is_op(node, "pow"):
-        exponent = node.args[1] if len(node.args) > 1 else node.kwargs.get("exponent")
-        return exponent == -0.5
+        return _operand(node, 1, "exponent") == -0.5
     return False
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
     """eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
-    add = peel(rsqrt.args[0])
+    add = peel(_operand(rsqrt, 0, "input"))
     if not is_op(add, "add"):
         return None
-    consts = [a for a in add.args if isinstance(a, (int, float))]
-    nodes = [a for a in add.args if isinstance(a, fx.Node)]
+    operands = [_operand(add, 0, "input"), _operand(add, 1, "other")]
+    consts = [a for a in operands if isinstance(a, (int, float))]
+    nodes = [a for a in operands if isinstance(a, fx.Node)]
     if len(consts) != 1 or len(nodes) != 1:
         return None
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
-    if not _is_squared(mean.args[0], x):
+    if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
 

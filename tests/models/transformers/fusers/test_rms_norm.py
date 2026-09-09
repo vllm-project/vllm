@@ -82,6 +82,14 @@ class KwargPowRMSNorm(Gemma4RMSNorm):
         return x * torch.pow(mean_squared, exponent=-0.5)
 
 
+class KwargBasePowRMSNorm(Gemma4RMSNorm):
+    """The fully functional spelling `torch.pow(input=v, exponent=-0.5)`."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(input=mean_squared, exponent=-0.5)
+
+
 class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
     """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
 
@@ -201,6 +209,7 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (Gemma4RMSNorm, 1e-6, False),
         (PowOperatorRMSNorm, 1e-6, False),
         (KwargPowRMSNorm, 1e-6, False),
+        (KwargBasePowRMSNorm, 1e-6, False),
         (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
