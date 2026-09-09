@@ -957,16 +957,12 @@ class TestSkipToolParsingFromMessageHeader:
 
 # ── Terminals with several spellings ──────────────────────────────────
 
-_ALIAS_START_ID = 60
-_ALIAS_END_ID = 61
-
 
 def _alias_config() -> ParserEngineConfig:
     """``TOOL_START`` has a canonical spelling and one corrupted alias."""
     return ParserEngineConfig(
         name="alias_test",
         terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},
-        token_id_terminals={"TOOL_START": "<tc>", "TOOL_END": "</tc>"},
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
@@ -983,10 +979,6 @@ def _alias_config() -> ParserEngineConfig:
         },
         tool_args_json=False,
     )
-
-
-def _alias_tokenizer():
-    return make_mock_tokenizer({"<tc>": _ALIAS_START_ID, "</tc>": _ALIAS_END_ID})
 
 
 class TestTerminalAliases:
@@ -1006,28 +998,16 @@ class TestTerminalAliases:
         assert cfg.terminal_literals == {"<tc>", "<tcx>", "</tc>"}
 
     @pytest.mark.parametrize("spelling", ["<tc>", "<tcx>"])
-    def test_every_spelling_shares_transitions_in_text_mode(self, spelling):
-        engine = StreamingParserEngine(_alias_config(), _alias_tokenizer())
-        events = engine.feed(f"{spelling}a</tc>", [])
+    @pytest.mark.parametrize("char_by_char", [False, True])
+    def test_every_spelling_shares_transitions(self, spelling, char_by_char):
+        engine = StreamingParserEngine(_alias_config(), None)
+        text = f"{spelling}a</tc>"
+        events = []
+        for chunk in list(text) if char_by_char else [text]:
+            events.extend(engine.feed(chunk, []))
         events.extend(engine.finish())
         assert [e.type for e in events] == [
             EventType.TOOL_CALL_START,
             EventType.ARG_VALUE_CHUNK,
             EventType.TOOL_CALL_END,
         ]
-
-    def test_alias_keeps_meaning_in_token_id_mode(self):
-        """Only the spelling that has a token id is demoted when it arrives
-        as text; an alias has no token to arrive by."""
-        engine = StreamingParserEngine(_alias_config(), _alias_tokenizer())
-        events = engine.feed("<tcx>a</tc>", [7, 8, _ALIAS_END_ID])
-        events.extend(engine.finish())
-        assert EventType.TOOL_CALL_START in [e.type for e in events]
-        text = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
-        assert "<tcx>" not in text
-
-    def test_canonical_spelling_as_text_still_demoted_in_token_id_mode(self):
-        engine = StreamingParserEngine(_alias_config(), _alias_tokenizer())
-        events = engine.feed("<tc>a</tc>", [7, 8, _ALIAS_END_ID])
-        events.extend(engine.finish())
-        assert EventType.TOOL_CALL_START not in [e.type for e in events]

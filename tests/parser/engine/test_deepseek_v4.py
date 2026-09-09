@@ -1363,7 +1363,14 @@ class TestMalformedDsmlNoise:
         tokens = [
             (900, wrapper) if tid == start_id else (tid, text) for tid, text in tokens
         ]
-        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        # Only the think markers are single tokens in the real
+        # DeepSeek-V4-Flash vocab; the DSML wrappers are ordinary text and
+        # must be matched by the lexer. Mirror that here.
+        vocab = {
+            DSML_THINK_START: _DSV4_FULL_VOCAB[DSML_THINK_START],
+            DSML_THINK_END: _DSV4_FULL_VOCAB[DSML_THINK_END],
+        }
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
         parser = _DeepSeekV4Delegating(
             tokenizer, chat_template_kwargs={"thinking": True}
         )

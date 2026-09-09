@@ -17,7 +17,7 @@ Each model format is described by a :class:`ParserEngineConfig` that specifies:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import cached_property
@@ -55,7 +55,7 @@ class ParserEngineConfig:
     name: str
 
     # A terminal may carry several spellings; the first spelling is the canonical one.
-    terminals: dict[str, str | tuple[str, ...]] = field(default_factory=dict)
+    terminals: Mapping[str, str | tuple[str, ...]] = field(default_factory=dict)
 
     token_id_terminals: dict[str, str] = field(default_factory=dict)
 
