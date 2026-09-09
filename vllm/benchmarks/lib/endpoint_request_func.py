@@ -12,7 +12,7 @@ import traceback
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 import aiohttp
 import regex as re
@@ -125,7 +125,7 @@ def _validate_api_url(
 
     expected_suffixes = {*expected_suffixes, "profile"}
 
-    if not urlparse(api_url).path.endswith(tuple(expected_suffixes)):
+    if not urlsplit(api_url).path.endswith(tuple(expected_suffixes)):
         raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
 
 
