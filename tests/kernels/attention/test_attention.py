@@ -553,11 +553,15 @@ def _run_rocm_free_attention(
 
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables = torch.randint(
-        0,
+        num_seqs,
         num_blocks,
         (num_seqs, max_num_blocks_per_seq),
         dtype=torch.int,
     )
+    # Give each sequence a private last block so its padding can be poisoned
+    # below without touching another sequence's valid tokens.
+    for seq_idx, seq_len in enumerate(seq_lens_list):
+        block_tables[seq_idx][(seq_len - 1) // block_size] = seq_idx
 
     key_caches, value_caches = kv_cache_factory(
         num_blocks,
@@ -572,6 +576,14 @@ def _run_rocm_free_attention(
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Slots past seq_len are never written in real serving, so poison them:
+    # the kernel must mask them, since 0 * NaN = NaN would poison the output.
+    for seq_idx, seq_len in enumerate(seq_lens_list):
+        padding_start = seq_len % block_size
+        if padding_start:
+            last_block_idx = block_tables[seq_idx][seq_len // block_size]
+            value_cache[last_block_idx, :, :, padding_start:] = torch.nan
 
     partition_size = 256
     num_partitions = (max_seq_len + partition_size - 1) // partition_size

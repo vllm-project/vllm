@@ -2467,6 +2467,17 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
           const _B16x8* v_fetch_ptr_16B =
               reinterpret_cast<const _B16x8*>(v_fetch_ptr);
           Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+          // Slots past seq_len in the final block are never written and may
+          // hold NaN; score masking alone does not help, since 0 * NaN = NaN.
+          if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+            const int vglobal_fetch_start =
+                partition_start_token_idx + vlocal_token_idx +
+                vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+            Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+                mask_v_cache_padding<cache_t>(
+                    Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+                    vglobal_fetch_start, seq_len);
+          }
         }
       }
     }
@@ -4147,6 +4158,19 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
             vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
             *reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+        // Slots past seq_len in the final block are never written and may hold
+        // NaN; score masking alone does not help, since 0 * NaN = NaN.
+        if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              rowid * VTOKENS_PER_LANE +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+              mask_v_cache_padding<cache_t>(
+                  Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+                  vglobal_fetch_start, seq_len);
+        }
       }
     }
   }
