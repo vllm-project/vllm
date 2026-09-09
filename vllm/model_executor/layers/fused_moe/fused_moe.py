@@ -1041,9 +1041,7 @@ def zero_experts_compute_triton(
     zero_expert_type: str,
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    N = expert_indices.numel()
     top_k = expert_indices.size(-1)
-    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE"]),)
 
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
