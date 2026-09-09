@@ -590,10 +590,11 @@ class GPUModelRunner(
         self._pp_recv_work: torch.distributed.Work | None = None
 
         # Sampler
-        self.sampler = Sampler(
-            logprobs_mode=self.model_config.logprobs_mode,
-            use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-        )
+        with self.jit_warmup_registry.activate():
+            self.sampler = Sampler(
+                logprobs_mode=self.model_config.logprobs_mode,
+                use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+            )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -638,69 +639,72 @@ class GPUModelRunner(
                 | Gemma4Proposer
                 | Step3p5MTPProposer
             )
-            if self.speculative_config.method == "custom_class":
-                self.drafter = create_custom_proposer(  # type: ignore[assignment]
-                    self.vllm_config
-                )
-            elif self.speculative_config.method == "ngram":
-                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
-                self.drafter = NgramProposer(self.vllm_config)
-            elif self.speculative_config.uses_draft_model():
-                self.drafter = DraftModelProposer(
-                    vllm_config=self.vllm_config,
-                    device=self.device,
-                    runner=self,
-                )
-            elif self.speculative_config.use_ngram_gpu():
-                self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
-                self.num_tokens_no_spec_gpu = torch.zeros(
-                    self.max_num_reqs, dtype=torch.int32, device=device
-                )
-                self.token_ids_gpu_tensor = torch.zeros(
-                    self.max_num_reqs,
-                    self.max_model_len,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                self._ngram_pinned_idx_buf = torch.zeros(
-                    self.max_num_reqs, dtype=torch.long, pin_memory=True
-                )
-                self._ngram_pinned_val_buf = torch.zeros(
-                    self.max_num_reqs, dtype=torch.int32, pin_memory=True
-                )
-            elif self.speculative_config.use_gemma4_mtp():
-                self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
-            elif self.speculative_config.use_step3p5_mtp():
-                self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
-            elif self.speculative_config.use_dflash():
-                self.drafter = DFlashProposer(self.vllm_config, self.device, self)
-                self.use_aux_hidden_state_outputs = True
-            elif self.speculative_config.method == "suffix":
-                self.drafter = SuffixDecodingProposer(self.vllm_config)
-            elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)
-                if self.speculative_config.method == "eagle3":
-                    self.use_aux_hidden_state_outputs = (
-                        self.drafter.eagle3_use_aux_hidden_state
+            with self.jit_warmup_registry.activate():
+                if self.speculative_config.method == "custom_class":
+                    self.drafter = create_custom_proposer(  # type: ignore[assignment]
+                        self.vllm_config
                     )
-            elif self.speculative_config.method == "medusa":
-                self.drafter = MedusaProposer(
-                    vllm_config=self.vllm_config, device=self.device
+                elif self.speculative_config.method == "ngram":
+                    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
+                    self.drafter = NgramProposer(self.vllm_config)
+                elif self.speculative_config.uses_draft_model():
+                    self.drafter = DraftModelProposer(
+                        vllm_config=self.vllm_config,
+                        device=self.device,
+                        runner=self,
+                    )
+                elif self.speculative_config.use_ngram_gpu():
+                    self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
+                    self.num_tokens_no_spec_gpu = torch.zeros(
+                        self.max_num_reqs, dtype=torch.int32, device=device
+                    )
+                    self.token_ids_gpu_tensor = torch.zeros(
+                        self.max_num_reqs,
+                        self.max_model_len,
+                        dtype=torch.int32,
+                        device=device,
+                    )
+                    self._ngram_pinned_idx_buf = torch.zeros(
+                        self.max_num_reqs, dtype=torch.long, pin_memory=True
+                    )
+                    self._ngram_pinned_val_buf = torch.zeros(
+                        self.max_num_reqs, dtype=torch.int32, pin_memory=True
+                    )
+                elif self.speculative_config.use_gemma4_mtp():
+                    self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
+                elif self.speculative_config.use_step3p5_mtp():
+                    self.drafter = Step3p5MTPProposer(
+                        self.vllm_config, self.device, self
+                    )
+                elif self.speculative_config.use_dflash():
+                    self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                    self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.method == "suffix":
+                    self.drafter = SuffixDecodingProposer(self.vllm_config)
+                elif self.speculative_config.use_eagle():
+                    self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                    if self.speculative_config.method == "eagle3":
+                        self.use_aux_hidden_state_outputs = (
+                            self.drafter.eagle3_use_aux_hidden_state
+                        )
+                elif self.speculative_config.method == "medusa":
+                    self.drafter = MedusaProposer(
+                        vllm_config=self.vllm_config, device=self.device
+                    )
+                elif self.speculative_config.method == "extract_hidden_states":
+                    self.drafter = ExtractHiddenStatesProposer(
+                        vllm_config=self.vllm_config, device=self.device
+                    )
+                    self.use_aux_hidden_state_outputs = True
+                else:
+                    raise ValueError(
+                        "Unknown speculative decoding method: "
+                        f"{self.speculative_config.method}"
+                    )
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler, self.speculative_config, self.device
                 )
-            elif self.speculative_config.method == "extract_hidden_states":
-                self.drafter = ExtractHiddenStatesProposer(
-                    vllm_config=self.vllm_config, device=self.device
-                )
-                self.use_aux_hidden_state_outputs = True
-            else:
-                raise ValueError(
-                    "Unknown speculative decoding method: "
-                    f"{self.speculative_config.method}"
-                )
-            self.rejection_sampler = RejectionSampler(
-                self.sampler, self.speculative_config, self.device
-            )
 
         self.num_spec_tokens = 0
         self.prev_num_spec_tokens = 0

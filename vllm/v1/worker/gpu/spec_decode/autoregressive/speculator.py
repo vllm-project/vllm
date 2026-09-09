@@ -9,6 +9,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DeclarativeTritonJitKernel,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -46,6 +50,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
+
+        _PREPARE_PREFILL_INPUTS_KERNEL.register_warmup(speculator=self)
+        if self.num_speculative_steps > 1:
+            _PREPARE_DECODE_INPUTS_KERNEL.register_warmup(speculator=self)
+            _UPDATE_DRAFT_INPUTS_KERNEL.register_warmup(speculator=self)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -796,7 +805,8 @@ def prepare_prefill_inputs(
     max_num_reqs,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
-    _prepare_prefill_inputs_kernel[(num_reqs,)](
+    _PREPARE_PREFILL_INPUTS_KERNEL(
+        (num_reqs,),
         last_token_indices,
         current_draft_step,
         input_buffers.input_ids,
@@ -884,7 +894,8 @@ def prepare_decode_inputs(
     advance_draft_positions: bool = True,
 ):
     num_reqs = draft_tokens.shape[0]
-    _prepare_decode_inputs_kernel[(num_reqs + 1,)](
+    _PREPARE_DECODE_INPUTS_KERNEL(
+        (num_reqs + 1,),
         draft_tokens,
         draft_tokens.stride(0),
         target_seq_lens,
@@ -987,7 +998,8 @@ def update_draft_inputs(
     advance_draft_positions: bool = True,
 ):
     _, hidden_size = hidden_states.shape
-    _update_draft_inputs_kernel[(num_reqs,)](
+    _UPDATE_DRAFT_INPUTS_KERNEL(
+        (num_reqs,),
         output_draft_tokens,
         output_draft_tokens.stride(0),
         next_input_hidden_states,
@@ -1006,3 +1018,182 @@ def update_draft_inputs(
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
+
+
+class PreparePrefillInputsKernel(DeclarativeTritonJitKernel):
+    """Triton warmup owner for ``_prepare_prefill_inputs_kernel``."""
+
+    kernel = staticmethod(_prepare_prefill_inputs_kernel)
+
+    def warmup_cases(self, *, speculator: AutoRegressiveSpeculator) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        return dict(
+            grid=(1,),
+            last_token_indices_ptr=int64_ptr,
+            draft_current_step_ptr=int64_ptr,
+            draft_input_ids_ptr=int32_ptr,
+            draft_positions_ptr=int64_ptr,
+            draft_query_start_loc_ptr=int32_ptr,
+            draft_seq_lens_ptr=int32_ptr,
+            target_input_ids_ptr=int32_ptr,
+            target_positions_ptr=int64_ptr,
+            idx_mapping_ptr=int64_ptr,
+            last_sampled_ptr=int64_ptr,
+            next_prefill_tokens_ptr=int32_ptr,
+            num_sampled_ptr=int32_ptr,
+            num_rejected_ptr=int32_ptr,
+            query_start_loc_ptr=int32_ptr,
+            seq_lens_ptr=int32_ptr,
+            max_num_reqs=speculator.max_num_reqs,
+            BLOCK_SIZE=1024,
+        )
+
+    def launch_spec(
+        self,
+        grid: tuple[int, ...],
+        last_token_indices_ptr: torch.Tensor,
+        draft_current_step_ptr: torch.Tensor,
+        draft_input_ids_ptr: torch.Tensor,
+        draft_positions_ptr: torch.Tensor,
+        draft_query_start_loc_ptr: torch.Tensor,
+        draft_seq_lens_ptr: torch.Tensor,
+        target_input_ids_ptr: torch.Tensor,
+        target_positions_ptr: torch.Tensor,
+        idx_mapping_ptr: torch.Tensor,
+        last_sampled_ptr: torch.Tensor,
+        next_prefill_tokens_ptr: torch.Tensor,
+        num_sampled_ptr: torch.Tensor,
+        num_rejected_ptr: torch.Tensor,
+        query_start_loc_ptr: torch.Tensor,
+        seq_lens_ptr: torch.Tensor,
+        max_num_reqs: int,
+        *,
+        BLOCK_SIZE: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, dict(BLOCK_SIZE=BLOCK_SIZE)
+
+
+class PrepareDecodeInputsKernel(DeclarativeTritonJitKernel):
+    """Triton warmup owner for ``_prepare_decode_inputs_kernel``."""
+
+    kernel = staticmethod(_prepare_decode_inputs_kernel)
+
+    def warmup_cases(self, *, speculator: AutoRegressiveSpeculator) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        draft_tokens_ptr = TritonWarmupTensor(
+            torch.int32, strides=(speculator.num_speculative_steps,)
+        )
+        return dict(
+            grid=(1,),
+            draft_tokens_ptr=draft_tokens_ptr,
+            draft_tokens_stride=draft_tokens_ptr.stride(0),
+            target_seq_lens_ptr=int32_ptr,
+            num_rejected_ptr=int32_ptr,
+            input_ids_ptr=int32_ptr,
+            positions_ptr=int64_ptr,
+            sample_src_positions_ptr=int64_ptr,
+            query_start_loc_ptr=int32_ptr,
+            seq_lens_ptr=int32_ptr,
+            max_model_len=speculator.max_model_len,
+            max_num_reqs=speculator.max_num_reqs,
+            BLOCK_SIZE=1024,
+            ADVANCE_DRAFT_POSITIONS=speculator.advance_draft_positions,
+        )
+
+    def launch_spec(
+        self,
+        grid: tuple[int, ...],
+        draft_tokens_ptr: torch.Tensor,
+        draft_tokens_stride: int,
+        target_seq_lens_ptr: torch.Tensor,
+        num_rejected_ptr: torch.Tensor,
+        input_ids_ptr: torch.Tensor,
+        positions_ptr: torch.Tensor,
+        sample_src_positions_ptr: torch.Tensor,
+        query_start_loc_ptr: torch.Tensor,
+        seq_lens_ptr: torch.Tensor,
+        max_model_len: int,
+        max_num_reqs: int,
+        *,
+        BLOCK_SIZE: int,
+        ADVANCE_DRAFT_POSITIONS: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, dict(
+            BLOCK_SIZE=BLOCK_SIZE,
+            ADVANCE_DRAFT_POSITIONS=ADVANCE_DRAFT_POSITIONS,
+        )
+
+
+class UpdateDraftInputsKernel(DeclarativeTritonJitKernel):
+    """Triton warmup owner for ``_update_draft_inputs_kernel``."""
+
+    kernel = staticmethod(_update_draft_inputs_kernel)
+
+    def warmup_cases(self, *, speculator: AutoRegressiveSpeculator) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        output_draft_tokens_ptr = TritonWarmupTensor(
+            torch.int32, strides=(speculator.num_speculative_steps, 1)
+        )
+        next_input_hidden_states_ptr = TritonWarmupTensor(
+            speculator.dtype,
+            strides=(speculator.hidden_size, 1),
+        )
+        hidden_states_ptr = TritonWarmupTensor(
+            speculator.dtype,
+            strides=(speculator.hidden_size, 1),
+        )
+        return dict(
+            grid=(1,),
+            output_draft_tokens_ptr=output_draft_tokens_ptr,
+            output_draft_tokens_stride=output_draft_tokens_ptr.stride(0),
+            next_input_hidden_states_ptr=next_input_hidden_states_ptr,
+            next_input_hidden_states_stride=next_input_hidden_states_ptr.stride(0),
+            input_ids_ptr=int32_ptr,
+            positions_ptr=int64_ptr,
+            sample_src_positions_ptr=int64_ptr,
+            seq_lens_ptr=int32_ptr,
+            draft_tokens_ptr=int32_ptr,
+            current_draft_step_ptr=int64_ptr,
+            hidden_states_ptr=hidden_states_ptr,
+            hidden_states_stride=hidden_states_ptr.stride(0),
+            hidden_size=speculator.hidden_size,
+            max_model_len=speculator.max_model_len,
+            num_speculative_steps=speculator.num_speculative_steps,
+            BLOCK_SIZE=1024,
+            ADVANCE_DRAFT_POSITIONS=speculator.advance_draft_positions,
+        )
+
+    def launch_spec(
+        self,
+        grid: tuple[int, ...],
+        output_draft_tokens_ptr: torch.Tensor,
+        output_draft_tokens_stride: int,
+        next_input_hidden_states_ptr: torch.Tensor,
+        next_input_hidden_states_stride: int,
+        input_ids_ptr: torch.Tensor,
+        positions_ptr: torch.Tensor,
+        sample_src_positions_ptr: torch.Tensor,
+        seq_lens_ptr: torch.Tensor,
+        draft_tokens_ptr: torch.Tensor,
+        current_draft_step_ptr: torch.Tensor,
+        hidden_states_ptr: torch.Tensor,
+        hidden_states_stride: int,
+        hidden_size: int,
+        max_model_len: int,
+        num_speculative_steps: int,
+        *,
+        BLOCK_SIZE: int,
+        ADVANCE_DRAFT_POSITIONS: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, dict(
+            BLOCK_SIZE=BLOCK_SIZE,
+            ADVANCE_DRAFT_POSITIONS=ADVANCE_DRAFT_POSITIONS,
+        )
+
+
+_PREPARE_PREFILL_INPUTS_KERNEL = PreparePrefillInputsKernel()
+_PREPARE_DECODE_INPUTS_KERNEL = PrepareDecodeInputsKernel()
+_UPDATE_DRAFT_INPUTS_KERNEL = UpdateDraftInputsKernel()

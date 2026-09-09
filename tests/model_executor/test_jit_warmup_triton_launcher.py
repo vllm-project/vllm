@@ -4,11 +4,36 @@
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
+from vllm.model_executor.warmup import jit_warmup_triton_helper
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+    _when,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DeclarativeTritonJitKernel,
+    DirectTritonJitKernel,
     LaunchSpec,
+    TritonJitKey,
+    TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
+    triton_scalar_specialization_rep,
+    triton_warmup_inputs,
 )
+from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _binder_test_kernel(x, value, BLOCK: tl.constexpr):
+    pass
+
+
+@triton.jit
+def _second_binder_test_kernel(x, value, BLOCK: tl.constexpr):
+    pass
 
 
 class _FakeTritonKernel:
@@ -89,6 +114,250 @@ def test_triton_launcher_supports_cpu_function_wrappers() -> None:
 
     owner("runtime", 2, None)
     assert calls == [("runtime", 2, 7)]
+
+
+def test_declarative_triton_kernel_traces_ranges_and_retains_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestDeclarativeKernel(DeclarativeTritonJitKernel):
+        kernel = _FakeTritonKernel()
+        static_calls = 0
+
+        def static_offset(self) -> int:
+            self.static_calls += 1
+            return 0
+
+        def warmup_cases(self) -> dict[str, Any]:
+            offset = self.static_offset()
+            tokens = WarmupIntRange(1, 34)
+            enabled = WarmupChoices(False, True)
+            _when(tokens <= 32)
+            config = ((7 if tokens <= 16 else 8) if enabled else 0) + offset
+            return dict(
+                first="warmup",
+                second=tokens,
+                runtime_launcher=None,
+                config=config,
+                enabled=enabled,
+                inline_choice=WarmupChoices("first", "second"),
+            )
+
+        def launch_spec(
+            self,
+            first: str,
+            second: int,
+            runtime_launcher: Any,
+            config: int,
+        ) -> LaunchSpec:
+            return (2,), dict(
+                CONST=config,
+                _runtime_launcher=runtime_launcher,
+                _runtime_launcher_arg_count=2,
+            )
+
+    owner = TestDeclarativeKernel()
+
+    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
+
+    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
+        return {(id(kernel), kwargs["CONST"])}
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        fake_precompile_keys,
+    )
+    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+    owner.kernel.warmup_calls.clear()
+    keys = owner.get_warmup_keys()
+
+    assert [
+        (key.inputs.as_dict()["second"], key.inputs.as_dict()["enabled"])
+        for key in keys
+    ] == [(1, False), (1, True), (17, True)]
+    assert owner.static_calls == 1
+    assert {key.inputs.as_dict()["inline_choice"] for key in keys} == {"first"}
+    assert owner.kernel.warmup_calls == []
+
+    owner.compile(keys[0])
+    assert owner.kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 0}
+    ]
+
+
+def test_direct_triton_kernel_preserves_native_call_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestDirectKernel(DirectTritonJitKernel):
+        kernel = _FakeTritonKernel()
+
+        def warmup_cases(self) -> dict[str, Any]:
+            value = WarmupIntRange(1, 3)
+            return triton_warmup_inputs(
+                self.kernel,
+                "warmup",
+                value,
+                grid=(2,),
+                CONST=7,
+            )
+
+    owner = TestDirectKernel()
+
+    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
+        return {
+            TritonJitKey(id(kernel), "fake", 0, (kwargs["second"], kwargs["CONST"]))
+        }
+
+    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
+        return {(id(kernel), kwargs["second"], kwargs["CONST"])}
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        fake_precompile_keys,
+    )
+    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+    owner.kernel.warmup_calls.clear()
+    keys = owner.get_warmup_keys()
+
+    assert len(keys) == 2
+    assert owner.kernel.warmup_calls == []
+    owner.compile(keys[0])
+    assert owner.kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
+    ]
+
+
+def test_triton_range_is_deduplicated_before_binder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestRangeKernel(DeclarativeTritonJitKernel):
+        kernel = _FakeTritonKernel()
+
+        def warmup_cases(self) -> dict[str, Any]:
+            value = WarmupIntRange(1, 8193)
+            return dict(
+                first="warmup",
+                second=value,
+                runtime_launcher=None,
+                config=7,
+            )
+
+        def launch_spec(
+            self,
+            first: str,
+            second: int,
+            runtime_launcher: Any,
+            config: int,
+        ) -> LaunchSpec:
+            return (2,), dict(CONST=config)
+
+    binder_calls: list[int] = []
+
+    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
+        return {
+            (
+                id(kernel),
+                triton_scalar_specialization_rep(kwargs["second"]),
+                kwargs["CONST"],
+            )
+        }
+
+    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
+        binder_calls.append(kwargs["second"])
+        return {
+            TritonJitKey(
+                id(kernel),
+                "fake",
+                0,
+                triton_scalar_specialization_rep(kwargs["second"]),
+            )
+        }
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        fake_precompile_keys,
+    )
+    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+
+    keys = TestRangeKernel().get_warmup_keys()
+
+    assert binder_calls == [1, 2, 16]
+    assert len(keys) == 3
+
+
+def test_triton_key_derivation_applies_wrappers_and_runtime_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from triton import knobs
+    from triton.runtime.driver import driver
+
+    device = "test-device"
+    monkeypatch.setattr(driver.active, "get_current_device", lambda: device)
+    calls: list[dict[str, Any]] = []
+
+    def binder(x: Any, value: int, BLOCK: int, **options: Any) -> Any:
+        calls.append(dict(BLOCK=BLOCK, **options))
+        specialization = [("pointer", x.dtype), ("i32", value), ("constexpr", BLOCK)]
+        return {}, specialization, options
+
+    cache: dict[Any, Any] = {}
+    _binder_test_kernel.device_caches[device] = ({}, cache, None, None, binder)
+    heuristic_kernel = triton.heuristics(
+        {"BLOCK": lambda args: 16 if args["value"] <= 16 else 32}
+    )(_binder_test_kernel)
+
+    keys = jit_warmup_triton_helper._triton_compile_keys(
+        heuristic_kernel,
+        {"x": TritonWarmupTensor(tl.float32), "value": 2},
+    )
+
+    assert len(keys) == 1
+    assert calls == [
+        {
+            "BLOCK": 16,
+            "debug": knobs.runtime.debug,
+            "instrumentation_mode": knobs.compilation.instrumentation_mode,
+        }
+    ]
+
+
+def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from triton.runtime.driver import driver
+
+    device = "test-device"
+    monkeypatch.setattr(driver.active, "get_current_device", lambda: device)
+
+    def binder(x: Any, value: int, BLOCK: int, **options: Any) -> Any:
+        specialization = [("pointer", x.dtype), ("i32", value), ("constexpr", BLOCK)]
+        return {}, specialization, options
+
+    for kernel in (_binder_test_kernel, _second_binder_test_kernel):
+        kernel.device_caches[device] = ({}, {}, None, None, binder)
+    autotuned = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 16}, num_warps=2),
+            triton.Config({"BLOCK": 32}, num_warps=4),
+        ],
+        key=["value"],
+    )(_binder_test_kernel)
+    inputs = {"x": TritonWarmupTensor(tl.float32), "value": 2}
+
+    autotune_keys = jit_warmup_triton_helper._triton_compile_keys(autotuned, inputs)
+    other_kernel_keys = jit_warmup_triton_helper._triton_compile_keys(
+        _second_binder_test_kernel, inputs | {"BLOCK": 16}
+    )
+
+    assert len(autotune_keys) == 2
+    assert {key.jit_function_key for key in autotune_keys} == {
+        _binder_test_kernel.cache_key
+    }
+    assert {key.jit_function_id for key in autotune_keys} == {id(_binder_test_kernel)}
+    assert autotune_keys.isdisjoint(other_kernel_keys)
 
 
 def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:

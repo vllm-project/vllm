@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Iterator
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DeclarativeTritonJitKernel,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -20,6 +25,12 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _COMPUTE_CUMULATIVE_LOG_P_KERNEL,
+    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL,
+    _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL,
+    _INSERT_RESAMPLED_KERNEL,
+    _REJECTION_KERNEL,
+    _RESAMPLE_KERNEL,
     rejection_sample,
 )
 
@@ -72,15 +83,50 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
+class FlattenSampledKernel(DeclarativeTritonJitKernel):
+    kernel = staticmethod(_flatten_sampled_kernel)
+
+    def warmup_cases(self, *, num_speculative_steps: int) -> dict[str, Any]:
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        return dict(
+            grid=(1,),
+            flat_sampled_ptr=int64_ptr,
+            sampled_ptr=int64_ptr,
+            sampled_stride=num_speculative_steps + 1,
+            num_sampled_ptr=int32_ptr,
+            cu_num_logits_ptr=int32_ptr,
+            num_warps=1,
+        )
+
+    def launch_spec(
+        self,
+        grid: tuple[int, ...],
+        flat_sampled_ptr: torch.Tensor,
+        sampled_ptr: torch.Tensor,
+        sampled_stride: int,
+        num_sampled_ptr: torch.Tensor,
+        cu_num_logits_ptr: torch.Tensor,
+        *,
+        num_warps: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return grid, dict(num_warps=num_warps)
+
+
 class RejectionSampler:
     def __init__(
         self,
         sampler: Sampler,
         spec_config: SpeculativeConfig,
         device: torch.device,
+        model_dtype: torch.dtype | None = None,
+        draft_dtype: torch.dtype | None = None,
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
+        _FLATTEN_SAMPLED_KERNEL.register_warmup(
+            num_speculative_steps=self.num_speculative_steps
+        )
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
@@ -96,6 +142,34 @@ class RejectionSampler:
             )
         elif rejection_sample_method == "block":
             self.use_block_verification = True
+
+        if model_dtype is not None:
+            draft_dtype = draft_dtype or model_dtype
+            warmup_kwargs = dict(
+                model_dtype=model_dtype,
+                draft_dtype=draft_dtype,
+                vocab_size=self.sampler.sampling_states.vocab_size,
+                num_speculative_steps=self.num_speculative_steps,
+            )
+            _COMPUTE_LOCAL_LOGITS_STATS_KERNEL.register_warmup(**warmup_kwargs)
+            if self.use_block_verification:
+                _COMPUTE_CUMULATIVE_LOG_P_KERNEL.register_warmup(**warmup_kwargs)
+                _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL.register_warmup(**warmup_kwargs)
+            _REJECTION_KERNEL.register_warmup(
+                **warmup_kwargs,
+                synthetic_mode=self.synthetic_conditional_rates is not None,
+                use_block_verification=self.use_block_verification,
+            )
+            _RESAMPLE_KERNEL.register_warmup(
+                **warmup_kwargs,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                use_block_verification=self.use_block_verification,
+            )
+            _INSERT_RESAMPLED_KERNEL.register_warmup(
+                num_speculative_steps=self.num_speculative_steps,
+                vocab_size=self.sampler.sampling_states.vocab_size,
+                use_fp64=self.sampler.use_fp64_gumbel,
+            )
 
     def _get_logprobs_tensors(
         self,
@@ -114,7 +188,8 @@ class RejectionSampler:
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
         )
-        _flatten_sampled_kernel[(num_reqs,)](
+        _FLATTEN_SAMPLED_KERNEL(
+            (num_reqs,),
             flat_sampled,
             sampled,
             sampled.stride(0),
@@ -299,3 +374,6 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
+
+
+_FLATTEN_SAMPLED_KERNEL = FlattenSampledKernel()

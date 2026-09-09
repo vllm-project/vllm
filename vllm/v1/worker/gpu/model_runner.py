@@ -276,7 +276,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                with self.jit_warmup_registry.activate():
+                    self.speculator = init_speculator(self.vllm_config, self.device)
 
             if self.speculative_config.method in (
                 "eagle3",
@@ -458,34 +459,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            sampler_kwargs: dict[str, Any] = {
-                "max_num_reqs": self.max_num_reqs,
-                "vocab_size": self.vocab_size,
-                "device": self.device,
-                "req_states": self.req_states,
-                "logprobs_mode": self.model_config.logprobs_mode,
-                "num_speculative_tokens": self.decode_query_len,
-                "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
-                "enable_trace_replay": self.model_config.enable_trace_replay,
-                "reasoning_config": self.vllm_config.reasoning_config,
-                "return_sampling_mask": self.model_config.return_sampling_mask,
-            }
-            if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
-            else:
-                watermarker = create_watermarker(self.vllm_config.watermark_config)
-                self.sampler = GPUWatermarkSampler(watermarker, **sampler_kwargs)
-            custom = self.model_state.custom_sampler(self.sampler)
+            with self.jit_warmup_registry.activate():
+                sampler_kwargs: dict[str, Any] = {
+                    "max_num_reqs": self.max_num_reqs,
+                    "vocab_size": self.vocab_size,
+                    "device": self.device,
+                    "req_states": self.req_states,
+                    "logprobs_mode": self.model_config.logprobs_mode,
+                    "num_speculative_tokens": self.decode_query_len,
+                    "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
+                    "enable_trace_replay": self.model_config.enable_trace_replay,
+                    "reasoning_config": self.vllm_config.reasoning_config,
+                    "return_sampling_mask": self.model_config.return_sampling_mask,
+                }
+                if self.vllm_config.watermark_config is None:
+                    self.sampler = Sampler(**sampler_kwargs)
+                else:
+                    watermarker = create_watermarker(self.vllm_config.watermark_config)
+                    self.sampler = GPUWatermarkSampler(watermarker, **sampler_kwargs)
+                custom = self.model_state.custom_sampler(self.sampler)
 
-            if custom:
-                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
-                self.sampler, self.rejection_sampler = custom
-            elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                )
+                if custom:
+                    self.vllm_config._check_watermarking_unsupported(
+                        custom_sampler=True
+                    )
+                    self.sampler, self.rejection_sampler = custom
+                elif self.speculative_config is not None:
+                    model_dtype = self.model_config.dtype
+                    assert isinstance(model_dtype, torch.dtype)
+                    draft_dtype = (
+                        self.speculator.draft_logits.dtype
+                        if self.speculator is not None
+                        and self.speculator.draft_logits is not None
+                        else self.model_config.head_dtype
+                    )
+                    self.rejection_sampler = RejectionSampler(
+                        self.sampler,
+                        self.speculative_config,
+                        self.device,
+                        model_dtype,
+                        draft_dtype,
+                    )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
