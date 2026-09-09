@@ -13,14 +13,12 @@ from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import (
     StackedFuser,
     fused_head_size,
-    local_output_sizes,
 )
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     innermost_block,
     is_linear,
     recover_forward,
-    replace_expr,
     returned_linear,
     single_self_call,
 )
@@ -45,7 +43,7 @@ class QKVFuser(StackedFuser):
     v_name: str
     o_name: str | None
     merged_name: ClassVar[str] = "qkv_proj"
-    merged_cls: ClassVar[str] = "QKVParallelLinear"
+    merged_cls_name: ClassVar[str] = "QKVParallelLinear"
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:
@@ -133,25 +131,9 @@ class QKVFuser(StackedFuser):
             raise ValueError("projection calls are in different blocks")
 
         # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
-        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
-        temps = [f"{name}_fused" for name in (self.q_name, self.k_name, self.v_name)]
-        if names & set(temps):
-            raise ValueError("fused temporaries would shadow existing names")
-        merged = f"self.{self.merged_name}"
-        sections = local_output_sizes(self.merged_name)
-        template = f"{', '.join(temps)} = {merged}(__arg__).split({sections}, -1)"
-        assign = ast.parse(template).body[0]
-        arg = next(
-            node
-            for node in ast.walk(assign)
-            if isinstance(node, ast.Name) and node.id == "__arg__"
-        )
-        replace_expr(assign, arg, calls[0].args[0])
-        block, index = blocks[0]
-        ast.copy_location(assign, block[index])
-        block.insert(min(index for _, index in blocks), assign)
-        for call, temp in zip(calls, temps):
-            replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
+        block = blocks[0][0]
+        index = min(index for _, index in blocks)
+        self._splice_merged_split(funcdef, calls, block, index)
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
