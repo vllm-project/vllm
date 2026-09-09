@@ -24,61 +24,17 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExpert
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    OCP_MX_Scheme,
+    _ACTIVATION_QUANT_DTYPE_MAP,
+    _ACTIVATION_QUANT_KEY_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
 
 logger = init_logger(__name__)
-
-
-def activation_quant_dtype(
-    ocp_mx_scheme: OCP_MX_Scheme | str,
-) -> torch.dtype | str | None:
-    """Activation dtype `moe_kernel_quantize_input` should fake-quantize to.
-
-    Args:
-        ocp_mx_scheme: The OCP MX scheme the emulated experts run. Accepts the
-            enum member or its string value.
-
-    Returns:
-        A `quant_dtype` `moe_kernel_quantize_input` dispatches on, or None for
-        weight-only schemes, which leave activations untouched.
-
-    Raises:
-        NotImplementedError: If the scheme has no emulated activation dtype.
-    """
-    if ocp_mx_scheme in {
-        OCP_MX_Scheme.w_mxfp4,
-        OCP_MX_Scheme.w_mxfp6_e3m2,
-        OCP_MX_Scheme.w_mxfp6_e2m3,
-    }:
-        return None
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
-        return "mxfp4"
-    elif ocp_mx_scheme in {
-        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-        OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
-    }:
-        return "mxfp6_e3m2"
-    elif ocp_mx_scheme in {
-        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
-    }:
-        return "mxfp6_e2m3"
-    elif ocp_mx_scheme in {
-        OCP_MX_Scheme.w_mxfp4_a_fp8,
-        OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
-        OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8,
-    }:
-        return current_platform.fp8_dtype()
-    raise NotImplementedError(
-        f"No emulated activation dtype for OCP MX scheme {ocp_mx_scheme}."
-        " Please open an issue."
-    )
 
 
 class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
@@ -102,11 +58,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             " quantization support for better performance."
         )
 
-        self.ocp_mx_scheme = quant_config.ocp_mx_scheme
-        assert self.ocp_mx_scheme is not None, (
-            "ocp_mx_scheme must be set in quant_config for"
-            " OCP_MXQuantizationEmulationTritonExperts"
-        )
+        assert self.weight_quant_dtype == quant_config._w2.dtype
 
         # `TritonExperts.apply` expects pre-dequantized weights,
         # which we handle in `apply` below.
@@ -118,7 +70,22 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
+        activation_dtype = quant_config._a1.dtype
+        assert activation_dtype is None or isinstance(activation_dtype, str)
+
+        self.activation_quant_key = (
+            None
+            if activation_dtype is None
+            else _ACTIVATION_QUANT_DTYPE_MAP[activation_dtype]
+        )
+
+        # TODO: Migrate quant_config._a1.dtype to be QuantKey directly.
+        if self.activation_quant_key is None:
+            self._quant_dtype = None
+        elif self.activation_quant_key == kFp8StaticTensorSym:
+            self._quant_dtype = current_platform.fp8_dtype()
+        else:
+            self._quant_dtype = _ACTIVATION_QUANT_KEY_MAP[self.activation_quant_key]
 
     @staticmethod
     def is_supported_config(
@@ -162,15 +129,16 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         w_scale: torch.Tensor,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Dequantize weights based on the OCP MX scheme."""
-        if self.ocp_mx_scheme.startswith("w_mxfp4"):  # type: ignore[union-attr]
+        """Dequantize weights according to their quantization descriptor."""
+        if self.weight_quant_dtype == "mxfp4":
             return dequant_mxfp4(w, w_scale, dtype)
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e3m2"):  # type: ignore[union-attr]
+        if self.weight_quant_dtype == "mxfp6_e3m2":
             return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e2m3"):  # type: ignore[union-attr]
+        if self.weight_quant_dtype == "mxfp6_e2m3":
             return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
-        else:
-            raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
+        raise NotImplementedError(
+            f"Unsupported OCP MX weight dtype {self.weight_quant_dtype}"
+        )
 
     def apply(
         self,

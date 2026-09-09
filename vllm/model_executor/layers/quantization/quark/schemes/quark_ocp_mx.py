@@ -20,8 +20,11 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp6E2M3Dynamic,
     kMxfp6E2M3Static,
+    kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
 )
 from vllm.model_executor.parameter import (
@@ -39,8 +42,8 @@ logger = init_logger(__name__)
 
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
-    supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
-    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
+    supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP, None]
+    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP]
 
     def __init__(
         self,
@@ -50,22 +53,8 @@ class QuarkOCP_MX(QuarkScheme):
     ):
         super().__init__(weight_quant_key, activation_quant_key)
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
-        self.weight_dtype = next(
-            dtype
-            for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
-            if quant_key == weight_quant_key
-        )
-        self.input_dtype = (
-            next(
-                dtype
-                for dtype, quant_key in _ACTIVATION_QUANT_KEY_MAP.items()
-                if quant_key == activation_quant_key
-            )
-            if activation_quant_key is not None
-            else None
-        )
 
-        if self.weight_dtype == "mxfp4":
+        if self.weight_quant_key == kMxfp4Static:
             self.packed_factor: int | Fraction = 2
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
@@ -79,29 +68,36 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         if current_platform.supports_mx() and (
-            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+            self.activation_quant_key != kMxfp4Dynamic
+            or self.weight_quant_key != kMxfp4Static
         ):
             logger.warning_once(
                 "The current platform supports native MXFP4/MXFP6 "
-                f"computation, but kernels for input_dtype={self.input_dtype} "
-                f"and weight_dtype={self.weight_dtype} are not yet integrated "
+                "computation, but kernels for "
+                f"activation_quant_key={self.activation_quant_key} and "
+                f"weight_quant_key={self.weight_quant_key} are not yet integrated "
                 "in vLLM. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
             )
 
-    def get_packed_dim(self, dim: int, quant_dtype: str):
-        if quant_dtype == "mxfp4":
+    def get_packed_dim(self, dim: int, quant_key: QuantKey):
+        if quant_key in {kMxfp4Static, kMxfp4Dynamic}:
             assert dim % 2 == 0
             return dim // 2
-        elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
+        elif quant_key in {
+            kMxfp6E2M3Dynamic,
+            kMxfp6E2M3Static,
+            kMxfp6E3M2Dynamic,
+            kMxfp6E3M2Static,
+        }:
             # FP6 packs 4 * 6 = 24 bits on 3 bytes.
             assert (dim * 3) % 4 == 0
             return (dim * 3) // 4
         else:
             raise NotImplementedError(
-                "Unsupported quant_dtype in QuarkOCP_MX.get_packed_dim, "
-                f"got quant_dtype={quant_dtype}. Something is wrong, please "
+                "Unsupported quant_key in QuarkOCP_MX.get_packed_dim, "
+                f"got quant_key={quant_key}. Something is wrong, please "
                 "open an issue."
             )
 
@@ -167,7 +163,9 @@ class QuarkOCP_MX(QuarkScheme):
             weight = PackedvLLMParameter(
                 data=torch.empty(
                     output_size_per_partition,
-                    self.get_packed_dim(input_size_per_partition, self.weight_dtype),
+                    self.get_packed_dim(
+                        input_size_per_partition, self.weight_quant_key
+                    ),
                     dtype=torch.uint8,
                 ),
                 input_dim=1,

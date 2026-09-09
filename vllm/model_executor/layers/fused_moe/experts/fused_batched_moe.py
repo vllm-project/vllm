@@ -573,7 +573,6 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert self.quant_config.ocp_mx_scheme is None, "NYI"
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -797,7 +796,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert self.quant_config.ocp_mx_scheme is None, "NYI"
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

@@ -13,11 +13,7 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
-from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
-    activation_quant_dtype,
-)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -1870,26 +1866,68 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
-# Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
+# Every activation-quantizing OCP MX dtype must map to a `quant_dtype` that
 # `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
 # the activation untouched, so a name it does not know (e.g. "mxfp6" instead of
 # "mxfp6_e3m2") silently skips the fake-quantization the emulation exists for.
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
-@pytest.mark.parametrize("ocp_mx_scheme", list(OCP_MX_Scheme))
-def test_emulation_activation_quant_dtype_is_dispatchable(ocp_mx_scheme):
-    quant_dtype = activation_quant_dtype(ocp_mx_scheme)
+@pytest.mark.parametrize(
+    ("activation_dtype", "expected_quant_dtype"),
+    [
+        (None, None),
+        ("mxfp4", "mxfp4"),
+        ("mxfp6_e3m2", "mxfp6_e3m2"),
+        ("mxfp6_e2m3", "mxfp6_e2m3"),
+        ("fp8", current_platform.fp8_dtype()),
+    ],
+)
+def test_emulation_activation_quant_dtype_is_dispatchable(
+    activation_dtype, expected_quant_dtype
+):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        FusedMoEQuantDesc,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
 
-    if "_a_" not in ocp_mx_scheme.value:
-        assert quant_dtype is None, "weight-only schemes must not quantize activations"
+    quant_config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(activation_dtype),
+        _a2=FusedMoEQuantDesc(activation_dtype),
+        _w1=FusedMoEQuantDesc("mxfp4"),
+        _w2=FusedMoEQuantDesc("mxfp4"),
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device=current_platform.device_type,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    experts = OCP_MXQuantizationEmulationTritonExperts(moe_config, quant_config)
+
+    assert experts.quant_dtype == expected_quant_dtype
+    if experts.quant_dtype is None:
         return
 
     a = torch.randn(64, 128, dtype=torch.bfloat16, device="cuda")
     a_scale = torch.ones(1, dtype=torch.float32, device="cuda")
     out, _ = moe_kernel_quantize_input(
-        a, a_scale, quant_dtype, False, None, quantization_emulation=True
+        a, a_scale, experts.quant_dtype, False, None, quantization_emulation=True
     )
     assert not torch.equal(out, a), (
-        f"{ocp_mx_scheme.value} -> quant_dtype={quant_dtype!r} left the activation"
+        f"{activation_dtype} -> quant_dtype={experts.quant_dtype!r} left the activation"
         " unquantized; moe_kernel_quantize_input does not dispatch on it"
     )
 
@@ -1999,11 +2037,9 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         w1_scale=w13_scale,
         w2_scale=w2_scale,
     )
-    assert a_mxfp6.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2
     out_a_mxfp6 = run(a_mxfp6)
 
     weight_only = mxfp4_w4a16_moe_quant_config(w1_scale=w13_scale, w2_scale=w2_scale)
-    assert weight_only.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4
     out_weight_only = run(weight_only)
 
     max_diff = (out_a_mxfp6.float() - out_weight_only.float()).abs().max().item()

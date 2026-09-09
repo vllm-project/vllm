@@ -1463,7 +1463,6 @@ def fused_experts_op(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1489,7 +1488,6 @@ def fused_experts_op(
         use_int8_w8a8,
         use_int8_w8a16,
         use_int4_w4a16,
-        ocp_mx_scheme,
         per_channel_quant,
         global_num_experts,
         expert_map,
@@ -1517,7 +1515,6 @@ def fused_experts_op_fake(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1618,7 +1615,6 @@ def fused_experts(
         use_int8_w8a8=quant_config.use_int8_w8a8,
         use_int8_w8a16=quant_config.use_int8_w8a16,
         use_int4_w4a16=quant_config.use_int4_w4a16,
-        ocp_mx_scheme=quant_config.ocp_mx_scheme,
         per_channel_quant=quant_config.per_act_token_quant,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
@@ -1665,7 +1661,6 @@ def fused_experts_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1679,12 +1674,6 @@ def fused_experts_impl(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if ocp_mx_scheme is not None:
-        raise NotImplementedError(
-            f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
-            "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
-        )
-
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
 

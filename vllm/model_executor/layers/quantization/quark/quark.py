@@ -42,8 +42,8 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    _ACTIVATION_QUANT_KEY_MAP,
-    _WEIGHT_QUANT_KEY_MAP,
+    _ACTIVATION_QUANT_DTYPE_MAP,
+    _WEIGHT_QUANT_DTYPE_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -709,7 +709,7 @@ class QuarkConfig(QuantizationConfig):
             return QuantKeyMatch(False, None, None)
 
         weight_dtype = weight_quant["dtype"].replace("fp", "mxfp")
-        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
+        weight_quant_key = _WEIGHT_QUANT_DTYPE_MAP[weight_dtype]
         if input_quant is None:
             activation_quant_key = None
         elif not input_quant.get("is_dynamic"):
@@ -730,14 +730,14 @@ class QuarkConfig(QuantizationConfig):
             activation_quant_key = kFp8DynamicTensorSym
         else:
             input_dtype = input_quant["dtype"].replace("fp", "mxfp")
-            if input_dtype not in _ACTIVATION_QUANT_KEY_MAP:
+            if input_dtype not in _ACTIVATION_QUANT_DTYPE_MAP:
                 raise ValueError(
                     f"Unsupported input_dtype={input_dtype} in Quark's vLLM "
                     "integration. Supported activation dtypes are "
-                    f"{_ACTIVATION_QUANT_KEY_MAP.keys()}, or None for "
+                    f"{_ACTIVATION_QUANT_DTYPE_MAP.keys()}, or None for "
                     "weight-only quantization."
                 )
-            activation_quant_key = _ACTIVATION_QUANT_KEY_MAP[input_dtype]
+            activation_quant_key = _ACTIVATION_QUANT_DTYPE_MAP[input_dtype]
         return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
     @staticmethod

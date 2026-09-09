@@ -13,14 +13,16 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
-    OCP_MX_Scheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
 
 if has_triton_kernels():
     try:
@@ -39,7 +41,6 @@ def _get_config_dtype_str(
     use_fp8_w8a16: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
 ) -> str | None:
     """
     Return a string used to construct the filename that contains the
@@ -54,11 +55,6 @@ def _get_config_dtype_str(
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
-    elif ocp_mx_scheme is not None:
-        # The output of this function is passed to `try_get_optimal_moe_config`,
-        # and as we only simulate OCP MX execution in fused_moe for now,
-        # we will NOT look for `*,dtype=w_mxfp4_a_mxfp4.json` for now.
-        return None
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
@@ -400,25 +396,6 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "nvfp4"
 
     @property
-    def ocp_mx_scheme(self) -> str | None:
-        if not hasattr(self, "_ocp_mx_scheme"):
-            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
-                self._w1.dtype is not None and not isinstance(self._w1.dtype, str)
-            ):
-                self._ocp_mx_scheme = None
-            else:
-                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
-                    self._a1.dtype, self._w1.dtype
-                )
-
-                if ocp_mx_scheme is not None:
-                    ocp_mx_scheme = ocp_mx_scheme.value
-
-                self._ocp_mx_scheme = ocp_mx_scheme
-
-        return self._ocp_mx_scheme
-
-    @property
     def use_mxfp4_w4a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == "mxfp4"
 
@@ -445,7 +422,6 @@ class FusedMoEQuantConfig:
             use_fp8_w8a16=self.use_fp8_w8a16,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
-            ocp_mx_scheme=self.ocp_mx_scheme,
             dtype=dtype,
         )
 
@@ -783,7 +759,7 @@ def ocp_mx_moe_quant_config(
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
-    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    Construct a quant config for OCP MX activations and weights.
     """
     assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
