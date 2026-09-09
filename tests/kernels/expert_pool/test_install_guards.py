@@ -66,3 +66,45 @@ def test_top_k_beyond_the_lane_cap_is_rejected():
         with pytest.raises(ValueError, match="0 < top_k"):
             inst._check_top_k(bad)
     inst._check_top_k(inst.MAX_DECODE_LANES)
+
+
+def _routed(rows=4, top_k=2, use_ep=False, dp_size=1, sp=False, method=None):
+    # The layer-construction guard runs before create_weights; it reads only
+    # these attributes, so a namespace stands in for the RoutedExperts.
+    return SimpleNamespace(
+        _moe_expert_pool_rows=rows,
+        quant_method=method or _method(),
+        moe_config=SimpleNamespace(
+            experts_per_token=top_k,
+            moe_parallel_config=SimpleNamespace(
+                use_ep=use_ep,
+                ep_size=2 if use_ep else 1,
+                dp_size=dp_size,
+                is_sequence_parallel=sp,
+            ),
+        ),
+    )
+
+
+def test_layer_guard_accepts_the_supported_geometry():
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    RoutedExperts._validate_expert_pool_supported(_routed())
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        (_routed(rows=1), "fewer than the 2 experts"),
+        (_routed(use_ep=True), "expert parallelism"),
+        (_routed(dp_size=2), "data parallelism"),
+        (_routed(sp=True), "sequence parallelism"),
+        (_routed(method=_method(NvFp4MoeBackend.VLLM_CUTLASS)), "Marlin"),
+        (_routed(method=SimpleNamespace(nvfp4_backend=None)), "Marlin"),
+    ],
+)
+def test_layer_guard_rejects_before_any_weight_is_allocated(bad, match):
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    with pytest.raises(ValueError, match=match):
+        RoutedExperts._validate_expert_pool_supported(bad)
