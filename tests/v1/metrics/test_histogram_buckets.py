@@ -106,6 +106,7 @@ DEFAULT_BUCKET_SNAPSHOTS: dict[str, list[float]] = {
         16384,
     ],
     "request_params_n": [1, 2, 5, 10, 20],
+    "request_num_preemptions": [1, 2, 3, 4, 5, 10, 20],
     "kv_cache_residency": [
         0.001,
         0.002,
@@ -142,6 +143,7 @@ METRIC_FAMILIES: dict[str, str] = {
     "vllm:request_time_per_output_token_seconds": "inter_token_latency",
     "vllm:iteration_tokens_total": "iteration_tokens",
     "vllm:request_params_n": "request_params_n",
+    "vllm:request_num_preemptions": "request_num_preemptions",
     "vllm:request_prompt_tokens": "request_tokens",
     "vllm:request_generation_tokens": "request_tokens",
     "vllm:request_max_num_generation_tokens": "request_tokens",
@@ -210,13 +212,14 @@ def test_buckets_return_fresh_copies():
 
 
 def test_bucket_family_keys():
-    """The override vocabulary is exactly the seven known families."""
+    """The override vocabulary is exactly the known families."""
     assert {
         "request_latency",
         "time_to_first_token",
         "inter_token_latency",
         "iteration_tokens",
         "request_params_n",
+        "request_num_preemptions",
         "request_tokens",
         "kv_cache_residency",
     } == BUCKET_FAMILY_KEYS

@@ -15,6 +15,7 @@ BucketFamilyKey = Literal[
     "inter_token_latency",
     "iteration_tokens",
     "request_params_n",
+    "request_num_preemptions",
     "request_tokens",
     "kv_cache_residency",
 ]
@@ -121,6 +122,10 @@ max-num-batched-tokens budget."""
 REQUEST_PARAMS_N_BUCKETS: tuple[float, ...] = (1, 2, 5, 10, 20)
 """Small integer counts for the ``n`` sampling parameter."""
 
+REQUEST_NUM_PREEMPTIONS_BUCKETS: tuple[float, ...] = (1, 2, 3, 4, 5, 10, 20)
+"""Per-request preemption counts: unit resolution over the common 1-5 range,
+coarsening for repeatedly preempted requests."""
+
 KV_CACHE_RESIDENCY_BUCKETS: tuple[float, ...] = (
     0.001,
     0.002,
@@ -153,6 +158,7 @@ _STATIC_FAMILY_DEFAULTS: dict[str, tuple[float, ...]] = {
     "inter_token_latency": INTER_TOKEN_LATENCY_BUCKETS,
     "iteration_tokens": ITERATION_TOKENS_BUCKETS,
     "request_params_n": REQUEST_PARAMS_N_BUCKETS,
+    "request_num_preemptions": REQUEST_NUM_PREEMPTIONS_BUCKETS,
     "kv_cache_residency": KV_CACHE_RESIDENCY_BUCKETS,
 }
 

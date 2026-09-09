@@ -730,6 +730,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         iteration_tokens_buckets = histogram_buckets("iteration_tokens")
         request_params_n_buckets = histogram_buckets("request_params_n")
+        request_num_preemptions_buckets = histogram_buckets("request_num_preemptions")
         time_to_first_token_buckets = histogram_buckets("time_to_first_token")
         inter_token_latency_buckets = histogram_buckets("inter_token_latency")
         request_latency_buckets = histogram_buckets("request_latency")
@@ -886,7 +887,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_request_num_preemptions = self._histogram_cls(
             name="vllm:request_num_preemptions",
             documentation="Histogram of the number of times a request was preempted.",
-            buckets=[1, 2, 3, 4, 5, 10, 20],
+            buckets=request_num_preemptions_buckets,
             labelnames=labelnames,
         )
         self.histogram_request_num_preemptions = create_metric_per_engine(
