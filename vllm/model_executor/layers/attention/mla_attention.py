@@ -1552,6 +1552,7 @@ class MLACommonPrefillMetadata:
         max_seq_len: int
         seq_lens: torch.Tensor
         token_to_seq: torch.Tensor
+        all_rows_active: bool
 
         # for mla DCP
         padded_local_seq_lens: list[int] | None = None
@@ -2129,6 +2130,8 @@ def build_mla_chunked_context_metadata(
             max_seq_len=max(plan.seq_lens),
             seq_lens=seq_lens_cpu[request_slice],
             token_to_seq=token_to_seq[token_slice],
+            all_rows_active=all(length > 0 for length in query_lens)
+            and all(length > 0 for length in plan.seq_lens),
             num_local_context_tokens=local_token_slice.stop - local_token_slice.start,
         )
         if use_dcp:
@@ -2534,6 +2537,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
                 prefill_backend=self._prefill_backend,
+                query_lens_cpu=prefill_query_lens_cpu,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
@@ -2542,6 +2546,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
+                assert seq_lens is not None, (
+                    "MLA DCP decode requires seq_lens on CommonAttentionMetadata"
+                )
+                if dcp_local_seq_lens is None:
+                    dcp_local_seq_lens = get_dcp_local_seq_lens(
+                        seq_lens,
+                        dcp_size=self.dcp_world_size,
+                        dcp_rank=get_dcp_group().rank_in_group,
+                        cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    )
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 
