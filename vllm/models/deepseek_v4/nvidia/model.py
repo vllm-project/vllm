@@ -21,6 +21,11 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.mhc import (
+    _HAS_OPTIMIZED_FUSIONS,
+    mhc_post_hc_head_norm_fused,
+    mhc_post_mean_fused,
+)
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -1436,18 +1441,47 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
             if idx + 1 in self.aux_hidden_state_layers:
                 # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
-                aux_hidden_state = aux_recon.mean(dim=1)
+                if _HAS_OPTIMIZED_FUSIONS:
+                    aux_recon, aux_hidden_state = mhc_post_mean_fused(
+                        hidden_states, residual, post_mix, res_mix
+                    )
+                else:
+                    aux_recon = mhc_post_tilelang(
+                        hidden_states, residual, post_mix, res_mix
+                    )
+                    aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
+        # Last PP rank: fold the final MHC post + hc_head + RMSNorm into a
+        # single kernel. Under sequence parallel each rank only holds a token
+        # shard, and the MTP draft reads the pre-hc_head stash in full-sequence
+        # order after the all-gather below, so the kernel-side stash must be
+        # disabled when both SP and the MTP buffer are active.
+        _fused_applied = False
         if layer is not None:
             # Reuse if the last layer was captured as an aux hidden state
             if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
+            elif (get_pp_group().is_last_rank and _HAS_OPTIMIZED_FUSIONS
+                  and not (self.use_sequence_parallel
+                           and self._mtp_hidden_buffer is not None)):
+                hidden_states = mhc_post_hc_head_norm_fused(
+                    hidden_states,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    self.hc_head_fn,
+                    self.hc_head_scale,
+                    self.hc_head_base,
+                    self.norm.weight.data,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.norm.variance_epsilon,
+                    mtp_buffer=self._mtp_hidden_buffer,
+                )
+                _fused_applied = True
             else:
                 hidden_states = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
@@ -1464,19 +1498,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
-        if self._mtp_hidden_buffer is not None:
+        # Stash the pre-hc_head residual for the MTP draft, unless the fused
+        # kernel already wrote it into the buffer (only possible when not
+        # sequence-parallel, where the stash and the buffer share one global
+        # token order).
+        if self._mtp_hidden_buffer is not None and not _fused_applied:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = hc_head_fused_kernel_tilelang(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-        )
-        hidden_states = self.norm(hidden_states)
+        if not _fused_applied:
+            hidden_states = hc_head_fused_kernel_tilelang(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+            hidden_states = self.norm(hidden_states)
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
