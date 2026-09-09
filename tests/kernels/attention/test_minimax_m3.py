@@ -1015,6 +1015,120 @@ def test_decode_index_topk_correctness(
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
+def _decode_topk_boundary_inputs(
+    decode_query_len: int, *, tied: bool = False, score_sign: int = 1
+):
+    num_heads, max_blocks, topk = 2, 17, 6
+    total_q = 3 * decode_query_len
+    seq_lens = torch.tensor(
+        (max_blocks * BLOCK_SIZE - 1, 129, 0), device="cuda", dtype=torch.int32
+    )
+    idx_q = torch.zeros(total_q, num_heads, 16, device="cuda")
+    idx_q[..., 0] = 1
+    scores = torch.arange(max_blocks, device="cuda", dtype=torch.float32)
+    if tied:
+        scores = scores // 4
+    cache = torch.zeros(3, max_blocks, BLOCK_SIZE, 16, device="cuda")
+    cache[..., 0] = score_sign * scores[None, :, None]
+    cache[:, 14, :, 0] = float("nan")
+    output_storage = torch.full(
+        (total_q + 2, num_heads, 2 * topk), -2, device="cuda", dtype=torch.int32
+    )
+    score_storage = torch.full(
+        (max_blocks + 7, total_q, num_heads), float("nan"), device="cuda"
+    )
+    return dict(
+        idx_q=idx_q,
+        index_kv_cache=cache.reshape(-1, BLOCK_SIZE, 16),
+        block_table=torch.arange(
+            3 * max_blocks, device="cuda", dtype=torch.int32
+        ).reshape(3, max_blocks),
+        seq_lens=seq_lens,
+        max_seq_len=max_blocks * BLOCK_SIZE - 1,
+        topk=topk,
+        init_blocks=2,
+        local_blocks=2,
+        num_kv_heads=num_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=4,
+        out=output_storage[..., ::2].transpose(0, 1),
+        score_out=score_storage.permute(2, 1, 0),
+    ), output_storage
+
+
+@pytest.mark.parametrize("decode_query_len", [1, 4])
+def test_decode_index_topk_nan_forced_blocks_and_strides(
+    decode_query_len: int, monkeypatch
+):
+    """Keep forced blocks, discard a NaN candidate, and preserve output padding."""
+    from vllm.models.minimax_m3.common.ops import index_topk
+
+    score = index_topk.minimax_m3_index_decode_score
+    counters = []
+
+    def score_with_poisoned_counter(*args, **kwargs):
+        counter = kwargs["_topk_counter"]
+        counter.fill_(123)
+        counters.append(counter)
+        return score(*args, **kwargs)
+
+    monkeypatch.setattr(
+        index_topk, "minimax_m3_index_decode_score", score_with_poisoned_counter
+    )
+    kwargs, output_storage = _decode_topk_boundary_inputs(decode_query_len)
+    actual = minimax_m3_index_decode(**kwargs)
+    expected = torch.full_like(actual, -1)
+    expected[:, :decode_query_len] = torch.tensor(
+        (0, 1, 12, 13, 15, 16), device="cuda", dtype=torch.int32
+    )
+    for offset in range(decode_query_len):
+        num_blocks = (129 - decode_query_len + offset + BLOCK_SIZE) // BLOCK_SIZE
+        expected[:, decode_query_len + offset, :num_blocks] = torch.arange(
+            num_blocks, device="cuda", dtype=torch.int32
+        )
+    assert torch.equal(actual.sort(dim=-1).values, expected.sort(dim=-1).values)
+    assert torch.all(output_storage[..., 1::2] == -2)
+    assert torch.all(output_storage[-2:, :, ::2] == -2)
+    assert torch.isnan(kwargs["score_out"][..., 17:]).all()
+    assert len(counters) == 1
+    assert torch.count_nonzero(counters[0]) == 0
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_decode_index_topk_concurrent_calls_and_replay(use_graph: bool):
+    """Independent calls preserve exact tied-ID ordering on separate streams."""
+    inputs = [
+        _decode_topk_boundary_inputs(4, tied=True, score_sign=sign)[0]
+        for sign in (1, -1)
+    ]
+    expected = [minimax_m3_index_decode(**kwargs).clone() for kwargs in inputs]
+    torch.accelerator.synchronize()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    graphs = []
+    outputs = []
+    if use_graph:
+        for stream, kwargs in zip(streams, inputs):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                output = minimax_m3_index_decode(**kwargs)
+            graphs.append(graph)
+            outputs.append(output)
+
+    observed = []
+    for _ in range(16):
+        for i, (stream, kwargs) in enumerate(zip(streams, inputs)):
+            with torch.cuda.stream(stream):
+                if use_graph:
+                    graphs[i].replay()
+                    output = outputs[i]
+                else:
+                    output = minimax_m3_index_decode(**kwargs)
+                observed.append((i, output.clone()))
+    torch.accelerator.synchronize()
+    for i, actual in observed:
+        assert torch.equal(actual, expected[i])
+
+
 @pytest.mark.parametrize(
     (
         "max_block",
