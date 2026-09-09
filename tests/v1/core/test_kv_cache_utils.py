@@ -3604,9 +3604,6 @@ def test_unpadded_page_size_includes_per_token_head_scales():
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
     assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
-    assert spec.supported_kernel_block_sizes == tuple(
-        TritonAttentionBackend.get_supported_kernel_block_sizes()
-    )
 
 
 def test_page_size_padded_wins():

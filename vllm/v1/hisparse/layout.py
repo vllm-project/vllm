@@ -10,7 +10,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import select_common_block_size_from_constraints
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheGroupRole,
@@ -106,7 +105,6 @@ def create_hisparse_layout(
     constraints = [
         spec.supported_kernel_block_sizes
         for spec in (*source_specs.values(), *indexer_specs.values())
-        if isinstance(spec, AttentionSpec)
     ]
     try:
         gpu_block_size = select_common_block_size_from_constraints(

@@ -27,7 +27,11 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseCacheHandle
     from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 
-from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayout,
+    MLAAttentionSpec,
+    get_kv_quant_mode,
+)
 
 
 class AttentionType(str, Enum):
@@ -175,10 +179,14 @@ class AttentionBackend(ABC):
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
         """
-        return replace(
-            spec,
-            supported_kernel_block_sizes=tuple(cls.get_supported_kernel_block_sizes()),
-        )
+        if isinstance(spec, MLAAttentionSpec):
+            return replace(
+                spec,
+                supported_kernel_block_sizes=tuple(
+                    cls.get_supported_kernel_block_sizes()
+                ),
+            )
+        return spec
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:

@@ -456,7 +456,6 @@ class AttentionSpec(KVCacheSpec):
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    supported_kernel_block_sizes: tuple[int | MultipleOf, ...] = ()
     num_head_slots: int | None = None
     """H of the logical ``[B, H, N, C]`` page when packing diverges from one
     slot per KV head. None means one slot per KV head. Published by the backend.
@@ -583,7 +582,6 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             tokens_per_state=specs[0].tokens_per_state,
@@ -619,6 +617,7 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 
 @dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
+    supported_kernel_block_sizes: tuple[int | MultipleOf, ...] = ()
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
@@ -729,7 +728,6 @@ class RSWASpec(FullAttentionSpec):
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
-            supported_kernel_block_sizes=base.supported_kernel_block_sizes,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
             tokens_per_state=base.tokens_per_state,
@@ -919,7 +917,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
-            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
@@ -1130,7 +1127,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
@@ -1407,7 +1403,6 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
-
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
