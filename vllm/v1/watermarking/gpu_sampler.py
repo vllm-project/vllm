@@ -11,6 +11,7 @@ from vllm.v1.watermarking.watermarker import Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 logger = init_logger(__name__)
 
@@ -72,6 +73,7 @@ class GPUWatermarkSampler(Sampler):
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
+        repeated_contexts = self._get_repeated_contexts(expanded_idx_mapping, contexts)
 
         def random_sample(sample_logits: torch.Tensor) -> torch.Tensor:
             return gumbel_sample(
@@ -91,24 +93,37 @@ class GPUWatermarkSampler(Sampler):
             random_sample,
         )
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
-        watermarking = self.watermarking.gpu[expanded_idx_mapping] & (temperatures != 0)
-        if not np.all(enabled):
-            unwatermarked = random_sample(processed_logits)
-            sampled = torch.where(watermarking, output.token_ids, unwatermarked)
-            output_logits = output.logits
-            if output.logits is not processed_logits:
-                output_logits = torch.where(
-                    watermarking.unsqueeze(-1), output.logits, processed_logits
-                )
-        else:
-            sampled = output.token_ids
-            output_logits = output.logits
+        watermarking = (
+            self.watermarking.gpu[expanded_idx_mapping]
+            & (temperatures != 0)
+            & ~repeated_contexts
+        )
+        unwatermarked = random_sample(processed_logits)
+        sampled = torch.where(watermarking, output.token_ids, unwatermarked)
+        output_logits = output.logits
+        if output.logits is not processed_logits:
+            output_logits = torch.where(
+                watermarking.unsqueeze(-1), output.logits, processed_logits
+            )
         sampled = torch.where(
             temperatures == 0,
             processed_logits.argmax(dim=-1),
             sampled,
         )
         return sampled, output_logits
+
+    def _get_repeated_contexts(
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        contexts: torch.Tensor,
+    ) -> torch.Tensor:
+        return repeated_context_mask(
+            self.req_states.all_token_ids.gpu,
+            expanded_idx_mapping,
+            self.req_states.prompt_len.gpu,
+            self.req_states.total_len.gpu,
+            contexts,
+        )
 
     def _get_contexts(self, expanded_idx_mapping: torch.Tensor) -> torch.Tensor:
         context_width = self.watermarker.context_width
