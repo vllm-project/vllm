@@ -2180,14 +2180,17 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-def test_remote_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path):
+@pytest.mark.parametrize("remote_load", [False, True])
+def test_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path, remote_load):
     (tmp_path / "config.json").write_text(
         '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
     )
     scheduler = create_scheduler(
         model=str(tmp_path),
         skip_tokenizer_init=True,
-        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+        use_kv_connector=mock_kv(
+            matched_tokens=16 if remote_load else 0, is_async=remote_load
+        ),
         block_size=16,
     )
     request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
@@ -2204,8 +2207,12 @@ def test_remote_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path
     scheduler.schedule()
     assert request.kv_allocation_started_at is None
     assert request.kv_transfer_metrics["kv_allocation_wait_time_ms"] >= 1000
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert request.remote_kv_wait_started_at is not None
+    if remote_load:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert request.remote_kv_wait_started_at is not None
+    else:
+        assert request.status == RequestStatus.RUNNING
+        assert request.remote_kv_wait_started_at is None
 
 
 @pytest.mark.parametrize("is_async", [False, True])

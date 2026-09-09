@@ -1083,7 +1083,10 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
-                if load_kv_async and request.kv_allocation_started_at is None:
+                if (
+                    self.connector is not None
+                    and request.kv_allocation_started_at is None
+                ):
                     request.kv_allocation_started_at = time.monotonic()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

@@ -241,7 +241,11 @@ async def test_serve_tokens_returns_enabled_request_metrics(stream):
         model=MODEL_NAME,
         stream=stream,
         kv_transfer_params={
-            "prefill_metrics": {"queue_time_ms": 12.0, "time_to_first_token_ms": 25.0}
+            "prefill_metrics": {
+                "queue_time_ms": 12.0,
+                "time_to_first_token_ms": 25.0,
+                "kv_allocation_wait_time_ms": 3.0,
+            }
         },
     )
 
@@ -265,6 +269,7 @@ async def test_serve_tokens_returns_enabled_request_metrics(stream):
     assert result["kv_transfer_bytes"] == 1024
     assert result["prefill_queue_time_ms"] == 12.0
     assert result["prefill_time_to_first_token_ms"] == 25.0
+    assert result["prefill_kv_allocation_wait_time_ms"] == 3.0
 
 
 @pytest.mark.asyncio

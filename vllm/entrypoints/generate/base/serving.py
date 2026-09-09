@@ -101,6 +101,9 @@ def build_per_request_timing_metrics(
         prefill_time_to_first_token_ms=(kv_transfer_params or {})
         .get("prefill_metrics", {})
         .get("time_to_first_token_ms"),
+        prefill_kv_allocation_wait_time_ms=(kv_transfer_params or {})
+        .get("prefill_metrics", {})
+        .get("kv_allocation_wait_time_ms"),
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,

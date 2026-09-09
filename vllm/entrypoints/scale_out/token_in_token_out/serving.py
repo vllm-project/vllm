@@ -390,6 +390,9 @@ class ServingTokens(GenerateBaseServing):
             response.kv_transfer_params["prefill_metrics"] = {
                 "queue_time_ms": request_metrics.queue_time_ms,
                 "time_to_first_token_ms": request_metrics.time_to_first_token_ms,
+                "kv_allocation_wait_time_ms": (
+                    request_metrics.kv_allocation_wait_time_ms
+                ),
             }
 
         # Log complete response if output logging is enabled

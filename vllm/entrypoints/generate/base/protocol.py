@@ -64,7 +64,7 @@ class PerRequestMetrics(OpenAIBaseModel):
     kv_allocation_wait_time_ms: float | None = Field(
         default=None,
         description=(
-            "Wall time from the first remote-KV allocation attempt to success, "
+            "Accumulated wall time from each initial KV allocation attempt to success, "
             "including capacity retries; excludes time before the first attempt."
         ),
     )
@@ -91,6 +91,7 @@ class PerRequestMetrics(OpenAIBaseModel):
     kv_transfer_bytes: int | None = None
     prefill_queue_time_ms: float | None = None
     prefill_time_to_first_token_ms: float | None = None
+    prefill_kv_allocation_wait_time_ms: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):
