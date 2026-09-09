@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 from tqdm import tqdm
@@ -45,6 +46,20 @@ _O = TypeVar(
     default=RequestOutput | PoolingRequestOutput,
 )
 _R = TypeVar("_R", default=Any)
+
+
+def _can_batch_engine_requests(prompts: Sequence[PromptType]) -> bool:
+    """Whether prompts need no expensive or asynchronous frontend work."""
+    return len(prompts) > 1 and all(
+        isinstance(prompt, list)
+        or (
+            isinstance(prompt, dict)
+            and "prompt_token_ids" in prompt
+            and "multi_modal_data" not in prompt
+            and "prompt_embeds" not in prompt
+        )
+        for prompt in prompts
+    )
 
 
 class OfflineInferenceMixin:
@@ -312,6 +327,7 @@ class OfflineInferenceMixin:
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(seq_prompts))
+        batch_engine_requests = _can_batch_engine_requests(seq_prompts)
 
         return self._render_and_add_requests(
             prompts=(
@@ -329,6 +345,7 @@ class OfflineInferenceMixin:
             params=seq_params,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
+            batch_engine_requests=batch_engine_requests,
         )
 
     def _run_completion(
@@ -535,21 +552,28 @@ class OfflineInferenceMixin:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
+        batch_engine_requests: bool = False,
     ) -> list[str]:
         added_request_ids: list[str] = []
+        batch_context = (
+            self.llm_engine.engine_core.batch_add_requests()
+            if batch_engine_requests
+            else nullcontext()
+        )
 
         try:
-            for i, prompt in enumerate(prompts):
-                request_id = self._add_request(
-                    prompt,
-                    params[i],
-                    lora_request=self._resolve_mm_lora(
+            with batch_context:
+                for i, prompt in enumerate(prompts):
+                    request_id = self._add_request(
                         prompt,
-                        None if lora_requests is None else lora_requests[i],
-                    ),
-                    priority=0 if priorities is None else priorities[i],
-                )
-                added_request_ids.append(request_id)
+                        params[i],
+                        lora_request=self._resolve_mm_lora(
+                            prompt,
+                            None if lora_requests is None else lora_requests[i],
+                        ),
+                        priority=0 if priorities is None else priorities[i],
+                    )
+                    added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
