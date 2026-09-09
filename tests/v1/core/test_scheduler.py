@@ -2696,6 +2696,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler._finished_req_ids_pending_kv_recv) == 0
+    assert len(scheduler._finished_req_ids_pending_kv_send) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -5071,6 +5073,43 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        pytest.param([("recv",), ("send",)], id="recv_then_send"),
+        pytest.param([("send",), ("recv",)], id="send_then_recv"),
+        pytest.param([("recv", "send")], id="same_output"),
+    ],
+)
+def test_aborted_request_waits_for_all_kv_transfers(outputs):
+    scheduler = create_scheduler(use_kv_connector=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # Async recv in flight (recv claim) plus an async save started by the
+    # connector on teardown (send claim).
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.connector.request_finished = Mock(return_value=(True, None))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    # Normally drained by the next schedule() call.
+    scheduler.finished_req_ids.clear()
+    assert request.request_id in scheduler.requests
+
+    for i, directions in enumerate(outputs):
+        scheduler._update_from_kv_xfer_finished(
+            KVConnectorOutput(
+                finished_recving={request.request_id} if "recv" in directions else None,
+                finished_sending={request.request_id} if "send" in directions else None,
+            )
+        )
+        if i < len(outputs) - 1:
+            assert request.request_id in scheduler.requests
+        else:
+            assert request.request_id not in scheduler.requests
+
+    assert_scheduler_empty(scheduler)
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
@@ -5080,8 +5119,9 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
 
     assert not scheduler.has_finished_requests()
 
-    request.status = RequestStatus.FINISHED_STOPPED
-    scheduler.requests[request.request_id] = request
+    scheduler.add_request(request)
+    scheduler.connector.request_finished = Mock(return_value=(True, None))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
     scheduler.finished_req_ids = set()
 
     assert scheduler.has_finished_requests()

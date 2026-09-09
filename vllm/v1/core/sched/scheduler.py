@@ -222,6 +222,11 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # Finished requests whose blocks are still owned by an async transfer.
+        # Recv and send are independent owners, so they are tracked separately.
+        self._finished_req_ids_pending_kv_recv: set[str] = set()
+        self._finished_req_ids_pending_kv_send: set[str] = set()
+
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
@@ -2586,6 +2591,13 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        # Register each block owner so that the last completion to
+        # arrive is the one that frees.
+        if delay_free_blocks:
+            self._finished_req_ids_pending_kv_recv.add(request_id)
+        if connector_delay_free_blocks:
+            self._finished_req_ids_pending_kv_send.add(request_id)
+
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -2594,6 +2606,8 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
+        self._finished_req_ids_pending_kv_recv.discard(request.request_id)
+        self._finished_req_ids_pending_kv_send.discard(request.request_id)
         self._free_request_blocks(request)
         del self.requests[request.request_id]
 
@@ -2997,6 +3011,14 @@ class Scheduler(SchedulerInterface):
             f"{request.status.name} for request {request.request_id}"
         )
 
+    def _free_blocks_if_no_pending_kv_transfer(self, request: Request) -> None:
+        request_id = request.request_id
+        if (
+            request_id not in self._finished_req_ids_pending_kv_recv
+            and request_id not in self._finished_req_ids_pending_kv_send
+        ):
+            self._free_blocks(request)
+
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """
         KV Connector: update the scheduler state based on the output.
@@ -3020,11 +3042,15 @@ class Scheduler(SchedulerInterface):
                 self.finished_recving_kv_req_ids.add(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                assert req_id in self._finished_req_ids_pending_kv_recv
+                self._finished_req_ids_pending_kv_recv.remove(req_id)
+                self._free_blocks_if_no_pending_kv_transfer(req)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            assert req_id in self._finished_req_ids_pending_kv_send
+            self._finished_req_ids_pending_kv_send.remove(req_id)
+            self._free_blocks_if_no_pending_kv_transfer(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self,
