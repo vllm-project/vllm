@@ -391,7 +391,7 @@ def _lookup_ple_embedding_from_pinned_kernel(
     )
 
 
-class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
+class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table loaded into pinned CPU memory and looked up through UVA."""
 
     supports_prefetch: ClassVar[bool] = True
@@ -716,7 +716,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
-            Qwen4ExpPinnedHostEmbedding
+            Qwen4ExpPLEPinnedHostEmbedding
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )

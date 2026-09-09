@@ -26,10 +26,10 @@ from vllm.models.qwen4_exp.common.ple import (
 )
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
-    Qwen4ExpPinnedHostEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
@@ -310,7 +310,7 @@ def test_pinned_ple_post_load_validates_scale_without_staging(
     from vllm.model_executor.model_loader import utils as loader_utils
 
     source = _make_fp8_embedding_layer(monkeypatch, load_scale=load_scale)
-    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     embedding.weight = source.weight
     embedding.weight_scale = source.weight_scale
@@ -457,7 +457,7 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
 def test_pinned_embedding_forward_finalizes_prefetched_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
     embedding._output_dim = 6
@@ -485,7 +485,7 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
 
 
 def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
-    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
     embedding.tp_size = 2
     reduced_dtypes = []
@@ -554,7 +554,7 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
             if fp8_checkpoint
             else Qwen4ExpPLEUnquantizedEmbeddingMethod()
         )
-        embedding = Qwen4ExpPinnedHostEmbedding(
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
             4,
             3,
             params_dtype=torch.bfloat16,
