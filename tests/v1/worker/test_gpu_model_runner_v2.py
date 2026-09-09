@@ -435,8 +435,11 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     runner.adaptive_verification = None
     runner.pooling_runner = None
     runner.encoder_cache = None
-    runner.pp_handler = SimpleNamespace(
-        get_prev_sampled_outputs=lambda: {
+
+    def get_prev_sampled_outputs(draft_tokens_to_update):
+        assert draft_tokens_to_update is req_states.draft_tokens
+        draft_tokens_to_update[req_idx] = 31
+        return {
             "idx_mapping": torch.tensor([req_idx], dtype=torch.int32, device=device),
             "sampled_tokens": torch.tensor(
                 [[20, 21]], dtype=torch.int64, device=device
@@ -444,6 +447,9 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
             "num_sampled": torch.tensor([2], dtype=torch.int32, device=device),
             "num_rejected": torch.zeros(1, dtype=torch.int32, device=device),
         }
+
+    runner.pp_handler = SimpleNamespace(
+        get_prev_sampled_outputs=get_prev_sampled_outputs
     )
     runner.block_tables = SimpleNamespace(
         append_block_ids=lambda *_args, **_kwargs: None,
@@ -485,6 +491,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     assert req_states.total_len.gpu[req_idx].item() == 3
     assert req_states.last_sampled_tokens[req_idx].item() == 10
     assert req_states.all_token_ids.gpu[req_idx, :5].tolist() == [1, 2, 10, 0, 0]
+    assert not req_states.draft_tokens[req_idx].any()
 
 
 @pytest.mark.parametrize(
