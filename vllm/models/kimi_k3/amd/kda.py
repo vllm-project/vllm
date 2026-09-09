@@ -41,13 +41,16 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.ops.kda_chunk import (
+    is_fused_kda_chunk_supported,
+)
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
 )
+from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
-    chunk_kda_with_fused_gate,
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
@@ -210,10 +213,24 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             if isinstance(additional_config, dict)
             else "auto"
         )
-        backend = "triton" if backend == "auto" else backend
-        assert backend == "triton", (
-            "The ROCm Kimi-K3 KDA layer only supports the Triton KDA prefill "
-            f"backend, got {backend!r}."
+        assert backend in ("auto", "triton", "hipkda"), (
+            "The ROCm Kimi-K3 KDA prefill backend must be one of "
+            f"'auto', 'triton' or 'hipkda', got {backend!r}."
+        )
+        if backend == "hipkda" and not is_fused_kda_chunk_supported():
+            raise RuntimeError(
+                "The hipkda KDA chunk kernel requires gfx950 and a "
+                "build that includes it."
+            )
+        # Distinguishes an explicit --kda-prefill-backend=hipkda from auto:
+        # the dispatcher hard-errors if the HIP kernels cannot actually run.
+        self.require_fused_chunk = backend == "hipkda"
+        self.use_fused_chunk = backend == "hipkda" or (
+            backend == "auto" and is_fused_kda_chunk_supported()
+        )
+        logger.info_once(
+            "Kimi-K3 KDA prefill backend: %s",
+            "hipkda" if self.use_fused_chunk else "triton",
         )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -498,6 +515,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # prefill tail only.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
+                # Without a spec split the non-spec tokens are exactly
+                # core_attn_out[:, :num_actual_tokens] in order, so both kernels
+                # can write their slice in place. 
+                write_out_in_place = spec_sequence_masks is None
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
@@ -515,6 +536,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         ssm_state_indices=non_spec_state_indices_tensor[
                             : m.num_decodes
                         ],
+                        out=core_attn_out[:, :nd_tok],
                     )
                     q_ns = q_ns[:, nd_tok:]
                     k_ns = k_ns[:, nd_tok:]
@@ -531,6 +553,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_query_start_loc = non_spec_query_start_loc
                     prefill_state_indices = non_spec_state_indices_tensor
                     prefill_has_initial_state = has_initial_state
+                    nd_tok = 0
 
                 initial_state = gather_initial_states(
                     recurrent_state,
@@ -540,7 +563,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
-                ) = chunk_kda_with_fused_gate(
+                ) = chunk_kda_prefill(
                     q=q_ns,
                     k=k_ns,
                     v=v_ns,
@@ -555,11 +578,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
+                    use_fused_chunk=self.use_fused_chunk,
+                    require_fused_chunk=self.require_fused_chunk,
+                    out=core_attn_out[:, nd_tok:num_actual_tokens]
+                    if write_out_in_place
+                    else None,
                 )
                 # Init cache
                 recurrent_state[prefill_state_indices] = last_recurrent_state
 
-                if split_non_spec:
+                if write_out_in_place:
+                    # Both slices already landed in core_attn_out.
+                    core_attn_out_non_spec = core_attn_out[:, :num_actual_tokens]
+                elif split_non_spec:
                     # Restore decode-first token order for the merge below.
                     core_attn_out_non_spec = torch.cat(
                         [core_attn_out_decode, core_attn_out_non_spec], dim=1
@@ -611,9 +642,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
             core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
         elif core_attn_out_non_spec is not None:
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            if core_attn_out_non_spec.data_ptr() != core_attn_out.data_ptr():
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                    0, :num_actual_tokens
+                ]
         else:
             assert core_attn_out_spec is not None
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
