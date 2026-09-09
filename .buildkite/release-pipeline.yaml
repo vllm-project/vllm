@@ -319,6 +319,7 @@ steps:
       - label: "Build release image - x86_64 - Rubin CUDA 13.4"
         depends_on: ~
         id: build-release-image-x86-rubin-cuda-13-4
+        if: build.env("NIGHTLY") == "1"
         agents:
           queue: cpu_queue_release
         commands:
@@ -348,6 +349,7 @@ steps:
       - label: "Build release image - aarch64 - Rubin CUDA 13.4"
         depends_on: ~
         id: build-release-image-arm64-rubin-cuda-13-4
+        if: build.env("NIGHTLY") == "1"
         agents:
           queue: arm64_cpu_queue_release
         commands:
@@ -576,6 +578,7 @@ steps:
           - build-release-image-x86-rubin-cuda-13-4
           - build-release-image-arm64-rubin-cuda-13-4
         id: create-multi-arch-manifest-rubin-cuda-13-4
+        if: build.env("NIGHTLY") == "1"
         agents:
           queue: small_cpu_queue_release
         commands:
