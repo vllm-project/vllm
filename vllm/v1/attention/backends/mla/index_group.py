@@ -262,7 +262,6 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         decode_query_len: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
-        use_metadata_layout = num_decodes is None and decode_query_len is None
         if num_decodes is None:
             num_decodes = attn_metadata.num_decodes
         if decode_query_len is None:
@@ -277,7 +276,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 req_id_per_token=self.request_ids[:num_decodes],
             )
 
-        if use_metadata_layout:
+        if num_tokens != num_decodes * decode_query_len:
             query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
             physical_topk_indices = self.physical_topk_indices[: num_tokens + 1]
             valid_topk_counts = self.valid_topk_counts[: num_tokens + 1]
