@@ -25,7 +25,7 @@
 # Requires 2 GPUs by default (encode on GPU 0, prefill on GPU 1); the
 # baseline reuses GPU 0 after the encode instance is stopped.
 
-# set -xe
+set -euo pipefail
 
 # Resolve the repository root from the script location instead of `.git`.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -59,6 +59,10 @@ PYTHON="${PYTHON:-python3}"
 LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_scale_out_ec_baseline.txt}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"
+BASELINE_LOG="${LOG_PATH}/scale_out_ec_baseline.log"
+RENDER_LOG="${LOG_PATH}/scale_out_ec_render.log"
+ENCODE_LOG="${LOG_PATH}/scale_out_ec_encode.log"
+PREFILL_LOG="${LOG_PATH}/scale_out_ec_prefill.log"
 
 mkdir -p "$LOG_PATH"
 
@@ -67,10 +71,42 @@ trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
 
 wait_for_server() {
     local port=$1
-    timeout "$TIMEOUT_SECONDS" bash -c "
-        until curl -s localhost:${port}/health > /dev/null; do
-            sleep 1
-        done" && return 0 || return 1
+    local pid=$2
+    local name=$3
+    local deadline=$((SECONDS + TIMEOUT_SECONDS))
+
+    while ((SECONDS < deadline)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "$name instance exited before becoming healthy"
+            return 1
+        fi
+        if curl --max-time 2 -fsS "http://localhost:${port}/health" \
+            > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Timed out waiting for $name instance on port $port"
+    return 1
+}
+
+dump_log() {
+    local name=$1
+    local log=$2
+
+    echo "--- $name log (last 200 lines)"
+    if [[ -f "$log" ]]; then
+        tail -n 200 "$log" || true
+    else
+        echo "Log file not found: $log"
+    fi
+}
+
+dump_scale_out_logs() {
+    dump_log "render" "$RENDER_LOG"
+    dump_log "encode" "$ENCODE_LOG"
+    dump_log "prefill" "$PREFILL_LOG"
 }
 
 cleanup_instances() {
@@ -99,17 +135,23 @@ run_baseline() {
         --enforce-eager \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs "$MAX_NUM_SEQS" \
-        > "$LOG_PATH"/scale_out_ec_baseline.log 2>&1 &
+        > "$BASELINE_LOG" 2>&1 &
     local BASELINE_PID=$!
 
     echo "Waiting for baseline instance to start..."
-    wait_for_server "$BASELINE_PORT"
+    if ! wait_for_server "$BASELINE_PORT" "$BASELINE_PID" "baseline"; then
+        dump_log "baseline" "$BASELINE_LOG"
+        return 1
+    fi
 
-    "$PYTHON" "${SCRIPT_DIR}/test_scale_out_ec_e2e.py" \
+    if ! "$PYTHON" "${SCRIPT_DIR}/test_scale_out_ec_e2e.py" \
         --mode baseline \
         --service_url "http://localhost:$BASELINE_PORT" \
         --model_name "$MODEL" \
-        --baseline_file "$BASELINE_FILE"
+        --baseline_file "$BASELINE_FILE"; then
+        dump_log "baseline" "$BASELINE_LOG"
+        return 1
+    fi
 
     echo "Stopping baseline instance..."
     kill "$BASELINE_PID" 2>/dev/null || true
@@ -133,8 +175,8 @@ run_scale_out_ec() {
     echo "Starting render server on port $RENDER_PORT"
     vllm launch render "$MODEL" \
         --port "$RENDER_PORT" \
-        > "$LOG_PATH"/scale_out_ec_render.log 2>&1 &
-    PIDS+=($!)
+        > "$RENDER_LOG" 2>&1 &
+    PIDS+=("$!")
 
     # Encode-only EC producer instance. It runs the vision encoder and
     # publishes embeddings through the ECExampleConnector shared storage.
@@ -155,8 +197,8 @@ run_scale_out_ec() {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
-        > "$LOG_PATH"/scale_out_ec_encode.log 2>&1 &
-    PIDS+=($!)
+        > "$ENCODE_LOG" 2>&1 &
+    PIDS+=("$!")
 
     # Prefill/decode EC consumer instance. It receives metadata-only
     # features plus ec_transfer_params and loads the embeddings that the
@@ -177,25 +219,37 @@ run_scale_out_ec() {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
-        > "$LOG_PATH"/scale_out_ec_prefill.log 2>&1 &
-    PIDS+=($!)
+        > "$PREFILL_LOG" 2>&1 &
+    PIDS+=("$!")
 
     echo "Waiting for render instance..."
-    wait_for_server "$RENDER_PORT"
+    if ! wait_for_server "$RENDER_PORT" "${PIDS[0]}" "render"; then
+        dump_scale_out_logs
+        return 1
+    fi
     echo "Waiting for encode instance..."
-    wait_for_server "$ENCODE_PORT"
+    if ! wait_for_server "$ENCODE_PORT" "${PIDS[1]}" "encode"; then
+        dump_scale_out_logs
+        return 1
+    fi
     echo "Waiting for prefill instance..."
-    wait_for_server "$PREFILL_PORT"
+    if ! wait_for_server "$PREFILL_PORT" "${PIDS[2]}" "prefill"; then
+        dump_scale_out_logs
+        return 1
+    fi
 
     echo "All scale-out EC services are up!"
 
-    "$PYTHON" "${SCRIPT_DIR}/test_scale_out_ec_e2e.py" \
+    if ! "$PYTHON" "${SCRIPT_DIR}/test_scale_out_ec_e2e.py" \
         --mode disagg \
         --render_url "http://localhost:$RENDER_PORT" \
         --encode_url "http://localhost:$ENCODE_PORT" \
         --prefill_url "http://localhost:$PREFILL_PORT" \
         --model_name "$MODEL" \
-        --baseline_file "$BASELINE_FILE"
+        --baseline_file "$BASELINE_FILE"; then
+        dump_scale_out_logs
+        return 1
+    fi
 
     echo "Stopping scale-out EC instances..."
     for pid in "${PIDS[@]}"; do
