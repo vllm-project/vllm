@@ -579,7 +579,7 @@ class FlashMLASparseMetadataBuilder(
 
     def _build_fp8_mixed_decode_prefill(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        num_tokens: int,
     ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
         """Build FP8 metadata treating MQA tokens as one batch.
 
@@ -587,13 +587,6 @@ class FlashMLASparseMetadataBuilder(
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
-        num_tokens = common_attn_metadata.num_actual_tokens
-        return self._build_fp8_mixed_kernel_metadata(num_tokens)
-
-    def _build_fp8_mixed_kernel_metadata(
-        self,
-        num_tokens: int,
-    ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
         # Use padded head count since that's what the kernel will see
         padded_heads = self.fp8_decode_padded_heads
 
@@ -774,13 +767,13 @@ class FlashMLASparseMetadataBuilder(
             # Only the decode rows reach the fp8 kernel on this path, so the
             # tile scheduler is sized for them alone.
             if metadata.num_decode_tokens > 0:
-                metadata.fp8_extra_metadata = self._build_fp8_mixed_kernel_metadata(
+                metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
                     metadata.num_decode_tokens
                 )
         elif self.use_fp8_kv_cache:
             if self.fp8_use_mixed_batch:
                 metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
-                    common_attn_metadata
+                    common_attn_metadata.num_actual_tokens
                 )
             else:
                 metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
