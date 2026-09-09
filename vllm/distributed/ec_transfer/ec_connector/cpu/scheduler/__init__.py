@@ -41,6 +41,10 @@ logger = init_logger(__name__)
 _ADMIT_DEFER_TIMEOUT_S = 60.0
 
 
+class _RemoteUnavailable(Exception):
+    """An item cannot be fetched within its request's remote wait budget."""
+
+
 class ECCPUScheduler:
     """Scheduler delegate for the ECCPUConnector."""
 
@@ -216,103 +220,121 @@ class ECCPUScheduler:
     def _nixl_consumer_admit(
         self, request: "Request", num_computed_tokens: int
     ) -> bool:
-        """Wait for remote encodings, falling back only with local input."""
+        """Admit a request once its required remote encodings are ready.
+
+        Each item has a per-request wait budget that survives transfer retries.
+        Unavailable items fall back to local input; without it, the request is
+        reported by take_unavailable_requests() for the scheduler to abort.
+
+        Returns:
+            True if no item needs to wait for a remote encoding. False if any
+            item is pending or the request must be aborted.
+        """
         if not request.ec_transfer_params:
             return True
         now = time.monotonic()
         pending = False
         for feature in request.mm_features:
-            pos = feature.mm_position
-            mm_hash = feature.identifier
-            if pos.offset + pos.length <= num_computed_tokens:
-                self._deferred_since.pop((request.request_id, mm_hash), None)
-                continue
-            announced = (request.ec_transfer_params or {}).get(mm_hash)
-            # Without a producer address there is nothing to fetch: the request
-            # carries what the model needs and the encoder runs locally.
-            # `ec_transfer_params` reaches us from the request, so its shape is
-            # checked rather than assumed.
-            remote: dict[str, Any] | None = (
-                announced
-                if isinstance(announced, dict) and "peer_host" in announced
-                else None
-            )
-
-            entry = self._cache.get(mm_hash)
-            if entry is not None and entry.ready:
-                # Local hit: upstream's update_state_after_alloc pins and
-                # loads it through the same path as a natively cached entry.
-                self._deferred_since.pop((request.request_id, mm_hash), None)
-                continue
-            if remote is None:
-                continue
-            since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
-            if now - since > _ADMIT_DEFER_TIMEOUT_S:
-                if not self._fail_or_fallback(
-                    request, feature, f"the remote wait exceeded {now - since:.0f}s"
-                ):
-                    return False
-                continue
-            if mm_hash in self._in_flight or mm_hash in self._step_completed:
-                pending = True
-                continue
-
-            if mm_hash in self._tombstones:
-                self._tombstones.discard(mm_hash)
-                if not self._fail_or_fallback(
-                    request, feature, "the remote read failed"
-                ):
-                    return False
-                continue
-
-            if entry is not None:
-                # Present but not ready and not being fetched: its blocks are
-                # held by a quarantined/settling DMA and cannot be reused.
-                pending = True
-                continue
-
-            expected = pos.length * self._hidden_dim * self._element_size
             try:
-                size = int(remote["size_bytes"])
-            except (KeyError, TypeError, ValueError):
-                if not self._fail_or_fallback(
-                    request, feature, "the announced size was unusable"
-                ):
+                if not self._admit_item(request, feature, num_computed_tokens, now):
+                    pending = True
+            except _RemoteUnavailable as error:
+                if not self._fail_or_fallback(request, feature, str(error)):
                     return False
-                continue
-            if size != expected:
-                logger.warning(
-                    "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
-                    mm_hash,
-                    size,
-                    expected,
-                )
-                if not self._fail_or_fallback(
-                    request, feature, "the announced size was wrong"
-                ):
-                    return False
-                continue
-
-            try:
-                started = self._start_xfer(mm_hash, remote, expected)
-            except Exception:
-                logger.exception(
-                    "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
-                )
-                if not self._fail_or_fallback(
-                    request, feature, "the read could not be started"
-                ):
-                    return False
-                continue
-            if started:
-                self._in_flight.add(mm_hash)
-            pending = True
         return not pending
+
+    def _admit_item(
+        self,
+        request: "Request",
+        feature: "MultiModalFeatureSpec",
+        num_computed_tokens: int,
+        now: float,
+    ) -> bool:
+        """Check one encoding, starting a remote read if needed.
+
+        Returns:
+            True if already computed, cached, or not remotely sourced. False
+            while waiting for a read or cache space, including across retries.
+
+        Raises:
+            _RemoteUnavailable: The remote source is invalid, the read failed,
+                or the item's total wait budget expired.
+        """
+        pos = feature.mm_position
+        mm_hash = feature.identifier
+        if pos.offset + pos.length <= num_computed_tokens:
+            self._deferred_since.pop((request.request_id, mm_hash), None)
+            return True
+        announced = (request.ec_transfer_params or {}).get(mm_hash)
+        # Without a producer address there is nothing to fetch: the request
+        # carries what the model needs and the encoder runs locally.
+        # `ec_transfer_params` reaches us from the request, so its shape is
+        # checked rather than assumed.
+        remote: dict[str, Any] | None = (
+            announced
+            if isinstance(announced, dict) and "peer_host" in announced
+            else None
+        )
+
+        entry = self._cache.get(mm_hash)
+        if entry is not None and entry.ready:
+            # Local hit: upstream's update_state_after_alloc pins and
+            # loads it through the same path as a natively cached entry.
+            self._deferred_since.pop((request.request_id, mm_hash), None)
+            return True
+        if remote is None:
+            return True
+        since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
+        if now - since > _ADMIT_DEFER_TIMEOUT_S:
+            raise _RemoteUnavailable(f"the remote wait exceeded {now - since:.0f}s")
+        if mm_hash in self._in_flight or mm_hash in self._step_completed:
+            return False
+
+        if mm_hash in self._tombstones:
+            self._tombstones.discard(mm_hash)
+            raise _RemoteUnavailable("the remote read failed")
+
+        if entry is not None:
+            # Present but not ready and not being fetched: its blocks are
+            # held by a quarantined/settling DMA and cannot be reused.
+            return False
+
+        expected = pos.length * self._hidden_dim * self._element_size
+        try:
+            size = int(remote["size_bytes"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise _RemoteUnavailable("the announced size was unusable") from error
+        if size != expected:
+            logger.warning(
+                "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
+                mm_hash,
+                size,
+                expected,
+            )
+            raise _RemoteUnavailable("the announced size was wrong")
+
+        try:
+            started = self._start_xfer(mm_hash, remote, expected)
+        except Exception as error:
+            logger.exception(
+                "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
+            )
+            raise _RemoteUnavailable("the read could not be started") from error
+        if started:
+            self._in_flight.add(mm_hash)
+        return False
 
     def _fail_or_fallback(
         self, request: "Request", feature: "MultiModalFeatureSpec", why: str
     ) -> bool:
-        """Allow local execution only with data beyond placeholder metadata."""
+        """Resolve an unavailable remote encoding and clear its wait budget.
+
+        Returns:
+            True if local media or embeddings are available, removing this
+            item's remote announcement so subsequent steps do not retry it.
+            False if only placeholder metadata (or no input) is available,
+            recording the request for take_unavailable_requests() to drain.
+        """
         mm_hash = feature.identifier
         self._deferred_since.pop((request.request_id, mm_hash), None)
         data = feature.data
@@ -344,6 +366,12 @@ class ECCPUScheduler:
         return False
 
     def take_unavailable_requests(self) -> set[str]:
+        """Return and clear IDs of requests that cannot obtain their encodings.
+
+        The scheduler must abort these requests rather than leave them waiting.
+        Requests that can fall back to local input are not included, and each
+        recorded failure is returned only once.
+        """
         if not self._unrecoverable:
             return set()
         failed = self._unrecoverable

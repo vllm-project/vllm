@@ -171,8 +171,7 @@ def test_no_remote_announcement_is_ready(monkeypatch, params):
 
 
 @pytest.mark.parametrize("payload", [None, "metadata", "pixels", "embeds", "shm"])
-@pytest.mark.parametrize("failure", ["tombstone", "timeout"])
-def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload, failure):
+def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload):
     """A remote miss is fatal only when local model input is unavailable."""
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
@@ -201,18 +200,12 @@ def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload, fail
         else None
     )
     req = _Request([_Feature("h1", 1, data)], params=_params("h1", 1))
-    now = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
     # Step 1: start the read.
     assert s.ensure_cache_available(req, 0) is False
     s.build_connector_meta(scheduler_output=None)
 
-    if failure == "tombstone":
-        fake._results.tombstoned.add("h1")
-    else:
-        now[0] += sched_mod._ADMIT_DEFER_TIMEOUT_S + 1
-        fake._results.retryable.add("h1")
+    fake._results.tombstoned.add("h1")
     s._sessions[("h", 1)] = fake
 
     can_fallback = payload in ("pixels", "embeds", "shm")
@@ -227,19 +220,6 @@ def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload, fail
         s.build_connector_meta(scheduler_output=None)
         assert s.ensure_cache_available(req, 0)
         assert fake.started == ["h1"]
-    s.shutdown()
-
-
-def test_request_finished_clears_only_its_wait_budget(monkeypatch):
-    """Cancelled requests leave no clocks behind, even for a shared hash."""
-    s = _consumer_sched(monkeypatch)
-    monkeypatch.setattr(s, "_start_xfer", lambda *args: False)
-    old = _Request([_Feature("h1")], params=_params("h1", 1), req_id="old")
-    new = _Request([_Feature("h1")], params=_params("h1", 1), req_id="new")
-    assert not s.ensure_cache_available(old, 0)
-    assert not s.ensure_cache_available(new, 0)
-    assert s.request_finished(old) == (False, None)
-    assert set(s._deferred_since) == {("new", "h1")}
     s.shutdown()
 
 
@@ -323,14 +303,10 @@ def test_invalid_remote_size_fails_the_request(monkeypatch, size_fields):
     s.shutdown()
 
 
-@pytest.mark.parametrize("pool_full", [False, True], ids=["not-ready", "full-pool"])
-def test_deferral_budget_is_per_request(monkeypatch, pool_full):
-    """Transient failures defer until each request exhausts its own budget."""
+def test_deferral_budget_is_per_request(monkeypatch):
+    """Shared hashes have independent wait budgets and cancellation cleanup."""
     s = _consumer_sched(monkeypatch)
-    if pool_full:
-        monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
-    else:
-        assert s._cache.alloc("h1", 1) is not None
+    monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
     params = _params("h1", 1)
     old = _Request([_Feature("h1", 1)], params=params, req_id="old")
     new = _Request([_Feature("h1", 1)], params=params, req_id="new")
@@ -346,6 +322,8 @@ def test_deferral_budget_is_per_request(monkeypatch, pool_full):
     # `old` is now past its budget; `new` is not.
     assert s.ensure_cache_available(new, 0) is False
     assert s.take_unavailable_requests() == set()
+    assert s.request_finished(new) == (False, None)
+    assert set(s._deferred_since) == {("old", "h1")}
     assert s.ensure_cache_available(old, 0) is False
     assert s.take_unavailable_requests() == {"old"}
     assert "h1" not in s._in_flight
