@@ -139,19 +139,20 @@ def test_copy_blocks_chunks_at_descriptor_cap(
 
 
 @pytest.mark.parametrize(
-    ("src_ids", "dst_ids", "expected_counts"),
+    ("src_ids", "dst_ids", "rocm_counts", "cuda_counts"),
     [
-        ([1], [2], [2]),
-        ([1, 2, 3], [5, 6, 7], [2]),
-        ([1, 2, 3], [2, 4, 6], [3, 3]),
-        ([1, 3, 5], [2, 3, 4], [3, 3]),
-        ([3, 2, 1], [6, 5, 4], [3, 3]),
-        ([1, 1, 2], [2, 4, 5], [3, 1]),
-        ([1, 2, 5, 6, 7, 4], [2, 3, 7, 8, 6, 5], [3, 3, 2]),
+        ([1], [2], [2], [2]),
+        ([1, 2, 3], [5, 6, 7], [2], [3, 3]),
+        ([1, 2, 3], [2, 4, 6], [3, 3], [3, 3]),
+        ([1, 3, 5], [2, 3, 4], [3, 3], [3, 3]),
+        ([3, 2, 1], [6, 5, 4], [3, 3], [3, 3]),
+        ([1, 1, 2], [2, 4, 5], [3, 1], [3, 3]),
+        ([1, 2, 5, 6, 7, 4], [2, 3, 7, 8, 6, 5], [3, 3, 2], [3, 3, 3, 3]),
     ],
 )
-def test_copy_blocks_coalesces_only_contiguous_source_and_destination(
-    monkeypatch, src_ids, dst_ids, expected_counts
+@pytest.mark.parametrize("is_rocm", [True, False])
+def test_copy_blocks_coalesces_contiguous_pairs_only_on_rocm(
+    monkeypatch, src_ids, dst_ids, rocm_counts, cuda_counts, is_rocm
 ):
     """Merged copies preserve mapped bytes and untouched blocks in every region."""
     sources = [np.arange(30, dtype=np.uint8), np.arange(50, dtype=np.uint8)]
@@ -175,9 +176,10 @@ def test_copy_blocks_coalesces_only_contiguous_source_and_destination(
 
     monkeypatch.setattr(cuda_mem_ops, "_batch_memcpy", (copy_descriptors, 0))
     monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 3)
+    monkeypatch.setattr(cuda_mem_ops.current_platform, "is_rocm", lambda: is_rocm)
     copy_blocks(src_ids, dst_ids, params)
 
-    assert counts == expected_counts
+    assert counts == (rocm_counts if is_rocm else cuda_counts)
     for source, destination, block_bytes in zip(sources, destinations, params.bpb):
         expected = np.full_like(source, 255)
         block_bytes = int(block_bytes)
