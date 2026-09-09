@@ -292,8 +292,24 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(parsed, ensure_ascii=False)
 
 
+def _gemma4_strip_opener_marker(name: str) -> str:
+    """Drop an opener marker the grammar did not consume.
+
+    Gemma 4 is specified to write ``call:`` before the tool name, and that form
+    is a terminal, so it never reaches here. Checkpoints are observed emitting a
+    bare ``:``, a ``-``, or nothing at all, and those arrive glued to the front
+    of the accumulated name.
+    """
+    return name.strip().lstrip(":-").strip()
+
+
 @functools.cache
 def gemma4_config() -> ParserEngineConfig:
+    """Build the parser engine config for Gemma 4's reasoning and tool syntax.
+
+    Cached, because the returned config owns a lexer shape that is expensive to
+    rebuild and is shared by every parser instance.
+    """
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
@@ -348,6 +364,14 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (),
             ),
+            (ParserState.TOOL_PREAMBLE, "OPEN_BRACE"): Transition(
+                ParserState.TOOL_ARGS,
+                (),
+            ),
+            (ParserState.TOOL_PREAMBLE, "OPEN_PAREN"): Transition(
+                ParserState.TOOL_ARGS,
+                (),
+            ),
             (ParserState.TOOL_NAME, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
@@ -379,10 +403,12 @@ def gemma4_config() -> ParserEngineConfig:
         content_events={
             ParserState.CONTENT: EventType.TEXT_CHUNK,
             ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.TOOL_PREAMBLE: EventType.TOOL_NAME,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_gemma4_arg_converter,
+        tool_name_normalizer=_gemma4_strip_opener_marker,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
         preserve_tokens=frozenset({STRING_DELIM}),
