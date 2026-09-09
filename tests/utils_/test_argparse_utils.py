@@ -491,7 +491,7 @@ def test_compilation_config_long_alias_dotted_form(parser):
     assert args.compilation_config == {"mode": 0}
 
 
-def test_compilation_mode_string_values(parser):
+def test_compilation_config_mode_validator(parser):
     """Test that CompilationConfig.mode field validator converts strings to integers."""
     from vllm.config.compilation import CompilationConfig, CompilationMode
 
