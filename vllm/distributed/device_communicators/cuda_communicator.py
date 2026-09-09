@@ -47,6 +47,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             global_world_size,
             use_all2all=use_all2all,
         )
+        # Match the group name exactly so ETP does not enable TP-only backends.
         if unique_name.split(":")[0] not in ("tp", "pcp", "dcp"):
             # custom allreduce or torch symm mem can be used only by tp, pcp
             # and dcp.
