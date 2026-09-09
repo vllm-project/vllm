@@ -35,10 +35,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Temporaries the fused down-projection binds in the rewritten forward.
-_Q_A_TEMP = "__q_a_fused"
-_KV_A_TEMP = "__kv_a_fused"
-
 
 def _consumes_placeholder(node: fx.Node) -> bool:
     """Whether `node` is a linear applied directly to a `forward` input."""
@@ -131,7 +127,7 @@ class MLAFuser(StackedFuser):
     kv_b_proj_name: str
     o_proj_name: str | None
     merged_name: ClassVar[str] = "fused_qkv_a_proj"
-    merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
+    merged_cls_name: ClassVar[str] = "MergedColumnParallelLinear"
 
     @property
     def has_q_lora(self) -> bool:
@@ -242,31 +238,12 @@ class MLAFuser(StackedFuser):
         if self.has_q_lora:
             # q_a_proj is usually inside the `else` of `if self.q_lora_rank is None`.
             # The fused call is inserted at the top-level statement preceding both.
-            q_call = single_self_call(funcdef, self.q_a_proj_name)
-            kv_call = single_self_call(funcdef, self.kv_a_proj_name)
-            if ast.dump(q_call.args[0]) != ast.dump(kv_call.args[0]):
+            names = [self.q_a_proj_name, self.kv_a_proj_name]
+            calls = [single_self_call(funcdef, name) for name in names]
+            if ast.dump(calls[0].args[0]) != ast.dump(calls[1].args[0]):
                 raise ValueError("down-projections read different inputs")
-            names = {n.id for n in ast.walk(funcdef) if isinstance(n, ast.Name)}
-            if names & {_Q_A_TEMP, _KV_A_TEMP}:
-                raise ValueError("fused temporaries would shadow existing names")
-
-            merged = f"self.{self.merged_name}"
-            targets = f"{_Q_A_TEMP}, {_KV_A_TEMP}"
-            sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
-            source = f"{targets} = {merged}(__arg__).split({sections}, -1)"
-            assign = ast.parse(source=source).body[0]
-            placeholder = next(
-                node
-                for node in ast.walk(assign)
-                if isinstance(node, ast.Name) and node.id == "__arg__"
-            )
-            replace_expr(assign, placeholder, q_call.args[0])
-
-            index = min(_top_level_index(funcdef, call) for call in (q_call, kv_call))
-            ast.copy_location(assign, funcdef.body[index])
-            funcdef.body.insert(index, assign)
-            replace_expr(funcdef, q_call, ast.Name(id=_Q_A_TEMP, ctx=ast.Load()))
-            replace_expr(funcdef, kv_call, ast.Name(id=_KV_A_TEMP, ctx=ast.Load()))
+            index = min(_top_level_index(funcdef, call) for call in calls)
+            self._splice_merged_split(funcdef, calls, funcdef.body, index)
 
         # Transformers expands the latent into full key/value in a dedicated method.
         # `MLAAttention` consumes the latent directly (absorbing `kv_b_proj`),

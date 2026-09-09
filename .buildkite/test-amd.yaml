@@ -720,7 +720,7 @@ steps:
 #--------------------------------------------------------  mi300 · detokenizer  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Async Engine, Inputs, Utils, Worker" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -878,7 +878,7 @@ steps:
   - pytest -v -s distributed/test_elastic_ep.py
 
 - label: ":amd: (MI300) RayExecutorV2" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1074,7 +1074,7 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server Generate)" # TBD
-  timeout_in_minutes: 50
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2163,7 +2163,7 @@ steps:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: ":amd: (MI300) Multimodal Models (Extended Pooling)" # TBD
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1

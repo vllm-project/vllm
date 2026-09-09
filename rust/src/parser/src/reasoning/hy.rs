@@ -18,7 +18,6 @@ impl HyReasoningParser {
                 tokenizer,
                 format!("<think{suffix}>"),
                 format!("</think{suffix}>"),
-                false,
             )?,
         })
     }
