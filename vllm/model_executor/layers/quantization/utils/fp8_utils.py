@@ -1506,3 +1506,59 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+@triton.jit
+def _e4m3_uint8_to_f32(u):
+    """Decode an ``e4m3fn`` byte (1-4-3, exp bias 7) to f32 without ever
+    materializing Triton's ``fp8e4nv`` type, which Ampere (SM80/SM86) cannot
+    represent. ``u`` is the raw uint8 bit pattern. NaN (S.1111.111) is not
+    produced by quantized weights and is decoded as a finite value."""
+    ui = u.to(tl.int32)
+    sign = (ui >> 7) & 1
+    exp = (ui >> 3) & 0xF
+    man = ui & 0x7
+    mant = man.to(tl.float32) * 0.125
+    # normal: 2^(exp-7) * (1+mant); subnormal (exp==0): 2^-6 * mant
+    val = tl.where(
+        exp != 0,
+        tl.exp2((exp - 7).to(tl.float32)) * (1.0 + mant),
+        0.015625 * mant,
+    )
+    return tl.where(sign != 0, -val, val)
+@triton.jit
+def _f32_to_e4m3_uint8(x):
+    """Encode f32 -> ``e4m3fn`` (1-4-3, exp bias 7, max 448, no inf) raw uint8
+    bits, for Ampere (SM80/SM86) where Triton lacks the ``fp8e4nv`` type. Inverse
+    of ``_e4m3_uint8_to_f32``. Round-to-nearest; saturates |x| > 448 and NaN/Inf
+    to +/-448. RNE-vs-round-half differences are sub-ulp and below fp8 noise."""
+    x = x.to(tl.float32)
+    sign = tl.where(x < 0, 1, 0).to(tl.int32)
+    a = tl.abs(x)
+    a = tl.where(a != a, 0.0, a)  # NaN -> 0 magnitude
+    a = tl.minimum(a, 448.0)
+    is_zero = a == 0.0
+    a_safe = tl.where(is_zero, 1.0, a)
+    # unbiased exponent, folded to the [-6, 8] e4m3 range (-6 covers subnormals)
+    e = tl.floor(tl.log2(a_safe))
+    e = tl.maximum(tl.minimum(e, 8.0), -6.0)
+    m = a / tl.exp2(e)  # normal: [1, 2); subnormal (a < 2^-6): [0, 1)
+    is_norm = m >= 1.0
+    # normal: expfield = e + 7 in [1, 15], mant = round((m - 1) * 8), carry -> +1 exp
+    mant_n = tl.floor((m - 1.0) * 8.0 + 0.5)
+    expf_n = e + 7.0
+    carry_n = mant_n >= 8.0
+    mant_n = tl.where(carry_n, 0.0, mant_n)
+    expf_n = tl.where(carry_n, expf_n + 1.0, expf_n)
+    # subnormal: expfield = 0, mant = round(m * 8); mant==8 promotes to min normal
+    mant_s = tl.floor(m * 8.0 + 0.5)
+    promote_s = mant_s >= 8.0
+    expf_s = tl.where(promote_s, 1.0, 0.0)
+    mant_s = tl.where(promote_s, 0.0, mant_s)
+    expf = tl.where(is_norm, expf_n, expf_s)
+    mant = tl.where(is_norm, mant_n, mant_s)
+    expf = tl.where(is_zero, 0.0, expf)
+    mant = tl.where(is_zero, 0.0, mant)
+    expf = tl.minimum(expf, 15.0)
+    byte = (sign << 7) | (expf.to(tl.int32) << 3) | mant.to(tl.int32)
+    return byte.to(tl.uint8)
