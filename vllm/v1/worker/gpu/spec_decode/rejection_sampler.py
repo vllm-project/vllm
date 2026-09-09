@@ -211,8 +211,16 @@ class RejectionSampler:
         for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
             hi = int(cu_num_logits_np[end])
-            chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
-            chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
+            if lo:
+                chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
+                chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
+            else:
+                # cu_num_logits always starts at 0, so the single-chunk case
+                # (and the first chunk of a split batch) rebases by nothing.
+                # Skip the GPU sub: a kernel launch and an allocation for a no-op.
+                # NOTE: these are read-only views of the input batch buffers.
+                chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1]
+                chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1]
             # draft_logits uses persistent request-state indices and stays global.
             processed_logits, sampled, num_sampled = self._verify(
                 logits[lo:hi],

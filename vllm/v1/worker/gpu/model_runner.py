@@ -1243,8 +1243,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 count=num_reqs,
             )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
-            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
             # combine_sampled_and_draft_tokens places a request's logits rows
             # at [query_end - num_logits, query_end). Fewer query rows than
@@ -1253,6 +1251,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            # The cumsum's last element IS the total, so the separate .sum()
+            # above was a second pass over the same data.
+            total_num_logits = int(cu_num_logits_np[-1])
+            total_num_draft_tokens = total_num_logits - num_reqs * num_bonus_tokens
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification = (
