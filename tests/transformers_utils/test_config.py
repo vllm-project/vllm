@@ -18,6 +18,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
+    patch_legacy_rope_type,
     try_get_generation_config,
 )
 from vllm.transformers_utils.configs.glm5_next import (
@@ -25,6 +26,28 @@ from vllm.transformers_utils.configs.glm5_next import (
     Glm5NextTextConfig,
     Glm5NextVisionConfig,
 )
+
+
+def test_patch_legacy_rope_type_preserves_nope_layers():
+    """NoPE layers stay disabled while later RoPE layers are normalized."""
+    rope_parameters = {
+        "full_attention": None,
+        "sliding_attention": {
+            "type": "mrope",
+            "mrope_section": [24, 20, 20],
+        },
+    }
+
+    patch_legacy_rope_type(rope_parameters)
+
+    assert rope_parameters == {
+        "full_attention": None,
+        "sliding_attention": {
+            "type": "mrope",
+            "rope_type": "default",
+            "mrope_section": [24, 20, 20],
+        },
+    }
 
 
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
