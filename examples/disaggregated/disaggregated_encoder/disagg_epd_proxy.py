@@ -187,10 +187,10 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             new_content.append(
                 {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
+            transfer_item = {"mm_hash": ec_mm_hash}
             if transfer_id is not None:
-                transfer_items.append(
-                    {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
-                )
+                transfer_item["transfer_id"] = transfer_id
+            transfer_items.append(transfer_item)
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
