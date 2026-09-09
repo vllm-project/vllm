@@ -69,6 +69,22 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     return use_fp4
 
 
+def _uses_deep_gemm_scheduler_metadata() -> bool:
+    """Whether the paged-MQA scheduler metadata is built by DeepGEMM.
+
+    SM 8.x (Ampere/Ada) and SM120 (consumer Blackwell) route the DeepGEMM-only
+    MQA/HC GEMM entry points to portable Triton/torch fallbacks, which ignore
+    the scheduler metadata; DeepGEMM's kernels (and their metadata builder) are
+    only built for Hopper/Blackwell-datacenter. Keep DeepGEMM for SM90/100.
+    """
+    return (
+        current_platform.is_cuda()
+        and has_deep_gemm()
+        and not current_platform.is_device_capability_family(80)
+        and not current_platform.is_device_capability_family(120)
+    )
+
+
 class PrepareUniformDecodeKernel(
     VllmTritonJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
@@ -1264,7 +1280,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _uses_deep_gemm_scheduler_metadata():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,

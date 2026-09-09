@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.sparse_mla_env import is_ampere_or_ada
 from vllm.utils.flashinfer import autotune as flashinfer_autotune
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
@@ -53,6 +54,10 @@ def _attention_backend_name(backend: object) -> str | None:
 
 
 def _has_deepseek_v4_sparse_mla_backend(runner: "GPUModelRunner") -> bool:
+    # SM8.x (Ampere/Ada) runs the portable Triton sparse-MLA fallback, not these
+    # FlashInfer-native sparse backends, so the DeepGEMM warmup does not apply.
+    if is_ampere_or_ada():
+        return False
     for groups in getattr(runner, "attn_groups", []) or ():
         for group in groups:
             name = _attention_backend_name(getattr(group, "backend", None))

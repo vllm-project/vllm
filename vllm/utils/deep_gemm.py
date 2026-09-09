@@ -544,6 +544,10 @@ def fp8_fp4_mqa_logits(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
+    if _use_sm12x_mqa_fallback() and q[1] is None:
+        return _fp8_mqa_logits_sm12x(
+            q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+        )
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
@@ -650,6 +654,10 @@ def fp8_fp4_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+    if _use_sm12x_mqa_fallback() and q[1] is None:
+        return _fp8_paged_mqa_logits_sm12x(
+            q, kv_cache, weights, context_lens, block_tables, max_model_len
+        )
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
@@ -688,6 +696,8 @@ def tf32_hc_prenorm_gemm(
 
     See the caller function for shape requirement
     """
+    if _use_sm12x_mqa_fallback():
+        return _tf32_hc_prenorm_gemm_sm12x(x, fn, out, sqrsum, num_split)
     _lazy_init()
     if _tf32_hc_prenorm_gemm_impl is None:
         return _missing()
@@ -803,3 +813,99 @@ __all__ = [
     "get_mn_major_tma_aligned_packed_ue8m0_tensor",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
 ]
+
+def _use_sm12x_mqa_fallback() -> bool:
+    """SM12x (Blackwell client) or SM 8.x (Ampere/Ada): route the DeepGEMM-only
+    MQA / HC GEMM entry points to the portable Triton/torch fallbacks instead of
+    DeepGEMM, which is only built for Hopper/Blackwell-datacenter GPUs."""
+    cp = current_platform
+    return cp.is_device_capability_family(120) or (
+        cp.is_cuda() and cp.is_device_capability_family(80)
+    )
+
+def fp8_fp4_mqa_topk_indices(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> bool:
+    """Write SM120 FP8 MQA top-k indices without materializing full logits."""
+    if not (current_platform.is_cuda() and _use_sm12x_mqa_fallback() and q[1] is None):
+        return False
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks.fp8_fp4_mqa_topk_indices(
+        q,
+        kv,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        topk_indices,
+    )
+
+def _fp8_mqa_logits_sm12x(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    clean_logits: bool,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._fp8_mqa_logits_sm12x(
+        q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+    )
+
+def _fp8_paged_mqa_logits_sm12x(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._fp8_paged_mqa_logits_sm12x(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+
+def fp8_fp4_paged_mqa_topk_indices(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+    topk_indices: torch.Tensor,
+) -> bool:
+    """Write SM120 FP8 paged MQA top-k indices without full logits."""
+    if not (current_platform.is_cuda() and _use_sm12x_mqa_fallback() and q[1] is None):
+        return False
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks.fp8_fp4_paged_mqa_topk_indices(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+        topk_indices,
+    )
+
+def _tf32_hc_prenorm_gemm_sm12x(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    num_split: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._tf32_hc_prenorm_gemm_sm12x(
+        x, fn, out, sqrsum, num_split
+    )

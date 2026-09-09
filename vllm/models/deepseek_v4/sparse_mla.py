@@ -93,7 +93,13 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        # SM90/SM100 run FlashMLA; SM12x (Blackwell client) and SM 8.x
+        # (Ampere/Ada) run the portable Triton DeepSeek-V4 path. Ada (8.9) has
+        # FP8 tensor cores; Ampere (8.0/8.6) lacks them, so its FP8 Triton
+        # kernels upcast to bf16 before the MMA.
+        if capability.major in [9, 10, 12]:
+            return True
+        return capability.major == 8
 
 
 @dataclass

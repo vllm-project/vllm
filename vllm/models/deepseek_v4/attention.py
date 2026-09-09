@@ -4,6 +4,7 @@
 DeepseekV4 MLA Attention Layer
 """
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -126,6 +127,8 @@ def _resolve_dsv4_kv_cache_dtype(
         return kv_cache_dtype, torch.float8_e4m3fn
     # auto / bfloat16 -> plain bf16 KV row.
     return kv_cache_dtype, torch.bfloat16
+
+
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -493,8 +496,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         o = o_padded[:, : self.n_local_heads, :]
 
+
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+        out = self._o_proj(o, positions)
+        return out
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor

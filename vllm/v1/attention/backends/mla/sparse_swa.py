@@ -189,6 +189,7 @@ class DeepseekSparseSWAMetadata:
     prefill_seq_lens: torch.Tensor | None = None
     prefill_seq_lens_cpu: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
+    prefill_gather_lens_cpu: torch.Tensor | None = None
     prefill_query_lens_cpu: torch.Tensor | None = None
     prefill_window_size: int = 0
     prefill_max_model_len: int = 0
@@ -862,10 +863,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
             result["prefill_seq_lens_cpu"] = seq_lens_cpu[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
-            result["prefill_query_lens_cpu"] = (
+            _q_lens_cpu = (
                 query_start_loc_cpu[num_decodes + 1 : num_decodes + num_prefills + 1]
                 - query_start_loc_cpu[num_decodes : num_decodes + num_prefills]
-            ).to(dtype=torch.int32)
+            )
+            result["prefill_query_lens_cpu"] = _q_lens_cpu.to(dtype=torch.int32)
+            _prefix_lens_cpu = result["prefill_seq_lens_cpu"] - _q_lens_cpu
+            result["prefill_gather_lens_cpu"] = _q_lens_cpu + torch.minimum(
+                _prefix_lens_cpu,
+                torch.full_like(_prefix_lens_cpu, self.window_size - 1),
+            )
             result["prefill_window_size"] = self.window_size
             result["prefill_max_model_len"] = self.max_model_len
             result["prefill_max_num_batched_tokens"] = self.max_num_batched_tokens
