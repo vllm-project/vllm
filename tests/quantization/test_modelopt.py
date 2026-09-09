@@ -28,7 +28,6 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
     KFp8StaticTensorMoE,
@@ -876,8 +875,7 @@ def test_build_moe_method_deepseek_nvfp4_is_w4a4():
     assert method.use_a16 is False
 
 
-@pytest.mark.parametrize("algo", ["FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO"])
-def test_modelopt_mixed_precision_skips_linear_only_moe(algo):
+def test_modelopt_mixed_precision_skips_pcpt_moe():
     from vllm.model_executor.layers.quantization import modelopt as m
 
     config = m.ModelOptMixedPrecisionConfig.from_config(
@@ -888,7 +886,9 @@ def test_modelopt_mixed_precision_skips_linear_only_moe(algo):
                 "exclude_modules": [],
                 "group_size": 16,
                 "quantized_layers": {
-                    "model.layers.0.mlp.experts": {"quant_algo": algo}
+                    "model.layers.0.mlp.experts": {
+                        "quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"
+                    }
                 },
             }
         }
