@@ -1100,6 +1100,7 @@ class NixlBaseConnectorWorker:
     ):
         # Do NIXL handshake in background and add to _ready_requests when done.
         assert meta.remote is not None
+        handshake_start = time.perf_counter()
         fut = self._ensure_handshake(
             remote_engine_id,
             meta.remote.host,
@@ -1117,6 +1118,7 @@ class NixlBaseConnectorWorker:
         def request_ready(f: Future[Any], entry=(req_id, meta)):
             try:
                 f.result()
+                meta.handshake_wait_time = time.perf_counter() - handshake_start
                 self._ready_requests.put(entry)
             except Exception as e:
                 self._log_failure(

@@ -4,11 +4,13 @@
 import contextlib
 import inspect
 import os
+import queue
 import tempfile
 import textwrap
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -89,6 +91,28 @@ def test_request_transfer_metrics_aggregate():
     assert merged == {
         "req": {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 5}
     }
+
+
+def test_request_handshake_timing_precedes_ready_publication():
+    worker = object.__new__(NixlConnectorWorker)
+    future: Future[None] = Future()
+    worker._ensure_handshake = MagicMock(return_value=future)
+    worker._ready_requests = queue.Queue()
+    meta = SimpleNamespace(
+        remote=SimpleNamespace(host="localhost", port=1234),
+        tp_size=1,
+        handshake_wait_time=0.0,
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.time.perf_counter",
+        side_effect=[10.0, 12.5],
+    ):
+        worker._background_nixl_handshake("req", "engine", meta)
+        assert worker._ready_requests.empty()
+        future.set_result(None)
+    request_id, ready_meta = worker._ready_requests.get_nowait()
+    assert request_id == "req"
+    assert ready_meta.handshake_wait_time == 2.5
 
 
 @pytest.fixture(scope="module", autouse=True)

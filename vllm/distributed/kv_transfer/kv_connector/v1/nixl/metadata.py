@@ -258,6 +258,7 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    handshake_wait_time: float = 0.0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

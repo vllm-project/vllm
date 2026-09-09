@@ -61,6 +61,12 @@ class PerRequestMetrics(OpenAIBaseModel):
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
     remote_kv_wait_time_ms: float | None = None
+    kv_handshake_wait_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Summed worker waits for successful NIXL handshakes; zero when cached."
+        ),
+    )
     kv_transfer_worker_time_ms: float | None = Field(
         default=None,
         description=(

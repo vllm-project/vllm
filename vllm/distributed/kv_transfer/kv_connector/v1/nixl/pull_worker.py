@@ -129,6 +129,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
+        self.pending_request_metrics.setdefault(req_id, {})[
+            "kv_handshake_wait_worker_time_ms"
+        ] = meta.handshake_wait_time * 1000
         engine_id = meta.remote.engine_id
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
