@@ -1797,14 +1797,6 @@ def _make_hisparse_cache_handle(
     return HiSparseCacheHandle(runtime)
 
 
-def _make_hisparse_index_group(
-    cache_handle: HiSparseCacheHandle, kv_cache_dtype: str = "auto"
-) -> HiSparseMLAIndexGroup:
-    group = object.__new__(HiSparseMLAIndexGroup)
-    group.caches = [cache_handle]
-    return group
-
-
 @requires_hisparse_ops
 def test_hisparse_uses_graph_stable_request_state_mapping():
     device = torch.device(DEVICE_TYPE)
