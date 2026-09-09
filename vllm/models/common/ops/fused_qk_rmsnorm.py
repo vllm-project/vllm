@@ -126,11 +126,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             kv_in_stride=input_stride,
             kv_out_stride=(input_stride, kv_size),
             eps=float(hf_config.rms_norm_eps),
-            # PDL is NVIDIA-only; compiling launch_pdl=True on ROCm emits
-            # griddepcontrol PTX and fails hsaco linking (#56030).
-            launch_pdl=(False, True)
-            if current_platform.is_arch_support_pdl()
-            else (False,),
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
