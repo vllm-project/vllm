@@ -149,7 +149,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            self._handle_failed_transfer(req_id, None)
+            self._handle_failed_transfer(req_id, None, self._recv_failures)
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -480,16 +480,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recving_transfers[request_id].append(handle)
             return True
         except Exception as e:
-            # mark all (logical) blocks for this request as invalid
             self._log_failure(
                 failure_type="transfer_setup_failed",
                 req_id=request_id,
-                msg="Marking blocks as invalid",
+                msg="Deferring failure reporting until outstanding transfers finish",
                 error=e,
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            self._handle_failed_transfer(request_id, handle)
+            if not self._handle_failed_transfer(
+                request_id, handle, self._recv_failures
+            ):
+                assert handle is not None
+                self._recving_transfers[request_id].append(handle)
             return False
 
     def _read_blocks_mixed(
@@ -531,7 +534,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
         except Exception:
             for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
+                if not self._try_release_xfer_handle(request_id, handle):
+                    self._recving_transfers[request_id].append(handle)
             raise
 
         self._pending_recv_notifs.setdefault(request_id, []).append(
@@ -542,7 +546,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self.nixl_wrapper.transfer(handle)
             except Exception:
                 for unstarted in handles[index:]:
-                    self.nixl_wrapper.release_xfer_handle(unstarted)
+                    if not self._try_release_xfer_handle(request_id, unstarted):
+                        self._recving_transfers[request_id].append(unstarted)
                 raise
             self._recving_transfers[request_id].append(handle)
 
