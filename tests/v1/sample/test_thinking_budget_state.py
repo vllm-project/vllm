@@ -29,7 +29,7 @@ def _cpu_async_h2d(monkeypatch: pytest.MonkeyPatch) -> None:
 class _MockReasoningConfig:
     reasoning_start_token_ids = [THINK_START]
     reasoning_end_token_ids = [THINK_END]
-    implicit_reasoning_end_token_ids = None
+    implicit_reasoning_end_token_ids: list[int] | None = None
 
 
 class _MockReasoningConfigWithToolCall(_MockReasoningConfig):

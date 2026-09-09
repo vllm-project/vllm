@@ -79,17 +79,19 @@ ThinkingTokenBudget = Annotated[
 _REASONING_EOS_POLICIES = ("stop", "force_end")
 
 
-def validate_reasoning_eos_policy(value: str | None) -> str:
+def validate_reasoning_eos_policy(
+    value: str | None,
+) -> Literal["stop", "force_end"]:
     """Validate ``reasoning_eos_policy``; default ``"stop"`` if unset."""
-    if value is None:
+    if value is None or value == "stop":
         return "stop"
-    if not isinstance(value, str) or value not in _REASONING_EOS_POLICIES:
-        raise VLLMValidationError(
-            '`reasoning_eos_policy` must be "stop" or "force_end".',
-            parameter="reasoning_eos_policy",
-            value=value,
-        )
-    return value
+    if value == "force_end":
+        return "force_end"
+    raise VLLMValidationError(
+        '`reasoning_eos_policy` must be "stop" or "force_end".',
+        parameter="reasoning_eos_policy",
+        value=value,
+    )
 
 
 ReasoningEosPolicy = Annotated[

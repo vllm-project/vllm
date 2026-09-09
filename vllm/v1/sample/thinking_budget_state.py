@@ -204,8 +204,7 @@ class ThinkingBudgetStateHolder:
         reasoning_eos_policy: str = "stop",
         stop_token_ids: list[int] | None = None,
     ) -> dict[str, Any]:
-        has_budget = thinking_token_budget is not None
-        countdown = thinking_token_budget if has_budget else 0
+        countdown = 0 if thinking_token_budget is None else thinking_token_budget
         if prompt_tok_ids is None:
             last_start = -1
             last_end = -1
@@ -233,7 +232,7 @@ class ThinkingBudgetStateHolder:
                 countdown -= think_count
                 continue_thinking = True
                 # check if the token is exhausted within prompt
-                if has_budget:
+                if thinking_token_budget is not None:
                     token_exhausted = thinking_token_budget - think_count
                     in_end = token_exhausted <= 0
             else:

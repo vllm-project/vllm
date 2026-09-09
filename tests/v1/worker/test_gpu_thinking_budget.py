@@ -32,7 +32,7 @@ class MockReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END]
     natural_reasoning_end_token_ids = [END]
-    implicit_reasoning_end_token_ids = None
+    implicit_reasoning_end_token_ids: list[int] | None = None
 
 
 EOS = 3
