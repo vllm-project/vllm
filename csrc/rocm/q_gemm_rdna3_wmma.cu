@@ -543,7 +543,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     // pass fixes the accumulation order.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -615,8 +615,7 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_16x16_1w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int,
-                                             float*) {}
+                                             const int, const int, float*) {}
 #endif
 
 // Deterministic split-K reduction for the WMMA path: one thread per output
@@ -672,8 +671,9 @@ static inline at::Tensor alloc_wmma_partials(int k_split, int size_m,
                                              int size_n) {
   return at::empty(
       {k_split, size_m, size_n},
-      at::TensorOptions().dtype(at::kFloat).device(
-          at::Device(at::kCUDA, c10::cuda::current_device())));
+      at::TensorOptions()
+          .dtype(at::kFloat)
+          .device(at::Device(at::kCUDA, c10::cuda::current_device())));
 }
 
 template <typename T>
@@ -708,10 +708,9 @@ void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
     partials = alloc_wmma_partials(k_split, size_m, size_n);
     partials_ptr = partials.data_ptr<float>();
   }
-  gemm_q4_wmma_kernel_16x16_1w<T>
-      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
-                                   size_n, size_k, groups, zero_offset,
-                                   partials_ptr);
+  gemm_q4_wmma_kernel_16x16_1w<T><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, partials_ptr);
   if (k_split > 1)
     launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
@@ -892,7 +891,7 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     // pass fixes the accumulation order.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -952,8 +951,7 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_32x16_2w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int,
-                                             float*) {}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
@@ -989,10 +987,9 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
     partials = alloc_wmma_partials(k_split, size_m, size_n);
     partials_ptr = partials.data_ptr<float>();
   }
-  gemm_q4_wmma_kernel_32x16_2w<T>
-      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
-                                   size_n, size_k, groups, zero_offset,
-                                   partials_ptr);
+  gemm_q4_wmma_kernel_32x16_2w<T><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, partials_ptr);
   if (k_split > 1)
     launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
@@ -1169,7 +1166,7 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     // pass fixes the accumulation order.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1227,8 +1224,7 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x16_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int,
-                                             float*) {}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
@@ -1255,10 +1251,9 @@ void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
     partials = alloc_wmma_partials(k_split, size_m, size_n);
     partials_ptr = partials.data_ptr<float>();
   }
-  gemm_q4_wmma_kernel_64x16_4w<T>
-      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
-                                   size_n, size_k, groups, zero_offset,
-                                   partials_ptr);
+  gemm_q4_wmma_kernel_64x16_4w<T><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, partials_ptr);
   if (k_split > 1)
     launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
@@ -1440,7 +1435,7 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
       // accumulation order, so the result is bit-reproducible.
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1500,8 +1495,7 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x32_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int,
-                                             float*) {}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
@@ -1530,10 +1524,9 @@ void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
     partials = alloc_wmma_partials(k_split, size_m, size_n);
     partials_ptr = partials.data_ptr<float>();
   }
-  gemm_q4_wmma_kernel_64x32_4w<T>
-      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
-                                   size_n, size_k, groups, zero_offset,
-                                   partials_ptr);
+  gemm_q4_wmma_kernel_64x32_4w<T><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, partials_ptr);
   if (k_split > 1)
     launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
@@ -1706,7 +1699,7 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
       // accumulation order, so the result is bit-reproducible.
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1919,7 +1912,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
       // accumulation order, so the result is bit-reproducible.
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -2151,7 +2144,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
       // accumulation order, so the result is bit-reproducible.
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -2214,20 +2207,17 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x64_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int,
-                                             float*) {}
+                                             const int, const int, float*) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k16(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               float*) {}
+                                               const int, const int, float*) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k32(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               float*) {}
+                                               const int, const int, float*) {}
 #endif
 
 template <typename T>
@@ -2281,8 +2271,7 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
       const T* a_t = a + (long)row0 * size_k;
       T* c_t = c + (long)row0 * size_n;
       dim3 grid((size_n + 63) / 64, (rows + 127) / 128, k_split);
-      if (size_k % 32 == 0 && groupsize >= 32 &&
-          (size_k / k_split) % 32 == 0) {
+      if (size_k % 32 == 0 && groupsize >= 32 && (size_k / k_split) % 32 == 0) {
         gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
             a_t, b_q_weight, b_qzeros, b_scales, c_t, rows, size_n, size_k,
             groups, zero_offset, partials_ptr);

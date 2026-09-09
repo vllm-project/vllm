@@ -617,8 +617,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   for (int m = 0; m < M_COUNT; ++m) {
     if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
     if (partials != nullptr) {
-      float* p = partials +
-                 ((long)blockIdx.z * size_m + (offset_m + m)) * size_n + n;
+      float* p =
+          partials + ((long)blockIdx.z * size_m + (offset_m + m)) * size_n + n;
       p[0] = block_c[m][0];
       p[1] = block_c[m][1];
       p[2] = block_c[m][2];
@@ -630,11 +630,10 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
       // Single writer per element: round once and store the packed 4 lanes
       // (8-byte aligned, see the note above) in one go.
       if constexpr (std::is_same<T, half>::value) {
-        half2 packed[2] = {
-            __halves2half2(__float2half_rn(block_c[m][0]),
-                           __float2half_rn(block_c[m][1])),
-            __halves2half2(__float2half_rn(block_c[m][2]),
-                           __float2half_rn(block_c[m][3]))};
+        half2 packed[2] = {__halves2half2(__float2half_rn(block_c[m][0]),
+                                          __float2half_rn(block_c[m][1])),
+                           __halves2half2(__float2half_rn(block_c[m][2]),
+                                          __float2half_rn(block_c[m][3]))};
         __builtin_memcpy(out, packed, sizeof(packed));
       } else {
         bf162_t packed[2];
@@ -670,8 +669,7 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 template <typename T, int M_COUNT>
 __global__ void gemm_q4_kernel_rdna3(const T*, const uint32_t*, const uint32_t*,
                                      const T*, T*, const int, const int,
-                                     const int, const int, const int,
-                                     float*) {}
+                                     const int, const int, const int, float*) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -690,10 +688,9 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
             (size_m + M_COUNT - 1) / M_COUNT,
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  gemm_q4_kernel_rdna3<T, M_COUNT>
-      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
-                                   size_n, size_k, groups, zero_offset,
-                                   partials);
+  gemm_q4_kernel_rdna3<T, M_COUNT><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, partials);
 }
 
 // Dispatch to the largest M_COUNT template that doesn't waste more than
@@ -711,8 +708,7 @@ template <typename T>
 void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                     const uint32_t* b_qzeros, const T* b_scales, T* c,
                     int size_m, int size_n, int size_k, int groups,
-                    bool use_v2_format, float* partials,
-                    cudaStream_t stream) {
+                    bool use_v2_format, float* partials, cudaStream_t stream) {
   const int zero_offset = use_v2_format ? 0 : 1;
 
   if (size_m == 1) {
@@ -736,7 +732,6 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                                     partials, stream);
   }
 }
-
 
 // Deterministic split-K reduction: one thread per output element sums the
 // grid.z FP32 partial slices in fixed ascending-z order and rounds to the
@@ -780,15 +775,16 @@ void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
   constexpr int TILE_M = 64;  // single tile covers the scalar domain
   const int z_count = (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE;
   if (z_count == 1) {
-    launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n,
-                   size_k, groups, use_v2_format,
+    launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
+                   groups, use_v2_format,
                    /*partials=*/nullptr, stream);
     return;
   }
   at::Tensor partials = at::empty(
       {z_count, std::min(TILE_M, size_m), size_n},
-      at::TensorOptions().dtype(at::kFloat).device(
-          at::Device(at::kCUDA, c10::cuda::current_device())));
+      at::TensorOptions()
+          .dtype(at::kFloat)
+          .device(at::Device(at::kCUDA, c10::cuda::current_device())));
   float* partials_ptr = partials.data_ptr<float>();
   for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
     const int rows = std::min(TILE_M, size_m - row0);
