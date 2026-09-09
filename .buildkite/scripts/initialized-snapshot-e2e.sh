@@ -6,8 +6,24 @@ readonly MODEL="Qwen/Qwen3-0.6B"
 readonly MODEL_REVISION="c1899de289a04d12100db370d81485cdf75e47ca"
 readonly EXPECTED_TOKEN_ID="12095"
 readonly EXPECTED_TEXT=" Paris"
-readonly RUN_LIMIT_S=3300
 readonly CLEANUP_RESERVE_S=300
+RUN_LIMIT_S="${SNAPSHOT_E2E_RUN_LIMIT_S:-3300}"
+[[ "$RUN_LIMIT_S" =~ ^[1-9][0-9]{2,3}$ ]] \
+    || { echo "SNAPSHOT_E2E_RUN_LIMIT_S must be a bounded decimal integer" >&2; exit 1; }
+(( RUN_LIMIT_S >= CLEANUP_RESERVE_S + 60 && RUN_LIMIT_S <= 3300 )) \
+    || { echo "SNAPSHOT_E2E_RUN_LIMIT_S must be between 360 and 3300" >&2; exit 1; }
+readonly RUN_LIMIT_S
+readonly HOST_HF_CACHE="${SNAPSHOT_E2E_HOST_HF_CACHE:-}"
+HF_CACHE_MOUNT=()
+if [[ -n "$HOST_HF_CACHE" ]]; then
+    [[ "$HOST_HF_CACHE" == /* && -d "$HOST_HF_CACHE" ]] \
+        || { echo "SNAPSHOT_E2E_HOST_HF_CACHE must be an existing absolute directory" >&2; exit 1; }
+    HF_CACHE_MOUNT=(--mount "type=bind,source=$HOST_HF_CACHE,target=/e2e/hf,readonly")
+    PREPARE_ARTIFACT_ROOT='install -d -m 0700 /e2e'
+else
+    PREPARE_ARTIFACT_ROOT='mkdir -m 0700 /e2e && mkdir -m 0700 /e2e/hf'
+fi
+readonly PREPARE_ARTIFACT_ROOT
 if (( $# != 2 )); then
     echo "usage: $0 IMAGE_TAG BUILDKITE_COMMIT" >&2
     exit 2
@@ -211,20 +227,28 @@ CONTAINER_ID="$(run "start exact candidate container" 90 docker run --detach \
     --gpus "device=$GPU_UUID" --user 0 --privileged --pid=host --ipc=host \
     --network=host --env CUDA_VISIBLE_DEVICES=0 --env HF_HUB_DISABLE_TELEMETRY=1 \
     --env VLLM_NO_USAGE_STATS=1 --env VLLM_USE_V2_MODEL_RUNNER=1 \
+    ${HF_CACHE_MOUNT[@]+"${HF_CACHE_MOUNT[@]}"} \
     --entrypoint sleep "$IMAGE_ID" infinity)"
 [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]] || die "invalid container ID"
 run "prepare private artifact root" 60 docker exec "$CONTAINER_NAME" sh -c \
-    "mkdir -m 0700 /e2e && mkdir -m 0700 /e2e/hf && df -Pk / | awk 'NR == 2 && \$4 >= 10485760 {ok=1} END {exit !ok}'"
+    "$PREPARE_ARTIFACT_ROOT && df -Pk / | awk 'NR == 2 && \$4 >= 10485760 {ok=1} END {exit !ok}'"
 run "verify snapshot runtime" 60 docker exec "$CONTAINER_NAME" sh -c \
     'criu --version; test -x /usr/local/sbin/cuda-checkpoint; test -f /usr/local/lib/criu/cuda_plugin.so'
-run "prefetch pinned public model" 900 docker exec --env HF_HOME=/e2e/hf \
-    "$CONTAINER_NAME" python3 -c \
-    'from pathlib import Path; from huggingface_hub import snapshot_download; import sys; p=snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2]); assert Path(p).name == sys.argv[2]' \
-    "$MODEL" "$MODEL_REVISION"
-
 OFFLINE_EXEC=(docker exec --env HF_HOME=/e2e/hf --env HF_HUB_OFFLINE=1 \
     --env TRANSFORMERS_OFFLINE=1 --env VLLM_SNAPSHOT_TIMEOUT_S=900 \
     "$CONTAINER_NAME")
+if [[ -n "$HOST_HF_CACHE" ]]; then
+    run "validate pinned model in read-only host cache" 120 \
+        "${OFFLINE_EXEC[@]}" python3 -c \
+        'from pathlib import Path; from huggingface_hub import snapshot_download; import sys; p=snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], local_files_only=True); assert Path(p).name == sys.argv[2]' \
+        "$MODEL" "$MODEL_REVISION"
+else
+    run "prefetch pinned public model" 900 docker exec --env HF_HOME=/e2e/hf \
+        "$CONTAINER_NAME" python3 -c \
+        'from pathlib import Path; from huggingface_hub import snapshot_download; import sys; p=snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2]); assert Path(p).name == sys.argv[2]' \
+        "$MODEL" "$MODEL_REVISION"
+fi
+
 run "create compact initialized snapshot" 1200 "${OFFLINE_EXEC[@]}" \
     vllm snapshot create "$MODEL" --revision "$MODEL_REVISION" \
     --tokenizer-revision "$MODEL_REVISION" --snapshot-dir /e2e/artifact \
