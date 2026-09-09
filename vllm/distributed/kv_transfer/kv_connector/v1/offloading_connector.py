@@ -54,8 +54,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _bounding_group_ids(self) -> tuple[int, ...]:
         """Prefix-cacheable groups this connector does not offload.
 
-        Such a group's own cached prefix bounds what a load can restore: past
-        it the group's KV would be left unwritten.
+        Never offer tokens for a range some group cannot cover: past such a
+        group's own cached prefix its KV would be left unwritten.
         """
         offloaded = set(get_offloading_group_ids(self._kv_cache_config))
         return tuple(
@@ -63,10 +63,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
             if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
         )
-
-    @property
-    def supports_divergent_local_hybrid_hits(self) -> bool:
-        return bool(self._bounding_group_ids)
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -167,7 +163,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _max_loadable_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> int | None:
-        """How far past ``num_computed_tokens`` a load may reach, if bounded."""
+        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+
+        Bounded by the deepest prefix the groups this connector does not
+        offload already hold, since nothing refills them beyond it.
+        """
         if not self._bounding_group_ids:
             return None
         assert self._kv_cache_manager is not None

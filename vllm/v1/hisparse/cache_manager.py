@@ -12,7 +12,7 @@ manager when the scheduler binds the KV cache manager to the connector.
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.distributed.kv_events import MEDIUM_CPU, KVCacheEvent
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -27,6 +27,28 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 
 
+class _SharedEventQueueBlockPool(BlockPool):
+    """A pool that publishes into another pool's live KV event queue.
+
+    The owner rebinds its queue on every drain, so this reads it through the
+    owner rather than holding a reference.
+    """
+
+    def __init__(self, *args, event_owner: BlockPool, **kwargs) -> None:
+        self._event_owner = event_owner
+        super().__init__(*args, **kwargs)
+
+    @property
+    def kv_event_queue(self) -> list[KVCacheEvent]:
+        return self._event_owner.kv_event_queue
+
+    @kv_event_queue.setter
+    def kv_event_queue(self, events: list[KVCacheEvent]) -> None:
+        # ``BlockPool.__init__`` seeds an empty queue and ``take_events``
+        # swaps in a fresh one; both belong to the owner, which drains it.
+        assert not events
+
+
 class HiSparseSourceManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
@@ -35,6 +57,8 @@ class HiSparseSourceManager(FullAttentionManager):
     """
 
     coordinator: "HiSparseCoordinator | None" = None
+    # The host tier keeps prefixes the device groups have already lost.
+    retains_longer_hit = True
 
     @property
     def records_new_block_ids(self) -> bool:
@@ -47,15 +71,26 @@ class HiSparseSourceManager(FullAttentionManager):
     def bind_host_pool(self, num_blocks: int) -> None:
         """Replace the device pool this group was built with by a host one."""
         device_pool = self.block_pool
-        self.block_pool = BlockPool(
+        self.block_pool = _SharedEventQueueBlockPool(
             num_gpu_blocks=num_blocks,
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=device_pool.metrics_collector,
             medium=MEDIUM_CPU,
+            event_owner=device_pool,
         )
         self._null_block = self.block_pool.null_block
+
+    def take_pending_cow_copies(self) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
+        """Host copies never reach the worker's generic block-copy path."""
+        return []
+
+    def take_host_cow_copies(self) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
+        """Drain host copies for the coordinator to hand to the connector."""
+        copies = self._pending_cow_copies
+        self._pending_cow_copies = []
+        return copies
 
     def get_num_blocks_to_allocate(
         self,
@@ -91,6 +126,22 @@ class HiSparseSourceManager(FullAttentionManager):
         req_blocks.extend([self._null_block] * (num_new_blocks - len(new_blocks)))
         return new_blocks
 
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        # The connector writes these host pages directly; they only become
+        # readable once the request is committed at that prefix length.
+        assert self.coordinator is not None
+        self.coordinator.record_pending_host_import(
+            request_id, num_local_computed_tokens + num_external_computed_tokens
+        )
+        super().allocate_external_computed_blocks(
+            request_id, num_local_computed_tokens, num_external_computed_tokens
+        )
+
     def cache_blocks(
         self,
         request: Request,
@@ -100,6 +151,7 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundary: int,
     ) -> None:
         assert self.coordinator is not None
+        self.coordinator.complete_pending_host_import(request.request_id, num_tokens)
         self.coordinator.publish_when_ready(
             request,
             num_tokens,

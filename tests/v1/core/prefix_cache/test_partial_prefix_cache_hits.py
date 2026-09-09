@@ -1139,9 +1139,9 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 
-def test_truncate_computed_blocks_keeps_short_groups_and_checks_alignment():
-    """A group whose hit stops early keeps its shorter list; the endpoint must
-    still land on a block boundary for every group it actually slices."""
+def test_truncate_computed_blocks_allows_short_mamba_group_only():
+    """External state may replace a short Mamba hit, but other groups must
+    cover the aligned local endpoint."""
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -1193,8 +1193,8 @@ def test_truncate_computed_blocks_keeps_short_groups_and_checks_alignment():
     short_full_attention = manager.create_kv_cache_blocks(
         (list(blocks.blocks[0][:1]), list(blocks.blocks[1]))
     )
-    truncated = manager.truncate_computed_blocks(short_full_attention, 4)
-    assert [len(group) for group in truncated.blocks] == [1, 1]
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(short_full_attention, 4)
 
     with pytest.raises(AssertionError):
         manager.truncate_computed_blocks(blocks, 6)
@@ -1632,7 +1632,9 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     freed: list = []
     blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
     mock = SimpleNamespace(
-        kv_cache_manager=SimpleNamespace(free_blocks=freed.extend),
+        kv_cache_manager=SimpleNamespace(
+            block_pool=SimpleNamespace(free_blocks=freed.extend)
+        ),
         deferred_frees=deque(),
         defer_block_free=True,
         processed_step_seq=2,

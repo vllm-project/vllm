@@ -206,7 +206,7 @@ class KVCacheCoordinator(ABC):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                num_blocks = manager.get_num_blocks_to_allocate(
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_encoder_tokens,
                     [],
@@ -216,7 +216,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                num_blocks = manager.get_num_blocks_to_allocate(
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
                     new_computed_blocks[i],
@@ -225,7 +225,6 @@ class KVCacheCoordinator(ABC):
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                 )
-            num_blocks_to_allocate += num_blocks
         return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(
@@ -342,14 +341,14 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         replay_boundary = self.get_replay_boundary(request)
-        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-        # tokens can be re-prefilled during multi-module MTP.
-        num_tokens_to_cache = max(
-            0, num_computed_tokens - self.num_reprefillable_tokens
-        )
         for manager in self.single_type_managers:
             if not manager.enable_caching:
                 continue
+            # Only cache tokens with finalized KV. The last num_reprefillable_tokens
+            # tokens can be re-prefilled during multi-module MTP.
+            num_tokens_to_cache = max(
+                0, num_computed_tokens - self.num_reprefillable_tokens
+            )
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
@@ -725,7 +724,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
 
-            # Try to find an existing group with the same spec and manager
+            # Try to find an existing group with the same spec and manager.
+            # A role-selected manager can give identical specs different
+            # managers, which do not share a lookup.
             for idx, group in enumerate(self.attention_groups):
                 if group.spec == spec and manager_cls is group.manager_cls:
                     group.group_ids.append(i)
@@ -927,7 +928,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for group in self.attention_groups:
             if not isinstance(group.spec, FullAttentionSpec):
                 continue
-            group_block_size = self.single_type_managers[group.group_ids[0]].block_size
+            first_manager = self.single_type_managers[group.group_ids[0]]
+            if first_manager.retains_longer_hit:
+                # This group's cache outlives its siblings'; keep its own hit so
+                # an external hit can extend the others into it.
+                continue
+            group_block_size = first_manager.block_size
             num_blocks = cdiv(hit_length, group_block_size)
             for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:

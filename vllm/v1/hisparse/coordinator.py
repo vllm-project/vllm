@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashWithGroupId,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+)
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.hisparse.cache_manager import (
     HiSparseHotManager,
@@ -153,6 +157,11 @@ class HiSparseCoordinator:
             hot_cost = sum(manager.blocks_per_request for manager in hot_managers)
             self.transition_watermark = max(hot_cost, kv_cache_config.num_blocks // 10)
 
+        # Host copies handed to the worker, by destination block id, until it
+        # reports having run them.
+        self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
+        # request -> prefix length an external load is still filling in.
+        self._pending_imports: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
         self.spills_to_send: list[SparseKVPageTransfer] = []
         self.pending_spills: dict[int, _PendingSpill] = {}
@@ -185,6 +194,37 @@ class HiSparseCoordinator:
         state.ready_prefix_pages = max(num_host_pages, state.ready_prefix_pages)
         self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
         state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
+
+    def take_host_block_copies(self) -> tuple[KVCacheBlockCopy, ...]:
+        """Drain host copy-on-write work, retaining both endpoints.
+
+        The worker runs the copies in the step that carries them, so the
+        endpoints are released when that step's output comes back.
+        """
+        if self.host_manager is None:
+            return ()
+        pairs = self.host_manager.take_host_cow_copies()
+        for source_block, cow_block in pairs:
+            self._retained_copies[cow_block.block_id] = (source_block, cow_block)
+        return tuple(
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+            for source_block, cow_block in pairs
+        )
+
+    def release_completed_host_copies(self, dst_block_ids: Iterable[int]) -> None:
+        """Release the endpoints of host copies the worker reports having run."""
+        blocks: list[KVCacheBlock] = []
+        for dst_block_id in dst_block_ids:
+            pair = self._retained_copies.pop(dst_block_id, None)
+            if pair is not None:
+                blocks.extend(pair)
+        if not blocks:
+            return
+        assert self.host_manager is not None
+        self.host_manager.block_pool.free_blocks(reversed(blocks))
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
@@ -433,6 +473,21 @@ class HiSparseCoordinator:
         self._record_copies(request_id, publication.num_computed_tokens)
         state.publication = None
 
+    def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
+        """Note a prefix an external load is populating in host pages."""
+        self._pending_imports[request_id] = num_tokens
+
+    def complete_pending_host_import(self, request_id: str, num_tokens: int) -> None:
+        """Publish a recorded import once its whole prefix is accounted for.
+
+        A load that failed part-way leaves the request short of the recorded
+        prefix, so nothing is published and the pages stay dirty.
+        """
+        pending = self._pending_imports.get(request_id)
+        if pending is not None and num_tokens >= pending:
+            del self._pending_imports[request_id]
+            self.complete_host_import(request_id, pending)
+
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
@@ -656,6 +711,7 @@ class HiSparseCoordinator:
 
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
+        self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return

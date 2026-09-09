@@ -304,6 +304,8 @@ class HiSparseConnectorWorker:
             )
         self.hot_backing = hot_backing
         self._pending_invalid_block_ids: list[int] = []
+        # Destination block ids of host copies this worker has run.
+        self._completed_host_copy_dst_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._enqueued_transfer_ids: list[int] = []
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
@@ -458,6 +460,9 @@ class HiSparseConnectorWorker:
         host_block_copies: Sequence[KVCacheBlockCopy],
         previous_host_write_event: torch.Event,
     ) -> None:
+        self._completed_host_copy_dst_ids.extend(
+            copy.dst_block_id for copy in host_block_copies
+        )
         if self.shared_host_region is not None and host_block_copies:
             if get_tensor_model_parallel_rank() == 0:
                 copy_kv_cache_blocks_inplace(
@@ -799,6 +804,12 @@ class HiSparseConnectorWorker:
             else:
                 self.host_write_event.record(compute_stream)
         self._release_completed_dma_descriptors()
+
+    def take_completed_host_copies(self) -> list[int]:
+        """Drain host copies this worker has enqueued for this step."""
+        completed = self._completed_host_copy_dst_ids
+        self._completed_host_copy_dst_ids = []
+        return completed
 
     def take_transfer_updates(self) -> tuple[list[int], list[int]]:
         enqueued = self._enqueued_transfer_ids

@@ -8,6 +8,7 @@ import pytest
 
 import vllm.v1.worker.gpu.kv_connector as kv_connector_module
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -20,7 +21,7 @@ def _make_connector(
     backend.bind_connector_metadata.side_effect = lambda _: events.append("bind")
     backend.start_load_kv.side_effect = lambda *_a, **_kw: events.append("start")
     backend.wait_for_save.side_effect = lambda: events.append("wait")
-    backend.get_finished.side_effect = lambda _: (set(), set())
+    backend.get_transfer_results.return_value = KVConnectorTransferResults()
     backend.get_block_ids_with_load_errors.return_value = set()
     backend.get_kv_connector_stats.return_value = None
     backend.get_kv_connector_kv_cache_events.return_value = None

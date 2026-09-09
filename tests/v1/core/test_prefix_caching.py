@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
     KVCacheBlock,
+    KVCacheBlockCopy,
     get_block_hash,
     get_group_id,
     get_request_block_hasher,
@@ -326,79 +327,123 @@ def test_hisparse_reports_when_context_is_fully_resident():
     assert coordinator.take_block_table_updates().keys() == {request.request_id}
 
 
-def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
-    manager = make_hisparse_kv_cache_manager(
-        32,
-        16,
-        enable_caching=True,
-    )
+def _hisparse_lagging_indexer(
+    evicted_indexer_pages: tuple[int, ...],
+) -> tuple[KVCacheManager, Request]:
+    """Publish a 4-page host prefix, then evict some of its indexer pages."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
-    spill_counts = {spill.transfer_id: 1 for spill in spills}
-    get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
+    _publish_hisparse_pages(manager)
     _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
-    evicted_indexer_id = indexer_blocks[2].block_id
+    evicted = {indexer_blocks[page].block_id for page in evicted_indexer_pages}
     manager.free(original)
-    manager.block_pool.evict_blocks({evicted_indexer_id})
+    manager.block_pool.evict_blocks(evicted)
+    return manager, make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
-    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    blocks, num_local, _, diverged = manager.get_computed_blocks_for_connector(resumed)
 
-    assert diverged
+def test_hisparse_host_group_keeps_its_deeper_hit():
+    """The host lookup is not trimmed to the reconciled (indexer) boundary."""
+    manager, resumed = _hisparse_lagging_indexer((2,))
+
+    blocks, num_local, shared_prefix_boundary = manager.get_computed_blocks(resumed)
+
     assert num_local == 2 * HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
+    assert shared_prefix_boundary == 3 * HISPARSE_BLOCK_SIZE
 
-    # The connector caps its own lookup at the depth of the host group.
+
+def test_hisparse_indexer_offload_completes_the_host_prefix():
+    """A restored indexer gap lets the request reuse the full host prefix."""
+    manager, resumed = _hisparse_lagging_indexer((2,))
+    blocks, num_local, _ = manager.get_computed_blocks(resumed)
+
+    # The connector never offers tokens the host group cannot cover.
     connector = make_hisparse_offloading_connector(manager)
     assert connector._bounding_group_ids == (0,)
-    max_completion = connector._max_loadable_tokens(resumed, num_local)
-    assert max_completion == HISPARSE_BLOCK_SIZE
+    offloadable = connector._max_loadable_tokens(resumed, num_local)
+    assert offloadable == HISPARSE_BLOCK_SIZE
 
-    completed = manager.truncate_computed_blocks(blocks, num_local + max_completion)
-    allocated = manager.allocate_slots(
-        resumed,
-        num_new_tokens=1,
-        num_new_computed_tokens=num_local,
-        new_computed_blocks=completed,
-        num_external_computed_tokens=max_completion,
+    assert (
+        manager.allocate_slots(
+            resumed,
+            num_new_tokens=1,
+            num_new_computed_tokens=num_local,
+            new_computed_blocks=blocks,
+            num_external_computed_tokens=offloadable,
+        )
+        is not None
     )
 
-    assert allocated is not None
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
     # The local prefix is adopted from shadow pages (GPU-resident), while the
     # externally imported page stays host-backed until its tail allocation.
-    assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
-    assert not resident[3].is_null
+    assert [block.is_null for block in resident] == [False, False, True, False]
 
 
-def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
-    manager = make_hisparse_kv_cache_manager(
-        32,
-        16,
-        enable_caching=True,
-    )
-    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
-    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
-    spill_counts = {spill.transfer_id: 1 for spill in spills}
-    get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
-    host_blocks, _, _, _ = manager.get_blocks(original.request_id).blocks
-    evicted_host_id = host_blocks[0].block_id
-    manager.free(original)
-    manager.evict_blocks({evicted_host_id})
-
-    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    _, num_local, _, diverged = manager.get_computed_blocks_for_connector(resumed)
+def test_hisparse_partial_indexer_offload_reuses_only_what_it_restores():
+    """A gap the offload only half covers reuses num_local plus that half."""
+    manager, resumed = _hisparse_lagging_indexer((1, 2))
+    blocks, num_local, _ = manager.get_computed_blocks(resumed)
     connector = make_hisparse_offloading_connector(manager)
 
-    assert not diverged
+    assert num_local == HISPARSE_BLOCK_SIZE
+    assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 1, 0, 0]
+    assert connector._max_loadable_tokens(resumed, num_local) == (
+        2 * HISPARSE_BLOCK_SIZE
+    )
+
+    assert (
+        manager.allocate_slots(
+            resumed,
+            num_new_tokens=1,
+            num_new_computed_tokens=num_local,
+            new_computed_blocks=blocks,
+            num_external_computed_tokens=HISPARSE_BLOCK_SIZE,
+        )
+        is not None
+    )
+
+    source, indexer, resident, _ = manager.get_blocks(resumed.request_id).blocks
+    # Two reused pages plus the freshly allocated tail; the host list was cut
+    # to match rather than adopting its third cached page.
+    assert len(source) == len(indexer) == len(resident) == 3
+    assert [block.is_null for block in resident] == [False, True, False]
+
+
+def test_hisparse_without_offload_reuses_only_the_reconciled_hit():
+    """With nothing to restore the deeper host list is cut back to num_local."""
+    manager, resumed = _hisparse_lagging_indexer((1, 2))
+    blocks, num_local, _ = manager.get_computed_blocks(resumed)
+
+    assert (
+        manager.allocate_slots(
+            resumed,
+            num_new_tokens=1,
+            num_new_computed_tokens=num_local,
+            new_computed_blocks=blocks,
+        )
+        is not None
+    )
+
+    source, indexer, resident, _ = manager.get_blocks(resumed.request_id).blocks
+    assert len(source) == len(indexer) == len(resident) == 2
+    assert not any(block.is_null for block in resident)
+
+
+def test_hisparse_offload_is_capped_by_a_missing_host_prefix():
+    """A host page the pool dropped bounds what the connector may offer."""
+    manager, resumed = _hisparse_lagging_indexer(())
+    host_pool = get_hisparse_coordinator(manager).get_host_block_pool()
+    assert host_pool is not None
+    host_pool.evict_blocks({host_pool.blocks[1].block_id})
+
+    _, num_local, _ = manager.get_computed_blocks(resumed)
+    connector = make_hisparse_offloading_connector(manager)
+
     assert num_local == 0
     assert connector._max_loadable_tokens(resumed, num_local) == 0
 
@@ -522,45 +567,94 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
     assert first[0].transfer_id != second[0].transfer_id
 
 
-def test_hisparse_free_blocks_preserves_host_and_device_ownership():
-    """Equal numeric block IDs must still be freed to their respective pools."""
+def test_hisparse_host_cow_copies_bypass_the_generic_block_copy_path():
+    """Host copies travel in connector metadata and return to the host pool."""
     manager = make_hisparse_kv_cache_manager(16, 16)
-    host_pool = get_hisparse_coordinator(manager).get_host_block_pool()
-    assert host_pool is not None
-    device_pool = manager.block_pool
-    host_free = host_pool.get_num_free_blocks()
-    device_free = device_pool.get_num_free_blocks()
-    host_block = host_pool.get_new_blocks(1)[0]
-    device_block = device_pool.get_new_blocks(1)[0]
-    assert host_block.block_id == device_block.block_id
-
-    manager.free_blocks([host_block, device_block])
-
-    assert host_block.ref_cnt == device_block.ref_cnt == 0
-    assert host_pool.get_num_free_blocks() == host_free
-    assert device_pool.get_num_free_blocks() == device_free
-
-
-def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
-    """Host-only copy-on-write work must reach the worker copy queue."""
-    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = get_hisparse_coordinator(manager)
     source_manager = manager.coordinator.single_type_managers[0]
     source_block = source_manager.block_pool.get_new_blocks(1)[0]
     source_manager.req_to_blocks["cow"] = [source_block]
     source_manager._partial_hit_reqs["cow"] = (0, source_block)
+    # Host and device block IDs overlap, so the endpoints must never be
+    # returned through the device pool.
+    device_block = manager.block_pool.get_new_blocks(1)[0]
+    assert device_block.block_id == source_block.block_id
+    host_free = source_manager.block_pool.get_num_free_blocks()
 
     new_blocks = source_manager.allocate_new_blocks(
         "cow", HISPARSE_BLOCK_SIZE, HISPARSE_BLOCK_SIZE
     )
-    new_block_ids = manager.take_new_block_ids()
-    copies, retained = manager.take_kv_cache_block_copies()
 
-    assert new_blocks and new_block_ids == []
-    assert len(copies) == 1
-    assert copies[0].host_resident
-    assert copies[0].src_block_id == source_block.block_id
-    assert copies[0].dst_block_id == new_blocks[0].block_id
-    assert retained == [source_block, new_blocks[0]]
+    assert new_blocks and manager.take_new_block_ids() == []
+    assert manager.take_kv_cache_block_copies() == ([], [])
+
+    [copy] = coordinator.take_host_block_copies()
+    assert copy.src_block_id == source_block.block_id
+    assert copy.dst_block_id == new_blocks[0].block_id
+
+    # Nothing is released until the worker reports having run the copy.
+    coordinator.release_completed_host_copies(())
+    assert source_manager.block_pool.get_num_free_blocks() < host_free
+
+    coordinator.release_completed_host_copies((copy.dst_block_id,))
+
+    assert source_manager.block_pool.get_num_free_blocks() == host_free
+    assert device_block.ref_cnt == 1
+
+
+def test_hisparse_unacknowledged_host_copies_stay_retained():
+    """A second batch staged before an ack keeps its endpoints retained."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = get_hisparse_coordinator(manager)
+    source_manager = manager.coordinator.single_type_managers[0]
+
+    def stage(request_id: str) -> KVCacheBlockCopy:
+        source_block = source_manager.block_pool.get_new_blocks(1)[0]
+        source_manager.req_to_blocks[request_id] = [source_block]
+        source_manager._partial_hit_reqs[request_id] = (0, source_block)
+        source_manager.allocate_new_blocks(
+            request_id, HISPARSE_BLOCK_SIZE, HISPARSE_BLOCK_SIZE
+        )
+        (copy,) = coordinator.take_host_block_copies()
+        return copy
+
+    first = stage("first")
+    second = stage("second")
+    free_with_both_retained = source_manager.block_pool.get_num_free_blocks()
+
+    coordinator.release_completed_host_copies((first.dst_block_id,))
+
+    # Only the acknowledged batch's endpoints came back.
+    assert source_manager.block_pool.get_num_free_blocks() == (
+        free_with_both_retained + 1
+    )
+    assert coordinator._retained_copies.keys() == {second.dst_block_id}
+
+
+def test_hisparse_host_events_survive_an_earlier_drain():
+    """Host publications reach take_events after the queue has been drained."""
+    manager = make_kv_cache_manager(
+        make_hisparse_kv_cache_config(32, 16),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=HISPARSE_BLOCK_SIZE,
+        enable_kv_cache_events=True,
+    )
+    get_hisparse_coordinator(manager)
+    first = make_request("first", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(first, 64) is not None
+    _publish_hisparse_pages(manager)
+    assert manager.take_events()
+
+    manager.free(first)
+    second = make_request("second", list(range(64, 128)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(second, 64) is not None
+    _publish_hisparse_pages(manager)
+
+    stored = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    assert (0, MEDIUM_CPU) in {(event.group_idx, event.medium) for event in stored}
 
 
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
@@ -603,6 +697,42 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     state = coordinator.request_states["partial"]
     assert state.valid_pages == {0}
     assert state.ready_prefix_pages == 1
+
+
+def test_hisparse_external_import_publishes_on_commit():
+    """Host pages an external load filled become readable when committed."""
+    manager = make_hisparse_kv_cache_manager(16, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = 2 * HISPARSE_BLOCK_SIZE
+    request = make_request("import", list(range(tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, tokens) is not None
+
+    # Nothing is readable while the load is still in flight.
+    in_flight = coordinator.request_states.get("import")
+    assert in_flight is None or not in_flight.valid_pages
+
+    request.num_computed_tokens = tokens
+    manager.cache_blocks(request, tokens)
+
+    state = coordinator.request_states["import"]
+    assert state.valid_pages == {0, 1}
+    assert state.ready_prefix_pages == 2
+
+
+def test_hisparse_short_external_import_publishes_nothing():
+    """A load that fell short of its recorded prefix must publish nothing."""
+    manager = make_hisparse_kv_cache_manager(16, 16, enable_caching=True)
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = 2 * HISPARSE_BLOCK_SIZE
+    request = make_request("import", list(range(tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, tokens) is not None
+
+    # The load failed past the first page, so the commit stops short.
+    request.num_computed_tokens = HISPARSE_BLOCK_SIZE
+    manager.cache_blocks(request, HISPARSE_BLOCK_SIZE)
+
+    state = coordinator.request_states.get("import")
+    assert state is None or not state.valid_pages
 
 
 def test_hisparse_resident_request_can_grow_without_hot_capacity():
@@ -676,8 +806,10 @@ def test_hisparse_events_report_host_and_device_placement():
         (1, MEDIUM_GPU),
     }
 
+    host_pool = get_hisparse_coordinator(manager).get_host_block_pool()
+    assert host_pool is not None
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
-    manager.evict_blocks({host_block.block_id})
+    host_pool.evict_blocks({host_block.block_id})
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU

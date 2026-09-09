@@ -43,6 +43,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._completed_host_copy_dst_ids = []
     return worker
 
 
@@ -720,7 +721,7 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
     worker.host_caches = (torch.empty(4, 1),)
     worker.host_num_blocks = 4
     previous_event = MagicMock()
-    copies = (KVCacheBlockCopy(0, 1, None),)
+    copies = (KVCacheBlockCopy(0, 1),)
     copy_blocks = MagicMock()
     tp_group = MagicMock()
     monkeypatch.setattr(

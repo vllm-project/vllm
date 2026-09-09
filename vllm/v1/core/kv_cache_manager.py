@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
-from vllm.distributed.kv_events import MEDIUM_GPU, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
@@ -23,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -30,13 +29,6 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
-
-
-def _pool_index_of(pools: tuple[BlockPool, ...], block: KVCacheBlock) -> int:
-    for idx, pool in enumerate(pools):
-        if block.block_id < len(pool.blocks) and pool.blocks[block.block_id] is block:
-            return idx
-    raise ValueError(f"Block {block.block_id} belongs to no pool.")
 
 
 @dataclass
@@ -191,18 +183,12 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        # Groups cached in host memory have their own block pool and can retain
-        # a deeper prefix than the device groups they back.
-        self.host_cached_group_ids = [
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.host_resident
-        ]
-        self.device_cached_group_ids = [
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if not group.host_resident and group.kv_cache_spec.prefix_cacheable
-        ]
+        # Groups whose lookup keeps blocks past the reconciled cache hit.
+        self.retained_hit_group_ids = tuple(
+            manager.kv_cache_group_id
+            for manager in self.coordinator.single_type_managers
+            if manager.retains_longer_hit
+        )
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -312,13 +298,9 @@ class KVCacheManager:
                 if num_blocks > 0:
                     group = self.kv_cache_config.kv_cache_groups[group_idx]
                     block_size = group.kv_cache_spec.block_size
-                    self.coordinator.single_type_managers[
-                        group_idx
-                    ].block_pool.emit_cached_block_events(
-                        request,
-                        num_blocks,
-                        block_size,
-                        group_idx,
+                    manager = self.coordinator.single_type_managers[group_idx]
+                    manager.block_pool.emit_cached_block_events(
+                        request, num_blocks, block_size, group_idx
                     )
 
         # The junction to pin is where the lagging sparse-retention group stops
@@ -347,12 +329,6 @@ class KVCacheManager:
         boundary if the connector supplies it, so the caller must fall back to
         ``get_computed_blocks`` to reconcile when no external tokens are found.
 
-        Hits also diverge when a group is cached in a slower medium than the
-        device groups it backs: the host copy of a prefix outlives the device
-        one. Report the device boundary as the local prefix and keep the deeper
-        host blocks, so the connector can restore the device groups into the
-        gap; the caller truncates the host blocks to whatever it restores.
-
         Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
 
         Returns:
@@ -360,9 +336,9 @@ class KVCacheManager:
             tokens, shared-prefix boundary) plus ``hit_diverged``.
         """
         coordinator = self.coordinator
-        if not isinstance(coordinator, HybridKVCacheCoordinator) or not (
-            self.host_cached_group_ids
-            or self.kv_cache_config.has_mamba_layers
+        if not (
+            self.kv_cache_config.has_mamba_layers
+            and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
             return *self.get_computed_blocks(request), False
@@ -370,21 +346,10 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
+        fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        if self.host_cached_group_ids:
-            num_local = min(
-                per_group_hits[group_id] for group_id in self.device_cached_group_ids
-            )
-            if min(per_group_hits[gid] for gid in self.host_cached_group_ids) <= (
-                num_local
-            ):
-                return *self.get_computed_blocks(request), False
-            return self.create_kv_cache_blocks(computed), num_local, 0, True
-
-        fa_group_id = coordinator.full_attention_group_id
-        assert fa_group_id is not None
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
@@ -502,6 +467,17 @@ class KVCacheManager:
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            if self.retained_hit_group_ids:
+                # These groups looked up blocks past the reconciled hit; adopt
+                # only the part the external hit reaches.
+                reused = num_new_computed_tokens + num_external_computed_tokens
+                groups = list(new_computed_block_list)
+                for group_id in self.retained_hit_group_ids:
+                    manager = self.coordinator.single_type_managers[group_id]
+                    groups[group_id] = groups[group_id][
+                        : cdiv(reused, manager.block_size)
+                    ]
+                new_computed_block_list = tuple(groups)
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
@@ -661,40 +637,13 @@ class KVCacheManager:
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
-    @property
-    def block_pools(self) -> tuple[BlockPool, ...]:
-        """Distinct pools backing the groups, in group order."""
-        if not self.host_cached_group_ids:
-            return (self.block_pool,)
-        return tuple(
-            dict.fromkeys(
-                manager.block_pool for manager in self.coordinator.single_type_managers
-            )
-        )
-
-    def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
-        """Return blocks to the pool each was allocated from."""
-        if not self.host_cached_group_ids:
-            self.block_pool.free_blocks(blocks)
-            return
-        pools = self.block_pools
-        by_pool: defaultdict[int, list[KVCacheBlock]] = defaultdict(list)
-        for block in blocks:
-            by_pool[_pool_index_of(pools, block)].append(block)
-        for pool_idx, pool_blocks in by_pool.items():
-            pools[pool_idx].free_blocks(pool_blocks)
-
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        # Connector block IDs address the persistent tier: the off-device pools
-        # when there are any, else the device pool.
-        pools = [pool for pool in self.block_pools if pool.medium != MEDIUM_GPU]
-        for pool in pools or [self.block_pool]:
-            pool.evict_blocks(block_ids)
+        self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -705,7 +654,10 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not all(pool.reset_prefix_cache() for pool in self.block_pools):
+        pools = dict.fromkeys(
+            manager.block_pool for manager in self.coordinator.single_type_managers
+        )
+        if not all([pool.reset_prefix_cache() for pool in pools]):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -747,14 +699,12 @@ class KVCacheManager:
         return self.coordinator.get_num_common_prefix_blocks(running_request_id)
 
     def take_events(self) -> list[KVCacheEvent]:
-        """Take the KV cache events from every block pool.
+        """Take the KV cache events from the block pool.
 
         Returns:
             A list of KV cache events.
         """
-        events: list[KVCacheEvent] = []
-        for pool in self.block_pools:
-            events.extend(pool.take_events())
+        events = self.block_pool.take_events()
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
@@ -855,9 +805,8 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
-        A group whose own hit stops before the endpoint keeps its shorter list:
-        an external hit supplies the rest (e.g. the final Mamba state, or the
-        device copy of a prefix that only survived in a slower medium).
+        An external hit can supply the final Mamba state even when the local
+        Mamba group ends before this endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
@@ -875,11 +824,12 @@ class KVCacheManager:
                 assert not group_blocks
                 truncated.append([])
                 continue
+            assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if num_blocks < len(group_blocks):
-                assert num_computed_tokens % manager.block_size == 0
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                num_blocks = min(num_blocks, len(group_blocks))
             else:
-                num_blocks = len(group_blocks)
+                assert num_blocks <= len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
@@ -922,18 +872,17 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        copies: list[KVCacheBlockCopy] = []
-        retained_blocks: list[KVCacheBlock] = []
+        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
         for mgr in self.coordinator.single_type_managers:
-            for source_block, cow_block in mgr.take_pending_cow_copies():
-                copies.append(
-                    KVCacheBlockCopy(
-                        src_block_id=source_block.block_id,
-                        dst_block_id=cow_block.block_id,
-                        host_resident=mgr.block_pool.medium != MEDIUM_GPU,
-                    )
-                )
-                retained_blocks.extend((source_block, cow_block))
+            pending_copies.extend(mgr.take_pending_cow_copies())
+        copies = [
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+            for source_block, cow_block in pending_copies
+        ]
+        retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
     def take_boundary_state_offloads(

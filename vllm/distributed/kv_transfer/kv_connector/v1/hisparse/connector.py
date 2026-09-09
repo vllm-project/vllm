@@ -47,6 +47,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
 class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     enqueued_transfer_counts: dict[int, int]
     completed_transfer_counts: dict[int, int]
+    completed_host_copy_dst_ids: tuple[int, ...] = ()
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, HiSparseConnectorWorkerMetadata)
@@ -63,6 +64,10 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             ),
             completed_transfer_counts=add_counts(
                 self.completed_transfer_counts, other.completed_transfer_counts
+            ),
+            # Every worker runs the same copies, so a union is the ack.
+            completed_host_copy_dst_ids=tuple(
+                {*self.completed_host_copy_dst_ids, *other.completed_host_copy_dst_ids}
             ),
         )
 
@@ -102,12 +107,7 @@ class HiSparseConnectorScheduler:
             self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
-        block_copies = scheduler_output.kv_cache_block_copies or ()
-        host_block_copies = tuple(copy for copy in block_copies if copy.host_resident)
-        if host_block_copies:
-            scheduler_output.kv_cache_block_copies = [
-                copy for copy in block_copies if not copy.host_resident
-            ]
+        host_block_copies = self.coordinator.take_host_block_copies()
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None
         source_block_ids = [
@@ -168,17 +168,13 @@ class HiSparseConnectorScheduler:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
-        for request_id in connector_output.finished_recving or ():
-            # An external load populated host pages directly; publish them.
-            request = self.requests.get(request_id)
-            if request is not None:
-                self.coordinator.complete_host_import(
-                    request_id, request.num_computed_tokens
-                )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
+        self.coordinator.release_completed_host_copies(
+            metadata.completed_host_copy_dst_ids
+        )
         self.coordinator.update_spills(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
@@ -230,12 +226,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def requires_kv_delivery(self) -> bool:
         return False
-
-    @property
-    def supports_divergent_local_hybrid_hits(self) -> bool:
-        # The host tier keeps prefixes the device groups have lost, so the
-        # local hit reported for a HiSparse model is routinely divergent.
-        return True
 
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
@@ -295,11 +285,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         enqueued, completed = self.connector_worker.take_transfer_updates()
-        if not enqueued and not completed:
+        host_copies = self.connector_worker.take_completed_host_copies()
+        if not enqueued and not completed and not host_copies:
             return None
         return HiSparseConnectorWorkerMetadata(
             enqueued_transfer_counts={transfer_id: 1 for transfer_id in enqueued},
             completed_transfer_counts={transfer_id: 1 for transfer_id in completed},
+            completed_host_copy_dst_ids=tuple(host_copies),
         )
 
     def shutdown(self) -> None:

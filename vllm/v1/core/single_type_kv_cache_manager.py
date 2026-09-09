@@ -51,6 +51,10 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    # Whether this group's cache hit may outlive the reconciled hit, so its
+    # lookup result is not trimmed to the shared boundary.
+    retains_longer_hit: bool = False
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
