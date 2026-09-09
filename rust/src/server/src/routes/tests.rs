@@ -28,6 +28,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -53,9 +54,11 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
+    build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
     render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -167,6 +170,22 @@ fn sse_json_payloads(text: &str) -> Vec<serde_json::Value> {
         .filter(|payload| *payload != "[DONE]")
         .map(|payload| serde_json::from_str(payload).expect("sse json payload"))
         .collect()
+}
+
+fn assert_shared_openai_stream_envelope(payloads: &[serde_json::Value], object: &str, model: &str) {
+    let first = payloads.first().expect("at least one SSE JSON payload");
+    assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(first["created"].is_u64());
+    assert_eq!(first["object"], object);
+    assert_eq!(first["model"], model);
+
+    for payload in payloads {
+        assert_eq!(payload["id"], first["id"]);
+        assert_eq!(payload["object"], first["object"]);
+        assert_eq!(payload["created"], first["created"]);
+        assert_eq!(payload["model"], first["model"]);
+        assert!(payload.get("envelope").is_none());
+    }
 }
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -699,6 +718,83 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
+#[test]
+fn scale_out_flag_accepts_unset_empty_zero_one_and_whitespace() {
+    assert_eq!(parse_scale_out_endpoints_flag(None), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("")), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("0")), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("1")), Ok(true));
+    assert_eq!(parse_scale_out_endpoints_flag(Some(" 1 ")), Ok(true));
+}
+
+#[test]
+fn scale_out_flag_rejects_values_other_than_zero_or_one() {
+    for value in ["-1", "2", "01", "+1", "invalid", " "] {
+        assert_eq!(
+            parse_scale_out_endpoints_flag(Some(value)),
+            Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_is_disabled_by_default() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-disabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        false,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_can_be_enabled() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-enabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -836,13 +932,41 @@ async fn test_admin_app_with_engine_script<F>(script: F) -> (axum::Router, MockE
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    test_admin_app_with_ready_and_engine_script(ready, script).await
+}
+
+async fn test_admin_app_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
+    (
+        build_router_with_dev_mode_and_lora(state, true, true),
+        engine_task,
+    )
+}
+
+async fn test_admin_state_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready,
         move |dealer, push| script(dealer, push),
     ));
 
@@ -859,16 +983,146 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_dev_mode_and_lora(
-            Arc::new(AppState::new(
-                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat,
-            )),
-            true,
-            true,
-        ),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         engine_task,
     )
+}
+
+/// Engine script that answers one `add_lora` utility call with `loaded` and
+/// hands the decoded LoRA request tuple to `check`.
+fn add_lora_script(
+    loaded: bool,
+    check: impl FnOnce(&[Value]) + Send + 'static,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+            let args = array[3].as_array().expect("utility args");
+            check(args[0].as_array().expect("lora request tuple"));
+            send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_loads_and_lists_with_parent() {
+    // An absolute local path: the runtime endpoint would reject it without
+    // VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES, static config trusts it.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        ready,
+        add_lora_script(true, |lora| {
+            assert_eq!(lora[0], Value::from("alice"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/adapters/alice"));
+            assert_eq!(lora[3], Value::from("base-model"));
+        }),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        is_3d_lora_weight: false,
+    };
+    let request = state.load_static_lora(&module).await.expect("load static lora");
+    assert_eq!(request.lora_name, "alice");
+    assert_eq!(request.lora_int_id, 1);
+
+    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "alice");
+    assert_eq!(json["data"][1]["root"], "/adapters/alice");
+    assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_requires_lora_enabled_engine() {
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine has no lora");
+    assert!(matches!(error, LoadLoraError::Disabled(_)), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_fails_when_engine_rejects_it() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(false, |_| {})).await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine rejected");
+    assert!(
+        matches!(error, LoadLoraError::NotLoaded { .. }),
+        "{error:?}"
+    );
+    assert!(state.served_lora_requests().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_rejects_empty_name_or_path() {
+    // The JSON form of `--lora-modules` is not validated at parse time; the
+    // manager rejects empty fields before any engine RPC.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, |_dealer, _push| {
+            boxed_test_future(async {})
+        })
+        .await;
+
+    for (name, path) in [("", "org/alice"), ("alice", "")] {
+        let module = LoraModulePath {
+            name: name.to_string(),
+            path: path.to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let error = state.load_static_lora(&module).await.expect_err("empty field");
+        assert!(
+            matches!(error, LoadLoraError::InvalidAdapter { .. }),
+            "{error:?}"
+        );
+    }
 }
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
@@ -885,10 +1139,13 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_scale_out_endpoints(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            true,
+        ),
         engine_task,
     )
 }
@@ -1205,10 +1462,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut generate_app = build_router(Arc::new(AppState::new(
-        vec!["render-model".to_string()],
-        chat,
-    )));
+    let mut generate_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
+        true,
+    );
     let generate_response = generate_app
         .call(
             Request::builder()
@@ -2702,6 +2959,11 @@ async fn happy_path_returns_sse_stream() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
 
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "chat.completion.chunk",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
     assert_eq!(
@@ -3639,7 +3901,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][1],
-        json!({"a": -0.5, "e": -0.3})
+        json!({
+            "97": {"logprob": -0.5, "rank": 1, "decoded_token": "a"},
+            "101": {"logprob": -0.3, "rank": 1, "decoded_token": "e"},
+        })
     );
 }
 
@@ -3947,10 +4212,13 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
@@ -4061,10 +4329,13 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
@@ -4447,6 +4718,11 @@ async fn completions_happy_path_returns_sse_stream() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "text_completion",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     let usage_index = payloads
         .iter()
         .position(|payload| payload.contains("\"usage\":"))

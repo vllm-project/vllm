@@ -457,7 +457,7 @@ class DeepseekV2Attention(nn.Module):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: int,
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
@@ -495,7 +495,7 @@ class DeepseekV2Attention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
+                self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -644,6 +644,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]: the indexer kernels and
+        # kv_cache_as_quant_view index a 3-D block-major cache.
+        self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(
@@ -869,12 +874,20 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
+    if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
+        scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
     if scale_inv.ndim == 1:
         # Per-channel scale: one scale per row of [out, in]
         group_shape = GroupShape(1, weight_fp8.shape[1])
     else:
-        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-        group_shape = GroupShape(block_size, block_size)
+        # Derive the block size independently per dim so that per-channel
+        # ([out, 1]), MX ([out, in / 32]) and 2D block ([out / 128, in / 128])
+        # scale layouts are all handled.
+        group_shape = GroupShape(
+            weight_fp8.shape[0] // scale_inv.shape[0],
+            weight_fp8.shape[1] // scale_inv.shape[1],
+        )
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
@@ -1041,8 +1054,14 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
-        qrep_enabled = (
+        # The env var predates the config field and still wins if set explicitly.
+        qrep_requested = (
             envs.VLLM_DCP_Q_REPLICATE
+            if envs.is_set("VLLM_DCP_Q_REPLICATE")
+            else bool(vllm_config.parallel_config.dcp_q_replicate)
+        )
+        qrep_enabled = (
+            qrep_requested
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.prefill_context_parallel_size <= 1
         )

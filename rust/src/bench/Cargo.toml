@@ -17,6 +17,7 @@ hf-hub.workspace = true
 image.workspace = true
 indicatif.workspace = true
 mimalloc.workspace = true
+parquet.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true

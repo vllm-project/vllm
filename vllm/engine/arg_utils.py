@@ -367,6 +367,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "max_num_queued_tokens",
             }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
@@ -481,7 +482,8 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
-    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
+    dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
+    dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -495,6 +497,9 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_batch_sharded_sampling: bool | None = (
+        ParallelConfig.enable_batch_sharded_sampling
+    )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -503,6 +508,7 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
+    dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
@@ -540,6 +546,8 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_queued_reqs: int | None = None
+    max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
@@ -656,6 +664,9 @@ class EngineArgs:
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
+    per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = (
+        ObservabilityConfig.per_request_spec_decode_metrics
+    )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
@@ -700,6 +711,7 @@ class EngineArgs:
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
+    enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -714,6 +726,9 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    enable_mamba_fine_grained_prefix_cache: bool = (
+        CacheConfig.enable_mamba_fine_grained_prefix_cache
+    )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -760,7 +775,10 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda", "flashinfer"] | None = (
+        None
+    )
+    kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -922,6 +940,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
+        model_group.add_argument(
+            "--enable-nccl-comm-suspend",
+            **model_kwargs["enable_nccl_comm_suspend"],
+        )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
@@ -1068,6 +1090,10 @@ class EngineArgs:
             **parallel_kwargs["dcp_comm_backend"],
         )
         parallel_group.add_argument(
+            "--dcp-q-replicate",
+            **parallel_kwargs["dcp_q_replicate"],
+        )
+        parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
@@ -1149,6 +1175,10 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
+            "--enable-batch-sharded-sampling",
+            **parallel_kwargs["enable_batch_sharded_sampling"],
+        )
+        parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
         )
@@ -1166,6 +1196,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
+        )
+        parallel_group.add_argument(
+            "--dp-sync-interval",
+            **parallel_kwargs["dp_sync_interval"],
         )
         parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
@@ -1255,6 +1289,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
+            "--enable-mamba-fine-grained-prefix-cache",
+            **cache_kwargs["enable_mamba_fine_grained_prefix_cache"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -1477,6 +1515,10 @@ class EngineArgs:
             **observability_kwargs["collect_detailed_traces"],
         )
         observability_group.add_argument(
+            "--per-request-spec-decode-metrics",
+            **observability_kwargs["per_request_spec_decode_metrics"],
+        )
+        observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
         )
         observability_group.add_argument(
@@ -1534,6 +1576,13 @@ class EngineArgs:
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
+        )
+        scheduler_group.add_argument(
+            "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
+        )
+        scheduler_group.add_argument(
+            "--max-num-queued-tokens",
+            **scheduler_kwargs["max_num_queued_tokens"],
         )
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
@@ -1708,9 +1757,16 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "flashinfer"],
             default=None,
             help="Select KDA prefill backend.",
+        )
+        parser.add_argument(
+            "--kda-decode-backend",
+            dest="kda_decode_backend",
+            choices=["auto", "native", "flashinfer", "triton"],
+            default=None,
+            help="Select KDA decode backend.",
         )
         return parser
 
@@ -1794,6 +1850,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
+            enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
@@ -1934,6 +1991,7 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
@@ -2021,6 +2079,9 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            enable_mamba_fine_grained_prefix_cache=(
+                self.enable_mamba_fine_grained_prefix_cache
+            ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
@@ -2085,21 +2146,19 @@ class EngineArgs:
             )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
-            world_size = (
-                self.data_parallel_size
-                * self.pipeline_parallel_size
-                * self.tensor_parallel_size
-            )
             world_size_within_dp = (
-                self.pipeline_parallel_size * self.tensor_parallel_size
+                self.pipeline_parallel_size
+                * self.tensor_parallel_size
+                * self.prefill_context_parallel_size
             )
+            world_size = self.data_parallel_size * world_size_within_dp
             if world_size % self.nnodes != 0:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
                     f"`--nnodes {self.nnodes}` must evenly divide the total "
                     f"world size ({world_size}). Adjust `--nnodes`, "
-                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
-                    "`--tensor-parallel-size`."
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, "
+                    "`--tensor-parallel-size`, or `--prefill-context-parallel-size`."
                 )
             if not 0 <= self.node_rank < self.nnodes:
                 raise ValueError(
@@ -2266,12 +2325,14 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
+            dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
@@ -2287,6 +2348,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
+            dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
@@ -2326,6 +2388,8 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_queued_reqs=self.max_num_queued_reqs,
+            max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
@@ -2393,6 +2457,19 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
@@ -2510,6 +2587,8 @@ class EngineArgs:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
+        if self.kda_decode_backend is not None:
+            self.additional_config["kda_decode_backend"] = self.kda_decode_backend
 
         config = VllmConfig(
             model_config=model_config,

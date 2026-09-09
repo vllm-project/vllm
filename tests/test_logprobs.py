@@ -208,3 +208,10 @@ def test_flat_logprobs_access() -> None:
     assert logprobs_last2.logprobs == [0.4, 0.5, 0.6, 0.1]
     assert logprobs_last2.ranks == [40, 50, 60, 10]
     assert logprobs_last2.decoded_tokens == ["40", "50", "60", "10"]
+
+    for empty_slice in (slice(0, 0), slice(3, 3), slice(10, 10)):
+        empty = logprobs[empty_slice]
+        assert isinstance(empty, FlatLogprobs)
+        assert len(empty) == 0
+        assert empty.start_indices == []
+        assert empty.end_indices == []
