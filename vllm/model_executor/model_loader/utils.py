@@ -12,7 +12,12 @@ from torch import nn
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.hpc import HpcModule
@@ -162,6 +167,21 @@ def process_weights_after_loading(
     for _, module in model.named_modules():
         if isinstance(module, HpcModule):
             module.process_weights_after_loading(model)
+
+    # Expert pool (moe_expert_pool_rows > 0): one shared bank for all MoE
+    # layers, bound after every layer's tensors are in their final layout.
+    from vllm.model_executor.layers.fused_moe.expert_pool.install import (
+        install_expert_pool,
+    )
+
+    scheduler_config = get_current_vllm_config().scheduler_config
+    install_expert_pool(
+        model,
+        target_device,
+        max_decode_tokens=(
+            scheduler_config.max_num_seqs if scheduler_config is not None else 1
+        ),
+    )
 
     # Model-level post-load hook, after the per-layer quant finalize.
     if hasattr(model, "process_weights_after_loading"):

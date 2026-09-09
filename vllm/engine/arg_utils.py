@@ -551,6 +551,7 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
+    moe_expert_pool_rows: int = OffloadConfig.moe_expert_pool_rows
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -1355,6 +1356,9 @@ class EngineArgs:
         )
         offload_group.add_argument(
             "--offload-params", **prefetch_kwargs["offload_params"]
+        )
+        offload_group.add_argument(
+            "--moe-expert-pool-rows", **offload_kwargs["moe_expert_pool_rows"]
         )
 
         # Multimodal related configs
@@ -2624,6 +2628,7 @@ class EngineArgs:
                 offload_prefetch_step=self.offload_prefetch_step,
                 offload_params=self.offload_params,
             ),
+            moe_expert_pool_rows=self.moe_expert_pool_rows,
         )
 
         if self.gdn_prefill_backend is not None:
