@@ -126,7 +126,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             kv_in_stride=input_stride,
             kv_out_stride=(input_stride, kv_size),
             eps=float(hf_config.rms_norm_eps),
-            launch_pdl=(False, True),
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
