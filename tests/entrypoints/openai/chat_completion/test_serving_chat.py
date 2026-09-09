@@ -95,7 +95,7 @@ def _make_serialization_test_response(**kwargs) -> ChatCompletionResponse:
     )
 
 
-def test_unset_vllm_fields_are_preserved_by_default():
+def test_omitting_unset_vllm_fields_is_opt_in():
     response = _make_serialization_test_response()
 
     payload = _serialize_chat_completion_response(response, omit_unset_fields=False)
@@ -103,16 +103,10 @@ def test_unset_vllm_fields_are_preserved_by_default():
     assert payload.keys() >= _VLLM_EXTENSION_FIELDS
     assert all(payload[field] is None for field in _VLLM_EXTENSION_FIELDS)
 
-
-def test_unset_vllm_fields_can_be_omitted_without_dropping_spec_fields():
-    response = _make_serialization_test_response()
-
     payload = _serialize_chat_completion_response(response, omit_unset_fields=True)
 
     assert _VLLM_EXTENSION_FIELDS.isdisjoint(payload)
-    assert "service_tier" in payload
     assert payload["service_tier"] is None
-    assert "system_fingerprint" in payload
     assert payload["system_fingerprint"] is None
     assert payload["choices"][0]["logprobs"] is None
 
