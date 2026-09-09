@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
@@ -1346,13 +1346,26 @@ class KVCacheTensor:
     layer_stride: int
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
-    host_resident: bool = False  # allocate in host rather than device memory
-    block_pool_id: int | None = 0
+    block_pool_id: int = 0  # index into ``KVCacheConfig.block_pools``
+
+
+class KVCachePlacement(str, Enum):
+    """Which memory a block pool is allocated from."""
+
+    DEVICE = "device"
+    HOST = "host"
+
+
+@dataclass
+class KVCacheBlockPoolSpec:
+    """One block-ID space. Blocks of a pool alias the same backing allocation."""
+
+    num_blocks: int
+    placement: KVCachePlacement = KVCachePlacement.DEVICE
 
 
 class KVCacheGroupRole(str, Enum):
     DEFAULT = "default"
-    HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"
 
 
@@ -1369,11 +1382,10 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
-    # Physical block-pool domain used by this group. Groups in the same domain
-    # share block IDs and may overlap in a packed HMA layout. Groups in
-    # different domains have independent block-ID spaces. None identifies a
-    # group owned by a dedicated non-device manager.
-    block_pool_id: int | None = 0
+    # Index into ``KVCacheConfig.block_pools``. Groups in the same pool share
+    # block IDs and may overlap in a packed layout; different pools have
+    # independent block-ID spaces.
+    block_pool_id: int = 0
     # Whether this group participates in persistent prefix-cache lookup.
     # Ephemeral accelerator-side replicas set this to False; their source
     # group remains authoritative and they are rebuilt when a prefix is reused.
@@ -1408,8 +1420,9 @@ class KVCacheConfig:
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
 
-    hisparse_host_num_blocks: int | None = None
-    """Capacity of the dedicated HiSparse host-block manager, when enabled."""
+    block_pools: list[KVCacheBlockPoolSpec] = field(default_factory=list)
+    """Block pools referenced by ``block_pool_id``. Pool 0 always holds the
+    ``num_blocks`` device blocks; further pools may be host-placed."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
@@ -1448,41 +1461,42 @@ class KVCacheConfig:
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     def __post_init__(self) -> None:
-        if self.num_blocks < 0:
-            raise ValueError("KV cache block-pool size must be non-negative.")
-        if self.hisparse_host_num_blocks is not None and (
-            self.hisparse_host_num_blocks < 0
-        ):
-            raise ValueError("HiSparse host block-pool size must be non-negative.")
-        for group in self.kv_cache_groups:
-            if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
-                if (
-                    group.block_pool_id is not None
-                    or self.hisparse_host_num_blocks is None
-                ):
-                    raise ValueError(
-                        "HiSparse source groups require a dedicated host block pool."
-                    )
-                continue
-            if group.block_pool_id != 0:
-                raise ValueError(
-                    f"Invalid device block_pool_id={group.block_pool_id}; expected 0."
-                )
-        for tensor in self.kv_cache_tensors:
-            if tensor.host_resident:
-                if (
-                    tensor.block_pool_id is not None
-                    or self.hisparse_host_num_blocks is None
-                ):
-                    raise ValueError(
-                        "Host-resident tensors require the HiSparse host pool."
-                    )
-                continue
-            if tensor.block_pool_id != 0:
-                raise ValueError(
-                    "Invalid device tensor block_pool_id="
-                    f"{tensor.block_pool_id}; expected 0."
-                )
+        if not self.block_pools:
+            self.block_pools = [KVCacheBlockPoolSpec(self.num_blocks)]
+        if any(pool.num_blocks < 0 for pool in self.block_pools):
+            raise ValueError("KV cache block-pool sizes must be non-negative.")
+        if self.num_blocks != self.block_pools[0].num_blocks:
+            raise ValueError("num_blocks must equal block_pools[0].num_blocks.")
+
+    @property
+    def host_block_pool_id(self) -> int | None:
+        """The host-placed block pool, if this configuration has one."""
+        return next(
+            (
+                pool_id
+                for pool_id, pool in enumerate(self.block_pools)
+                if pool.placement is KVCachePlacement.HOST
+            ),
+            None,
+        )
+
+    @property
+    def host_group_ids(self) -> tuple[int, ...]:
+        """Cache groups whose blocks are allocated from host memory."""
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if self.block_pools[group.block_pool_id].placement is KVCachePlacement.HOST
+        )
+
+    @property
+    def host_layer_names(self) -> frozenset[str]:
+        """Layers whose blocks are allocated from host memory."""
+        return frozenset(
+            layer_name
+            for group_id in self.host_group_ids
+            for layer_name in self.kv_cache_groups[group_id].layer_names
+        )
 
     @property
     def has_mamba_layers(self) -> bool:
@@ -1511,15 +1525,12 @@ class KVCacheConfig:
         zeroing_pools = {
             group.block_pool_id
             for group in self.kv_cache_groups
-            if group.block_pool_id is not None
-            and any(
+            if any(
                 isinstance(spec, MambaSpec)
                 for spec in iter_layer_specs(group.kv_cache_spec)
             )
         }
         for group in self.kv_cache_groups:
-            if group.block_pool_id is None:
-                continue
             group_spec = group.kv_cache_spec
             specs = (
                 group_spec.kv_cache_specs.values()

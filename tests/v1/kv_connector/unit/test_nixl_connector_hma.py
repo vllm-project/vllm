@@ -25,9 +25,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheBlockPoolSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheGroupSpec,
+    KVCachePlacement,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -1845,15 +1846,17 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=gpu_num_blocks,
-        hisparse_host_num_blocks=host_num_blocks,
+        block_pools=[
+            KVCacheBlockPoolSpec(gpu_num_blocks),
+            KVCacheBlockPoolSpec(host_num_blocks, KVCachePlacement.HOST),
+        ],
         kv_cache_tensors=[
             KVCacheTensor(
                 size=host_num_blocks * spec.page_size_bytes,
                 layers=["mla.host"],
                 layer_stride=host_num_blocks * spec.page_size_bytes,
                 block_stride=spec.page_size_bytes,
-                host_resident=True,
-                block_pool_id=None,
+                block_pool_id=1,
             ),
             KVCacheTensor(
                 size=gpu_num_blocks * spec.page_size_bytes,
@@ -1866,8 +1869,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
             KVCacheGroupSpec(
                 ["mla.host"],
                 spec,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
+                block_pool_id=1,
             ),
             KVCacheGroupSpec(["mla.device"], spec),
         ],

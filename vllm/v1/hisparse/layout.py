@@ -13,8 +13,10 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
+    KVCacheBlockPoolSpec,
     KVCacheGroupRole,
     KVCacheGroupSpec,
+    KVCachePlacement,
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -25,6 +27,10 @@ from vllm.v1.kv_cache_interface import (
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 
+# HiSparse pages sparse-MLA KV from a host pool onto the shared device pool.
+DEVICE_BLOCK_POOL_ID = 0
+HOST_BLOCK_POOL_ID = 1
+
 
 @dataclass(frozen=True)
 class HiSparseLayout:
@@ -32,6 +38,10 @@ class HiSparseLayout:
     device_groups: list[KVCacheGroupSpec]
     host_tensors: list[KVCacheTensor]
     host_num_blocks: int
+
+    @property
+    def host_block_pool(self) -> KVCacheBlockPoolSpec:
+        return KVCacheBlockPoolSpec(self.host_num_blocks, KVCachePlacement.HOST)
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
@@ -217,9 +227,8 @@ def create_hisparse_layout(
     source_group = KVCacheGroupSpec(
         list(source_specs),
         source_group_spec,
-        block_pool_id=None,
+        block_pool_id=HOST_BLOCK_POOL_ID,
         enable_kv_transfer=True,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
     regular_groups = [replace(group, block_pool_id=0) for group in groups[1:]]
     gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
@@ -236,8 +245,7 @@ def create_hisparse_layout(
             layers=[name],
             layer_stride=spec.page_size_bytes * host_num_blocks,
             block_stride=spec.page_size_bytes,
-            host_resident=True,
-            block_pool_id=None,
+            block_pool_id=HOST_BLOCK_POOL_ID,
         )
         for name, spec in source_specs.items()
     ]

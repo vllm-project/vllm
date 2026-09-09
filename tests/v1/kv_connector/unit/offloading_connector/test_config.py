@@ -20,9 +20,11 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    KVCacheBlockPoolSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheGroupSpec,
+    KVCachePlacement,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
@@ -341,8 +343,7 @@ def test_hisparse_offloads_only_indexer_group():
     source = KVCacheGroupSpec(
         ["source"],
         _full_attention_spec(),
-        block_pool_id=None,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
+        block_pool_id=1,
     )
     indexer = KVCacheGroupSpec(
         ["indexer"],
@@ -353,7 +354,10 @@ def test_hisparse_offloads_only_indexer_group():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[source, indexer],
-        hisparse_host_num_blocks=4,
+        block_pools=[
+            KVCacheBlockPoolSpec(4),
+            KVCacheBlockPoolSpec(4, KVCachePlacement.HOST),
+        ],
     )
     config = _make_vllm_config()
 

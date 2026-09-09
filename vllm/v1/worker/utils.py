@@ -686,7 +686,7 @@ class DeviceKVCacheBlockCopier:
         ]
 
     def copy(self, copies: Sequence[KVCacheBlockCopy]) -> None:
-        device_copies = [copy for copy in copies if copy.block_pool_id is not None]
+        device_copies = [copy for copy in copies if copy.block_pool_id == 0]
         copy_kv_cache_blocks_inplace(
             self._caches,
             self._num_blocks,

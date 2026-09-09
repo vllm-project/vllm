@@ -211,8 +211,9 @@ class HiSparseConnectorWorker:
 
         resident = cache_handles[0].view
         assert resident is not None
-        host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
-        assert host_num_blocks is not None
+        host_pool_id = self.kv_cache_config.host_block_pool_id
+        assert host_pool_id is not None
+        host_num_blocks = self.kv_cache_config.block_pools[host_pool_id].num_blocks
         try:
             self.initialize(
                 cache_handles,

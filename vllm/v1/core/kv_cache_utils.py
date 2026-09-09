@@ -32,8 +32,8 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheBlockPoolSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -65,19 +65,6 @@ BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 # It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
 ExternalBlockHash: TypeAlias = bytes | int
-
-
-def get_unique_kv_cache_group_id(
-    kv_cache_config: KVCacheConfig, role: KVCacheGroupRole
-) -> int:
-    group_ids = [
-        group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if group.role is role
-    ]
-    if len(group_ids) != 1:
-        raise ValueError(f"Expected one {role.value} cache group, found {group_ids}.")
-    return group_ids[0]
 
 
 def make_block_hash_with_group_id(
@@ -204,7 +191,7 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
     # Device block-pool domain, or None for a dedicated non-device owner.
-    pool_id: int | None = 0
+    pool_id: int = 0  # index into ``KVCacheConfig.block_pools``
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -248,7 +235,7 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
-    block_pool_id: int | None = 0
+    block_pool_id: int = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -1079,25 +1066,17 @@ def get_max_concurrency_for_kv_cache_config(
     table. Requirements are summed within each allocator domain, then the
     tightest domain determines concurrency.
     """
-    blocks_per_request = 0
-    host_blocks_per_request = 0
+    blocks_per_request = [0] * len(kv_cache_config.block_pools)
     for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
+        blocks_per_request[group.block_pool_id] += cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-        if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
-            host_blocks_per_request += required
-        else:
-            assert group.block_pool_id == 0
-            blocks_per_request += required
-    limits = [kv_cache_config.num_blocks / blocks_per_request]
-    if host_blocks_per_request:
-        assert kv_cache_config.hisparse_host_num_blocks is not None
-        limits.append(
-            kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request
-        )
-    return min(limits)
+    return min(
+        pool.num_blocks / required
+        for pool, required in zip(kv_cache_config.block_pools, blocks_per_request)
+        if required > 0
+    )
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -1819,13 +1798,14 @@ def get_kv_cache_config_from_groups(
         )
         kv_cache_groups = [hisparse_layout.source_group, *kv_cache_groups]
 
+    block_pools = [KVCacheBlockPoolSpec(num_blocks)]
+    if hisparse_layout is not None:
+        block_pools.append(hisparse_layout.host_block_pool)
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
-        hisparse_host_num_blocks=(
-            hisparse_layout.host_num_blocks if hisparse_layout is not None else None
-        ),
+        block_pools=block_pools,
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
@@ -2373,8 +2353,7 @@ def generate_scheduler_kv_cache_config(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
     assert all(
-        cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
-        for cfg in kv_cache_configs
+        cfg.block_pools == kv_cache_configs[0].block_pools for cfg in kv_cache_configs
     )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.

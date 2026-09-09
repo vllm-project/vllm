@@ -4076,9 +4076,11 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
 def test_register_kv_caches_uses_transfer_group_memory_domain():
     """Derived GPU caches must not change host-source transfer addresses."""
     from vllm.v1.kv_cache_interface import (
+        KVCacheBlockPoolSpec,
         KVCacheConfig,
         KVCacheGroupRole,
         KVCacheGroupSpec,
+        KVCachePlacement,
         KVCacheTensor,
     )
 
@@ -4094,8 +4096,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
     source_group = KVCacheGroupSpec(
         ["source"],
         source_spec,
-        block_pool_id=None,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
+        block_pool_id=1,
     )
     indexer_group = KVCacheGroupSpec(
         ["indexer"],
@@ -4111,8 +4112,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
                 layers=["source"],
                 layer_stride=host_num_blocks * page_size,
                 block_stride=page_size,
-                host_resident=True,
-                block_pool_id=None,
+                block_pool_id=1,
             ),
             KVCacheTensor(
                 size=gpu_num_blocks * page_size,
@@ -4122,7 +4122,10 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
             ),
         ],
         kv_cache_groups=[source_group, indexer_group],
-        hisparse_host_num_blocks=host_num_blocks,
+        block_pools=[
+            KVCacheBlockPoolSpec(gpu_num_blocks),
+            KVCacheBlockPoolSpec(host_num_blocks, KVCachePlacement.HOST),
+        ],
     )
     worker = _make_bare_worker(num_gpu_blocks=gpu_num_blocks)
     worker._kv_cache_config = config

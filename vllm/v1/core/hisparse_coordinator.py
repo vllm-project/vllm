@@ -8,7 +8,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_unique_kv_cache_group_id
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
@@ -22,7 +22,6 @@ from vllm.v1.hisparse.types import (
 from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
 )
 from vllm.v1.request import Request
 
@@ -84,16 +83,16 @@ class HiSparseCoordinator:
         enable_kv_cache_events: bool,
         metrics_collector: KVCacheMetricsCollector | None,
     ) -> BlockPool | None:
-        num_blocks = kv_cache_config.hisparse_host_num_blocks
-        if num_blocks is None:
+        host_pool_id = kv_cache_config.host_block_pool_id
+        if host_pool_id is None:
             return None
         return BlockPool(
-            num_gpu_blocks=num_blocks,
+            num_gpu_blocks=kv_cache_config.block_pools[host_pool_id].num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
-            block_pool_id=None,
+            block_pool_id=host_pool_id,
         )
 
     def __init__(
@@ -115,11 +114,9 @@ class HiSparseCoordinator:
                         "HiSparse resident specs require resident cache managers."
                     )
                 resident_managers.append(manager)
-                assert group.block_pool_id is not None
                 hisparse_pool_ids.add(group.block_pool_id)
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
-                assert group.block_pool_id is not None
                 hisparse_pool_ids.add(group.block_pool_id)
 
         if len(hisparse_pool_ids) > 1:
@@ -137,12 +134,12 @@ class HiSparseCoordinator:
         self.host_manager: SingleTypeKVCacheManager | None = None
         self.host_group_id: int | None = None
         self.max_spill_pages = 0
-        if kv_cache_config.hisparse_host_num_blocks is not None:
-            host_group_id = get_unique_kv_cache_group_id(
-                kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
-            )
-            self.host_group_id = host_group_id
-            self.host_manager = managers[host_group_id]
+        self.host_block_pool_id = kv_cache_config.host_block_pool_id
+        if host_group_ids := kv_cache_config.host_group_ids:
+            if len(host_group_ids) != 1:
+                raise ValueError(f"Expected one host cache group, got {host_group_ids}")
+            self.host_group_id = host_group_ids[0]
+            self.host_manager = managers[self.host_group_id]
         self.has_host_cache = self.host_manager is not None
         if self.resident_managers:
             assert self.host_manager is not None
@@ -290,13 +287,7 @@ class HiSparseCoordinator:
         return manager.block_pool if manager is not None else None
 
     def owns_block(self, block: KVCacheBlock) -> bool:
-        pool = self.get_host_block_pool()
-        return (
-            pool is not None
-            and block.pool_id is None
-            and 0 <= block.block_id < len(pool.blocks)
-            and pool.blocks[block.block_id] is block
-        )
+        return block.pool_id == self.host_block_pool_id
 
     def has_host_capacity(self, num_blocks: int) -> bool:
         pool = self.get_host_block_pool()

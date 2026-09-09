@@ -64,8 +64,10 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheBlockPoolSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePlacement,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
@@ -143,8 +145,10 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         config, [group], available_memory=2**30
     )
     assert cache_config.num_blocks == 7
-    assert cache_config.hisparse_host_num_blocks is not None
-    assert cache_config.hisparse_host_num_blocks > 7
+    device_pool, host_pool = cache_config.block_pools
+    assert device_pool == KVCacheBlockPoolSpec(7)
+    assert host_pool.placement is KVCachePlacement.HOST
+    assert host_pool.num_blocks > 7
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert host_group.kv_cache_spec.block_size == gpu_block_size

@@ -1257,11 +1257,6 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
-        tensor_configs = {
-            layer_name: tensor_config
-            for tensor_config in self.kv_cache_config.kv_cache_tensors
-            for layer_name in tensor_config.layers
-        }
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_region_index = None
@@ -1334,13 +1329,9 @@ class NixlBaseConnectorWorker:
                 // self._physical_blocks_per_logical_kv_block
             )
             group = self.kv_cache_config.transfer_groups[group_index]
-            if group.block_pool_id is None:
-                logical_num_blocks = (
-                    cache.shape[0] // self._physical_blocks_per_logical_kv_block
-                )
-            else:
-                assert group.block_pool_id == 0
-                logical_num_blocks = self.kv_cache_config.num_blocks
+            logical_num_blocks = self.kv_cache_config.block_pools[
+                group.block_pool_id
+            ].num_blocks
             group_id = group_index
             num_blocks = (
                 logical_num_blocks
@@ -1356,8 +1347,7 @@ class NixlBaseConnectorWorker:
             )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            tensor_config = tensor_configs.get(layer_name)
-            is_host_resident = tensor_config is not None and tensor_config.host_resident
+            is_host_resident = layer_name in self.kv_cache_config.host_layer_names
             if cache.device.type == "cpu":
                 mem_type = "DRAM"
                 region_device_id = 0

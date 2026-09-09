@@ -826,7 +826,6 @@ class KVCacheManager:
         )
         by_pool: dict[int, list[KVCacheBlock]] = {}
         for block in device_blocks:
-            assert block.pool_id is not None
             by_pool.setdefault(block.pool_id, []).append(block)
         for pool_id, pool_blocks in by_pool.items():
             self.block_pools[pool_id].free_blocks(pool_blocks)
@@ -1062,17 +1061,18 @@ class KVCacheManager:
         return self.create_kv_cache_blocks(tuple(truncated))
 
     def take_new_block_ids(self) -> dict[int, list[int]]:
-        """Drain new attention block IDs, preserving their allocator pool."""
+        """Drain new device block IDs, preserving their allocator pool."""
         ids_by_pool: dict[int, list[int]] = {}
-        for group, mgr in zip(
-            self.kv_cache_config.kv_cache_groups,
-            self.coordinator.single_type_managers,
-            strict=True,
+        host_group_ids = self.kv_cache_config.host_group_ids
+        for group_id, (group, mgr) in enumerate(
+            zip(
+                self.kv_cache_config.kv_cache_groups,
+                self.coordinator.single_type_managers,
+                strict=True,
+            )
         ):
             ids = mgr.take_new_block_ids()
-            if ids:
-                if group.block_pool_id is None:
-                    continue
+            if ids and group_id not in host_group_ids:
                 ids_by_pool.setdefault(group.block_pool_id, []).extend(ids)
         return ids_by_pool
 
@@ -1088,7 +1088,6 @@ class KVCacheManager:
             strict=True,
         ):
             if mgr.records_new_block_ids:
-                assert group.block_pool_id is not None
                 start_idx = start_token // mgr.block_size
                 end_idx = cdiv(end_token, mgr.block_size)
                 blocks = mgr.req_to_blocks[request_id]
@@ -1115,7 +1114,7 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        pending_copies: list[tuple[int | None, KVCacheBlock, KVCacheBlock]] = []
+        pending_copies: list[tuple[int, KVCacheBlock, KVCacheBlock]] = []
         for group, mgr in zip(
             self.kv_cache_config.kv_cache_groups,
             self.coordinator.single_type_managers,
