@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -53,7 +53,6 @@ DraftPrefillInputs = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor | None,
-    Callable[[torch.Tensor], torch.Tensor] | None,
 ]
 
 
@@ -224,47 +223,6 @@ class DraftModelSpeculator(BaseSpeculator):
     def set_eplb_state(self, eplb_state: EplbState) -> None:
         """Inject EPLB state after construction."""
         self.eplb_state = eplb_state
-
-    def prepare_draft_prefill(
-        self,
-        input_batch: InputBatch,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        self._draft_prefill_inputs = None
-        if self.pcp_manager is not None:
-            self._draft_prefill_inputs = self.pcp_manager.prepare_draft_prefill(
-                input_batch, input_ids, hidden_states
-            )
-        if self._draft_prefill_inputs is None:
-            return hidden_states
-        return self._draft_prefill_inputs[2]
-
-    def draft_prefill_model_inputs(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        context = getattr(self, "_draft_prefill_inputs", None)
-        if context is None:
-            return self.input_buffers.input_ids, self.input_buffers.positions, None
-        return context[0], context[1], context[3]
-
-    def restore_draft_prefill_outputs(
-        self,
-        last_hidden_states: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        context = getattr(self, "_draft_prefill_inputs", None)
-        self._draft_prefill_inputs = None
-        if context is None or (restore := context[4]) is None:
-            return last_hidden_states, hidden_states
-        local_last_hidden_states = last_hidden_states
-        last_hidden_states = restore(local_last_hidden_states)
-        hidden_states = (
-            last_hidden_states
-            if local_last_hidden_states is hidden_states
-            else restore(hidden_states)
-        )
-        return last_hidden_states, hidden_states
 
     def draft_decode_is_prefilling(self, num_reqs: int) -> torch.Tensor | None:
         if self.pcp_manager is None:

@@ -710,8 +710,21 @@ class PCPManager:
             local_batch.positions,
             hidden_states,
             local_batch.is_padding,
-            self.restore_hidden_states,
         )
+
+    def restore_draft_prefill(
+        self,
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        local_last_hidden_states = last_hidden_states
+        last_hidden_states = self.restore_hidden_states(local_last_hidden_states)
+        hidden_states = (
+            last_hidden_states
+            if local_last_hidden_states is hidden_states
+            else self.restore_hidden_states(hidden_states)
+        )
+        return last_hidden_states, hidden_states
 
     def restore_for_sampling(
         self,

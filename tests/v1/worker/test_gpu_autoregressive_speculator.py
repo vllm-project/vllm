@@ -349,8 +349,10 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
         local_batch.positions,
         torch.empty(2, 1),
         padding,
-        restorer,
     )
+    manager = object.__new__(PCPManager)
+    manager.restore_hidden_states = restorer
+    speculator.pcp_manager = manager
     speculator._draft_prefill_inputs = prefill
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
     speculator.last_token_indices = torch.tensor([1, 3])
