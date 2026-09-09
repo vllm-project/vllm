@@ -1201,6 +1201,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         num_extend_tokens = attn_metadata.num_extend_tokens
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
+            # Skip if key/value None (KV sharing layers use target cache)
             if num_prefills > 0 and key is not None and value is not None:
                 assert attn_metadata.prefill_metadata is not None
 
@@ -1227,6 +1228,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 )
 
             # calculate for extends
+            # Skip if key/value None (KV sharing layers use target cache)
             if num_extends > 0 and key is not None and value is not None:
                 assert attn_metadata.extend_metadata is not None
                 extend_tokens_slice = slice(
