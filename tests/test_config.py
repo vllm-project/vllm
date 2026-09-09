@@ -2670,3 +2670,51 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+def test_speculative_max_num_scheduled_tokens_error_messages():
+    # Case 1: max_num_scheduled_tokens <= 0
+    config_negative_scheduled = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            max_num_new_slots_for_drafting=16,
+            num_speculative_tokens=16,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=2048,
+            max_num_seqs=128,
+            max_num_scheduled_tokens=-1792,
+        ),
+    )
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig._set_max_num_scheduled_tokens(config_negative_scheduled)
+
+    err_msg = str(exc_info.value)
+    assert "max_num_batched_tokens=2048" in err_msg
+    assert "max_num_seqs=128" in err_msg
+    assert "num_speculative_tokens=16" in err_msg
+    assert "scheduled_token_delta=16" in err_msg
+    assert "--max-num-batched-tokens" in err_msg
+    assert "--max-num-seqs" in err_msg
+    assert "--num-speculative-tokens" in err_msg
+
+    # Case 2: max_num_batched_tokens <= scheduled_token_delta
+    config_insufficient_slots = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            max_num_new_slots_for_drafting=16,
+            num_speculative_tokens=16,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_seqs=128,
+            max_num_scheduled_tokens=None,
+        ),
+    )
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig._set_max_num_scheduled_tokens(config_insufficient_slots)
+
+    err_msg = str(exc_info.value)
+    assert "max_num_batched_tokens=8" in err_msg
+    assert "scheduled_token_delta=16" in err_msg
+    assert "num_speculative_tokens=16" in err_msg
+    assert "--max-num-batched-tokens" in err_msg
+    assert "--num-speculative-tokens" in err_msg
