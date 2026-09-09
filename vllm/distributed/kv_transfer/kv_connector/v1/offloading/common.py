@@ -83,9 +83,6 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     """
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
-    # Jobs whose transfer failed on at least one worker. A job appears here as
-    # well as in completed_jobs: it still completes, but its destination holds
-    # undefined data and must not be published as cache.
     failed_jobs: set[int] = field(default_factory=set)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
 
