@@ -170,9 +170,9 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
-    DeviceKVCacheBlockCopier,
     KVBlockZeroer,
     clear_layer_kv_caches,
+    copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
@@ -714,9 +714,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
             )
-        self.device_kv_cache_block_copier = DeviceKVCacheBlockCopier(
-            self.kv_cache_config, kv_caches_dict
-        )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -1165,8 +1162,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            self.device_kv_cache_block_copier.copy(
-                scheduler_output.kv_cache_block_copies
+            copy_kv_cache_blocks_inplace(
+                (cache for cache in self.kv_caches if cache.device == self.device),
+                self.kv_cache_config.num_blocks,
+                [
+                    copy
+                    for copy in scheduler_output.kv_cache_block_copies
+                    if copy.block_pool_id is not None
+                ],
             )
 
     def gather_batch_req_state(
@@ -2154,8 +2157,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
-        if hasattr(self, "device_kv_cache_block_copier"):
-            del self.device_kv_cache_block_copier
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

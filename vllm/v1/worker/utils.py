@@ -634,30 +634,6 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._v_scale_cache = None
 
 
-class DeviceKVCacheBlockCopier:
-    def __init__(
-        self,
-        kv_cache_config: KVCacheConfig,
-        kv_caches: Mapping[str, torch.Tensor | list[torch.Tensor]],
-    ) -> None:
-        self._num_blocks = kv_cache_config.num_blocks
-        self._caches = [
-            kv_caches[name]
-            for group in kv_cache_config.kv_cache_groups
-            if group.block_pool_id == 0
-            for name in group.layer_names
-            if name in kv_caches
-        ]
-
-    def copy(self, copies: Sequence[KVCacheBlockCopy]) -> None:
-        device_copies = [copy for copy in copies if copy.block_pool_id is not None]
-        copy_kv_cache_blocks_inplace(
-            self._caches,
-            self._num_blocks,
-            device_copies,
-        )
-
-
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
