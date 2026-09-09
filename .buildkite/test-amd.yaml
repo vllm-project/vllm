@@ -3742,7 +3742,7 @@ steps:
   - pytest -v -s models/language/generation_ppl_test
 
 - label: ":amd: (MI355) Language Models (Standard)" # TBD
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
