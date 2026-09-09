@@ -28,8 +28,8 @@ logger = init_logger(__name__)
 class PCPSchedule:
     """PCP-invariant view of the current batch, for building DCP schedules.
 
-    Every field is computed identically on every PCP rank -- they all run over
-    the same ``segments_by_rank`` -- so any schedule derived from this is
+    Every field is computed identically on every PCP rank - they all run over
+    the same ``segments_by_rank`` - so any schedule derived from this is
     guaranteed to agree across ranks without communicating.
     """
 
@@ -273,12 +273,12 @@ class PCPManager:
             if query_len == 0:
                 continue
             chunk_indices: tuple[int, ...]
-            if replicated[global_batch_req_idx]:
-                chunk_size = query_len
-                chunk_indices = (0,)
-            else:
+            if not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
+            else:  # decodes, and short prefills under DCP, are replicated
+                chunk_size = query_len
+                chunk_indices = (0,)
 
             for chunk_idx in chunk_indices:
                 chunk_offset = chunk_idx * chunk_size
@@ -413,6 +413,7 @@ class PCPManager:
                     segment.global_batch_slice.stop,
                     dtype=np.int64,
                 )
+                # Cache insertion pairs one slot entry with each rank's local decode.
                 if replicated[segment.global_batch_req_idx] and rank != 0:
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True

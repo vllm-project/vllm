@@ -212,7 +212,7 @@ def plan_gathered_prefill(
     """Lay out the DCP-gathered KV workspace for this step's prefill rows.
 
     PCP splits a prefill request into ``2W`` chunks and gives this rank two of
-    them, so several local rows share one request -- and one context. They share
+    them, so several local rows share one request - and one context. They share
     ONE workspace region.
     """
     assert dcp_world_size > 1, "the gathered layout needs a DCP group to gather"
@@ -475,6 +475,9 @@ class FlashMLASparseMetadataBuilder(
                     "prefill/decode path returns the LSE for decode tokens "
                     "only, while the DCP merge needs it for every token"
                 )
+            # Head padding (and the tile-scheduler metadata sized from it) is
+            # computed from the local head count, but the kernel runs on the
+            # DCP-gathered heads.
             if self.use_pcp:
                 gathered_num_heads = (
                     self.num_heads * parallel_config.tensor_parallel_size
@@ -541,7 +544,7 @@ class FlashMLASparseMetadataBuilder(
         region_ids = async_copy_to_gpu(region_ids_np, device=self.device)
         workspace_starts = async_copy_to_gpu(plan.workspace_starts, device=self.device)
         # One block table row per region: rows of the same request share a
-        # request, so they share its blocks -- take the first row's.
+        # request, so they share its blocks - take the first row's.
         region_first_row = (num_decodes + plan.region_first_row).astype(np.int64)
         region_block_tables = common_attn_metadata.block_table_tensor.index_select(
             0, async_copy_to_gpu(region_first_row, device=self.device)
@@ -860,9 +863,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 "the bf16 sparse path is not supported under DCP."
             )
 
-        # (name, spec) rather than a bare list: _refresh_workspaces looks the
-        # buffers up by name, so inserting a spec cannot silently rebind another
-        # buffer to the wrong slice.
         self.workspace_slots: list[tuple[str, tuple[tuple[int, ...], torch.dtype]]] = [
             ("q_concat", (q_concat_shape, torch.bfloat16))
         ]
