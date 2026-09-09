@@ -2475,6 +2475,7 @@ def _max_memory_usage_bytes_from_groups(
         if tail_names:
             total_blocks += 1
         return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0
     for group in kv_cache_groups:
