@@ -28,7 +28,7 @@ import vllm.version
 from vllm.config import ModelConfig
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
@@ -162,9 +162,33 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_id: int, socket_dir: str | None = None) -> str:
+def normalize_draft_model_idx(draft_model_idx: int | None) -> int:
+    return -1 if draft_model_idx is None else draft_model_idx
+
+
+def format_daemon_role(
+    is_draft_model: bool = False, draft_model_idx: int | None = None
+) -> str:
+    if not is_draft_model:
+        return ""
+    return f"_draft{draft_model_idx if draft_model_idx is not None else 0}"
+
+
+def get_socket_path(
+    gpu_id: int,
+    socket_dir: str | None = None,
+    *,
+    is_draft_model: bool = False,
+    draft_model_idx: int | None = None,
+) -> str:
     directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_id=gpu_id))
+    return os.path.join(
+        directory,
+        SOCKET_NAME_TEMPLATE.format(
+            gpu_id=gpu_id,
+            role=format_daemon_role(is_draft_model, draft_model_idx),
+        ),
+    )
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -312,10 +336,18 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    is_draft_model: bool = False
+    draft_model_idx: int = -1
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        is_draft_model: bool = False,
+        draft_model_idx: int | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -342,6 +374,8 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft_model=is_draft_model,
+            draft_model_idx=normalize_draft_model_idx(draft_model_idx),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:

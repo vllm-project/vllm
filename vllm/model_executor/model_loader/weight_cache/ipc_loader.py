@@ -57,6 +57,8 @@ class IpcModelLoader(BaseModelLoader):
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
       derived from the physical GPU id.
     - socket_dir: directory containing the daemon sockets.
+    - is_draft_model: route to the speculative draft daemon.
+    - draft_model_idx: optional speculative draft index.
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
       the fingerprints mismatch (default: True).
@@ -72,6 +74,14 @@ class IpcModelLoader(BaseModelLoader):
         super().__init__(load_config)
         extra_config = copy(load_config.model_loader_extra_config or {})
         self.socket_path: str | None = extra_config.pop("socket_path", None)
+        self.is_draft_model = load_config.weight_cache_is_draft_model
+        self.draft_model_idx = load_config.weight_cache_draft_model_idx
+        if self.is_draft_model and self.socket_path is not None:
+            raise ValueError(
+                "Explicit socket_path is incompatible with a draft weight "
+                "cache role; use socket_dir so target and draft sockets can "
+                "be derived independently."
+            )
         self.socket_dir: str | None = extra_config.pop("socket_dir", None)
         self.mode: str = extra_config.pop("mode", "zero_copy")
         self.fallback: bool = extra_config.pop("fallback", True)
@@ -278,6 +288,8 @@ class IpcModelLoader(BaseModelLoader):
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
+            is_draft_model=self.is_draft_model,
+            draft_model_idx=self.draft_model_idx,
         )
         return self._request_state(cache_config)
 
@@ -332,7 +344,12 @@ class IpcModelLoader(BaseModelLoader):
                 "Cannot infer the physical GPU id from CUDA_VISIBLE_DEVICES; "
                 "pass socket_path via --model-loader-extra-config"
             )
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(
+            gpu_id,
+            self.socket_dir,
+            is_draft_model=self.is_draft_model,
+            draft_model_idx=self.draft_model_idx,
+        )
 
     def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
         if daemon_uuid is None:

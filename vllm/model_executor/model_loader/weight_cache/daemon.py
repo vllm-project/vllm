@@ -19,6 +19,11 @@ Engines then load from the daemons with:
 
 Only tensor parallelism is supported; pipeline, data, and expert parallelism
 are rejected at launch.
+
+When MTP speculative decoding is configured, one target daemon group and one
+draft daemon group are launched. They use different cache keys, Unix sockets,
+and distributed rendezvous endpoints, so each process group loads exactly one
+model role.
 """
 
 import contextlib
@@ -33,7 +38,13 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -113,6 +124,19 @@ def export_entries(
     return entries, aliases
 
 
+def _get_cached_model_configs(vllm_config: VllmConfig) -> list[ModelConfig]:
+    """Return model configs that require daemon-side validation."""
+    model_configs = [vllm_config.model_config]
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.method == "mtp"
+        and speculative_config.draft_model_config is not None
+    ):
+        model_configs.append(speculative_config.draft_model_config)
+    return model_configs
+
+
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
 
@@ -122,11 +146,15 @@ class WeightCacheDaemon:
         tp_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
+        is_draft_model: bool = False,
+        draft_model_idx: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.tp_rank = tp_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
+        self.is_draft_model = is_draft_model
+        self.draft_model_idx = draft_model_idx
         self.model: torch.nn.Module | None = None
         self.entries: dict[str, TensorEntry] = {}
         self.aliases: dict[str, str] = {}
@@ -136,6 +164,8 @@ class WeightCacheDaemon:
             vllm_config.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
+            is_draft_model=is_draft_model,
+            draft_model_idx=draft_model_idx,
         )
 
     def load_model(self) -> None:
@@ -153,16 +183,13 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
             self.model = get_model(vllm_config=self.vllm_config)
-        self._export_entries()
+        self.entries, self.aliases = export_entries(self.model)
         logger.info(
-            "Weight cache daemon rank %d cached %d tensors",
+            "Weight cache %s daemon rank %d cached %d tensors",
+            "draft" if self.is_draft_model else "target",
             self.tp_rank,
             len(self.entries),
         )
-
-    def _export_entries(self) -> None:
-        assert self.model is not None
-        self.entries, self.aliases = export_entries(self.model)
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -240,7 +267,12 @@ class WeightCacheDaemon:
         gpu_id = get_physical_device_id(device_index)
         if gpu_id is None:
             gpu_id = device_index
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(
+            gpu_id,
+            self.socket_dir,
+            is_draft_model=self.is_draft_model,
+            draft_model_idx=self.draft_model_idx,
+        )
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -295,13 +327,21 @@ def _run_daemon(
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
-    ready_queue: "multiprocessing.Queue[int]",
+    ready_queue: "multiprocessing.Queue[tuple[str, int]]",
+    is_draft_model: bool = False,
+    draft_model_idx: int | None = None,
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, distributed_init_method, socket_dir
+        vllm_config,
+        tp_rank,
+        distributed_init_method,
+        socket_dir,
+        is_draft_model,
+        draft_model_idx,
     )
     daemon.load_model()
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    role = "draft" if is_draft_model else "target"
+    daemon.serve_forever(ready_callback=lambda: ready_queue.put((role, tp_rank)))
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
@@ -343,29 +383,75 @@ def main() -> None:
             "default --load-format"
         )
     # Checked before loading anything: an unsupported quantization method would
-    # otherwise only surface in the engine, after a full load.
-    check_ipc_quant_support(vllm_config.model_config, where="daemon")
-    parallel_config = vllm_config.parallel_config
-    _reject_unsupported_parallelism(parallel_config)
-    tp_size = parallel_config.tensor_parallel_size
-
-    distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
-    ctx = multiprocessing.get_context("spawn")
-    ready_queue: multiprocessing.Queue[int] = ctx.Queue()
-    procs = [
-        ctx.Process(
-            target=_run_daemon,
-            args=(
-                rank,
-                vllm_config,
-                distributed_init_method,
-                args.weight_cache_socket_dir,
-                ready_queue,
-            ),
-            name=f"vllm-weight-cache-daemon-{rank}",
+    # otherwise only surface in the engine, after a full load. MTP has a
+    # separate draft model config and therefore needs its own check as well.
+    for model_config in _get_cached_model_configs(vllm_config):
+        check_ipc_quant_support(model_config, where="daemon")
+    target_parallel_config = vllm_config.parallel_config
+    _reject_unsupported_parallelism(target_parallel_config)
+    target_dist_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
+    daemon_specs = [
+        (
+            "target",
+            False,
+            None,
+            vllm_config,
+            target_dist_init_method,
         )
-        for rank in range(tp_size)
     ]
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.method == "mtp"
+        and speculative_config.draft_model_config is not None
+    ):
+        draft_parallel_config = speculative_config.draft_parallel_config
+        if draft_parallel_config.tensor_parallel_size != (
+            target_parallel_config.tensor_parallel_size
+        ):
+            raise ValueError(
+                "MTP weight cache requires target and draft tensor parallel "
+                "sizes to match"
+            )
+        _reject_unsupported_parallelism(draft_parallel_config)
+        draft_vllm_config = replace(
+            vllm_config,
+            model_config=speculative_config.draft_model_config,
+            parallel_config=draft_parallel_config,
+        )
+        daemon_specs.append(
+            (
+                "draft",
+                True,
+                0,
+                draft_vllm_config,
+                get_distributed_init_method("127.0.0.1", get_open_port()),
+            )
+        )
+    ctx = multiprocessing.get_context("spawn")
+    ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
+    procs = []
+    expected_ready: set[tuple[str, int]] = set()
+    for role, is_draft_model, draft_model_idx, config, dist_init_method in daemon_specs:
+        tp_size = config.parallel_config.tensor_parallel_size
+        for rank in range(tp_size):
+            expected_ready.add((role, rank))
+            procs.append(
+                ctx.Process(
+                    target=_run_daemon,
+                    args=(
+                        rank,
+                        config,
+                        dist_init_method,
+                        args.weight_cache_socket_dir,
+                        ready_queue,
+                        is_draft_model,
+                        draft_model_idx,
+                    ),
+                    name=f"vllm-weight-cache-{role}-{rank}",
+                )
+            )
+
     for proc in procs:
         proc.start()
 
@@ -376,10 +462,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    ready_ranks: set[int] = set()
-    while len(ready_ranks) < tp_size:
+    ready_roles: set[tuple[str, int]] = set()
+    while len(ready_roles) < len(expected_ready):
         try:
-            ready_ranks.add(ready_queue.get(timeout=1.0))
+            ready_roles.add(ready_queue.get(timeout=1.0))
         except queue.Empty:
             dead = [p for p in procs if p.exitcode is not None]
             if dead:
@@ -395,11 +481,12 @@ def main() -> None:
                 sys.exit(max((p.exitcode or 0) for p in procs))
     logger.info_once(
         "===== Weight cache daemon READY: all %d ranks serving in %s =====",
-        tp_size,
+        len(expected_ready),
         args.weight_cache_socket_dir or "the default socket dir",
     )
     _report_ready(
-        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
+        f"===== Weight cache daemon READY: all {len(expected_ready)} "
+        "rank(s) serving in "
         f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
     )
 

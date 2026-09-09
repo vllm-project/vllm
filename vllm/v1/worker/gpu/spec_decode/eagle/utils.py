@@ -104,8 +104,17 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
             ),
         )
     with set_model_tag("eagle_head"):
+        draft_load_config = None
+        if speculative_config.method == "mtp":
+            draft_load_config = replace(
+                vllm_config.load_config,
+                weight_cache_is_draft_model=True,
+                weight_cache_draft_model_idx=0,
+            )
         eagle_model = get_model(
-            vllm_config=vllm_config, model_config=draft_model_config
+            vllm_config=vllm_config,
+            model_config=draft_model_config,
+            load_config=draft_load_config,
         )
 
     target_language_model = (
