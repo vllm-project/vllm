@@ -198,13 +198,13 @@ def _compute_sender_transfer_plan(
 
             local_head = local_tp_rank * total_num_kv_heads // local_tp_size
             remote_head = remote_tp_rank * total_num_kv_heads // remote_tp_size
-            head_size = local_kv_block_len // local_head_count
+            bytes_per_head = local_kv_block_len // local_head_count
 
             return (
                 local_tp_rank % local_replica_count == 0,
-                max(remote_head - local_head, 0) * head_size,
-                max(local_head - remote_head, 0) * head_size,
-                head_size,
+                max(remote_head - local_head, 0) * bytes_per_head,
+                max(local_head - remote_head, 0) * bytes_per_head,
+                bytes_per_head,
             )
 
     if tp_ratio > 0:
