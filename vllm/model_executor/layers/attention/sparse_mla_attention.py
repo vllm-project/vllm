@@ -128,7 +128,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -198,7 +198,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        topk_tokens = model_config.hf_config.index_topk
+        topk_tokens = model_config.hf_text_config.index_topk
 
         workspace_size = min(
             max(

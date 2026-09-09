@@ -419,6 +419,7 @@ def test_sparse_backend_decode_correctness(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -587,7 +588,7 @@ def test_sparse_backend_decode_correctness(
     sdpa_reference = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -1145,6 +1146,7 @@ def test_sparse_backend_prefill_correctness(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -1251,7 +1253,7 @@ def test_sparse_backend_prefill_correctness(
     ref_output = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
