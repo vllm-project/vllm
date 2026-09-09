@@ -347,10 +347,11 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             draft_model_config=draft_model_config,
-            draft_parallel_config=SimpleNamespace(),
+            draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
             attention_backend=None,
             kv_cache_dtype=None,
         ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
