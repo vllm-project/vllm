@@ -17,11 +17,11 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
     zip_inputs,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton

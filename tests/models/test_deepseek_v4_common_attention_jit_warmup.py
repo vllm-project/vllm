@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -236,6 +237,38 @@ def test_fused_qkv_rmsnorm_dispatch_matches_legacy_meta() -> None:
     )
 
 
+def test_attention_warmup_covers_pdl_variants() -> None:
+    qkv_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                q_lora_rank=1536,
+                head_dim=512,
+                rms_norm_eps=1.0e-6,
+            ),
+        )
+    )
+    inv_rope_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                num_attention_heads=128,
+                o_groups=8,
+                head_dim=512,
+                qk_rope_head_dim=64,
+            )
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=8),
+    )
+
+    assert {
+        key.launch_pdl for key in FusedQKVRMSNormKernel().get_warmup_keys(qkv_config)
+    } == {False, True}
+    assert {
+        key.launch_pdl
+        for key in FusedInvRopeFP8QuantKernel().get_warmup_keys(inv_rope_config)
+    } == {False, True}
+
+
 def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -255,7 +288,7 @@ def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
             rope_start=64,
             half_rope=32,
             tma_aligned_scales=True,
-            use_gdc=True,
+            launch_pdl=True,
         )
     )
 
@@ -287,7 +320,6 @@ def test_save_partial_states_dispatch_matches_legacy_meta() -> None:
         state_cache_stride0=32768,
         state_cache_stride1=2048,
         block_size=16,
-        launch_pdl=True,
     ) == kernel.CompileKey(
         head_size=512,
         triton_block_size=512,
@@ -299,7 +331,6 @@ def test_save_partial_states_dispatch_matches_legacy_meta() -> None:
         state_cache_stride0=32768,
         state_cache_stride1=2048,
         block_size=16,
-        launch_pdl=True,
     )
 
 
@@ -318,9 +349,31 @@ def test_save_partial_states_warmup_uses_instance_geometry() -> None:
             state_cache_stride0=2048,
             state_cache_stride1=512,
             block_size=4,
-            launch_pdl=False,
         )
     ]
+
+
+def test_save_partial_states_forwards_runtime_pdl_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = SavePartialStatesKernel()
+    launch = Mock()
+    monkeypatch.setattr(kernel, "launch", launch)
+
+    kernel(
+        torch.empty(2, 128),
+        torch.empty(2, 1),
+        torch.empty(2, 64),
+        torch.empty(2, dtype=torch.int64),
+        torch.empty(1, 4, 256),
+        torch.empty(2, dtype=torch.int64),
+        block_size=4,
+        state_width=256,
+        compress_ratio=4,
+        pdl_kwargs={"launch_pdl": True},
+    )
+
+    assert launch.call_args.args[0][1]["launch_pdl"] is True
 
 
 def _cache_warmup_config() -> SimpleNamespace:

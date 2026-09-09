@@ -40,11 +40,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton

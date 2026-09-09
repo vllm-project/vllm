@@ -69,6 +69,30 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
     assert runtime_calls == [(owner.kernel, (2,), ("runtime", 2), {"CONST": 7})]
 
 
+def test_triton_warmup_preserves_compile_key_pdl_variant() -> None:
+    class PdlKernel(_TestTritonKernel):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int = 1
+            launch_pdl: bool = False
+
+        @kernel_launcher
+        def __call__(
+            self,
+            first: str,
+            second: int,
+            runtime_launcher: Any,
+        ) -> LaunchSpec:
+            return (2,), dict(CONST=7, launch_pdl=False)
+
+    owner = PdlKernel()
+    owner.kernel.warmup_calls.clear()
+
+    owner.compile(owner.CompileKey(launch_pdl=True))
+
+    assert owner.kernel.warmup_calls[0]["launch_pdl"] is True
+
+
 def test_triton_launcher_supports_cpu_function_wrappers() -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -76,6 +100,8 @@ def test_triton_launcher_supports_cpu_function_wrappers() -> None:
         calls.append((first, second, CONST))
 
     class FuncWrapper:
+        arg_names = ("first", "second", "CONST")
+
         def __init__(self) -> None:
             self.func = kernel
 

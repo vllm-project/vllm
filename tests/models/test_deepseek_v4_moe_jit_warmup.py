@@ -5,7 +5,6 @@
 import importlib
 import importlib.util
 import sys
-from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -19,7 +18,6 @@ if not current_platform.is_cuda_alike():
 
 import vllm.model_executor.layers.fused_moe.deep_gemm_utils as deep_gemm_utils_module
 import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
-import vllm.model_executor.layers.fused_moe.moe_fused_mul_sum as mul_sum_module
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     DeepGemmEPGatherKernel,
     DeepGemmEPScatterCopyKernel,
@@ -422,65 +420,46 @@ def test_compute_identity_dispatch_matches_legacy_meta() -> None:
     )
 
 
-@dataclass
-class _FakePlatform:
-    capability: int
-
-    def has_device_capability(self, capability: int) -> bool:
-        return self.capability >= capability
-
-
 @pytest.mark.parametrize(
-    ("capability", "kwargs", "expected"),
+    ("dtype", "element_size", "block_k", "num_warps"),
     [
-        (
-            90,
-            dict(
-                num_tokens=64,
-                top_k=8,
-                size=7168,
-                element_size=4,
-                dtype=torch.float32,
-                has_expert_map=False,
-            ),
-            (torch.float32, False, 8, 7168, 2, 256, 8, 4),
-        ),
-        (
-            80,
-            dict(
-                num_tokens=64,
-                top_k=8,
-                size=7168,
-                element_size=2,
-                dtype=torch.bfloat16,
-                has_expert_map=True,
-            ),
-            (torch.bfloat16, True, 8, 7168, 4, 1024, 16, 2),
-        ),
-        (
-            70,
-            dict(
-                num_tokens=2048,
-                top_k=8,
-                size=512,
-                element_size=2,
-                dtype=torch.bfloat16,
-                has_expert_map=False,
-            ),
-            (torch.bfloat16, False, 8, 512, 8, 512, 8, 2),
-        ),
+        (torch.float32, 4, 256, 4),
+        (torch.bfloat16, 2, 512, 2),
     ],
 )
 def test_moe_fused_mul_sum_dispatch_matches_legacy_heuristic(
-    monkeypatch: pytest.MonkeyPatch,
-    capability: int,
-    kwargs: dict[str, Any],
-    expected: tuple[torch.dtype, bool, int, int, int, int, int, int],
+    dtype: torch.dtype,
+    element_size: int,
+    block_k: int,
+    num_warps: int,
 ) -> None:
-    monkeypatch.setattr(mul_sum_module, "current_platform", _FakePlatform(capability))
     kernel = MoeFusedMulSumKernel()
 
-    assert kernel.dispatch(**kwargs) == kernel.CompileKey(*expected)
+    assert kernel.dispatch(
+        hidden_size=7168,
+        element_size=element_size,
+        input_dtype=dtype,
+        topk_weights_dtype=torch.float32,
+        output_dtype=dtype,
+        topk_ids_dtype=torch.int32,
+        expert_map_dtype=None,
+        num_valid_tokens_dtype=None,
+        stride_m=8 * 7168,
+        top_k=8,
+    ) == kernel.CompileKey(
+        input_dtype=dtype,
+        topk_weights_dtype=torch.float32,
+        output_dtype=dtype,
+        topk_ids_dtype=torch.int32,
+        expert_map_dtype=None,
+        num_valid_tokens_dtype=None,
+        stride_m=8 * 7168,
+        top_k=8,
+        hidden_size=7168,
+        block_k=block_k,
+        num_warps=num_warps,
+        num_stages=3,
+    )
 
 
 def test_globalize_recv_topk_dispatch_matches_legacy_meta(
@@ -537,6 +516,29 @@ def test_eplb_map_and_record_dispatch_matches_legacy_meta(
     )
 
 
+def test_dsv4_topk_warmup_covers_pdl_variants() -> None:
+    kernel = DSV4TopKKernel()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v4",
+                n_routed_experts=256,
+                num_experts_per_tok=6,
+                norm_topk_prob=True,
+                scoring_func="sqrtsoftplus",
+                vision_n_layers=0,
+                routed_scaling_factor=2.5,
+            )
+        ),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+    )
+
+    warmed_keys = kernel.get_warmup_keys(config)
+
+    assert warmed_keys
+    assert {key.launch_pdl for key in warmed_keys} == {False, True}
+
+
 def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
     kernel = DSV4TopKKernel()
 
@@ -544,11 +546,15 @@ def test_dsv4_topk_dispatch_matches_legacy_meta() -> None:
         num_experts=256,
         indices_dtype=torch.int32,
         routed_scaling_factor=2.5,
+        has_vl=False,
+        image_sentinel_lo=0,
         launch_pdl=True,
     ) == kernel.CompileKey(
         num_experts=256,
         block_n=256,
         indices_dtype=torch.int32,
         routed_scaling_factor=2.5,
+        has_vl=False,
+        image_sentinel_lo=0,
         launch_pdl=True,
     )

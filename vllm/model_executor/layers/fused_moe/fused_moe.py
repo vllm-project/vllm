@@ -34,13 +34,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
+    TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -305,6 +306,335 @@ def fused_moe_kernel_gptq_awq(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+class Wna16TritonKernel(VllmTritonJitKernel["Wna16TritonKernel.CompileKey"]):
+    kernel = staticmethod(fused_moe_kernel_gptq_awq)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        a_dtype: torch.dtype
+        b_dtype: torch.dtype
+        c_dtype: torch.dtype
+        b_scale_dtype: torch.dtype
+        b_zp_dtype: torch.dtype | None
+        topk_weights_dtype: torch.dtype | None
+        input_variant: TritonPointerInputVariant
+        n: int
+        k: int
+        em: int
+        num_valid_tokens: int
+        stride_am: int
+        stride_ak: int
+        stride_be: int
+        stride_bk: int
+        stride_bn: int
+        stride_cm: int
+        stride_cn: int
+        stride_bse: int
+        stride_bsk: int
+        stride_bsn: int
+        stride_bze: int
+        stride_bzk: int
+        stride_bzn: int
+        block_k_diviable: bool
+        group_size: int
+        block_size_m: int
+        block_size_n: int
+        block_size_k: int
+        group_size_m: int
+        split_k: int
+        mul_routed_weight: bool
+        top_k: int
+        compute_type: tl.dtype
+        has_zp: bool
+        use_int4_w4a16: bool
+        use_int8_w8a16: bool
+        num_warps: int
+        num_stages: int
+
+    @staticmethod
+    def _resolve_config(
+        config: dict[str, int],
+        *,
+        num_valid_tokens: int,
+        size_k: int,
+        size_n: int,
+        group_size: int,
+        real_top_k: int,
+    ) -> dict[str, int]:
+        config = config.copy()
+        config.update(
+            get_moe_wna16_block_config(
+                config=config,
+                use_moe_wna16_cuda=False,
+                num_valid_tokens=num_valid_tokens,
+                size_k=size_k,
+                size_n=size_n,
+                num_experts=size_n,
+                group_size=group_size,
+                real_top_k=real_top_k,
+                block_size_m=config["BLOCK_SIZE_M"],
+            )
+        )
+        return config
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        em: int,
+        second_gemm: bool,
+        layer: Any,
+        experts: Any,
+    ) -> CompileKey:
+        dtype = layer.moe_config.in_dtype
+        top_k = layer.top_k
+        pack_factor = 2 if experts.quant_config.use_int4_w4a16 else 1
+        weight = layer.w2_weight if second_gemm else layer.w13_weight
+        scale = experts.w2_scale if second_gemm else experts.w1_scale
+        zero_point = (
+            experts.quant_config.w2_zp if second_gemm else experts.quant_config.w1_zp
+        )
+        input_size = weight.size(2) * pack_factor
+        group_size = experts.block_shape[1]
+        base_config = try_get_optimal_moe_config(
+            layer.w13_weight.size(),
+            layer.w2_weight.size(),
+            top_k,
+            experts.quant_config.config_name(dtype),
+            num_tokens,
+            block_shape=experts.block_shape,
+        )
+        config = self._resolve_config(
+            base_config,
+            num_valid_tokens=num_tokens * top_k,
+            size_k=input_size,
+            size_n=weight.size(1),
+            group_size=group_size,
+            real_top_k=1 if second_gemm else top_k,
+        )
+        compute_type = (
+            tl.float16
+            if dtype == torch.float16
+            else tl.float32
+            if dtype == torch.float32
+            else tl.bfloat16
+        )
+        input_variant = TritonPointerInputVariant.from_alignment(
+            a=True,
+            b=True,
+            c=True,
+            b_scale=True,
+            b_zp=True,
+            topk_weights=True,
+            sorted_token_ids=True,
+            expert_ids=True,
+            num_tokens_post_padded=True,
+        )
+        return self.CompileKey(
+            a_dtype=dtype,
+            b_dtype=weight.dtype,
+            c_dtype=dtype,
+            b_scale_dtype=scale.dtype,
+            b_zp_dtype=None if zero_point is None else zero_point.dtype,
+            topk_weights_dtype=torch.float32 if second_gemm else None,
+            input_variant=input_variant,
+            n=weight.size(1),
+            k=input_size,
+            em=triton_scalar_specialization_rep(em),
+            num_valid_tokens=triton_scalar_specialization_rep(num_tokens * top_k),
+            stride_am=triton_scalar_specialization_rep(input_size),
+            stride_ak=1,
+            stride_be=triton_scalar_specialization_rep(weight.stride(0)),
+            stride_bk=triton_scalar_specialization_rep(weight.stride(2)),
+            stride_bn=triton_scalar_specialization_rep(weight.stride(1)),
+            stride_cm=triton_scalar_specialization_rep(weight.size(1)),
+            stride_cn=1,
+            stride_bse=triton_scalar_specialization_rep(scale.stride(0)),
+            stride_bsk=triton_scalar_specialization_rep(scale.stride(2)),
+            stride_bsn=triton_scalar_specialization_rep(scale.stride(1)),
+            stride_bze=triton_scalar_specialization_rep(zero_point.stride(0))
+            if zero_point is not None
+            else 0,
+            stride_bzk=triton_scalar_specialization_rep(zero_point.stride(2))
+            if zero_point is not None
+            else 0,
+            stride_bzn=triton_scalar_specialization_rep(zero_point.stride(1))
+            if zero_point is not None
+            else 0,
+            block_k_diviable=input_size % config["BLOCK_SIZE_K"] == 0,
+            group_size=group_size,
+            block_size_m=config["BLOCK_SIZE_M"],
+            block_size_n=config["BLOCK_SIZE_N"],
+            block_size_k=config["BLOCK_SIZE_K"],
+            group_size_m=config["GROUP_SIZE_M"],
+            split_k=config["SPLIT_K"],
+            mul_routed_weight=second_gemm and not layer.apply_router_weight_on_input,
+            top_k=1 if second_gemm else top_k,
+            compute_type=compute_type,
+            has_zp=zero_point is not None,
+            use_int4_w4a16=experts.quant_config.use_int4_w4a16,
+            use_int8_w8a16=experts.quant_config.use_int8_w8a16,
+            num_warps=config.get("num_warps", 4),
+            num_stages=config.get("num_stages", 3),
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        layer: Any,
+        experts: Any,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=WarmupIntRange(1, layer.moe_config.max_num_tokens + 1),
+            em=(1, 2, 16),
+            second_gemm=(False, True),
+            layer=layer,
+            experts=experts,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        variant = compile_key.input_variant
+        return dict(
+            a=TritonWarmupTensor(
+                compile_key.a_dtype,
+                aligned=variant.is_aligned("a"),
+                shape=(1, compile_key.k),
+                strides=(compile_key.stride_am, compile_key.stride_ak),
+            ),
+            b=TritonWarmupTensor(
+                compile_key.b_dtype,
+                aligned=variant.is_aligned("b"),
+                shape=(1, compile_key.n, 1),
+                strides=(
+                    compile_key.stride_be,
+                    compile_key.stride_bn,
+                    compile_key.stride_bk,
+                ),
+            ),
+            c=TritonWarmupTensor(
+                compile_key.c_dtype,
+                aligned=variant.is_aligned("c"),
+                shape=(1, 1, compile_key.n),
+                strides=(1, compile_key.stride_cm, compile_key.stride_cn),
+            ),
+            b_scale=TritonWarmupTensor(
+                compile_key.b_scale_dtype,
+                aligned=variant.is_aligned("b_scale"),
+                shape=(1, 1, 1),
+                strides=(
+                    compile_key.stride_bse,
+                    compile_key.stride_bsn,
+                    compile_key.stride_bsk,
+                ),
+            ),
+            b_zp=(
+                None
+                if compile_key.b_zp_dtype is None
+                else TritonWarmupTensor(
+                    compile_key.b_zp_dtype,
+                    aligned=variant.is_aligned("b_zp"),
+                    shape=(1, 1, 1),
+                    strides=(
+                        compile_key.stride_bze,
+                        compile_key.stride_bzn,
+                        compile_key.stride_bzk,
+                    ),
+                )
+            ),
+            topk_weights=(
+                None
+                if compile_key.topk_weights_dtype is None
+                else variant.pointer("topk_weights", compile_key.topk_weights_dtype)
+            ),
+            sorted_token_ids=variant.pointer("sorted_token_ids", torch.int32),
+            expert_ids=variant.pointer("expert_ids", torch.int32),
+            num_tokens_post_padded=variant.pointer(
+                "num_tokens_post_padded", torch.int32
+            ),
+            EM=compile_key.em,
+            num_valid_tokens=compile_key.num_valid_tokens,
+            config=dict(
+                BLOCK_SIZE_M=compile_key.block_size_m,
+                BLOCK_SIZE_N=compile_key.block_size_n,
+                BLOCK_SIZE_K=compile_key.block_size_k,
+                GROUP_SIZE_M=compile_key.group_size_m,
+                SPLIT_K=compile_key.split_k,
+                num_warps=compile_key.num_warps,
+                num_stages=compile_key.num_stages,
+            ),
+            group_size=compile_key.group_size,
+            mul_routed_weight=compile_key.mul_routed_weight,
+            top_k=compile_key.top_k,
+            compute_type=compile_key.compute_type,
+            use_int4_w4a16=compile_key.use_int4_w4a16,
+            use_int8_w8a16=compile_key.use_int8_w8a16,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+        b_scale: torch.Tensor,
+        b_zp: torch.Tensor | None,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        *,
+        EM: int,
+        num_valid_tokens: int,
+        config: dict[str, int],
+        group_size: int,
+        mul_routed_weight: bool,
+        top_k: int,
+        compute_type: tl.dtype,
+        use_int4_w4a16: bool,
+        use_int8_w8a16: bool,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        N = b.shape[1]
+        K = a.shape[1]
+        grid = (
+            triton.cdiv(EM, config["BLOCK_SIZE_M"])
+            * triton.cdiv(N, config["BLOCK_SIZE_N"]),
+        )
+        return grid, dict(
+            N=N,
+            K=K,
+            EM=EM,
+            num_valid_tokens=num_valid_tokens,
+            stride_am=a.stride(0),
+            stride_ak=a.stride(1),
+            stride_be=b.stride(0),
+            stride_bk=b.stride(2),
+            stride_bn=b.stride(1),
+            stride_cm=c.stride(1),
+            stride_cn=c.stride(2),
+            stride_bse=b_scale.stride(0),
+            stride_bsk=b_scale.stride(2),
+            stride_bsn=b_scale.stride(1),
+            stride_bze=b_zp.stride(0) if b_zp is not None else 0,
+            stride_bzk=b_zp.stride(2) if b_zp is not None else 0,
+            stride_bzn=b_zp.stride(1) if b_zp is not None else 0,
+            block_k_diviable=K % config["BLOCK_SIZE_K"] == 0,
+            group_size=group_size,
+            BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
+            BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
+            BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
+            GROUP_SIZE_M=config["GROUP_SIZE_M"],
+            SPLIT_K=config["SPLIT_K"],
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            has_zp=b_zp is not None,
+            use_int4_w4a16=use_int4_w4a16,
+            use_int8_w8a16=use_int8_w8a16,
+            num_warps=config.get("num_warps", 4),
+            num_stages=config.get("num_stages", 3),
+        )
 
 
 # NOTE(zyongye): we can remove all the wna16 kernel
@@ -1162,10 +1492,6 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -1181,7 +1507,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         )
     )
 
-    fused_moe_kernel_gptq_awq[grid](
+    _WNA16_TRITON_KERNEL(
         A,
         B,
         C,
@@ -1191,32 +1517,15 @@ def invoke_fused_moe_wna16_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.size(1),
-        A.size(1),
-        EM,
-        num_tokens,
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(2),
-        B.stride(1),
-        C.stride(1),
-        C.stride(2),
-        B_scale.stride(0),
-        B_scale.stride(2),
-        B_scale.stride(1),
-        B_zp.stride(0) if B_zp is not None else 0,
-        B_zp.stride(2) if B_zp is not None else 0,
-        B_zp.stride(1) if B_zp is not None else 0,
-        block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
+        EM=EM,
+        num_valid_tokens=num_tokens,
+        config=config,
         group_size=block_shape[1],
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        mul_routed_weight=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
-        **config,
     )
 
 
@@ -2439,5 +2748,6 @@ def fused_experts_impl(
     return out_hidden_states
 
 
+_WNA16_TRITON_KERNEL = Wna16TritonKernel()
 _FUSED_MOE_TRITON_KERNEL = FusedMoeTritonKernel()
 _COMPUTE_IDENTITY_KERNEL = ComputeIdentityKernel()

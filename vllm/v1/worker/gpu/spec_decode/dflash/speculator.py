@@ -11,11 +11,10 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, triton

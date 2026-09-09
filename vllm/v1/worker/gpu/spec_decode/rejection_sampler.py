@@ -9,10 +9,10 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, triton

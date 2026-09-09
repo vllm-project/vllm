@@ -19,12 +19,11 @@ from vllm.lora.ops.triton_ops.utils import (
     get_lora_op_configs,
     supports_pdl,
 )
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton

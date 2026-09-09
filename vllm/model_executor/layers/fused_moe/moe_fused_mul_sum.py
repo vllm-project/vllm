@@ -7,11 +7,11 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 

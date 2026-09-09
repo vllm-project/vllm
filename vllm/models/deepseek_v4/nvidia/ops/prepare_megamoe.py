@@ -15,11 +15,11 @@ import torch
 from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2

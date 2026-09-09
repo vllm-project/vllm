@@ -9,12 +9,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
