@@ -25,7 +25,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.linear import (
-    _KIMI_K3_LARGE_FRONT_MAX_TOKENS,
+    _KIMI_K3_MERGED_FRONT_MAX_TOKENS,
     KimiMoE,
     KimiRoutedOutputTransform,
     _get_kimi_k3_large_front_workspace,
@@ -308,12 +308,12 @@ def test_large_front_workspace_is_shared_within_one_worker() -> None:
     second = _get_kimi_k3_large_front_workspace(device)
 
     assert first is second
-    assert first.front.shape == (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 6016)
+    assert first.front.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 6016)
     assert first.front.dtype == torch.float32
-    assert first.shared.shape == (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 768)
-    assert first.router.shape == (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 896)
+    assert first.shared.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 768)
+    assert first.router.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 896)
     assert first.routed.shape == (
-        _KIMI_K3_LARGE_FRONT_MAX_TOKENS,
+        _KIMI_K3_MERGED_FRONT_MAX_TOKENS,
         LATENT_SIZE,
     )
 
@@ -329,8 +329,14 @@ def test_large_front_workspace_is_shared_within_one_worker() -> None:
         (15, False),
         (511, False),
         (512, True),
-        (1537, True),
+        (513, False),
+        (1024, True),
+        (1536, True),
+        (1537, False),
+        (2048, True),
+        (3072, False),
         (4096, True),
+        (6144, False),
         (8192, True),
         (8193, False),
     ],

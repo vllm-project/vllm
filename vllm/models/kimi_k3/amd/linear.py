@@ -74,9 +74,10 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-_KIMI_K3_LARGE_FRONT_MIN_TOKENS = 512
-_KIMI_K3_LARGE_FRONT_MAX_TOKENS = 8192
-_KIMI_K3_DECODE_FRONT_TOKEN_COUNTS = frozenset((7, 14))
+_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS = frozenset(
+    (7, 14, 512, 1024, 1536, 2048, 4096, 8192)
+)
+_KIMI_K3_MERGED_FRONT_MAX_TOKENS = max(_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS)
 
 
 @dataclass
@@ -100,22 +101,22 @@ def _get_kimi_k3_large_front_workspace(
     if workspace is None:
         workspace = _KimiK3LargeFrontWorkspace(
             front=torch.empty(
-                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 6016),
+                (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 6016),
                 dtype=torch.float32,
                 device=device,
             ),
             shared=torch.empty(
-                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 768),
+                (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 768),
                 dtype=torch.bfloat16,
                 device=device,
             ),
             router=torch.empty(
-                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 896),
+                (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 896),
                 dtype=torch.float32,
                 device=device,
             ),
             routed=torch.empty(
-                (_KIMI_K3_LARGE_FRONT_MAX_TOKENS, 3584),
+                (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 3584),
                 dtype=torch.bfloat16,
                 device=device,
             ),
@@ -372,7 +373,7 @@ class KimiMoE(nn.Module):
         self._kimi_k3_large_front_initialized = True
 
         if (
-            not envs.VLLM_ROCM_KIMI_K3_LARGE_M_FRONT
+            not envs.VLLM_ROCM_USE_MERGED_MOE_FRONT
             or not isinstance(self.experts, ROCmLatentMoERunner)
             or self.shared_experts is None
             or self.routed_expert_down_proj is None
@@ -452,11 +453,9 @@ class KimiMoE(nn.Module):
         )
 
     def _supports_kimi_k3_large_front(self, num_tokens: int) -> bool:
-        return self._kimi_k3_large_front_available and (
-            num_tokens in _KIMI_K3_DECODE_FRONT_TOKEN_COUNTS
-            or _KIMI_K3_LARGE_FRONT_MIN_TOKENS
-            <= num_tokens
-            <= _KIMI_K3_LARGE_FRONT_MAX_TOKENS
+        return (
+            self._kimi_k3_large_front_available
+            and num_tokens in _KIMI_K3_MERGED_FRONT_TOKEN_COUNTS
         )
 
     def _project_kimi_k3_large_front(
