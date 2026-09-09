@@ -166,7 +166,6 @@ class Step3p5Attention(nn.Module):
             rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
-            sliding_window = sliding_window
             if swa_num_attention_heads is not None:
                 num_heads = swa_num_attention_heads
                 self.total_num_heads = swa_num_attention_heads
