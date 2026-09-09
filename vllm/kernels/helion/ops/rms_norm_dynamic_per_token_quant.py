@@ -119,18 +119,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     return result
 
 
-def fake_impl(
-    result: torch.Tensor,  # [num_tokens, hidden_size]
-    input: torch.Tensor,  # [num_tokens, hidden_size]
-    weight: torch.Tensor,  # [hidden_size]
-    scale: torch.Tensor,  # [num_tokens, 1]
-    epsilon: float,
-    scale_ub: torch.Tensor | None = None,  # []
-    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
-) -> None:
-    return
-
-
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
@@ -179,7 +167,6 @@ def baseline(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
