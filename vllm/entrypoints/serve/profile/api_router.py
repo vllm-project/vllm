@@ -30,8 +30,9 @@ async def start_profile(
         str | None,
         Query(
             pattern=_SECURE_FILENAME_REGEX,
-            description="Prefix for start profiling. "
-            "Validated to prevent path traversal.",
+            description="Optional string parsed as the worker_name inside PyTorch "
+            "profiler's trace handler. When provided, this prefixes the generated "
+            "trace filenames. Validated to prevent path traversal.",
         ),
     ] = None,
 ):
