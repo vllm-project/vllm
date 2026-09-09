@@ -17,6 +17,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     collect_ec_item_metadata,
 )
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -121,7 +122,8 @@ class ECExampleConnector(ECConnectorBase):
             return
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
-        tensors = {"ec_cache": ec_cache.detach().cpu()}
+        with gpu_sync_allowed():
+            tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
