@@ -67,9 +67,9 @@ def make_fused_moe_layer(
         quant_config=quant_config,
     )
 
-    spec, ctx, format_scheme = resolve("NVFP4", quant_config, "")
+    spec, ctx, _ = resolve("NVFP4", quant_config, "")
     nvfp4_fused_moe = ModelOptMoEMethod(
-        spec, ctx, fml, quant_config=quant_config, format_scheme=format_scheme
+        spec, ctx, fml, quant_config=quant_config
     )
     nvfp4_fused_moe.create_weights(
         fml,
