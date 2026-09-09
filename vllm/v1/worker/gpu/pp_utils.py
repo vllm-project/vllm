@@ -169,15 +169,13 @@ class PPHandler:
             return
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            # idx_mapping is a temporary allocation on the main stream and read here
-            # on broadcast_stream; without record_stream, the caching allocator may
-            # reuse its memory before the gather executes.
-            input_batch.idx_mapping.record_stream(self.broadcast_stream)
             send = draft_tokens[input_batch.idx_mapping].contiguous()
+            # Must record the idx_mapping tensor since it was allocated
+            # on the main stream.
+            input_batch.idx_mapping.record_stream(self.broadcast_stream)
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )
-            send.record_stream(self.broadcast_stream)
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
