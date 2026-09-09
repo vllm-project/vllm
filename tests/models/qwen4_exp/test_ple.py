@@ -217,7 +217,7 @@ def test_etp_lookup_gathers_and_returns_dp_local_rows(
             num_tokens_across_dp_cpu=torch.tensor([2, 3]),
         )
     )
-    monkeypatch.setattr(ngram_embedding_module, "get_etp_dp_group", lambda: group)
+    monkeypatch.setattr(ngram_embedding_module, "get_dp_group", lambda: group)
     monkeypatch.setattr(
         ngram_embedding_module, "get_forward_context", lambda: forward_context
     )

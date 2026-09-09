@@ -1560,15 +1560,6 @@ def get_etp_group() -> GroupCoordinator:
     return _ETP
 
 
-_ETP_DP: GroupCoordinator | None = None
-
-
-def get_etp_dp_group() -> GroupCoordinator:
-    """Return DP ranks whose tokens share one ETP embedding table."""
-    assert _ETP_DP is not None, "Engram DP group is not initialized"
-    return _ETP_DP
-
-
 _DCP: GroupCoordinator | None = None
 
 
@@ -2026,9 +2017,8 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
-    global _ETP, _ETP_DP
+    global _ETP
     assert _ETP is None, "Engram tensor-parallel group is already initialized"
-    assert _ETP_DP is None, "Engram DP group is already initialized"
     engram_tensor_parallel_size = (
         config.engram_config.get_parallel_size(parallel_config)
         if config.engram_config is not None
@@ -2037,9 +2027,6 @@ def initialize_model_parallel(
     if engram_tensor_parallel_size == tensor_model_parallel_size:
         _ETP = _TP
     else:
-        etp_data_parallel_size = (
-            engram_tensor_parallel_size // tensor_model_parallel_size
-        )
         group_ranks = (
             all_ranks.permute(0, 2, 3, 1, 4)
             .reshape(-1, engram_tensor_parallel_size)
@@ -2050,17 +2037,6 @@ def initialize_model_parallel(
             get_world_group().local_rank,
             backend,
             group_name="etp",
-        )
-        group_ranks = (
-            all_ranks.permute(0, 2, 3, 4, 1)
-            .reshape(-1, etp_data_parallel_size)
-            .unbind(0)
-        )
-        _ETP_DP = init_model_parallel_group(
-            [ranks.tolist() for ranks in group_ranks],
-            get_world_group().local_rank,
-            backend,
-            group_name="etp_dp",
         )
 
     # Build the DCP model-parallel groups.
@@ -2299,11 +2275,7 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP, _ETP, _ETP_DP
-
-    if _ETP_DP:
-        _ETP_DP.destroy()
-    _ETP_DP = None
+    global _TP, _ETP
 
     if _ETP and _ETP is not _TP:
         _ETP.destroy()

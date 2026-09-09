@@ -12,7 +12,7 @@ from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_etp_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -107,7 +107,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         """Delegate storage-format conversion to the embedding method."""
         return self.embedding_method.dequantize(self, embeddings, output_dtype)
 
-    def _get_etp_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
+    def _get_dp_gather_slot(self, local_num_tokens: int) -> tuple[int, int]:
         """Return the per-DP slot size and this rank's slot offset."""
         if self.etp_data_parallel_size == 1:
             return local_num_tokens, 0
@@ -121,10 +121,10 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         token_counts = dp_metadata.num_tokens_across_dp_cpu.tolist()
         group_counts = token_counts[group_start:group_end]
         slot_size = max(group_counts)
-        etp_dp_rank = get_etp_dp_group().rank_in_group
-        return slot_size, etp_dp_rank * slot_size
+        dp_rank = get_dp_group().rank_in_group
+        return slot_size, dp_rank * slot_size
 
-    def _gather_etp_ids(
+    def _gather_dp_ids(
         self,
         ngram_ids: torch.Tensor,
         slot_size: int,
@@ -137,7 +137,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
                 slot_size - ngram_ids.shape[0], ngram_ids.shape[1]
             )
             ngram_ids = torch.cat((ngram_ids, padding), dim=0)
-        return get_etp_dp_group().all_gather(ngram_ids, dim=0)
+        return get_dp_group().all_gather(ngram_ids, dim=0)
 
     def _select_embeddings(
         self,
@@ -346,8 +346,8 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
 
     def fetch_etp_embeddings(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         """Gather ETP inputs, look up embeddings, and select local rows."""
-        slot_size, slot_offset = self._get_etp_gather_slot(ngram_ids.shape[0])
-        gathered_ids = self._gather_etp_ids(ngram_ids, slot_size)
+        slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         embeddings = super().forward(gathered_ids)
         return self._select_embeddings(
             embeddings,
@@ -505,8 +505,8 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         ngram_ids: torch.Tensor,
     ) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
-        slot_size, _ = self._get_etp_gather_slot(ngram_ids.shape[0])
-        gathered_ids = self._gather_etp_ids(ngram_ids, slot_size)
+        slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         active_output = self._prefetch_buffer[: gathered_ids.shape[0]]
         prefetch_stream = self._prefetch_stream
         prefetch_stream.wait_stream(torch.cuda.current_stream())
@@ -522,7 +522,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
     ) -> None:
         """Join the side stream, reduce ETP shards, and select local rows."""
         torch.cuda.current_stream().wait_stream(self._prefetch_stream)
-        slot_size, slot_offset = self._get_etp_gather_slot(output.shape[0])
+        slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
         active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
         embeddings = self._reduce_etp_embeddings(active_output)
         embeddings = self._select_embeddings(
