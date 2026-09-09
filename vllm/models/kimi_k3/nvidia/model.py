@@ -1724,9 +1724,6 @@ class KimiLinearForCausalLM(
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def process_weights_after_loading(self) -> None:
-        self.model.finalize_mega_moe_weights()
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
