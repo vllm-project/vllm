@@ -102,6 +102,7 @@ class FSOffloadingWorker(OffloadingWorker):
         self, job_id: int, src_spec: LoadStoreSpec, device_ptrs: DevicePointers
     ) -> bool:
         assert isinstance(src_spec, FSLoadStoreSpec)
+        torch.cuda.current_stream().synchronize()
         futures, num_bytes = self._submit_io(device_ptrs, src_spec.keys, is_store=False)
         self._transfers[job_id] = _Transfer(
             job_id=job_id,
