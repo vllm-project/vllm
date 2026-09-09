@@ -21,8 +21,6 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is only supported on CUDA"
         if not has_humming():
             return False, "Humming is not installed"
-        if c.has_g_idx:
-            return False, "Humming does not support act-order (g_idx)"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

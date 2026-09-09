@@ -1421,6 +1421,7 @@ class AiterMLAHelper:
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     # DCP decode paths return natural-log softmax LSE for the cross-rank merge.
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
     # Measured on gfx950: aiter.mla.mla_decode_fwd(return_lse=True) matches
     # logsumexp to fp32 exactly, and merge_mla_segments_triton converts AITER's
     # base-2 segment statistics with LOGE2. Stated rather than inherited because
