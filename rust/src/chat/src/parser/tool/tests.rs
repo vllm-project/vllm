@@ -207,6 +207,10 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
         Some(names::SEED_OSS)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("allenai/Olmo-3-7B-Instruct"),
+        Some(names::OLMO3)
+    );
 
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
