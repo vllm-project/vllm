@@ -5,6 +5,7 @@ Roundtrip tests for multimodal serde used by the
 token_in_token_out generate endpoint.
 """
 
+import pytest
 import torch
 from pydantic import ValidationError
 
@@ -22,7 +23,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.inputs import mm_input
+from vllm.inputs import MultiModalInput, mm_input
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -127,7 +128,7 @@ def _image_engine_input(
     *,
     pixel_keep_on_cpu: bool = False,
     grid_keep_on_cpu: bool = True,
-) -> tuple[object, MultiModalFieldElem, MultiModalFieldElem]:
+) -> tuple[MultiModalInput, MultiModalFieldElem, MultiModalFieldElem]:
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
         field=MultiModalBatchedField(keep_on_cpu=pixel_keep_on_cpu),
@@ -186,6 +187,47 @@ def test_extract_includes_declared_placeholder_metadata_fields():
     metadata = decode_mm_kwargs_item(features.mm_metadata["image"][0])
     assert set(metadata) == {"image_grid_thw"}
     assert torch.equal(metadata["image_grid_thw"].data, image_grid_thw.data)
+
+
+@pytest.mark.parametrize("metadata_source", ["cpu", "declared", "none"])
+def test_render_preserves_metadata_slots_across_modalities(metadata_source: str):
+    """Metadata stays aligned when only some modalities have metadata fields."""
+    engine_input, _, _ = _image_engine_input(grid_keep_on_cpu=metadata_source == "cpu")
+    audio = MultiModalFieldElem(
+        data=torch.ones(2, 3),
+        field=MultiModalBatchedField(),
+    )
+    engine_input["mm_kwargs"]["audio"] = [
+        MultiModalKwargsItem({"input_audio_embeds": audio}),
+        None,
+    ]
+    engine_input["mm_hashes"]["audio"] = ["audio", "cached-audio"]
+    engine_input["mm_placeholders"]["audio"] = [
+        PlaceholderRange(offset=1, length=1),
+        PlaceholderRange(offset=2, length=1),
+    ]
+
+    features = extract_mm_features(
+        engine_input,
+        metadata_fields_for=lambda modality: (
+            {"image_grid_thw"}
+            if modality == "image" and metadata_source == "declared"
+            else set()
+        ),
+    )
+    assert features is not None
+    features = MultiModalFeatures.model_validate_json(features.model_dump_json())
+    if metadata_source == "none":
+        assert features.mm_metadata is None
+    else:
+        assert features.mm_metadata is not None
+        assert features.mm_metadata["audio"] == [None, None]
+
+    restored = mm_kwargs_from_features(features)
+    assert restored["audio"][1] is None
+    audio_item = restored["audio"][0]
+    assert audio_item is not None
+    assert torch.equal(audio_item["input_audio_embeds"].data, audio.data)
 
 
 def test_legacy_kwargs_only_generate_keeps_full_payload():
