@@ -860,21 +860,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for committed mamba "align" boundary-state snapshots.
 
-        These are block-aligned boundaries, i.e. exactly what the normal save
-        would key — but ``store_mask`` masks mamba groups out of it entirely, so
-        this is their *only* writer. The exclusion is not an optimization: the
-        normal save resolves a chunk's address as
-        ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
-        connector's append-only mirror of the core's per-group table. An
-        align-mode table is mutated in place (a superseded state block is freed
-        and nulled; speculative blocks relocate), and the connector is never
-        told, so a stale mirror entry is indistinguishable from a live one — a
-        retry of a failed or pressure-skipped chunk would read a block that now
-        belongs to another request.
-
-        Each entry's handed-off block *is* the boundary state and is pinned by
-        the core, so it is uploaded under its boundary-end hash key and never
-        resolved positionally.
+        Each core handoff identifies the exact checkpoint block, pinned for
+        this Store job and keyed by its boundary-end hash.
         """
         hash_block_size = self.coord.hash_block_size
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
@@ -937,6 +924,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
         saved = self._saved_offset.get(req_meta.req_id, 0)
+        group_saved = self._group_saved_offsets.get(
+            req_meta.req_id, [saved] * len(self.token_databases)
+        )
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
             if not self.group_participates[g_idx]:
@@ -949,7 +939,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # only here, even if normal saves already advanced past it.
             last_chunk = cdiv(boundary, db.chunk_size) - 1
             for chunk_idx in range(
-                min(saved // db.chunk_size, last_chunk), last_chunk + 1
+                min(group_saved[g_idx] // db.chunk_size, last_chunk), last_chunk + 1
             ):
                 if chunk_idx % put_step != put_step_rank:
                     continue
@@ -2001,7 +1991,7 @@ class MooncakeStoreWorker:
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
-    ) -> tuple[int | None, str, tuple[_StoreGroupPlan, ...] | None]:
+    ) -> tuple[int | None, str, tuple[_StoreGroupPlan | None, ...] | None]:
         """Select compatible Store layouts for every KV-cache group."""
         lcm_store_tp_enabled = extra_config.get("enable_store_tp_lcm") is True
         store_tp_requested = (
@@ -2059,7 +2049,7 @@ class MooncakeStoreWorker:
         ):
             fallback_reason = "Store TP is not divisible by local TP"
 
-        plans: list[_StoreGroupPlan] = []
+        plans: list[_StoreGroupPlan | None] = []
         if fallback_reason is None:
             assert requested_store_tp_size is not None
             assert store_layout_cls is not None
@@ -2070,6 +2060,9 @@ class MooncakeStoreWorker:
                     strict=True,
                 )
             ):
+                if not group.kv_cache_spec.prefix_cacheable:
+                    plans.append(None)
+                    continue
                 plan = self._make_store_group_plan(
                     group,
                     requested_store_tp_size,
@@ -2115,36 +2108,33 @@ class MooncakeStoreWorker:
     def _build_token_databases(
         self,
         metadata: KeyMetadata,
-        plans: tuple[_StoreGroupPlan, ...] | None,
+        plans: tuple[_StoreGroupPlan | None, ...] | None,
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
-        if plans is None:
-            return [
-                ChunkedTokenDatabase(
-                    dataclasses.replace(
-                        metadata,
-                        group_id=g_idx,
-                        tp_rank=(
-                            self.tp_rank // self._group_tp_replication_factors[g_idx]
-                        ),
-                    ),
-                    group.kv_cache_spec.block_size,
-                    hash_block_size=(
-                        self.hash_block_size
-                        if group.kv_cache_spec.prefix_cacheable
-                        else group.kv_cache_spec.block_size
-                    ),
-                )
-                for g_idx, group in enumerate(self._kv_cache_groups)
-            ]
-
-        assert self.store_tp_size is not None
         token_dbs: list[ChunkedTokenDatabase] = []
-        for group_idx, plan in enumerate(plans):
-            spec = self._kv_cache_groups[group_idx].kv_cache_spec
+        for group_idx, group in enumerate(self._kv_cache_groups):
+            spec = group.kv_cache_spec
             hash_block_size = (
                 self.hash_block_size if spec.prefix_cacheable else spec.block_size
             )
+            plan = plans[group_idx] if plans is not None else None
+            if plan is None:
+                token_dbs.append(
+                    ChunkedTokenDatabase(
+                        dataclasses.replace(
+                            metadata,
+                            group_id=group_idx,
+                            tp_rank=(
+                                self.tp_rank
+                                // self._group_tp_replication_factors[group_idx]
+                            ),
+                        ),
+                        spec.block_size,
+                        hash_block_size=hash_block_size,
+                    )
+                )
+                continue
+            assert self.store_tp_size is not None
             group_namespace = (
                 f"@store_tp:{self.store_tp_size}@store_pp:{self.pp_size}"
                 f"@store_format:{plan.layout_cls.store_format}"

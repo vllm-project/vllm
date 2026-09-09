@@ -54,6 +54,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -414,9 +415,11 @@ def _make_kv_cache_config(
     )
 
 
-def _make_hybrid_gdn_kv_cache_config(tp_size: int, conv_layout: str = "DS") -> object:
+def _make_hybrid_gdn_kv_cache_config(
+    tp_size: int, conv_layout: str = "DS"
+) -> KVCacheConfig:
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     full = FullAttentionSpec(
         block_size=1600 // tp_size,
@@ -1007,6 +1010,24 @@ def test_partial_tail_offload_skips_null_source_blocks():
         [0x1000 + 3 * 256],
         [0x2000 + 7 * 256],
     ]
+
+
+@pytest.mark.parametrize("saved", [0, 8, 12])
+def test_partial_tail_offload_uses_group_progress_and_keeps_tail_key(saved):
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+    thread._group_saved_offsets["req-a"] = [saved, 0]
+
+    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([1, 2, 3]))
+
+    keys = store.batch_is_exist.call_args.args[0]
+    attention_keys = [key for key in keys if "@group:0" in key]
+    assert [key.rsplit("@", 1)[-1] for key in attention_keys] == (
+        ["6130", "6131", "6132"] if saved == 0 else ["6132"]
+    )
+    assert any("@group:1@6132" in key for key in keys)
 
 
 def test_partial_tail_offload_writes_each_local_store_shard():
@@ -2403,9 +2424,10 @@ def test_worker_enables_store_tp_layout(
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
+@pytest.mark.parametrize("with_scratch", [False, True])
 @pytest.mark.parametrize("conv_layout", ["DS", "SD"])
 def test_hybrid_gdn_workers_share_group_aware_store_tp_namespace(
-    tmp_path, monkeypatch, conv_layout
+    tmp_path, monkeypatch, conv_layout, with_scratch
 ):
     store = MagicMock()
     store.setup.return_value = 0
@@ -2433,7 +2455,28 @@ def test_hybrid_gdn_workers_share_group_aware_store_tp_namespace(
             prefix_match_unit=16,
         )
         kv_cache_config = _make_hybrid_gdn_kv_cache_config(tp_size, conv_layout)
+        if with_scratch:
+            from vllm.v1.kv_cache_interface import KpoolTailSpec
+
+            kv_cache_config.kv_cache_groups.append(
+                KVCacheGroupSpec(
+                    ["scratch"],
+                    KpoolTailSpec(
+                        block_size=4,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.bfloat16,
+                        sliding_window=4,
+                    ),
+                )
+            )
         store_worker = worker.MooncakeStoreWorker(config, kv_cache_config)
+        if with_scratch:
+            assert len(store_worker.token_dbs) == 3
+            assert store_worker.token_dbs[2].hash_block_size == 4
+            assert isinstance(
+                store_worker.token_dbs[2].store_layout, RankLocalStoreLayout
+            )
         assert store_worker.store_tp_size == 4
         assert isinstance(store_worker.token_dbs[0].store_layout, LBHNCStoreLayout)
         assert isinstance(store_worker.token_dbs[1].store_layout, MambaStoreLayout)
