@@ -481,7 +481,13 @@ def _get_backend_priorities(
     backends = []
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
-    if not use_kv_connector:
+    allow_rocm_attn = not use_kv_connector
+    # On gfx11 the ROCM_ATTN custom paged-attention kernel only covers
+    # head_size 128 with block_size 16, a GQA ratio of 3-16 and an unquantized
+    # KV cache (see use_rocm_custom_paged_attention); anything else falls back
+    # to its internal Triton path. Rank TRITON_ATTN above it there.
+    rocm_attn_first = allow_rocm_attn and not on_gfx11()
+    if rocm_attn_first:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
@@ -490,6 +496,8 @@ def _get_backend_priorities(
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    if allow_rocm_attn and not rocm_attn_first:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
