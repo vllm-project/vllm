@@ -692,11 +692,24 @@ fn test_render_app_with_parser_selections(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+}
+
+fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
+    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
-        text: TextRequestProcessor::new(backend.clone(), 128),
+        max_model_len,
+        text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
@@ -1412,6 +1425,26 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_list_models_reports_configured_max_model_len() {
+    for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
+        let mut app = test_render_app_with_max_model_len(configured);
+        let response = app
+            .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let card = json["data"][0].as_object().expect("card object");
+        assert!(card.contains_key("max_model_len"));
+        assert_eq!(
+            card["max_model_len"], expected,
+            "configured: {configured:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
