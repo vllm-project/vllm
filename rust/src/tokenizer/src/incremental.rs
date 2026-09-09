@@ -72,16 +72,6 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
-    fn record_token(&mut self, token_id: u32, produced_text: bool) {
-        let zero_width = (self.skip_special_tokens && self.tokenizer.is_special_id(token_id))
-            || (!produced_text && self.tokenizer.id_to_token(token_id).is_none());
-        if zero_width {
-            self.decoded.record_zero_width_token(token_id);
-        } else {
-            self.decoded.record_pending_token(token_id);
-        }
-    }
-
     /// Decode prompt-only context for prefix seeding.
     ///
     /// Prompt ids may come from the model vocabulary rather than the local
@@ -147,7 +137,18 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
         let produced_text = string.len() > prefix_len && !string.ends_with('\u{FFFD}');
-        self.record_token(token_id, produced_text);
+
+        // Skipped undefined IDs leave the decoded text unchanged. Check only
+        // non-emitting steps to avoid id_to_token's lookup and String allocation
+        // on the normal path.
+        let zero_width = (self.skip_special_tokens && self.tokenizer.is_special_id(token_id))
+            || (!produced_text && self.tokenizer.id_to_token(token_id).is_none());
+        if zero_width {
+            self.decoded.record_zero_width_token(token_id);
+        } else {
+            self.decoded.record_pending_token(token_id);
+        }
+
         if !produced_text {
             return Ok(0);
         }

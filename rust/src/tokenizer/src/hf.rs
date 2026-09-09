@@ -54,6 +54,8 @@ fn decode_fastokens_byte_level(
     let tokens: Vec<&str> = token_ids
         .iter()
         .filter(|&&id| !(skip_special_tokens && t.is_special_token(id)))
+        // Match HF and fastokens: model vocabularies may contain undefined
+        // tokenizer IDs, which contribute no decoded text.
         .filter_map(|&id| t.id_to_token(id))
         .collect();
     Ok(decode_byte_level(tokens))
