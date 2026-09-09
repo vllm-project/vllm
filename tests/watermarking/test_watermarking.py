@@ -32,17 +32,18 @@ def test_watermarker_contract(algorithm: str):
     assert torch.equal(first.token_ids, second.token_ids)
 
 
-def test_gumbel_watermarker_warns_about_degenerate_generations(monkeypatch):
+def test_gumbel_config_warns_about_degenerate_generations(monkeypatch):
     messages: list[str] = []
     monkeypatch.setattr(
-        "vllm.v1.watermarking.gumbel.logger.warning_once", messages.append
+        "vllm.config.watermarking.logger.warning_once",
+        lambda message, *, scope: messages.append(message),
     )
 
-    create_watermarker(WatermarkConfig(key=42))
+    WatermarkConfig(key=42)
 
     assert messages == [
-        "Using single-key Gumbel-max watermarking may increase degenerate "
-        "generations, including repetition loops."
+        "Single-key Gumbel-max watermarking may increase the frequency of "
+        "degenerate generations, including repetition loops."
     ]
 
 

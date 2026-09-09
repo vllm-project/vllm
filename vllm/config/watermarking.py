@@ -7,6 +7,9 @@ from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 WatermarkingAlgorithm = Literal["gumbel"]
 WatermarkPRFName = Literal["philox"]
@@ -33,6 +36,12 @@ class WatermarkConfig:
     def validate_key(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
+        if self.algorithm == "gumbel":
+            logger.warning_once(
+                "Single-key Gumbel-max watermarking may increase the frequency of "
+                "degenerate generations, including repetition loops.",
+                scope="global",
+            )
         return self
 
     @property
