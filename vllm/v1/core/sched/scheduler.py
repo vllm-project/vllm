@@ -2421,7 +2421,7 @@ class Scheduler(SchedulerInterface):
             )
 
         return {
-            "data_parallel_rank": self.parallel_config.data_parallel_rank,
+            "data_parallel_rank": self.parallel_config.data_parallel_index,
             "queues": queues,
         }
 

@@ -150,6 +150,7 @@ def test_get_num_unfinished_requests():
 
 def test_get_inflight_queue_diagnostics():
     scheduler = create_scheduler()
+    scheduler.parallel_config.data_parallel_index = 1
     requests = create_requests(num_requests=3)
     for request in requests:
         request.arrival_time = time.time() - 1
@@ -160,7 +161,7 @@ def test_get_inflight_queue_diagnostics():
 
     diagnostics = scheduler.get_inflight_queue_diagnostics(limit=2)
 
-    assert diagnostics["data_parallel_rank"] == 0
+    assert diagnostics["data_parallel_rank"] == 1
     assert [queue["name"] for queue in diagnostics["queues"]] == [
         "running",
         "waiting",
