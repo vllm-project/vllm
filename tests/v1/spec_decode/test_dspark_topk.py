@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     nvfp4_gathered_bias,
 )
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.platforms import current_platform
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
@@ -69,7 +70,10 @@ def test_gathered_markov_bias_matches_dense_at_full_vocab():
     torch.testing.assert_close(result, expected)
 
 
-def test_gathered_markov_bias_dequantizes_selected_w4a16_rows():
+@pytest.mark.parametrize("cuda_alike_platform", [False, True])
+def test_gathered_markov_bias_dequantizes_selected_w4a16_rows(
+    monkeypatch, cuda_alike_platform
+):
     packed_weight = torch.tensor(
         [[0x00] * 8, [0x22] * 8, [0xAA] * 8, [0x31] * 8], dtype=torch.uint8
     )
@@ -110,6 +114,8 @@ def test_gathered_markov_bias_dequantizes_selected_w4a16_rows():
     original_values = values.clone()
     logits = torch.full((2, 4), float("-inf"))
 
+    # CPU tensors must use the fallback even on CUDA/ROCm hosts.
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: cuda_alike_platform)
     result = head.apply_bias_gathered(markov_embed, logits, values, index)
 
     dense_weight = torch.tensor([[0.0] * 16, [1.0] * 16, [-1.0] * 16, [0.5, 1.5] * 8])

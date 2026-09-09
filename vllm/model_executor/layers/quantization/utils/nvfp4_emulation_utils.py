@@ -573,7 +573,7 @@ def dequantize_to_dtype(
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
 
-    if not swizzle and current_platform.is_cuda_alike():
+    if not swizzle and tensor_fp4.is_cuda and current_platform.is_cuda_alike():
         return _triton_dequantize_nvfp4(
             tensor_fp4, tensor_sf, global_scale, dtype, block_size
         )
