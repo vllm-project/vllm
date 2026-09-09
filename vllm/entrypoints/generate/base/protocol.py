@@ -61,6 +61,13 @@ class PerRequestMetrics(OpenAIBaseModel):
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
     remote_kv_wait_time_ms: float | None = None
+    kv_allocation_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall time from the first remote-KV allocation attempt to success, "
+            "including capacity retries; excludes time before the first attempt."
+        ),
+    )
     kv_handshake_wait_worker_time_ms: float | None = Field(
         default=None,
         description=(

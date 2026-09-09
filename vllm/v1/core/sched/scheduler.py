@@ -1083,6 +1083,8 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                if load_kv_async and request.kv_allocation_started_at is None:
+                    request.kv_allocation_started_at = time.monotonic()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -1105,6 +1107,13 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if request.kv_allocation_started_at is not None:
+                    request.kv_transfer_metrics["kv_allocation_wait_time_ms"] = (
+                        request.kv_transfer_metrics.get("kv_allocation_wait_time_ms", 0)
+                        + (time.monotonic() - request.kv_allocation_started_at) * 1000
+                    )
+                    request.kv_allocation_started_at = None
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that

@@ -104,6 +104,7 @@ class Request:
         self.remote_kv_wait_started_at: float | None = None
         self.remote_kv_wait_time = 0.0
         self.kv_transfer_metrics: dict[str, float] = {}
+        self.kv_allocation_started_at: float | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
