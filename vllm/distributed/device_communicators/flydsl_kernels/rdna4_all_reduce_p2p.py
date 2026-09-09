@@ -10,7 +10,7 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream
 
-from .common import MAX_BLOCKS
+from .common import MAX_BLOCKS, global_pointer
 from .common import load_pack_128b as _load_pack
 from .common import store_pack_128b as _store_pack
 
@@ -22,32 +22,25 @@ _SG_FLAG_OFFSET = MAX_BLOCKS * 8 * 4 * 2
 
 
 def _load_i32_acquire(address):
-    return fx.rocdl.global_load(
-        address,
-        fx.Int32,
-        alignment=4,
-        memory_order=fx.rocdl.MemoryOrder.Acquire,
+    return fx.generic_load(
+        global_pointer(address, fx.Int32, 4),
+        memory_order=fx.AtomicOrdering.Acquire,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _store_i32_release(address, value):
-    fx.rocdl.global_store(
-        address,
+    fx.generic_store(
+        global_pointer(address, fx.Int32, 4),
         value,
-        alignment=4,
-        memory_order=fx.rocdl.MemoryOrder.Release,
+        memory_order=fx.AtomicOrdering.Release,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _load_pointer(array_address, index):
     address = array_address + fx.Int64(index * 8)
-    return fx.rocdl.global_load(address, fx.Int64, alignment=8)
-
-
-def _sleep_one():
-    fx.rocdl.sleep(1)
+    return fx.generic_load(global_pointer(address, fx.Int64, 8))
 
 
 @flyc.jit
@@ -82,7 +75,6 @@ def _sync(
             )
             observed = fx.Int32(_load_i32_acquire(local_address))
             while observed < ticket:
-                _sleep_one()
                 observed = fx.Int32(_load_i32_acquire(local_address))
 
     gpu.barrier()
@@ -131,7 +123,6 @@ def _wait_progress(
             )
             observed = fx.Int32(_load_i32_acquire(local_address))
             while observed < ticket:
-                _sleep_one()
                 observed = fx.Int32(_load_i32_acquire(local_address))
     gpu.barrier()
 
@@ -173,7 +164,6 @@ def _sync_strided_group(
             )
             observed = fx.Int32(_load_i32_acquire(local_address))
             while observed < ticket:
-                _sleep_one()
                 observed = fx.Int32(_load_i32_acquire(local_address))
 
     gpu.barrier()

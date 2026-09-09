@@ -16,6 +16,7 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu
 from flydsl.expr.typing import Int32, Int64, Stream
 
+from .common import global_pointer
 from .common import load_pack_128b as _load_pack
 from .common import store_pack_128b as _store_pack
 
@@ -25,27 +26,20 @@ _SG_FLAG_OFFSET = 80 * 8 * 4 * 2
 
 
 def _load_i64_acquire(addr_i64):
-    return fx.rocdl.global_load(
-        addr_i64,
-        fx.Int64,
-        alignment=8,
-        memory_order=fx.rocdl.MemoryOrder.Acquire,
+    return fx.generic_load(
+        global_pointer(addr_i64, fx.Int64, 8),
+        memory_order=fx.AtomicOrdering.Acquire,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _store_i64_release(addr_i64, value):
-    fx.rocdl.global_store(
-        addr_i64,
+    fx.generic_store(
+        global_pointer(addr_i64, fx.Int64, 8),
         value,
-        alignment=8,
-        memory_order=fx.rocdl.MemoryOrder.Release,
+        memory_order=fx.AtomicOrdering.Release,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
-
-
-def _sleep_one():
-    fx.rocdl.sleep(1)
 
 
 def _add_bf16_pack(lhs_raw, rhs_raw):
@@ -55,30 +49,25 @@ def _add_bf16_pack(lhs_raw, rhs_raw):
 
 
 def _load_i32_acquire(addr_i32):
-    return fx.rocdl.global_load(
-        addr_i32,
-        fx.Int32,
-        alignment=4,
-        memory_order=fx.rocdl.MemoryOrder.Acquire,
+    return fx.generic_load(
+        global_pointer(addr_i32, fx.Int32, 4),
+        memory_order=fx.AtomicOrdering.Acquire,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _store_i32_release(addr_i32, value):
-    fx.rocdl.global_store(
-        addr_i32,
+    fx.generic_store(
+        global_pointer(addr_i32, fx.Int32, 4),
         value,
-        alignment=4,
-        memory_order=fx.rocdl.MemoryOrder.Release,
+        memory_order=fx.AtomicOrdering.Release,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _load_pointer(array_addr, index):
-    return fx.rocdl.global_load(
-        array_addr + fx.Int64(index) * fx.Int64(8),
-        fx.Int64,
-        alignment=8,
+    return fx.generic_load(
+        global_pointer(array_addr + fx.Int64(index) * fx.Int64(8), fx.Int64, 8),
     )
 
 
@@ -133,7 +122,6 @@ def make_p2p_tp2_one_shot_launcher(*, blocks: int, threads: int):
             observed = fx.Int32(_load_i32_acquire(local_ready_addr))
             observed_epoch = observed >> fx.Int32(12)
             while observed_epoch != ticket_epoch:
-                _sleep_one()
                 observed = fx.Int32(_load_i32_acquire(local_ready_addr))
                 observed_epoch = observed >> fx.Int32(12)
         gpu.barrier()
@@ -163,7 +151,6 @@ def make_p2p_tp2_one_shot_launcher(*, blocks: int, threads: int):
             _store_i32_release(peer_done_addr, ticket_epoch)
             observed_done = fx.Int32(_load_i32_acquire(local_done_addr))
             while observed_done < ticket_epoch:
-                _sleep_one()
                 observed_done = fx.Int32(_load_i32_acquire(local_done_addr))
         gpu.barrier()
 
@@ -247,7 +234,6 @@ def make_mapped_tp2_full_launcher(*, blocks: int, threads: int):
                 else:
                     ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
                     while ticket <= previous:
-                        _sleep_one()
                         ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
             fx.ptr_store(fx.Vector.from_elements([ticket], fx.Int64), ticket_ptr)
         gpu.barrier()
@@ -274,7 +260,6 @@ def make_mapped_tp2_full_launcher(*, blocks: int, threads: int):
                 _store_i64_release(local_ready_addr, ticket)
                 peer_ticket = fx.Int64(_load_i64_acquire(peer_ready_addr))
                 while peer_ticket < ticket:
-                    _sleep_one()
                     peer_ticket = fx.Int64(_load_i64_acquire(peer_ready_addr))
             else:
                 local_block_addr = local_ready_addr + fx.Int64(bid) * fx.Int64(8)
@@ -282,7 +267,6 @@ def make_mapped_tp2_full_launcher(*, blocks: int, threads: int):
                 _store_i64_release(local_block_addr, ticket)
                 peer_ticket = fx.Int64(_load_i64_acquire(peer_block_addr))
                 while peer_ticket < ticket:
-                    _sleep_one()
                     peer_ticket = fx.Int64(_load_i64_acquire(peer_block_addr))
         gpu.barrier()
 
@@ -375,7 +359,6 @@ def make_mapped_tp2_pipeline_launcher(*, blocks: int, threads: int, chunk_packs:
             else:
                 ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
                 while ticket <= previous_ticket:
-                    _sleep_one()
                     ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
             fx.ptr_store(fx.Vector.from_elements([ticket], fx.Int64), ticket_ptr)
         gpu.barrier()
@@ -412,7 +395,6 @@ def make_mapped_tp2_pipeline_launcher(*, blocks: int, threads: int, chunk_packs:
                 _store_i64_release(local_block_addr, progress)
                 peer_value = fx.Int64(_load_i64_acquire(peer_block_addr))
                 while peer_value < progress:
-                    _sleep_one()
                     peer_value = fx.Int64(_load_i64_acquire(peer_block_addr))
             gpu.barrier()
 

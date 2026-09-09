@@ -3,6 +3,7 @@
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -246,6 +247,24 @@ def test_flydsl_probe_fails_closed(monkeypatch, error):
 
     monkeypatch.setattr(rdna4_module.importlib, "import_module", unavailable)
     assert not rdna4_module._is_rdna4_flydsl_available()
+
+
+@pytest.mark.parametrize(
+    "missing", [None, "generic_load", "generic_store", "AtomicOrdering"]
+)
+def test_flydsl_probe_accepts_generic_memory_api(monkeypatch, missing):
+    fx = SimpleNamespace(
+        AtomicOrdering=object(),
+        PointerType=object(),
+        inttoptr=object(),
+        generic_load=object(),
+        generic_store=object(),
+        rocdl=SimpleNamespace(SyncScope=object()),
+    )
+    if missing is not None:
+        delattr(fx, missing)
+    monkeypatch.setattr(rdna4_module.importlib, "import_module", lambda _: fx)
+    assert rdna4_module._is_rdna4_flydsl_available() is (missing is None)
 
 
 def test_public_router_has_no_eager_flydsl_imports():

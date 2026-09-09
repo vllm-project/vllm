@@ -94,8 +94,16 @@ def _run(world_size, element_counts):
 
 @multi_gpu_test(num_gpus=2)
 def test_rdna4_all_reduce_tp2():
-    # Cover both mapped memory and the first direct-P2P graph size.
-    _run(2, (8, 32_768, 32_776))
+    _run(2, (8, 128, 512, 2048, 4096, 8192, 16_384, 24_576, 32_768))
+
+
+@multi_gpu_test(num_gpus=2)
+def test_rdna4_all_reduce_tp2_p2p():
+    if not all(
+        torch.cuda.can_device_access_peer(src, dst) for src, dst in ((0, 1), (1, 0))
+    ):
+        pytest.skip("TP2 direct-P2P requires bidirectional peer access")
+    _run(2, (32_776, 524_288, 4_194_304))
 
 
 @multi_gpu_test(num_gpus=4)

@@ -10,32 +10,26 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream
 
+from .common import global_pointer
 from .common import load_pack_128b as _load_pack
 from .common import store_pack_128b as _store_pack
 
 
 def _load_i64_acquire(addr_i64):
-    return fx.rocdl.global_load(
-        addr_i64,
-        fx.Int64,
-        alignment=8,
-        memory_order=fx.rocdl.MemoryOrder.Acquire,
+    return fx.generic_load(
+        global_pointer(addr_i64, fx.Int64, 8),
+        memory_order=fx.AtomicOrdering.Acquire,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
 
 
 def _store_i64_release(addr_i64, value):
-    fx.rocdl.global_store(
-        addr_i64,
+    fx.generic_store(
+        global_pointer(addr_i64, fx.Int64, 8),
         value,
-        alignment=8,
-        memory_order=fx.rocdl.MemoryOrder.Release,
+        memory_order=fx.AtomicOrdering.Release,
         syncscope=fx.rocdl.SyncScope.OneAs,
     )
-
-
-def _sleep_one():
-    fx.rocdl.sleep(1)
 
 
 def _bf16_pack_to_f32(raw):
@@ -102,7 +96,6 @@ def make_mapped_full_launcher(*, world_size: int, threads: int = 1024):
                 peer_ready_addr = shared_addr + fx.Int64(peer_rank) * fx.Int64(8)
                 peer_ticket = fx.Int64(_load_i64_acquire(peer_ready_addr))
                 while peer_ticket < ticket:
-                    _sleep_one()
                     peer_ticket = fx.Int64(_load_i64_acquire(peer_ready_addr))
         gpu.barrier()
 
@@ -216,7 +209,6 @@ def make_mapped_rsag_launcher(
             else:
                 ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
                 while ticket <= previous_ticket:
-                    _sleep_one()
                     ticket = fx.Int64(_load_i64_acquire(local_launch_addr))
             fx.ptr_store(fx.Vector.from_elements([ticket], fx.Int64), ticket_ptr)
         gpu.barrier()
@@ -268,7 +260,6 @@ def make_mapped_rsag_launcher(
                     )
                     peer_progress = fx.Int64(_load_i64_acquire(peer_progress_addr))
                     while peer_progress < input_ready:
-                        _sleep_one()
                         peer_progress = fx.Int64(_load_i64_acquire(peer_progress_addr))
             gpu.barrier()
 
@@ -302,7 +293,6 @@ def make_mapped_rsag_launcher(
                     )
                     owner_progress = fx.Int64(_load_i64_acquire(owner_progress_addr))
                     while owner_progress < result_ready:
-                        _sleep_one()
                         owner_progress = fx.Int64(
                             _load_i64_acquire(owner_progress_addr)
                         )

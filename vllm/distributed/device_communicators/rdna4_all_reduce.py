@@ -63,15 +63,15 @@ def _is_rdna4_flydsl_available() -> bool:
         fx = importlib.import_module("flydsl.expr")
         rocdl = fx.rocdl
         return all(
-            hasattr(rocdl, name)
+            hasattr(fx, name)
             for name in (
-                "MemoryOrder",
-                "SyncScope",
-                "global_load",
-                "global_store",
-                "sleep",
+                "AtomicOrdering",
+                "PointerType",
+                "inttoptr",
+                "generic_load",
+                "generic_store",
             )
-        )
+        ) and hasattr(rocdl, "SyncScope")
     except Exception:
         logger.debug("FlyDSL collective primitive probe failed", exc_info=True)
         return False
