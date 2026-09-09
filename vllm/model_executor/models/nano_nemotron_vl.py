@@ -30,6 +30,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
 )
@@ -897,10 +898,21 @@ class NanoNemotronVLDummyInputsBuilder(
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
 class NemotronH_Nano_VL_V2(
-    nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
+    nn.Module,
+    HasInnerState,
+    IsHybrid,
+    SupportsMultiModal,
+    SupportsMultiModalPruning,
+    SupportsLoRA,
 ):
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
+
+    # LoRA covers the language model only
+    is_non_gated_moe = NemotronHForCausalLM.is_non_gated_moe
+    packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
+    embedding_modules = NemotronHForCausalLM.embedding_modules
+    lora_skip_prefixes = NemotronHForCausalLM.lora_skip_prefixes
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
