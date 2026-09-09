@@ -726,6 +726,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     assert captured["layer_config"] is layer_config
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test only exercises the CUDA Marlin path.",
+)
 @pytest.mark.parametrize("bits", [4, 8])
 def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
     """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
@@ -1533,8 +1537,7 @@ def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
     assert layer.scales.dtype == torch.bfloat16
     assert layer.qzeros.shape == (1, 4)
     assert layer.qzeros.dtype == torch.int32
-    assert layer.g_idx.shape == (64,)
-    assert layer.g_idx.dtype == torch.int32
+    assert not hasattr(layer, "g_idx")
     assert layer.in_features == 64
     assert layer.out_features == 64
     assert layer.params_dtype == torch.bfloat16
@@ -2440,7 +2443,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
         w_scale,
         w_zp,
         group_size,
-        g_idx,
+        group_idx,
         bias,
     ) = captured["gemm_args"]
     assert quant_x.dtype is torch.int8
@@ -2452,7 +2455,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
     assert qweight is layer.qweight
     assert w_zp is layer.qzeros
     assert group_size == 128
-    assert g_idx is None
+    assert group_idx is None
     assert bias is None
 
     # The kernel emits fp16; the result is cast back to the activation dtype.

@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,21 +41,19 @@ def get_model(arch: str) -> str:
     return model_info.default
 
 
+def count_modules(model, cls: type) -> int:
+    return sum(isinstance(m, cls) for m in model.modules())
+
+
 def get_num_fused(model) -> tuple[int, int]:
     from vllm.model_executor.layers.linear import (
         MergedColumnParallelLinear,
         QKVParallelLinear,
     )
 
-    glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
-    qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
+    glu = count_modules(model, MergedColumnParallelLinear)
+    qkv = count_modules(model, QKVParallelLinear)
     return glu, qkv
-
-
-def count_mla_layers(model) -> int:
-    from vllm.model_executor.layers.attention import MLAAttention
-
-    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
 
 
 def check_implementation(
@@ -86,6 +85,12 @@ def check_implementation(
         for num_glu, num_qkv in model_test.apply_model(get_num_fused):
             assert num_glu == expected_glu * num_layers
             assert num_qkv == expected_qkv * num_layers
+
+        tp_size = kwargs_test.get("tensor_parallel_size", 1)
+        from vllm.model_executor.layers.attention import Attention
+
+        counts = model_test.apply_model(partial(count_modules, cls=Attention))
+        assert counts == [num_layers] * tp_size
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -143,6 +148,42 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     )
 
 
+def get_sinks(model) -> dict[int, torch.Tensor]:
+    """The sink tensor each attention layer was handed, keyed by layer index."""
+    sinks = {}
+    for i, (prefix, fuser) in model.attention_fusers.items():
+        if (sink := fuser.sinks(model.get_submodule(prefix))) is not None:
+            sinks[i] = sink.float().cpu()
+    return sinks
+
+
+def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None:
+    """Learnable attention sinks must reach the attention layers.
+
+    Only the attention impl can apply them, so if they are not passed to
+    `Attention` they are dropped and every softmax is subtly wrong.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.has_device_capability(90):
+        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+
+    model = "tiny-random/gpt-oss-bf16"
+    with vllm_runner(
+        model, model_impl="transformers", max_model_len=1024, enforce_eager=True
+    ) as model_test:
+        assert model_test.llm.llm_engine.model_config.using_transformers_backend()
+        sinks = model_test.apply_model(get_sinks)[0]
+
+    with hf_runner(model, dtype="bfloat16") as model_ref:
+        layers = model_ref.model.model.get_decoder().layers
+        expected = {i: layer.self_attn.sinks.float() for i, layer in enumerate(layers)}
+
+    assert sinks.keys() == expected.keys()
+    for i, sink in sinks.items():
+        torch.testing.assert_close(sink, expected[i].cpu())
+
+
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
     import transformers
     from packaging.version import Version
@@ -165,7 +206,10 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
-        assert model_test.apply_model(count_mla_layers) == [num_layers]
+        from vllm.model_executor.layers.attention import MLAAttention
+
+        counts = model_test.apply_model(partial(count_modules, cls=MLAAttention))
+        assert counts == [num_layers]
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
     with vllm_runner(model, model_impl="auto") as model_ref:
@@ -199,7 +243,7 @@ def test_distributed(
     "model, quantization_kwargs",
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
-        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
+        ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -627,7 +671,7 @@ def test_attention_dispatch_is_matched(model_type: str):
     """Exactly the decoder layers' attention modules match an `AttentionFuser`.
 
     That match is what `recursive_replace` records, and so what
-    `create_attention_instances` attaches vLLM's attention layer to.
+    `_create_attention_instances` attaches vLLM's attention layer to.
     """
     model = build_model(model_type)
     matched = {
@@ -682,7 +726,7 @@ def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
         ValueError,
         match="Layer 0 does not dispatch through the Transformers attention interface",
     ):
-        Base.create_attention_instances(model)
+        Base._create_attention_instances(model)
 
 
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)

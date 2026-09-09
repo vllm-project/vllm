@@ -1,67 +1,194 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 
-@triton.jit
-def _fused_q_kv_rmsnorm_kernel(
-    q_ptr,
-    q_out_ptr,
-    q_weight_ptr,
-    q_in_stride,
-    q_out_stride,
-    kv_ptr,
-    kv_out_ptr,
-    kv_weight_ptr,
-    kv_in_stride,
-    kv_out_stride,
-    eps,
-    Q_SIZE: tl.constexpr,
-    KV_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    launch_pdl: tl.constexpr,
-):
-    # num_tokens goes on grid-x (max 2**31 - 1); task goes on grid-y.
-    # CUDA's grid-y/z are capped at 65535, so putting num_tokens there crashes
-    # the launch at max-num-batched-tokens >= 65536 with "invalid argument".
-    # int64: q_in_stride can be ~24K (128 heads × 192) and overflows int32
-    # past num_tokens ~87K under large chunked prefill.
-    token_idx = tl.program_id(0).to(tl.int64)
-    pid_task = tl.program_id(1)
+class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        q_size: int
+        kv_size: int
+        block_size: int
+        q_in_stride: int
+        q_out_stride: int
+        kv_in_stride: int
+        kv_out_stride: int
+        eps: float
+        launch_pdl: bool
 
-    if pid_task == 0:
-        SIZE = Q_SIZE
-        row_in = q_ptr + token_idx * q_in_stride
-        weight_ptr = q_weight_ptr
-        row_out = q_out_ptr + token_idx * q_out_stride
-    else:
-        SIZE = KV_SIZE
-        row_in = kv_ptr + token_idx * kv_in_stride
-        weight_ptr = kv_weight_ptr
-        row_out = kv_out_ptr + token_idx * kv_out_stride
+    @staticmethod
+    @triton.jit
+    def kernel(
+        q_ptr,
+        q_out_ptr,
+        q_weight_ptr,
+        q_in_stride,
+        q_out_stride,
+        kv_ptr,
+        kv_out_ptr,
+        kv_weight_ptr,
+        kv_in_stride,
+        kv_out_stride,
+        eps,
+        Q_SIZE: tl.constexpr,
+        KV_SIZE: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        launch_pdl: tl.constexpr,
+    ):
+        # num_tokens goes on grid-x (max 2**31 - 1); task goes on grid-y.
+        # CUDA's grid-y/z are capped at 65535, so putting num_tokens there crashes
+        # the launch at max-num-batched-tokens >= 65536 with "invalid argument".
+        # int64: q_in_stride can be ~24K (128 heads × 192) and overflows int32
+        # past num_tokens ~87K under large chunked prefill.
+        token_idx = tl.program_id(0).to(tl.int64)
+        pid_task = tl.program_id(1)
 
-    # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
-    # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
-    # keep x, rrms, and w all in fp32 and perform a single cast at store.
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < SIZE
-    # The weight load does not depend on the producer's output, so issue it
-    # before the PDL wait: gamma streams in while the producer finishes,
-    # leaving a single dependent global round trip (x) after the wait.
-    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
+        if pid_task == 0:
+            SIZE = Q_SIZE
+            row_in = q_ptr + token_idx * q_in_stride
+            weight_ptr = q_weight_ptr
+            row_out = q_out_ptr + token_idx * q_out_stride
+        else:
+            SIZE = KV_SIZE
+            row_in = kv_ptr + token_idx * kv_in_stride
+            weight_ptr = kv_weight_ptr
+            row_out = kv_out_ptr + token_idx * kv_out_stride
 
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
+        # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
+        # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
+        # keep x, rrms, and w all in fp32 and perform a single cast at store.
+        block = tl.arange(0, BLOCK_SIZE)
+        mask = block < SIZE
+        # The weight load does not depend on the producer's output, so issue it
+        # before the PDL wait: gamma streams in while the producer finishes,
+        # leaving a single dependent global round trip (x) after the wait.
+        w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
 
-    x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
-    variance = tl.sum(x * x, axis=0) / SIZE
-    rrms = tl.rsqrt(variance + eps)
-    y = x * rrms * w
-    tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
+
+        x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
+        variance = tl.sum(x * x, axis=0) / SIZE
+        rrms = tl.rsqrt(variance + eps)
+        y = x * rrms * w
+        tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        q_size: int,
+        kv_size: int,
+        eps: float,
+        launch_pdl: bool,
+        **compile_key_fields: int,
+    ) -> CompileKey:
+        max_size = q_size if q_size >= kv_size else kv_size
+        return self.CompileKey(
+            **compile_key_fields,
+            dtype=dtype,
+            q_size=q_size,
+            kv_size=kv_size,
+            block_size=next_power_of_2(max_size),
+            eps=eps,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        q_size = int(getattr(hf_config, "q_lora_rank", 0) or 0)
+        kv_size = int(getattr(hf_config, "head_dim", 0) or 0)
+        if q_size <= 0 or kv_size <= 0:
+            return []
+
+        input_stride = q_size + kv_size
+        return self._trace_dispatch(self.dispatch)(
+            dtype=vllm_config.model_config.dtype,
+            q_size=q_size,
+            kv_size=kv_size,
+            q_in_stride=input_stride,
+            q_out_stride=(input_stride, q_size),
+            kv_in_stride=input_stride,
+            kv_out_stride=(input_stride, kv_size),
+            eps=float(hf_config.rms_norm_eps),
+            launch_pdl=(False, True),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            q=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.q_size),
+                strides=(compile_key.q_in_stride, 1),
+            ),
+            kv=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.kv_size),
+                strides=(compile_key.kv_in_stride, 1),
+            ),
+            q_out=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.q_size),
+                strides=(compile_key.q_out_stride, 1),
+            ),
+            kv_out=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(1, compile_key.kv_size),
+                strides=(compile_key.kv_out_stride, 1),
+            ),
+            q_weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.q_size,),
+            ),
+            kv_weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.kv_size,),
+            ),
+            eps=compile_key.eps,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        q_out: torch.Tensor,
+        kv_out: torch.Tensor,
+        q_weight: torch.Tensor,
+        kv_weight: torch.Tensor,
+        eps: float,
+    ) -> LaunchSpec:
+        q_size = q.shape[1]
+        kv_size = kv.shape[1]
+        block_size = next_power_of_2(max(q_size, kv_size))
+        return (q.shape[0], 2), dict(
+            q_in_stride=q.stride(0),
+            q_out_stride=q_out.stride(0),
+            kv_in_stride=kv.stride(0),
+            kv_out_stride=kv_out.stride(0),
+            Q_SIZE=q_size,
+            KV_SIZE=kv_size,
+            BLOCK_SIZE=block_size,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+            # One vectorized 128-bit access per thread for K3/DSv4-sized rows,
+            # instead of a serial per-thread chain at the default 4 warps.
+            num_warps=8 if block_size >= 2048 else 4,
+        )
 
 
 def fused_q_kv_rmsnorm(
@@ -78,40 +205,19 @@ def fused_q_kv_rmsnorm(
     assert qr.stride(-1) == 1 and kv.stride(-1) == 1
     assert q_weight.is_contiguous() and kv_weight.is_contiguous()
 
-    q_size = qr.shape[1]
-    kv_size = kv.shape[1]
-    num_tokens = qr.shape[0]
-    # Allocate packed outputs rather than empty_like: qr/kv are typically
-    # column slices of a fused qkv_a projection, and for num_tokens == 1
-    # empty_like preserves the parent's row stride (torch keeps strides of
-    # size-1 dims), e.g. (2112, 1) for a [1, 1536] q slice. Downstream
-    # dispatchers that require packed row-major inputs (e.g. the Kimi-K3
-    # low-latency GEMM's _is_packed_row_major check) then reject the tensor
-    # and silently fall back to cuBLAS on every decode step.
     qr_out = torch.empty(qr.shape, dtype=qr.dtype, device=qr.device)
     kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
-    if num_tokens == 0:
-        return qr_out, kv_out
-
-    block_size = triton.next_power_of_2(max(q_size, kv_size))
-    _fused_q_kv_rmsnorm_kernel[(num_tokens, 2)](
-        qr,
-        qr_out,
-        q_weight,
-        qr.stride(0),
-        qr_out.stride(0),
-        kv,
-        kv_out,
-        kv_weight,
-        kv.stride(0),
-        kv_out.stride(0),
-        eps,
-        Q_SIZE=q_size,
-        KV_SIZE=kv_size,
-        BLOCK_SIZE=block_size,
-        launch_pdl=current_platform.is_arch_support_pdl(),
-        # One vectorized 128-bit access per thread for K3/DSv4-sized rows,
-        # instead of a serial per-thread chain at the default 4 warps.
-        num_warps=8 if block_size >= 2048 else 4,
-    )
+    if qr.shape[0] > 0:
+        _FUSED_Q_KV_RMSNORM_KERNEL(
+            qr,
+            kv,
+            qr_out,
+            kv_out,
+            q_weight,
+            kv_weight,
+            eps,
+        )
     return qr_out, kv_out
+
+
+_FUSED_Q_KV_RMSNORM_KERNEL = FusedQKVRMSNormKernel()
