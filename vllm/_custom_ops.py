@@ -1915,34 +1915,17 @@ def scaled_fp8_quant(
         assert num_token_padding is None, "padding not supported if output passed in"
         assert output.dtype == out_dtype
 
-    if current_platform.is_cpu():
-        # CPU does not implement static/dynamic_scaled_fp8_quant; use native
-        # PyTorch math instead.
-        fp8_max = torch.finfo(out_dtype).max
-        x = input.float()
-        if scale is None:
-            if use_per_token_if_dynamic:
-                abs_max = x.abs().amax(dim=1, keepdim=True)
-                scale = (abs_max / fp8_max).clamp(min=1e-7).to(torch.float32)
-            else:
-                abs_max = x.abs().max()
-                scale = (abs_max / fp8_max).clamp(min=1e-7).view(1).to(torch.float32)
-        q = (x / scale).clamp(-fp8_max, fp8_max).to(out_dtype)
-        output.copy_(q)
-    else:
-        if scale is None:
-            if use_per_token_if_dynamic:
-                scale = torch.empty(
-                    (shape[0], 1), device=input.device, dtype=torch.float32
-                )
-                torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                    output, input, scale, scale_ub
-                )
-            else:
-                scale = torch.empty(1, device=input.device, dtype=torch.float32)
-                torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+    if scale is None:
+        if use_per_token_if_dynamic:
+            scale = torch.empty((shape[0], 1), device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+                output, input, scale, scale_ub
+            )
         else:
-            torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
+            scale = torch.empty(1, device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+    else:
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 
@@ -3621,16 +3604,6 @@ def fp8_scaled_mm_cpu(
 
 
 # FP8 W8A8 CPU kernels
-if hasattr(torch.ops._C, "float8_linear_prepack_cpu"):
-
-    @register_fake("_C::float8_linear_prepack_cpu")
-    def float8_linear_prepack_cpu_fake(
-        weight: torch.Tensor,
-        scales: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.empty_like(weight), torch.empty_like(scales)
-
-
 _supports_cpu_fp8_w8a8 = bool(hasattr(torch.ops._C, "float8_linear_prepack_cpu"))
 
 

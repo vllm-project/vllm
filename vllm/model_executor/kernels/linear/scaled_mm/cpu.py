@@ -331,7 +331,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
 
-class CPUFp8BlockScaledMMW8A8Kernel(Fp8BlockScaledMMLinearKernel):
+class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     """FP8 W8A8 block-quantized GEMM with dynamic per-token activation quant on CPU."""
 
     # Activation quant is done inside fp8_scaled_mm_with_quant;
@@ -480,11 +480,11 @@ class CPUFp8BlockScaledMMW8A8Kernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8BlockScaledMMW8A8Kernel overrides apply_weights directly."
+            "CPUFp8W8A8BlockScaledMMKernel overrides apply_weights directly."
         )
 
 
-class CPUFp8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """FP8 W8A8 GEMM with dynamic per-token activation quantization on CPU."""
 
     @classmethod
@@ -602,5 +602,5 @@ class CPUFp8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     def apply_scaled_mm(self, A, B, out_dtype, As, Bs, bias=None, **kwargs):
         raise NotImplementedError(
-            "CPUFp8W8A8ScaledMMLinearKernel uses apply_weights directly."
+            "CPUFP8W8A8ScaledMMLinearKernel uses apply_weights directly."
         )

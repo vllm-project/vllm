@@ -1288,8 +1288,7 @@ def test_fp8_w8a8_cpu_fused_moe(E: int, N: int, K: int, M: int, top_k: int):
     ref = _ref_fp8_w8a8_moe(
         x_dequant, w13, w13_scale, w2, w2_scale, topk_weights, topk_ids.long(), N
     )
-    # FP8 quantization error is ~1%; use generous tolerance.
-    torch.testing.assert_close(output.float(), ref.float(), atol=1.0, rtol=1.0)
+    torch.testing.assert_close(output.float(), ref.float(), atol=1e-2, rtol=1e-2)
 
 
 if __name__ == "__main__":
