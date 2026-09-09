@@ -389,6 +389,9 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
+        self.enable_omit_prefix_routed_experts = (
+            vllm_config.model_config.enable_omit_prefix_routed_experts
+        )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         if self.enable_return_routed_experts:
@@ -1193,6 +1196,11 @@ class Scheduler(SchedulerInterface):
                         )
 
                 # Record at admission so unscheduled lookups are not counted.
+                if (
+                    self.enable_omit_prefix_routed_experts
+                    and request.num_cached_tokens < 0
+                ):
+                    request.num_cached_tokens = num_computed_tokens
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(
                         request, num_new_local_computed_tokens
@@ -2092,6 +2100,9 @@ class Scheduler(SchedulerInterface):
                         assert prompt_start < request.num_prompt_tokens
                     else:
                         prompt_start = 0
+                    if self.enable_omit_prefix_routed_experts:
+                        assert request.num_cached_tokens >= 0
+                        prompt_start = max(prompt_start, request.num_cached_tokens)
                     routed_experts = self.routed_experts_mgr.get(
                         block_ids,
                         request.num_prompt_tokens,

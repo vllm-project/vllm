@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -17,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    apply_routed_expert_session,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -52,6 +51,7 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
@@ -96,6 +96,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 async def create_batch_chat_completion(
     request: BatchChatCompletionRequest, raw_request: Request
 ):
+    apply_routed_expert_session(request, raw_request)
     handler = batch_chat(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Chat Completions API")

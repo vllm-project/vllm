@@ -1108,6 +1108,16 @@ class VllmConfig:
 
         if (
             self.model_config is not None
+            and self.model_config.enable_omit_prefix_routed_experts
+            and not self.model_config.enable_return_routed_experts
+        ):
+            raise ValueError(
+                "--enable-omit-prefix-routed-experts requires "
+                "--enable-return-routed-experts."
+            )
+
+        if (
+            self.model_config is not None
             and self.model_config.enable_return_routed_experts
         ):
             if self.parallel_config.pipeline_parallel_size > 1:
@@ -1132,7 +1142,7 @@ class VllmConfig:
             if (
                 self.kv_transfer_config is not None
                 and self.kv_transfer_config.is_kv_transfer_instance
-            ):
+            ) or self.cache_config.kv_offloading_size is not None:
                 raise ValueError(
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
@@ -2425,6 +2435,7 @@ class VllmConfig:
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
+            f"enable_omit_prefix_routed_experts={self.model_config.enable_omit_prefix_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
