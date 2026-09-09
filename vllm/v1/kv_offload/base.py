@@ -143,17 +143,6 @@ class LoadStoreSpec:
     """
 
 
-class FSLoadStoreSpec(LoadStoreSpec):
-    """Spec for loading/storing KV blocks from a filesystem tier.
-
-    Carries content-addressed OffloadKeys that the worker resolves to
-    file paths via a FileMapper.
-    """
-
-    def __init__(self, keys: list["OffloadKey"]):
-        self.keys = keys
-
-
 @dataclass
 class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
@@ -573,6 +562,13 @@ def resolve_device_pointers(
     Called once at the OffloadingConnectorWorker boundary.
     GPU blocks_per_chunk is always 1, so resolution is a direct
     vectorized lookup: base_ptr + block_id * row_stride.
+
+    See also compute_sub_block_ptrs in cpu/gpu_worker.py which does
+    the analogous resolution for CPU tensors, including sub-block
+    expansion for blocks_per_chunk > 1. Both functions could share
+    the inner pointer computation, but the sub block expansion in
+    compute_sub_block_ptrs make them different with the common part
+    being just being the base_ptr+block_id*stride calculation.
     """
     block_ids = device_spec.block_ids
     group_sizes = device_spec.group_sizes
