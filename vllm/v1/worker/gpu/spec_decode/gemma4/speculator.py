@@ -27,13 +27,17 @@ def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
     """Copy target KV scales while preserving their tensor representation.
 
     Default attention scales are scalar buffers, while some quantization
-    methods replace them with length-one or per-head parameters. Re-register
-    cloned buffers on the draft layer so the shared KV cache is interpreted
-    with the target's values and shapes without aliasing target parameters.
+    methods replace them with length-one or per-head parameters. Preserve the
+    draft layer's registration type so the shared KV cache is interpreted with
+    the target's values and shapes without aliasing target parameters.
     """
     for scale_name in ("_k_scale", "_v_scale"):
+        draft_scale = getattr(attn, scale_name)
         target_scale = getattr(target_attn, scale_name)
-        attn.register_buffer(scale_name, target_scale.detach().clone())
+        scale = target_scale.detach().clone()
+        if isinstance(draft_scale, nn.Parameter):
+            scale = nn.Parameter(scale, requires_grad=False)
+        setattr(attn, scale_name, scale)
     for scale_name in ("_k_scale_float", "_v_scale_float"):
         setattr(attn, scale_name, getattr(target_attn, scale_name))
     for scale_name in ("_k_scale_cpu", "_v_scale_cpu"):

@@ -664,6 +664,11 @@ def _blackwell(vllm_config=None):
         yield
 
 
+def _mock_hopper_fa_version(*, head_size=None, **_kwargs):
+    # FA3 supports up to head size 256 on SM90; larger heads promote to FA4.
+    return 4 if head_size is not None and head_size > 256 else 3
+
+
 @contextmanager
 def _hopper(vllm_config=None):
     platform = MagicMock()
@@ -674,8 +679,12 @@ def _hopper(vllm_config=None):
     with (
         patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
         patch(
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
+            "vllm.v1.attention.backends.flash_attn.is_fa_version_supported",
             return_value=True,
+        ),
+        patch(
+            "vllm.v1.attention.backends.fa_utils.get_flash_attn_version",
+            side_effect=_mock_hopper_fa_version,
         ),
         patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config),
     ):
