@@ -230,9 +230,7 @@ def _get_ihc_warmup_config(
     )
 
 
-class IHCPreStage1Kernel(
-    VllmTritonJitKernel["IHCPreStage1Kernel.CompileKey"]
-):
+class IHCPreStage1Kernel(VllmTritonJitKernel["IHCPreStage1Kernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -330,9 +328,7 @@ class IHCPreStage1Kernel(
         )
 
 
-class IHCPreStage2Kernel(
-    VllmTritonJitKernel["IHCPreStage2Kernel.CompileKey"]
-):
+class IHCPreStage2Kernel(VllmTritonJitKernel["IHCPreStage2Kernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -441,9 +437,7 @@ class IHCPreStage2Kernel(
         partial_stride = 1 + 2 * hc_pow2
         if _outputs is None:
             _outputs = (
-                torch.empty(
-                    (num_tokens, hidden_size), dtype=x.dtype, device=x.device
-                ),
+                torch.empty((num_tokens, hidden_size), dtype=x.dtype, device=x.device),
                 torch.empty(
                     (num_tokens, hc_mult), dtype=torch.float32, device=x.device
                 ),
