@@ -24,7 +24,13 @@ from .utils import create_vllm_config
 
 
 def _make_packed_mla_worker(
-    layouts, block_stride, *, pp_size=1, push=True, backend_names=("FLASHMLA",)
+    layouts,
+    block_stride,
+    *,
+    num_blocks=4,
+    pp_size=1,
+    push=True,
+    backend_names=("FLASHMLA",),
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -43,7 +49,7 @@ def _make_packed_mla_worker(
         create_kv_cache_views,
     )
 
-    num_blocks, block_size = 4, 16
+    block_size = 16
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
     for name, (offset, page_size) in layouts.items():
@@ -139,7 +145,10 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
     assert (producer.compat_hash == consumer.compat_hash) is compatible
 
 
-def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_members():
+@pytest.mark.parametrize("p_num_blocks, d_num_blocks", [(4, 4), (4, 6), (6, 4)])
+def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_members(
+    p_num_blocks, d_num_blocks
+):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
     )
@@ -147,16 +156,26 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_members():
     # Different cache groups overlay pages of different sizes at the same address.
     # PP also changes both the placement and the stride of the matching D pages.
     producer, p_raw = _make_packed_mla_worker(
-        {"L2": (0, 128), "L2.swa": (0, 64), "L3": (128, 64)}, 192, pp_size=2
+        {"L2": (0, 128), "L2.swa": (0, 64), "L3": (128, 64)},
+        192,
+        num_blocks=p_num_blocks,
+        pp_size=2,
     )
     consumer, d_raw = _make_packed_mla_worker(
         {"L0": (0, 128), "L2": (128, 128), "L2.swa": (0, 64), "L3": (64, 64)},
         256,
+        num_blocks=d_num_blocks,
     )
     assert producer.block_len_per_layer == [128, 64, 64]
     assert producer._member_group_ids == (0, 1, 2)
-    local_ids = producer._compute_desc_ids([[1], [2], [3]], 4, None, 1)
-    remote_ids = producer._compute_desc_ids([[3], [1], [2]], 4, None, 1)
+    assert producer.num_descs == 3 * p_num_blocks
+    local_ids = producer._compute_desc_ids(
+        [[1], [2], [3]],
+        producer.num_blocks,
+        None,
+        1,
+        region_num_blocks=producer.dst_region_num_blocks[producer.engine_id],
+    )
     assert producer.src_blocks_data[local_ids].tolist() == [
         [p_raw.data_ptr() + 192, 128, 0],
         [p_raw.data_ptr() + 2 * 192, 64, 0],
@@ -169,8 +188,18 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_members():
             type=NixlAgentMetadata,
         )
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
+        assert metadata.region_num_blocks == [d_num_blocks] * 3
+        assert metadata.region_names == ["L2", "L2.swa", "L3"]
+        remote_ids = producer._compute_desc_ids(
+            [[3], [1], [2]],
+            metadata.num_blocks,
+            None,
+            1,
+            region_num_blocks=producer.dst_region_num_blocks[consumer.engine_id],
+        )
         handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
         remote_descs = producer.nixl_wrapper.dlists[handle]
+        assert len(remote_descs) == 3 * d_num_blocks
         assert remote_descs[remote_ids].tolist() == [
             [d_raw.data_ptr() + 128 + 3 * 256, 128, 0],
             [d_raw.data_ptr() + 256, 64, 0],
@@ -376,8 +405,8 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
-    worker.kv_cache_layout = "NHD"
-    worker.host_buffer_kv_cache_layout = "NHD"
+    worker.kv_cache_layout = "LBNHC"
+    worker.host_buffer_kv_cache_layout = "LBNHC"
     worker._physical_blocks_per_logical_kv_block = 1
     worker._logical_num_blocks = num_blocks
     worker.region_group_ids = []
