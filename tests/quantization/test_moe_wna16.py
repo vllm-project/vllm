@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -34,6 +33,35 @@ def test_map_wna16_backend_supports_triton():
 
 
 @pytest.mark.parametrize(
+    "config",
+    [
+        {"desc_act": True, "group_size": 128},
+        {
+            "desc_act": False,
+            "group_size": 128,
+            "dynamic": {r"+:model\.layers\.0\..*": {"desc_act": True}},
+        },
+    ],
+)
+def test_moe_wna16_rejects_gptq_group_activation_order(config):
+    config.update({"quant_method": "gptq", "bits": 4, "sym": True})
+    with pytest.raises(ValueError, match="group activation ordering"):
+        MoeWNA16Config.from_config(config)
+
+
+def test_moe_wna16_accepts_channelwise_gptq_activation_order():
+    config = {
+        "quant_method": "gptq",
+        "bits": 4,
+        "group_size": -1,
+        "desc_act": True,
+        "sym": True,
+    }
+    assert MoeWNA16Config.is_moe_wna16_compatible(config)
+    MoeWNA16Config.from_config(config)
+
+
+@pytest.mark.parametrize(
     ("backend", "quant_config", "may_have_zp", "may_have_bias", "expected"),
     [
         (
@@ -42,28 +70,6 @@ def test_map_wna16_backend_supports_triton():
             True,
             False,
             "AutoAWQ weight layout",
-        ),
-        (
-            WNA16MoEBackend.TRITON,
-            AutoGPTQConfig(4, 128, True, True, False, {}, {}),
-            False,
-            False,
-            "activation ordering",
-        ),
-        (
-            WNA16MoEBackend.TRITON,
-            QuantizationArgs(
-                num_bits=4,
-                type=QuantizationType.INT,
-                strategy=QuantizationStrategy.GROUP,
-                symmetric=True,
-                dynamic=False,
-                group_size=128,
-                actorder=ActivationOrdering.GROUP,
-            ),
-            False,
-            False,
-            "activation ordering",
         ),
         (
             WNA16MoEBackend.TRITON,
@@ -244,7 +250,6 @@ def test_compressed_tensors_wna16_moe_create_weights_uses_ceil_packed_shapes(
         hidden_size=256,
         intermediate_size_per_partition=512,
         params_dtype=torch.float16,
-        intermediate_size_full=512,
     )
 
     packed_hidden = (256 * num_bits + 31) // 32
@@ -296,7 +301,6 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
         num_experts=2,
         hidden_size=256,
         intermediate_size_per_partition=512,
-        intermediate_size_full=512,
         params_dtype=torch.bfloat16,
     )
     layer.cuda()
