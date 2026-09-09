@@ -640,6 +640,67 @@ class HfRunner:
             embeddings.append(embedding)
         return embeddings
 
+    def get_prompt_embeddings_from_inputs(
+        self,
+        all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]],
+    ) -> list[torch.Tensor]:
+        embeddings = []
+        for inputs in all_inputs:
+            input_ids = self.wrap_device(inputs)["input_ids"]
+            embedding = self.model.get_input_embeddings()(input_ids).squeeze(0)
+            embeddings.append(embedding)
+        return embeddings
+
+    def get_prompt_logprobs(
+        self,
+        inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]
+        | None = None,
+        *,
+        prompt_embeds: list[torch.Tensor] | None = None,
+    ) -> list[torch.Tensor]:
+        if (inputs is None) == (prompt_embeds is None):
+            raise ValueError("Specify exactly one of inputs and prompt_embeds")
+
+        all_logprobs = []
+        with torch.no_grad():
+            if inputs is not None:
+                outputs = [
+                    self.model(
+                        **self.wrap_device(model_input),
+                        use_cache=False,
+                        return_dict=True,
+                    )
+                    for model_input in inputs
+                ]
+            else:
+                assert prompt_embeds is not None
+                outputs = []
+                for prompt_embed in prompt_embeds:
+                    assert prompt_embed is not None
+                    attention_mask = torch.ones(
+                        (1, prompt_embed.shape[0]),
+                        dtype=torch.long,
+                        device=prompt_embed.device,
+                    )
+                    outputs.append(
+                        self.model(
+                            inputs_embeds=prompt_embed.unsqueeze(0),
+                            attention_mask=attention_mask,
+                            use_cache=False,
+                            return_dict=True,
+                        )
+                    )
+
+            for output in outputs:
+                assert isinstance(output.logits, torch.Tensor)
+                all_logprobs.append(
+                    F.log_softmax(
+                        output.logits[:, :-1].to(torch.float32), dim=-1
+                    ).squeeze(0)
+                )
+
+        return all_logprobs
+
     def classify(self, prompts: list[str]) -> list[list[float]]:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
@@ -1096,7 +1157,10 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: list[str] | list[torch.Tensor] | list[list[int]],
+        prompts: list[str]
+        | list[torch.Tensor]
+        | list[list[int]]
+        | list[dict[str, Any]],
         sampling_params: SamplingParams,
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
