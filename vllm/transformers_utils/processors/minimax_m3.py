@@ -120,7 +120,13 @@ def smart_resize(
     When ``max_long_side_pixel`` is set, use the MiniMax-M3 long-side resize
     spec (see :func:`_smart_resize_by_long_side`). Otherwise fall back to the
     Qwen-VL area bound, keeping the total area within ``[min_pixels, max_pixels]``.
+    ``min_pixels`` must not exceed ``max_pixels``; a request cannot enlarge a
+    frame past the max by inverting those bounds.
     """
+    if min_pixels <= 0 or max_pixels <= 0:
+        raise ValueError("min_pixels and max_pixels must be positive.")
+    if min_pixels > max_pixels:
+        raise ValueError("min_pixels must be less than or equal to max_pixels.")
     if max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
             f"absolute aspect ratio must be smaller than {MAX_RATIO}, "
@@ -145,6 +151,11 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
+    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
+        raise ValueError(
+            f"image area {h_bar * w_bar} exceeds max_total_pixels "
+            f"{max_total_pixels} after resizing"
+        )
     return h_bar, w_bar
 
 
@@ -216,6 +227,8 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         for shape, stacked_images in grouped_images.items():
             height, width = stacked_images.shape[-2:]
             if do_resize:
+                # Request kwargs may lower ``max_pixels`` but cannot raise it.
+                max_pixels = min(max_pixels, type(self).max_pixels)
                 resized_height, resized_width = smart_resize(
                     height,
                     width,
@@ -312,6 +325,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         max_long_side_pixel = images_kwargs.get(
             "max_long_side_pixel", self.max_long_side_pixel
         )
+        max_pixels = min(max_pixels, type(self).max_pixels)
 
         resized_height, resized_width = smart_resize(
             height,
@@ -400,6 +414,8 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
             batch_size, num_frames, channels, height, width = stacked_videos.shape
             resized_height, resized_width = height, width
             if do_resize:
+                # Request kwargs may lower ``max_pixels`` but cannot raise it.
+                max_pixels = min(max_pixels, type(self).max_pixels)
                 resized_height, resized_width = smart_resize(
                     height,
                     width,
@@ -412,11 +428,9 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
                     # is enforced below once num_frames is known.
                     max_total_pixels=None,
                 )
-                if (
-                    max_long_side_pixel is not None
-                    and resized_height * resized_width * num_frames
-                    > self.max_total_pixels
-                ):
+                # Area-resize (default ``max_long_side_pixel=None``) must still
+                # honor the volumetric ``width * height * frames`` budget.
+                if resized_height * resized_width * num_frames > self.max_total_pixels:
                     raise ValueError(
                         f"video area {resized_height * resized_width * num_frames} "
                         f"(width * height * frames) exceeds max_total_pixels "
