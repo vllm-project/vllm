@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.hisparse.worker import init_hisparse_kv_cache
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
@@ -233,8 +234,6 @@ def init_kv_cache(
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
-            from vllm.v1.hisparse.worker import init_hisparse_kv_cache
-
             assert block_tables is not None
             kv_caches = init_hisparse_kv_cache(
                 kv_cache_config,
