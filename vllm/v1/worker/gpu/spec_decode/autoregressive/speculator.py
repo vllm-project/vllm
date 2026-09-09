@@ -45,6 +45,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         self.inputs_embeds: torch.Tensor | None = None
+
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False

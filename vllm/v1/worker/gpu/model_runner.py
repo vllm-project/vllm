@@ -861,14 +861,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     last_hidden_states=spec_hidden_states,
                     aux_hidden_states=aux_hidden_states,
                     num_sampled=torch.ones(
-                        input_batch.num_reqs,
-                        dtype=torch.int32,
-                        device=self.device,
+                        input_batch.num_reqs, dtype=torch.int32, device=self.device
                     ),
                     num_rejected=torch.zeros(
-                        input_batch.num_reqs,
-                        dtype=torch.int32,
-                        device=self.device,
+                        input_batch.num_reqs, dtype=torch.int32, device=self.device
                     ),
                     last_sampled=self.req_states.last_sampled_tokens,
                     next_prefill_tokens=self.req_states.next_prefill_tokens,
