@@ -373,7 +373,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
-        dummy_run=False,
     )
 
     assert generate_draft.call_count == expected_eager_calls
@@ -420,7 +419,6 @@ def test_autoregressive_mtp_finishes_each_draft_mirror_phase(monkeypatch, cg_mod
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
-        dummy_run=False,
     )
 
     assert speculator.slot_mapping_observer.call_count == 3
