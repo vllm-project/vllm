@@ -14,9 +14,8 @@ from vllm.v1.watermarking.detector import (
 )
 from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
-    AcceptanceRandomness,
     RandomSampler,
-    SpeculativeVerification,
+    SupportsSpeculativeDecoding,
     Watermarker,
     WatermarkSample,
 )
@@ -99,10 +98,7 @@ class GumbelWatermarker(Watermarker):
         return WatermarkSample(token_ids, logits)
 
 
-class DualKeyGumbelWatermarker(GumbelWatermarker):
-    speculative_verification = SpeculativeVerification.STANDARD
-    acceptance_randomness = AcceptanceRandomness.RANDOM
-
+class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
     def __init__(
         self,
         key: int,

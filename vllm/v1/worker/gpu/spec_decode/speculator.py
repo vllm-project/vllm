@@ -181,7 +181,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 watermarker,
                 self.max_num_reqs,
                 device,
-                watermark_config.allow_target_only_speculative_decoding,
+                watermark_config.allow_target_only_watermarking,
             )
 
         self.supports_mm_inputs = False

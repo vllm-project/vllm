@@ -47,7 +47,7 @@ class WatermarkConfig:
     `none`."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
-    allow_target_only_speculative_decoding: bool = False
+    allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
 
     @model_validator(mode="after")

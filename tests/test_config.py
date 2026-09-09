@@ -2755,7 +2755,7 @@ def _watermarked_vllm_config() -> VllmConfig:
 def test_target_only_gumbel_allows_speculative_decoding():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(
-        key=42, allow_target_only_speculative_decoding=True
+        key=42, allow_target_only_watermarking=True
     )
     config.speculative_config = SimpleNamespace(
         method="mtp",

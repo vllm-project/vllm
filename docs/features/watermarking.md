@@ -52,6 +52,14 @@ the reference algorithms. `WatermarkDetector` consumes token IDs, so callers
 remain responsible for using the tokenizer and watermark profile that match
 generation.
 
+## Speculative decoding
+
+By default, a watermarking algorithm without native speculative-decoding
+support is rejected before model loading. Set
+`"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
+not watermarked, while target-side rejection recovery and bonus sampling remain
+watermarked. This weakens detection compared with fully watermarked generation.
+
 ## Algorithms
 
 ### Gumbel-max
@@ -131,12 +139,6 @@ vllm serve MODEL \
 
 This implements the construction from [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
-
-Watermarking algorithms without native speculative-decoding support can be
-used with `"allow_target_only_speculative_decoding": true`. Accepted draft
-tokens are not watermarked in this mode; only target-side rejection recovery
-and bonus sampling are watermarked. This weakens detection compared with fully
-watermarked generation.
 
 ### SynthID-Text
 

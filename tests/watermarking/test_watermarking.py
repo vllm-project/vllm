@@ -22,12 +22,7 @@ from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     create_speculative_draft_watermarker,
 )
-from vllm.v1.watermarking.watermarker import (
-    AcceptanceRandomness,
-    SpeculativeVerification,
-    Watermarker,
-    WatermarkSample,
-)
+from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import (
     philox_gumbel_sample,
@@ -115,8 +110,6 @@ def test_dual_key_watermarker_uses_domain_separated_keys():
     draft = target.create_draft_watermarker()
 
     assert isinstance(target, DualKeyGumbelWatermarker)
-    assert target.speculative_verification is SpeculativeVerification.STANDARD
-    assert target.acceptance_randomness is AcceptanceRandomness.RANDOM
     assert target.prf.key == derive_watermark_key(42, b"target")
     assert draft.prf.key == derive_watermark_key(42, b"draft")
     assert target.prf.key != draft.prf.key
