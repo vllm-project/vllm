@@ -12,6 +12,7 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.fp8_host_staged_all_reduce import (
     QUANT_BLOCK,
     KERNEL_BLOCK,
+    NVFP4_SCALE_BLOCK,
     Fp8HostStagedAllReduce,
     _quant_fp8_kernel,
 )
@@ -41,12 +42,66 @@ def _quant_reference(x: torch.Tensor):
     return payload, scale
 
 
+def _nvfp4_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """OCP NVFP4 codec in torch: per-16 E4M3 scale (RN amax/6, E4M3 cast,
+    RN reciprocal) and e2m1 payload (RTNE on the 8-value grid), 2 codes
+    per byte (even element in the low nibble). Mirrors the kernel's
+    rounding order (scalar-left reciprocal is RN). Runs on CPU:
+    IEEE-RN fp32 ops and the E4M3 cast are bit-identical to CUDA, and a
+    CPU reference keeps this test off the GPU memory budget.
+    """
+    x = x.cpu()
+    xb = x.view(-1, NVFP4_SCALE_BLOCK).float()
+    amax = xb.abs().amax(dim=1)
+    six = torch.full_like(amax, 6.0)
+    s = torch.where(amax > 0, amax / six, torch.ones_like(amax))
+    s = s.to(torch.float8_e4m3fn).float()
+    inv = 1.0 / s
+    v = xb.abs() * inv.unsqueeze(1)
+    code = (
+        (v > 0.25).int()
+        + (v >= 0.75).int()
+        + (v > 1.25).int()
+        + (v >= 1.75).int()
+        + (v > 2.5).int()
+        + (v >= 3.5).int()
+        + (v > 5.0).int()
+    )
+    code = code | (((xb < 0).int() & (code > 0).int()) << 3)
+    lo, hi = code.reshape(-1, 8, 2)[:, :, 0], code.reshape(-1, 8, 2)[:, :, 1]
+    payload = (lo | (hi << 4)).reshape(-1).to(torch.uint8)
+    return payload, s.to(torch.float8_e4m3fn)
+
+
+def _nvfp4_dequant_reference(
+    payload: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """Unpack the NVFP4 wire (payload uint8, scale E4M3) into FP32
+    values. Inputs are moved to CPU (see _nvfp4_quant_reference)."""
+    payload = payload.cpu()
+    scale = scale.cpu()
+    grid = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        dtype=torch.float32,
+    )
+    code = payload.to(torch.int32)
+    s = scale.float().repeat_interleave(NVFP4_SCALE_BLOCK)
+
+    def deq(c: torch.Tensor) -> torch.Tensor:
+        vals = grid[c & 7]
+        return torch.where((c & 8) > 0, -vals, vals)
+
+    even, odd = code & 0xF, (code >> 4) & 0xF
+    return torch.stack([deq(even), deq(odd)], dim=1).reshape(-1) * s
+
+
 def _uninitialized_comm(device: torch.device) -> Fp8HostStagedAllReduce:
     comm = Fp8HostStagedAllReduce.__new__(Fp8HostStagedAllReduce)
     comm.rank = 0
     comm.peer = 1
     comm.device = device
     comm._cpu_group = None
+    comm._codec = "e4m3"
     comm._cap = 0
     comm._wire = None
     comm.disabled = False
@@ -97,6 +152,49 @@ def test_quant_roundtrip_error_bound(dev):
     err = (dq - x.float().view(-1, QUANT_BLOCK)).abs()
     amax = x.float().abs().view(-1, QUANT_BLOCK).amax(dim=1, keepdim=True)
     bound = 0.0625 * amax * 1.001
+    assert (err <= bound).all(), f"max err {err.max().item():.6f}"
+
+
+def test_quant_nvfp4_bitexact_vs_reference(dev):
+    x = _make_input(dev, 4096 * 5120)
+    comm = _uninitialized_comm(dev)
+    comm._codec = "nvfp4"
+    payload, scale = comm.quantize(x)
+    ref_payload, ref_scale = _nvfp4_quant_reference(x)
+    assert payload.dtype == torch.uint8
+    assert scale.dtype == torch.float8_e4m3fn
+    assert payload.numel() == x.numel() // 2
+    assert scale.numel() == x.numel() // NVFP4_SCALE_BLOCK
+    assert torch.equal(
+        payload.cpu(), ref_payload
+    ), "payload must be bit-identical to the reference codec"
+    assert torch.equal(
+        scale.cpu(), ref_scale
+    ), "scales must be bit-identical"
+
+
+def test_quant_nvfp4_roundtrip_error_bound(dev):
+    """Codec error bound: per element, err <= 0.25 * block amax.
+
+    e2m1 quantization: the top bin [4, 6] has step 2, so the error is at
+    most 1 scale unit = amax/6 ~= 0.167 * amax; the E4M3 scale rounding
+    adds at most 0.0625 * amax (derived total 0.24). Compared in FP32
+    (no BF16 cast) so the bound characterizes the codec alone.
+    """
+    x = _make_input(dev, 4096 * 5120)
+    comm = _uninitialized_comm(dev)
+    comm._codec = "nvfp4"
+    payload, scale = comm.quantize(x)
+    dq = _nvfp4_dequant_reference(payload, scale).view(-1)
+    err = (dq - x.cpu().float().view(-1)).abs()
+    amax = (
+        x.cpu().float()
+        .abs()
+        .view(-1, NVFP4_SCALE_BLOCK)
+        .amax(dim=1)
+        .repeat_interleave(NVFP4_SCALE_BLOCK)
+    )
+    bound = 0.25 * amax * 1.002
     assert (err <= bound).all(), f"max err {err.max().item():.6f}"
 
 
@@ -178,12 +276,16 @@ def fp8_hs_ar_target(
     pp_size,
     rank,
     distributed_init_port,
+    codec: str = "e4m3",
 ):
     # Ray workers must see all GPUs (the project never uses
     # CUDA_VISIBLE_DEVICES).
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     # opt in before the TP group (and its CudaCommunicator) is constructed
     os.environ["VLLM_FP8_HOST_STAGED_AR"] = "1"
+    os.environ["VLLM_FP8_HOST_STAGED_AR_NVFP4"] = (
+        "1" if codec == "nvfp4" else "0"
+    )
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -191,6 +293,7 @@ def fp8_hs_ar_target(
     assert comm.fp8_hs_ar is not None, "FP8 host-staged AR was not constructed"
     hs = comm.fp8_hs_ar
     assert hs.disabled is False
+    assert hs._codec == codec
 
     # warmup (also grows the buffers to the size used below)
     x = torch.randn(4096, 5120, dtype=torch.bfloat16, device=device)
@@ -214,15 +317,20 @@ def fp8_hs_ar_target(
     gmax = x.abs().max().float()
     dist.all_reduce(gmax, group=group, op=dist.ReduceOp.MAX)
     torch.accelerator.synchronize()
-    # per-side E4M3 quantization (0.0625 * amax) + bf16-first dequant
-    # roundings (two side casts + one sum cast, each <= 2^-8 of its operand,
-    # operands <= 1.0625 gmax; the sum cast sees |out| <= 2.125 gmax)
+    # per-side codec quantization + bf16-first dequant roundings (two
+    # side casts + one sum cast, each <= 2^-8 of its operand)
     # + NCCL bf16 reduction rounding of the reference (2^-7 of each input)
-    bound = (
-        0.0625 * 2 * gmax * 1.001
-        + 4.25 * gmax * 2**-8
-        + 2.0 * gmax * 2**-7
-    )
+    if codec == "nvfp4":
+        # e2m1 per-16 scale: per side <= 0.25 * amax (see the unit test);
+        # a dequantized operand is bounded by 1.25 gmax, the sum by 2.5.
+        codec_bound = 0.25 * 2 * gmax * 1.002
+        bf16_bound = 5.0 * gmax * 2**-8
+    else:
+        # E4M3 per-128 scale: per side <= 0.0625 * amax; operands are
+        # bounded by 1.0625 gmax, the sum by 2.125 gmax.
+        codec_bound = 0.0625 * 2 * gmax * 1.001
+        bf16_bound = 4.25 * gmax * 2**-8
+    bound = codec_bound + bf16_bound + 2.0 * gmax * 2**-7
     err = (out.float() - ref).abs().max().item()
     assert err <= bound, f"max err {err} exceeds bound {bound.item()}"
 
@@ -256,8 +364,11 @@ def fp8_hs_ar_target(
         comm.pynccl_comm.send = orig_send
 
 
+@pytest.mark.parametrize("codec", ["e4m3", "nvfp4"])
 @pytest.mark.parametrize("tp_size", [2])
-def test_fp8_hs_ar_2gpu(monkeypatch: pytest.MonkeyPatch, tp_size):
+def test_fp8_hs_ar_2gpu(
+    monkeypatch: pytest.MonkeyPatch, tp_size, codec
+):
     if tp_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_parallel(monkeypatch, tp_size, 1, fp8_hs_ar_target)
+    multi_process_parallel(monkeypatch, tp_size, 1, fp8_hs_ar_target, codec=codec)

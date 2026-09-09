@@ -73,6 +73,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
             use_fp8_host_staged_ar = envs.VLLM_FP8_HOST_STAGED_AR
+            # Wire codec for the host-staged AR: nvfp4 halves the wire
+            # bytes; e4m3 is the default and the measured bit-exact codec.
+            fp8_hs_ar_codec = (
+                "nvfp4" if envs.VLLM_FP8_HOST_STAGED_AR_NVFP4 else "e4m3"
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
@@ -152,6 +157,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 rank=self.rank_in_group,
                 device=self.device,
                 cpu_group=self.cpu_group,
+                codec=fp8_hs_ar_codec,
             )
 
         if self.use_aiter_allreduce and self.world_size > 1:
