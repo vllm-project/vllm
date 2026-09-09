@@ -92,22 +92,19 @@ models:
       tp: "--gpu-memory-utilization 0.85"
       ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
-  # K2.5: align env/flags with K2.6 so aiter routes MoE to mxmoe_* (not moe2_*)
-  # at M=16384 bringup. Validated: gsm8k 0.919 (6864) / 0.932@250 (6879) on nightly.
+  # K2.5: minimal disagg fix — FSE + kv-fp8 + block-size (gsm8k@250 0.917, job 6996).
   - model: Kimi-K2.5-MXFP4
     env:
       VLLM_ROCM_USE_AITER: "1"
-      AMDGCN_USE_BUFFER_OPS: "1"
-      VLLM_ROCM_USE_AITER_MLA: "1"
-      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
-      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
-    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 1 --attention-backend ROCM_AITER_MLA"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --block-size 1"
     prefill:
-      tp: "--gpu-memory-utilization 0.9"
+      tp: "--gpu-memory-utilization 0.85"
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
-      tp: "--gpu-memory-utilization 0.9"
+      tp: "--gpu-memory-utilization 0.85"
       ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: Kimi-K2.6-MXFP4
