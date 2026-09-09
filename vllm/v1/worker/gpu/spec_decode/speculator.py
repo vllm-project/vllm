@@ -133,7 +133,10 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
+            max_num_tokens=max(
+                self.max_num_tokens,
+                self.max_num_reqs * (self.num_speculative_steps + 1),
+            ),
             device=device,
         )
         self.idx_mapping = torch.zeros(

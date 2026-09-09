@@ -39,8 +39,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
-        self.replicated_pcp = parallel_config.prefill_context_parallel_size > 1
-        if self.replicated_pcp:
+        if parallel_config.prefill_context_parallel_size > 1:
             vllm_config = copy.copy(vllm_config)
             vllm_config.parallel_config = replace(
                 parallel_config,
@@ -311,7 +310,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         causal: bool | Mapping[int, bool] = False,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
-        is_prefilling: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -326,7 +324,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=causal,
             query_start_loc_np=query_start_loc_np,
             dcp_local_seq_lens=dcp_local_seq_lens,
-            is_prefilling=is_prefilling,
         )
 
     @torch.inference_mode()
@@ -398,7 +395,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
             return self.draft_tokens[:num_reqs]
 
-        if self.replicated_pcp and not dummy_run:
+        if self.pcp_manager is not None and not dummy_run:
             self.block_tables.gather_block_tables(
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )

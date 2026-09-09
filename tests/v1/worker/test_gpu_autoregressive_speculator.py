@@ -128,7 +128,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         speculative_config=speculative_config,
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
-            max_num_batched_tokens=8,
+            max_num_batched_tokens=4,
         ),
         model_config=SimpleNamespace(
             max_model_len=32,
@@ -144,6 +144,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
     speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
 
     assert speculator.hidden_size == expected
+    assert speculator.input_buffers.max_num_tokens == 8
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
@@ -335,21 +336,9 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     global_logits = torch.tensor([[1.0], [5.0], [2.0], [6.0]])
     global_feedback = torch.tensor([[3.0], [7.0], [4.0], [8.0]])
     restorer = Mock(side_effect=[global_logits, global_feedback])
-    padding = torch.tensor([False, True])
-    local_batch = SimpleNamespace(
-        input_ids=torch.arange(2),
-        positions=torch.arange(2),
-        is_padding=padding,
-    )
-    prefill = (
-        local_batch.input_ids,
-        local_batch.positions,
-        torch.empty(2, 1),
-        padding,
-    )
     manager = object.__new__(PCPManager)
     manager.restore_hidden_states = restorer
-    manager.draft_prefill_inputs = prefill
+    manager.draft_prefill_batch = Mock()
     speculator.pcp_manager = manager
     speculator._run_model = Mock(return_value=(local_logits, local_feedback))
     speculator.last_token_indices = torch.tensor([1, 3])
@@ -381,7 +370,7 @@ def test_pcp_prefill_restores_logits_and_feedback_before_sampling():
     assert torch.equal(
         speculator.sample_draft.call_args.args[0], torch.tensor([[5.0], [6.0]])
     )
-    assert manager.draft_prefill_inputs is None
+    assert manager.draft_prefill_batch is None
 
 
 def test_pcp_manager_prepares_local_draft_prefill():
@@ -390,23 +379,16 @@ def test_pcp_manager_prepares_local_draft_prefill():
     global_batch = object()
     local_batch = SimpleNamespace(
         input_ids=torch.full((2,), -1),
-        positions=torch.arange(2),
-        is_padding=torch.tensor([False, True]),
-        num_tokens_after_padding=2,
     )
     manager._global_batch = global_batch
     manager._local_batch = local_batch
-    hidden_states = torch.arange(2).view(2, 1)
-
-    prepared_hidden_states = manager.prepare_draft_prefill(
+    manager.prepare_draft_prefill(
         global_batch,  # type: ignore[arg-type]
         torch.tensor([10, 11, 12]),
-        hidden_states,
     )
 
-    assert manager.draft_prefill_inputs is not None
-    assert manager.draft_prefill_inputs[0].tolist() == [12, 10]
-    assert prepared_hidden_states is hidden_states
+    assert manager.draft_prefill_batch is local_batch
+    assert manager.draft_prefill_batch.input_ids.tolist() == [12, 10]
 
 
 @pytest.mark.parametrize(

@@ -271,10 +271,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         if self.pcp_manager is not None:
-            hidden_states = self.pcp_manager.prepare_draft_prefill(
+            self.pcp_manager.prepare_draft_prefill(
                 input_batch,
                 self.input_buffers.input_ids[:num_tokens_padded],
-                hidden_states,
             )
         self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
@@ -394,9 +393,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pcp_manager = getattr(self, "pcp_manager", None)
-        prefill = getattr(pcp_manager, "draft_prefill_inputs", None)
-        input_ids = self.input_buffers.input_ids if prefill is None else prefill[0]
-        positions = self.input_buffers.positions if prefill is None else prefill[1]
+        prefill = getattr(pcp_manager, "draft_prefill_batch", None)
+        input_buffers = prefill if prefill is not None else self.input_buffers
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -406,7 +404,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
-            is_padding=None if prefill is None else prefill[3],
+            is_padding=None if prefill is None else prefill.is_padding,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
@@ -417,15 +415,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     is_mm_embed.shape[0] if is_mm_embed is not None else num_tokens
                 )
                 self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
-                    input_ids[:num_input_tokens],
+                    input_buffers.input_ids[:num_input_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
             model_inputs = dict(
-                input_ids=input_ids[:num_tokens],
-                positions=positions[:num_tokens],
+                input_ids=input_buffers.input_ids[:num_tokens],
+                positions=input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )

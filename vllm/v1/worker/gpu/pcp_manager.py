@@ -19,13 +19,6 @@ from vllm.v1.worker.gpu.input_batch import (
 
 logger = init_logger(__name__)
 
-DraftPrefillInputs = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor | None,
-]
-
 
 @dataclass(frozen=True)
 class RankSegment:
@@ -69,7 +62,7 @@ class PCPManager:
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
-        self.draft_prefill_inputs: DraftPrefillInputs | None = None
+        self.draft_prefill_batch: InputBatch | None = None
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -561,7 +554,7 @@ class PCPManager:
             )
             dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
 
-        local_batch = replace(
+        self._local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
@@ -595,8 +588,7 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
         )
-        self._local_batch = local_batch
-        return local_batch
+        return self._local_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -667,66 +659,31 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
-    def local_batch_for(self, global_batch: InputBatch) -> InputBatch | None:
-        """Return this step's local view, never a stale view from an older step."""
-        if global_batch is not self._global_batch:
-            return None
-        return self._local_batch
-
-    def localize_tensor(
-        self,
-        tensor: torch.Tensor,
-        out: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self._local_gather_idx is not None
-        num_local_tokens = self._local_gather_idx.shape[0]
-        torch.index_select(
-            tensor,
-            0,
-            self._local_gather_idx,
-            out=out[:num_local_tokens],
-        )
-        return out[:num_local_tokens]
-
-    def localize_input_ids_for_draft(
-        self,
-        global_input_ids: torch.Tensor,
-        local_batch: InputBatch,
-    ) -> torch.Tensor:
-        """Reuse the consumed target-input buffer for rank-local draft IDs.
-
-        The target forward has finished, no supported post-forward path reads
-        these local IDs, and partition_batch rematerializes them next step.
-        """
-        assert local_batch is self._local_batch
-        return self.localize_tensor(global_input_ids, local_batch.input_ids)
-
     def prepare_draft_prefill(
         self,
         input_batch: InputBatch,
         input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        self.draft_prefill_inputs = None
-        local_batch = self.local_batch_for(input_batch)
-        if local_batch is None:
-            return hidden_states
-        assert hidden_states.shape[0] == local_batch.num_tokens_after_padding
-        input_ids = self.localize_input_ids_for_draft(input_ids, local_batch)
-        self.draft_prefill_inputs = (
+    ) -> None:
+        self.draft_prefill_batch = None
+        if input_batch is not self._global_batch or self._local_batch is None:
+            return
+        local_batch = self._local_batch
+        assert self._local_gather_idx is not None
+        num_local_tokens = self._local_gather_idx.shape[0]
+        torch.index_select(
             input_ids,
-            local_batch.positions,
-            hidden_states,
-            local_batch.is_padding,
+            0,
+            self._local_gather_idx,
+            out=local_batch.input_ids[:num_local_tokens],
         )
-        return hidden_states
+        self.draft_prefill_batch = local_batch
 
     def restore_draft_prefill(
         self,
         last_hidden_states: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.draft_prefill_inputs is None:
+        if self.draft_prefill_batch is None:
             return last_hidden_states, hidden_states
         local_last_hidden_states = last_hidden_states
         last_hidden_states = self.restore_hidden_states(local_last_hidden_states)
@@ -735,7 +692,7 @@ class PCPManager:
             if local_last_hidden_states is hidden_states
             else self.restore_hidden_states(hidden_states)
         )
-        self.draft_prefill_inputs = None
+        self.draft_prefill_batch = None
         return last_hidden_states, hidden_states
 
     def restore_for_sampling(

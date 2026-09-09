@@ -12,11 +12,9 @@ from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
 
 
 def test_pcp_compatibility_ignores_replicated_draft_attention(monkeypatch):
-    backend = SimpleNamespace(supports_pcp=lambda: False)
     layer = SimpleNamespace(
         use_pcp=False,
-        get_attn_backend=lambda: backend,
-        impl=SimpleNamespace(need_to_return_lse_for_decode=True),
+        get_attn_backend=lambda: pytest.fail("replicated draft checked for PCP"),
     )
     monkeypatch.setattr(
         cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
