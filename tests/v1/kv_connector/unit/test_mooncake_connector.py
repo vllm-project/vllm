@@ -873,6 +873,73 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
+def _decode_worker_with_pull(vllm_config):
+    decode_connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        _make_test_kv_cache_config(),
+    )
+    worker = decode_connector.connector_worker
+    pull_metas = {
+        "d-req-1": PullReqMeta(
+            d_req_id="d-req-1",
+            transfer_id="xfer-req-1",
+            local_block_ids=[[100, 101], [102]],
+            remote_engine_id="p-engine",
+            remote_bootstrap_addr="http://bootstrap:33333",
+        )
+    }
+    return decode_connector, worker, pull_metas
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_discovery_failure_reports_terminal_failure():
+    """A request must not wait forever when bootstrap discovery fails."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector, worker, pull_metas = _decode_worker_with_pull(vllm_config)
+
+        # The bootstrap query fails, so the remote engine is never registered.
+        async def failing_query(remote_bootstrap_addr: str):
+            worker._pending_bootstrap_queries[remote_bootstrap_addr].set()
+            del worker._pending_bootstrap_queries[remote_bootstrap_addr]
+
+        with patch.object(
+            worker, "_connect_to_prefiller_bootstrap", side_effect=failing_query
+        ):
+            await worker.handle_new_engine_id("p-engine", pull_metas)
+
+        assert worker.finished_recving_reqs == {"d-req-1"}
+        assert connector.get_block_ids_with_load_errors() == {100, 101, 102}
+        assert connector.get_block_ids_with_load_errors() == set()
+        worker.shutdown()
+
+
+def test_transfer_error_reports_terminal_failure():
+    """err_reqs from the producer must reach the scheduler, not just the log."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector, worker, pull_metas = _decode_worker_with_pull(vllm_config)
+        pull_metas["d-req-1"].pull_tasks_count = 1
+
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                err_reqs=["d-req-1"],
+                err_msg="Timeout waiting for P side ready.",
+            ),
+            pull_metas,
+        )
+
+        assert worker.finished_recving_reqs == {"d-req-1"}
+        assert connector.get_block_ids_with_load_errors() == {100, 101, 102}
+        worker.shutdown()
+
+
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
 
