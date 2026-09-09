@@ -51,3 +51,11 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type);
+
+// RDNA3.5 only: Fused Gated Delta Net prefill kernel.
+// Mutates `out` and `final_state` in place.
+void gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
+                 torch::Tensor& g, torch::Tensor& beta,
+                 std::optional<torch::Tensor> initial_state,
+                 torch::Tensor& cu_seqlens, torch::Tensor& out,
+                 torch::Tensor& final_state, double scale);

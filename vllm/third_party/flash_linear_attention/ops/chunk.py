@@ -12,6 +12,7 @@ import torch
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_o import chunk_fwd_o
+from .rocm_rdna35_gdn_chunked import chunk_gdn_hip_fwd, is_hip_gdn_supported
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
@@ -34,6 +35,31 @@ def chunk_gated_delta_rule_fwd(
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
 ):
+    # Runs before chunk_local_cumsum: the kernel takes the decay cumsum over
+    # its own chunk.  It forms none of the intermediates SUPPRESS_LEVEL >= 3
+    # returns.
+    if SUPPRESS_LEVEL < 3 and is_hip_gdn_supported(q, v, cu_seqlens):
+        o, final_state = chunk_gdn_hip_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            core_attn_out=core_attn_out,
+        )
+        return (
+            None,
+            o,
+            None,
+            final_state if output_final_state else None,
+            None,
+            None,
+            None,
+        )
+
     g = chunk_local_cumsum(
         g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
     )
