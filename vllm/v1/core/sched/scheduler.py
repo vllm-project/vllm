@@ -350,7 +350,7 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
-        self._skip_zero_block_ids: dict[int, set[int]] = {}
+        self._skip_zero_block_ids: set[int] = set()
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1190,7 +1190,7 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks: int | tuple[int, ...] = 0
+                reserved_blocks = 0
                 reserved_host_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
@@ -1277,17 +1277,13 @@ class Scheduler(SchedulerInterface):
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
-                        for (
-                            pool_id,
-                            block_ids,
-                        ) in self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                            request.request_id,
-                            num_new_local_computed_tokens,
-                            num_computed_tokens,
-                        ).items():
-                            self._skip_zero_block_ids.setdefault(pool_id, set()).update(
-                                block_ids
+                        self._skip_zero_block_ids.update(
+                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
+                                request.request_id,
+                                num_new_local_computed_tokens,
+                                num_computed_tokens,
                             )
+                        )
                     continue
 
                 self.running.append(request)
@@ -1526,19 +1522,19 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> dict[int, list[int]] | None:
+    def _get_new_block_ids_to_zero(self) -> list[int] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
         if not self.needs_kv_cache_zeroing:
             return None
 
-        for pool_id, skip in self._skip_zero_block_ids.items():
-            if block_ids := new_block_ids_to_zero.get(pool_id):
-                new_block_ids_to_zero[pool_id] = [b for b in block_ids if b not in skip]
-        self._skip_zero_block_ids.clear()
+        if self._skip_zero_block_ids:
+            skip = self._skip_zero_block_ids
+            new_block_ids_to_zero = [b for b in new_block_ids_to_zero if b not in skip]
+            skip.clear()
 
-        return {k: v for k, v in new_block_ids_to_zero.items() if v} or None
+        return new_block_ids_to_zero or None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
@@ -2974,10 +2970,10 @@ class Scheduler(SchedulerInterface):
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 
-    def _request_remaining_blocks(self, request: Request) -> tuple[int, ...]:
-        """Per-pool blocks needed to hold the request's full sequence."""
+    def _request_remaining_blocks(self, request: Request) -> int:
+        """Device blocks needed to hold the request's full sequence."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate_by_pool(
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -3003,13 +2999,12 @@ class Scheduler(SchedulerInterface):
             )
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> tuple[int, ...]:
-        """Per-pool reservations needed by all in-flight prefills."""
-        reserved = [0] * len(self.kv_cache_manager.block_pools)
-        for request in self._inflight_prefills:
-            for pool_id, count in enumerate(self._request_remaining_blocks(request)):
-                reserved[pool_id] += count
-        return tuple(reserved)
+    def _inflight_prefill_reserved_blocks(self) -> int:
+        """Device reservations needed by all in-flight prefills."""
+        return sum(
+            self._request_remaining_blocks(request)
+            for request in self._inflight_prefills
+        )
 
     def _inflight_prefill_reserved_host_blocks(self) -> int:
         """HiSparse host reservation needed by all in-flight prefills."""

@@ -1494,49 +1494,17 @@ class KVCacheConfig:
 
     @property
     def has_mixed_precision_kv_cache(self) -> bool:
-        """Whether attention groups store their KV cache at more than one precision."""
+        """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
+            if group.block_pool_id is None:
+                continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)
                 for spec in iter_layer_specs(group.kv_cache_spec)
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
-
-    @property
-    def zeroing_block_pool_ids(self) -> frozenset[int]:
-        """Physical pools whose newly allocated blocks require zeroing."""
-        pool_precisions: dict[int, set[tuple[torch.dtype, KVQuantMode]]] = {}
-        zeroing_pools = {
-            group.block_pool_id
-            for group in self.kv_cache_groups
-            if group.block_pool_id is not None
-            and any(
-                isinstance(spec, MambaSpec)
-                for spec in iter_layer_specs(group.kv_cache_spec)
-            )
-        }
-        for group in self.kv_cache_groups:
-            if group.block_pool_id is None:
-                continue
-            group_spec = group.kv_cache_spec
-            specs = (
-                group_spec.kv_cache_specs.values()
-                if isinstance(group_spec, UniformTypeKVCacheSpecs)
-                else (group_spec,)
-            )
-            pool_precisions.setdefault(group.block_pool_id, set()).update(
-                (spec.dtype, spec.kv_quant_mode)
-                for spec in specs
-                if isinstance(spec, AttentionSpec)
-            )
-        zeroing_pools.update(
-            pool_id
-            for pool_id, precisions in pool_precisions.items()
-            if len(precisions) > 1
-        )
-        return frozenset(zeroing_pools)
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
@@ -1547,4 +1515,4 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        return bool(self.zeroing_block_pool_ids)
+        return self.has_mamba_layers or self.has_mixed_precision_kv_cache

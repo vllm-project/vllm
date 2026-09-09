@@ -401,7 +401,7 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     )
     first = make_request("first", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    assert manager.block_pools[0].get_num_free_blocks() == 1
+    assert manager.block_pool.get_num_free_blocks() == 1
 
     second = make_request(
         "second", list(range(HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
@@ -524,7 +524,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     new_block_ids = manager.take_new_block_ids()
     copies, retained = manager.take_kv_cache_block_copies()
 
-    assert new_blocks and new_block_ids == {}
+    assert new_blocks and new_block_ids == []
     assert len(copies) == 1
     assert copies[0].block_pool_id is None
     assert copies[0].src_block_id == source_block.block_id
@@ -548,7 +548,7 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     imported_tokens = 4 * HISPARSE_BLOCK_SIZE
 
     assert allocate_external_prefix(manager, request, imported_tokens) is not None
-    required = manager.coordinator.get_num_blocks_to_allocate_by_pool(
+    required = manager.coordinator.get_num_blocks_to_allocate(
         request_id=request.request_id,
         num_tokens=request.num_tokens,
         new_computed_blocks=manager.empty_kv_cache_blocks.blocks,
@@ -559,7 +559,25 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
         apply_admission_cap=True,
     )
 
-    assert required == (4,)
+    assert required == 4
+
+
+def test_hisparse_full_sequence_admission_preserves_host_reservations():
+    """A first chunk must not admit a prompt using another prefill's host budget."""
+    manager = make_hisparse_kv_cache_manager(32, 5)
+    request = make_request(
+        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+
+    assert (
+        manager.allocate_slots(
+            request,
+            num_new_tokens=HISPARSE_BLOCK_SIZE,
+            full_sequence_must_fit=True,
+            reserved_host_blocks=2,
+        )
+        is None
+    )
 
 
 def test_hisparse_host_import_ignores_unsealed_tail():
@@ -587,7 +605,7 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
         [],
     )
 
-    manager.coordinator.get_num_blocks_to_allocate_by_pool(
+    manager.coordinator.get_num_blocks_to_allocate(
         request_id="query-only",
         num_tokens=HISPARSE_BLOCK_SIZE,
         new_computed_blocks=computed,
@@ -673,7 +691,7 @@ def test_hisparse_shadow_pages_free_under_pool_pressure():
 
     coordinator = manager.hisparse_coordinator
     assert coordinator.shadow_pages
-    pool = manager.block_pools[0]
+    pool = manager.block_pool
     free_before = pool.get_num_free_blocks()
     reclaimed = coordinator.reclaim_resident_blocks(0, 2)
     assert reclaimed >= 2
@@ -733,7 +751,7 @@ def test_hisparse_recomputes_capacity_after_reclaim_requires_hot(monkeypatch):
         HISPARSE_BLOCK_SIZE,
         sha256,
     )
-    pool = manager.block_pools[0]
+    pool = manager.block_pool
     held = pool.get_new_blocks(3)
 
     def reclaim(*_args):
@@ -741,7 +759,9 @@ def test_hisparse_recomputes_capacity_after_reclaim_requires_hot(monkeypatch):
             hot_manager.require_hot(request.request_id)
         pool.free_blocks([held.pop()])
 
-    monkeypatch.setattr(manager, "_reclaim_resident_shortage", reclaim)
+    monkeypatch.setattr(
+        manager.hisparse_coordinator, "reclaim_resident_blocks", reclaim
+    )
 
     # The original two-block estimate fits after reclaim, but the transition
     # adds a two-block hot region. Admission must defer instead of reaching
@@ -780,7 +800,7 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     assert len(resident) == num_prompt_blocks
     assert all(block.is_null for block in resident)
     assert len(hot) == 2
-    assert manager.block_pools[0].get_num_free_blocks() == 1
+    assert manager.block_pool.get_num_free_blocks() == 1
 
 
 def test_hisparse_external_import_survives_capacity_retry():

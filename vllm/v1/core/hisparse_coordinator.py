@@ -10,10 +10,9 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_unique_kv_cache_group_id
 from vllm.v1.core.single_type_kv_cache_manager import (
-    HiSparseHotManager,
-    HiSparseResidentManager,
     SingleTypeKVCacheManager,
 )
+from vllm.v1.hisparse.cache_manager import HiSparseHotManager, HiSparseResidentManager
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,

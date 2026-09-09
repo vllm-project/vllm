@@ -284,9 +284,9 @@ class SchedulerOutput:
     # EC Cache Manager metadata
     ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
-    # The worker zeros the corresponding cache memory before the blocks are used,
+    # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
-    new_block_ids_to_zero: dict[int, list[int]] | None = None
+    new_block_ids_to_zero: list[int] | None = None
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None

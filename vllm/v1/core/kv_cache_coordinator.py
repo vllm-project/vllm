@@ -16,12 +16,11 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
-    HiSparseHotManager,
-    HiSparseResidentManager,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
+from vllm.v1.hisparse.cache_manager import HiSparseHotManager, HiSparseResidentManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -112,7 +111,6 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
             block_pool_id=0,
         )
-        self.block_pools = (self.block_pool,)
 
         source_groups = [
             group
@@ -185,8 +183,8 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=(
-                    kv_cache_group.block_pool_id
-                    in self.kv_cache_config.zeroing_block_pool_ids
+                    kv_cache_group.block_pool_id is not None
+                    and self.kv_cache_config.needs_kv_cache_zeroing
                 ),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
@@ -220,31 +218,6 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        return sum(
-            self.get_num_blocks_to_allocate_by_pool(
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                num_encoder_tokens,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
-            )
-        )
-
-    def get_num_blocks_to_allocate_by_pool(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        num_encoder_tokens: int,
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> tuple[int, ...]:
-        """Get allocation requirements independently for each block pool."""
         needs_hot = self.hisparse_coordinator.needs_hot(new_computed_blocks)
         num_external_computed_tokens = total_computed_tokens - num_local_computed_tokens
         host_import = (
@@ -264,9 +237,7 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_external_computed_tokens,
                 )
-            elif host_import and isinstance(manager, HiSparseHotManager):
-                num_blocks = manager.get_num_host_import_blocks_to_allocate(request_id)
-            elif isinstance(manager, HiSparseHotManager) and needs_hot:
+            elif isinstance(manager, HiSparseHotManager) and (host_import or needs_hot):
                 num_blocks = manager.get_num_required_blocks(request_id)
             elif isinstance(manager, CrossAttentionManager):
                 num_blocks = manager.get_num_blocks_to_allocate(
@@ -289,7 +260,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             required += num_blocks
-        return (required,)
+        return required
 
     def allocate_new_computed_blocks(
         self,

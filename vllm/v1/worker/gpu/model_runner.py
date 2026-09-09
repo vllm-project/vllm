@@ -172,7 +172,6 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     DeviceKVCacheBlockCopier,
     KVBlockZeroer,
-    build_kv_block_zeroers,
     clear_layer_kv_caches,
     get_uniform_decode_token_count,
 )
@@ -209,7 +208,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
-        self.kv_block_zeroers: dict[int, KVBlockZeroer] = {}
+        self.kv_block_zeroer: KVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -712,8 +711,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 self.kernel_block_sizes,
                 self.vllm_config,
-                self.block_tables,
                 kv_cache_allocation_context=kv_cache_allocation_context,
+                block_tables=self.block_tables,
             )
         self.device_kv_cache_block_copier = DeviceKVCacheBlockCopier(
             self.kv_cache_config, kv_caches_dict
@@ -725,12 +724,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        self.kv_block_zeroers = build_kv_block_zeroers(
-            device=self.device,
-            attn_groups=self.attn_groups,
+        self.kv_block_zeroer = KVBlockZeroer(
+            self.device,
+            attn_groups_iter=(
+                attn_group
+                for cache_group, attn_groups in zip(
+                    self.kv_cache_config.kv_cache_groups, self.attn_groups
+                )
+                if cache_group.block_pool_id is not None
+                for attn_group in attn_groups
+            ),
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
-            kv_cache_config=self.kv_cache_config,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     @torch.inference_mode()
@@ -1153,8 +1159,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
-            for pool_id, ids_to_zero in scheduler_output.new_block_ids_to_zero.items():
-                self.kv_block_zeroers[pool_id].zero_block_ids(ids_to_zero)
+            assert self.kv_block_zeroer is not None
+            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.

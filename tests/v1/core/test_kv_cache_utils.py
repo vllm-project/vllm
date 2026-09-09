@@ -3989,7 +3989,7 @@ def test_wrapped_mamba_group_requires_block_zeroing():
         kv_cache_groups=[KVCacheGroupSpec(["mamba"], wrapped)],
     )
 
-    assert config.zeroing_block_pool_ids == frozenset({0})
+    assert config.needs_kv_cache_zeroing
 
 
 def _spec_decode_grouping_config(method="dspark", model_type=None):

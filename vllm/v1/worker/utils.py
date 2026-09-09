@@ -120,7 +120,6 @@ class KVBlockZeroer:
         static_forward_context: dict[str, Any],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
-        zeroing_group_ids: set[int] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -139,9 +138,6 @@ class KVBlockZeroer:
         physical block stride and zeroed page span remain independent.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
-        When ``zeroing_group_ids`` is provided, groups in other physical
-        block-pool domains are excluded because their numeric block IDs may
-        overlap.
         """
         self.device = device
         self._meta: (
@@ -159,11 +155,6 @@ class KVBlockZeroer:
         seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
-            if (
-                zeroing_group_ids is not None
-                and group.kv_cache_group_id not in zeroing_group_ids
-            ):
-                continue
             spec = group.kv_cache_spec
             if not isinstance(spec, AttentionSpec):
                 continue
@@ -262,33 +253,6 @@ class KVBlockZeroer:
         """JIT-compile the zeroing kernel before the first real request."""
         if num_kv_blocks > 0:
             self.zero_block_ids([0])
-
-
-def build_kv_block_zeroers(
-    *,
-    device: torch.device,
-    attn_groups: list[list["AttentionGroup"]],
-    kernel_block_sizes: list[int],
-    static_forward_context: dict[str, Any],
-    kv_cache_config: KVCacheConfig,
-    runner_only_attn_layers: set[str] | None = None,
-) -> dict[int, KVBlockZeroer]:
-    return {
-        pool_id: KVBlockZeroer(
-            device,
-            attn_groups_iter=(group for groups in attn_groups for group in groups),
-            kernel_block_sizes=kernel_block_sizes,
-            static_forward_context=static_forward_context,
-            num_blocks=kv_cache_config.num_blocks,
-            runner_only_attn_layers=runner_only_attn_layers,
-            zeroing_group_ids={
-                group_id
-                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-                if group.block_pool_id == pool_id
-            },
-        )
-        for pool_id in kv_cache_config.zeroing_block_pool_ids
-    }
 
 
 @dataclass
