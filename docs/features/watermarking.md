@@ -64,9 +64,11 @@ Gumbel noise for categorical sampling. See
 Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
 bypass watermarking and emit a warning once per worker.
 
-Single-key Gumbel-max watermarking may increase degenerate generations. In
-particular, reusing the same keyed random vector when a context repeats can
-reinforce repetition loops that continue until the maximum token limit.
+When a generated-token context has already appeared in the same completion,
+generation uses ordinary sampling for that occurrence. Reusing the keyed random
+vector would otherwise correlate token choices and weaken the sequence-level
+distribution-preserving guarantee. The detector applies the matching context
+deduplication described below.
 
 ### SynthID-Text
 

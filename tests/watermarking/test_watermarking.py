@@ -9,10 +9,12 @@ import torch
 
 from vllm import SamplingParams
 from vllm.config.watermarking import WatermarkConfig
+from vllm.platforms import current_platform
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.watermarker import WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel"])
@@ -102,6 +104,9 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         2, 1, dtype=torch.int64
     )
+    sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: (
+        torch.zeros(2, dtype=torch.bool)
+    )
     monkeypatch.setattr(
         "vllm.v1.watermarking.gpu_sampler.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
@@ -121,6 +126,130 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
     assert torch.equal(sampled, torch.tensor([7, 4]))
     assert torch.equal(output_logits[0], torch.full((8,), 10.0))
     assert torch.equal(output_logits[1], logits[1])
+
+
+def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
+    class StubWatermarker:
+        context_width = 1
+
+        def sample(self, logits, contexts, random_sample):
+            return WatermarkSample(torch.tensor([7, 7]), logits + 10)
+
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = StubWatermarker()
+    sampler.watermarking = SimpleNamespace(
+        np=np.array([True, True]), gpu=torch.tensor([True, True])
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(np=np.ones(2), gpu=torch.ones(2)),
+        seeds=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64)),
+    )
+    sampler.use_fp64_gumbel = False
+    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
+        2, 1, dtype=torch.int64
+    )
+    sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: (
+        torch.tensor([True, False])
+    )
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.gpu_sampler.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([3, 4]),
+    )
+    logits = torch.zeros(2, 8)
+
+    sampled, output_logits = sampler._sample_random(
+        logits,
+        torch.tensor([0, 1]),
+        np.array([0, 1]),
+        torch.zeros(2, dtype=torch.int64),
+        None,
+        None,
+        False,
+    )
+
+    assert torch.equal(sampled, torch.tensor([3, 7]))
+    assert torch.equal(output_logits[0], logits[0])
+    assert torch.equal(output_logits[1], torch.full((8,), 10.0))
+
+
+def test_repeated_context_mask_ignores_prompt_tokens():
+    all_token_ids = torch.tensor(
+        [
+            [8, 9, 1, 2, 1, 2],
+            [3, 4, 1, 2, 3, 4],
+            [0, 0, 0, 0, 0, 0],
+        ],
+        dtype=torch.int32,
+    )
+    req_indices = torch.tensor([0, 1, -1])
+    prompt_lens = torch.tensor([2, 2, 0])
+    total_lens = torch.tensor([6, 6, 0])
+    contexts = torch.tensor([[1, 2], [3, 4], [-1, -1]])
+
+    repeated = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        contexts,
+    )
+
+    assert torch.equal(repeated, torch.tensor([True, False, False]))
+
+
+def _repeated_context_inputs(
+    context_width: int, device: str = "cpu"
+) -> tuple[torch.Tensor, ...]:
+    prompt = [101, 102, 103, 104]
+    repeated_output = [*range(1, context_width + 1)] * 2
+    unique_output = [*range(1, context_width + 2)]
+    max_len = len(prompt) + len(repeated_output)
+    rows = [
+        prompt + repeated_output,
+        prompt + unique_output,
+        [],
+    ]
+    all_token_ids = torch.zeros((3, max_len), dtype=torch.int32, device=device)
+    for row, token_ids in enumerate(rows):
+        all_token_ids[row, : len(token_ids)] = torch.tensor(
+            token_ids, dtype=torch.int32, device=device
+        )
+    return (
+        all_token_ids,
+        torch.tensor([0, 1, -1], dtype=torch.int32, device=device),
+        torch.tensor([len(prompt), len(prompt), 0], dtype=torch.int32, device=device),
+        torch.tensor([len(rows[0]), len(rows[1]), 0], dtype=torch.int32, device=device),
+        torch.tensor(
+            [
+                repeated_output[-context_width:],
+                unique_output[-context_width:],
+                [-1] * context_width,
+            ],
+            dtype=torch.int64,
+            device=device,
+        ),
+    )
+
+
+@pytest.mark.parametrize("context_width", [1, 4, 16])
+def test_repeated_context_mask(context_width: int):
+    repeated = repeated_context_mask(*_repeated_context_inputs(context_width))
+
+    assert torch.equal(repeated, torch.tensor([True, False, False]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("context_width", [1, 4, 16])
+def test_repeated_context_mask_accelerator_parity(context_width: int):
+    cpu_inputs = _repeated_context_inputs(context_width)
+    accelerator_inputs = _repeated_context_inputs(context_width, "cuda")
+
+    expected = repeated_context_mask(*cpu_inputs)
+    actual = repeated_context_mask(*accelerator_inputs).cpu()
+
+    assert torch.equal(actual, expected)
 
 
 def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):

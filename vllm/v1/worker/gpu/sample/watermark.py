@@ -43,6 +43,88 @@ _TOKEN_DOMAIN = tl.constexpr(_TOKEN_DOMAIN_VALUE) if HAS_TRITON else _TOKEN_DOMA
 
 
 @triton.jit
+def _repeated_context_mask_kernel(
+    output_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    req_indices_ptr,
+    prompt_lens_ptr,
+    total_lens_ptr,
+    contexts_ptr,
+    context_stride,
+    CONTEXT_WIDTH: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    req_idx = tl.load(req_indices_ptr + row).to(tl.int64)
+    valid_req = req_idx >= 0
+    safe_req_idx = tl.maximum(req_idx, 0)
+    prompt_len = tl.load(prompt_lens_ptr + safe_req_idx, mask=valid_req, other=0)
+    total_len = tl.load(total_lens_ptr + safe_req_idx, mask=valid_req, other=0)
+    output_len = total_len - prompt_len
+
+    repeated = tl.full((), False, tl.int1)
+    previous_output_pos = 0
+    while previous_output_pos < output_len:
+        matches = valid_req
+        for offset in range(CONTEXT_WIDTH):
+            historical_pos = previous_output_pos + offset - CONTEXT_WIDTH
+            historical_token = tl.load(
+                all_token_ids_ptr
+                + safe_req_idx * all_token_ids_stride
+                + prompt_len
+                + tl.maximum(historical_pos, 0),
+                mask=valid_req & (historical_pos >= 0),
+                other=-1,
+            )
+            context_token = tl.load(contexts_ptr + row * context_stride + offset)
+            matches &= historical_token == context_token
+        repeated |= matches
+        previous_output_pos += 1
+
+    tl.store(output_ptr + row, repeated)
+
+
+def repeated_context_mask(
+    all_token_ids: torch.Tensor,
+    req_indices: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    total_lens: torch.Tensor,
+    contexts: torch.Tensor,
+) -> torch.Tensor:
+    if all_token_ids.device.type == "cpu":
+        repeated = torch.zeros(len(req_indices), dtype=torch.bool)
+        for row, req_idx_tensor in enumerate(req_indices):
+            req_idx = int(req_idx_tensor)
+            if req_idx < 0:
+                continue
+            prompt_len = int(prompt_lens[req_idx])
+            total_len = int(total_lens[req_idx])
+            output_tokens = all_token_ids[req_idx, prompt_len:total_len].tolist()
+            prefix = [-1] * contexts.shape[-1]
+            current_context = tuple(contexts[row].tolist())
+            for token_id in output_tokens:
+                if tuple(prefix[-contexts.shape[-1] :]) == current_context:
+                    repeated[row] = True
+                    break
+                prefix.append(token_id)
+        return repeated
+
+    repeated = torch.empty(len(req_indices), dtype=torch.bool, device=contexts.device)
+    _repeated_context_mask_kernel[(len(req_indices),)](
+        repeated,
+        all_token_ids,
+        all_token_ids.stride(0),
+        req_indices,
+        prompt_lens,
+        total_lens,
+        contexts,
+        contexts.stride(0),
+        CONTEXT_WIDTH=contexts.shape[-1],
+    )
+    return repeated
+
+
+@triton.jit
 def _mulhilo32(multiplier: tl.constexpr, value):
     high = tl_math.umulhi(multiplier, value)
     low = tl.mul(multiplier, value, sanitize_overflow=False)
