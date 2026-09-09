@@ -441,7 +441,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     assert calls[0][1] is gate.weight
 
 
-def test_gate_linear_fp32_weight_falls_back(monkeypatch):
+def test_gate_linear_fp32_weight_path(monkeypatch):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.float32)
     assert not gate.allow_ll_bf16_gemm
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
@@ -456,6 +456,11 @@ def test_gate_linear_fp32_weight_falls_back(monkeypatch):
     out, _ = gate(x)
     assert out.shape == (4, 64)
     assert out.dtype == torch.float32
+
+    if gate.allow_bf16x3_router_gemm:
+        compiled_gate = torch.compile(gate, backend="eager", fullgraph=True)
+        compiled_out, _ = compiled_gate(x)
+        torch.testing.assert_close(compiled_out, out)
 
 
 def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
