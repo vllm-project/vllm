@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
@@ -9,10 +11,14 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import triton_unified_attention as attention
 from vllm.v1.attention.ops.triton_attention_helpers import (
     compute_tile_loop_bounds,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    reduce_segments,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -34,6 +40,228 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+def _uses_splitk(
+    monkeypatch,
+    query_len,
+    scratch,
+    *,
+    uniform=True,
+    causal=True,
+    threshold=8,
+    mm_prefix=None,
+):
+    query = torch.empty((2 * query_len, 8, 128), dtype=torch.bfloat16, device="cpu")
+    cache = torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="cpu")
+    kernel = MagicMock()
+    monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
+    monkeypatch.setattr(attention, "reduce_segments", MagicMock())
+    unified_attention(
+        query,
+        cache,
+        cache,
+        torch.empty_like(query),
+        torch.tensor([0, query_len, 2 * query_len], dtype=torch.int32),
+        query_len,
+        torch.tensor([128, 128], dtype=torch.int32),
+        128,
+        128**-0.5,
+        causal,
+        (-1, -1),
+        torch.zeros((2, 1), dtype=torch.int32),
+        0.0,
+        None,
+        None,
+        None,
+        is_uniform_decode=uniform,
+        seq_threshold_3D=threshold,
+        num_par_softmax_segments=16,
+        softmax_segm_output=scratch[0],
+        softmax_segm_max=scratch[1],
+        softmax_segm_expsum=scratch[2],
+        mm_prefix_range=mm_prefix,
+    )
+    return kernel.__getitem__.return_value.call_args.kwargs["IS_3D"]
+
+
+@pytest.mark.parametrize("query_len", [1, 5])
+@pytest.mark.parametrize("buffer_index", [0, 1, 2])
+@pytest.mark.parametrize(
+    "defect", [None, "rows", "shape", "rank", "dtype", "device", "stride", "missing"]
+)
+def test_splitk_validates_each_scratch_tensor(
+    monkeypatch, buffer_index, defect, query_len
+):
+    """The launch must use the supplied tensors' capacity and packed FP32 layout."""
+    query = torch.empty((2 * query_len, 8, 128), dtype=torch.bfloat16, device="cpu")
+    rows = query.shape[0]
+    shapes = [(rows, 8, 16, 128), (rows, 8, 16), (rows, 8, 16)]
+    scratch = [torch.empty(shape, device="cpu") for shape in shapes]
+    buffer = scratch[buffer_index]
+    if defect == "rows":
+        buffer = buffer[:-1]
+    elif defect == "shape":
+        buffer = torch.empty((2, 7, *buffer.shape[2:]), device="cpu")
+    elif defect == "rank":
+        buffer = buffer.flatten()
+    elif defect == "dtype":
+        buffer = buffer.to(torch.float16)
+    elif defect == "device":
+        buffer = buffer.to("meta")
+    elif defect == "stride":
+        buffer = buffer.transpose(0, 1).contiguous().transpose(0, 1)
+    elif defect == "missing":
+        buffer = None
+    scratch[buffer_index] = buffer
+    assert _uses_splitk(monkeypatch, query_len, scratch) is (defect is None)
+
+
+@pytest.mark.parametrize(
+    "query_len,options,expected",
+    [
+        (1, {"uniform": False}, True),
+        (1, {"uniform": False, "causal": False}, True),
+        (5, {}, True),
+        (5, {"uniform": False}, False),
+        (6, {}, False),
+        (5, {"causal": False}, False),
+        (5, {"causal": "per_sequence"}, False),
+        (5, {"threshold": 1}, False),
+        (5, {"batch_invariant": True}, False),
+        (5, {"mm_prefix": True}, False),
+    ],
+)
+def test_splitk_admission_preserves_decode_and_bounds_verification(
+    monkeypatch, query_len, options, expected
+):
+    options = options.copy()
+    monkeypatch.setattr(
+        attention, "is_batch_invariant", options.pop("batch_invariant", False)
+    )
+    if options.get("causal") == "per_sequence":
+        options["causal"] = torch.ones(2, dtype=torch.bool, device="cpu")
+    if options.get("mm_prefix"):
+        options["mm_prefix"] = torch.zeros((2, 1, 2), dtype=torch.int32, device="cpu")
+    scalar_shape = (2 * query_len, 8, 16)
+    scratch = [
+        torch.empty((*scalar_shape, 128), device="cpu"),
+        torch.empty(scalar_shape, device="cpu"),
+        torch.empty(scalar_shape, device="cpu"),
+    ]
+    assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
+
+
+@pytest.mark.parametrize("empty_state", ["masked", "unvisited", "all_empty"])
+def test_reduce_segments_ignores_empty_softmax_states(empty_state: str) -> None:
+    """Empty segments must not suppress strongly negative, nonempty segments."""
+    output = torch.full((1, 1, 32), float("nan"), device=DEVICE_TYPE)
+    partial = torch.zeros((1, 1, 16, 32), device=DEVICE_TYPE)
+    maxima = torch.full((1, 1, 16), -float("inf"), device=DEVICE_TYPE)
+    masses = torch.ones_like(maxima)
+    if empty_state != "all_empty":
+        partial[:, :, 0] = 3.0
+        maxima[:, :, 0] = -1000.0
+    if empty_state in ("masked", "all_empty"):
+        maxima[:, :, 1:] = 0.0
+        masses[:, :, 1:] = 0.0
+    reduce_segments[(1, 1)](
+        output,
+        partial,
+        maxima,
+        masses,
+        torch.tensor([32], dtype=torch.int32, device=DEVICE_TYPE),
+        1,
+        1,
+        1.0,
+        output.stride(0),
+        output.stride(1),
+        1,
+        16,
+        32,
+        32,
+        torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE),
+        16,
+        16,
+        False,
+    )
+    torch.testing.assert_close(
+        output, torch.full_like(output, 0.0 if empty_state == "all_empty" else 3.0)
+    )
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens", [([5, 0], [5, 0]), ([0], [0]), ([5], [0])]
+)
+def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) -> None:
+    """A padded reducer row must return before reading sequence or scratch data."""
+    output = torch.full((10, 1, 32), 123.0, device=DEVICE_TYPE)
+    partial = torch.zeros((10, 1, 16, 32), device=DEVICE_TYPE)
+    maxima = torch.zeros((10, 1, 16), device=DEVICE_TYPE)
+    masses = torch.ones_like(maxima)
+    query_starts = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(0, dtype=torch.int32)
+    reduce_segments[(10, 1)](
+        output,
+        partial,
+        maxima,
+        masses,
+        torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE_TYPE),
+        len(seq_lens),
+        1,
+        1.0,
+        output.stride(0),
+        output.stride(1),
+        1,
+        16,
+        32,
+        32,
+        query_starts,
+        16,
+        16,
+        False,
+    )
+    active_rows = sum(q for q, kv in zip(query_lens, seq_lens) if kv > 0)
+    torch.testing.assert_close(
+        output[:active_rows], torch.zeros_like(output[:active_rows])
+    )
+    torch.testing.assert_close(
+        output[active_rows:], torch.full_like(output[active_rows:], 123.0)
+    )
+
+
+@pytest.mark.parametrize("query_len", [2, 4, 5])
+@pytest.mark.parametrize("sliding_window", [None, 32])
+@pytest.mark.parametrize("seq_threshold_3D", [0, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_speculative_splitk_matches_reference(
+    query_len, sliding_window, seq_threshold_3D, dtype
+):
+    test_triton_unified_attn(
+        seq_lens=[(query_len, 128), (query_len, 129), (query_len, 257)],
+        num_heads=(8, 1),
+        head_size=128,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=128,
+        soft_cap=None,
+        num_blocks=8,
+        q_dtype=None,
+        seq_threshold_3D=seq_threshold_3D,
+    )
+
+
+@pytest.mark.parametrize("seq_threshold_3D", [0, 8])
+def test_speculative_splitk_bf16_query_fp8_kv(seq_threshold_3D):
+    test_triton_unified_attn_bf16_query_fp8_kv(
+        seq_lens=[(5, 128), (5, 129), (5, 4097)],
+        num_heads=(8, 1),
+        head_size=128,
+        block_size=128,
+        num_blocks=64,
+        seq_threshold_3D=seq_threshold_3D,
+    )
 
 
 @triton.jit
@@ -422,16 +650,18 @@ def test_triton_unified_attn(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
+    is_uniform_decode = len(set(query_lens)) == 1 and max_query_len <= 5
+    scratch_rows = seq_threshold_3D * (max_query_len if is_uniform_decode else 1)
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
     softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
 
@@ -452,6 +682,7 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
+        is_uniform_decode=is_uniform_decode,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
@@ -542,16 +773,18 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
+    is_uniform_decode = len(set(query_lens)) == 1 and max_query_len <= 5
+    scratch_rows = seq_threshold_3D * (max_query_len if is_uniform_decode else 1)
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
     softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
 
@@ -572,6 +805,7 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
         q_descale=None,
         k_descale=k_descale,
         v_descale=v_descale,
+        is_uniform_decode=is_uniform_decode,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
