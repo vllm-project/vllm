@@ -364,14 +364,6 @@ class PCPManager:
             query_start_loc_np,
         )
 
-        local_capacity = max(per_rank_num_tokens)
-        if padded_num_tokens is None:
-            padded_num_tokens = local_capacity
-        elif padded_num_tokens < local_capacity:
-            raise ValueError(
-                "PCP padded token count is smaller than the largest rank-local "
-                f"batch: {padded_num_tokens} < {local_capacity}."
-            )
         local_segments = segments_by_rank[self.pcp_rank]
         # Publish for the attention metadata builders, which run after this and
         # must size their DCP collectives PCP-invariantly.
@@ -398,6 +390,13 @@ class PCPManager:
         # Therefore global = gathered[hidden_restore_idx] and
         # padded_gathered = global[padded_gather_idx].
         hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
+        if padded_num_tokens is None:
+            padded_num_tokens = max(per_rank_num_tokens)
+        elif padded_num_tokens < max(per_rank_num_tokens):
+            raise ValueError(
+                "PCP padded token count is smaller than the largest rank-local "
+                f"batch: {padded_num_tokens} < {max(per_rank_num_tokens)}."
+            )
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
