@@ -488,7 +488,7 @@ class KVCacheManager:
                 free blocks to hold the full sequence, accounting for prefix cache hits
                 and sliding window. Used as an admission gate to prevent over-admitting
                 requests when chunked prefill would otherwise only check the first chunk
-            reserved_blocks: Number of free device blocks that must remain available for
+            reserved_blocks: Number of free blocks that must be left available for
                 other in-flight sequences to complete. The actual allocation is only
                 made if it fits within (free blocks - reserved_blocks). Used to gate
                 async KV-connector loads so their initial allocation cannot consume
