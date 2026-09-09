@@ -96,7 +96,7 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         groups.append(
             KVCacheGroupSpec([f"layer{i}"], kv_spec, is_eagle_group=eagle and i == 1)
         )
-    manager = CPUOffloadingManager(num_blocks=100)
+    manager = CPUOffloadingManager(num_chunks=100)
     spec = SimpleNamespace(
         tokens_per_block=(256, 64, 8),
         tokens_per_hash=8,
