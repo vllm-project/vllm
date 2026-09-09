@@ -170,6 +170,10 @@ class HiSparseConnectorScheduler:
 class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     """Join the scheduler coordinator to the worker's transfer engine."""
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str:
+        return "BLHNC"
+
     def __init__(
         self,
         vllm_config: VllmConfig,

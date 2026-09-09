@@ -86,6 +86,12 @@ def test_hisparse_written_rows_preserve_scheduler_page_boundaries():
     )
 
 
+def test_hisparse_written_rows_without_host_destinations_are_skipped():
+    assert (
+        _select_written_row_mirrors((), np.array([100, 101], dtype=np.int64), 0) == ()
+    )
+
+
 def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     """Separate context and query writes must share one mirror phase."""
     worker = _make_hisparse_worker()
