@@ -538,7 +538,7 @@ class SpeculativeConfig:
 
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence. Supported for DSpark and DFlash2 with a trained confidence head."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1516,8 +1516,19 @@ class SpeculativeConfig:
                 self.index_share_for_mtp_iteration
             )
 
-        if self.method != "dspark" and self.enable_adaptive_verification:
-            raise ValueError("Adaptive verification only supported with DSpark")
+        dflash2_adaptive = (
+            self.method == "dflash"
+            and self.draft_model_config is not None
+            and "DFlash2DraftModel" in self.draft_model_config.architectures
+        )
+        if (
+            self.enable_adaptive_verification
+            and self.method != "dspark"
+            and not dflash2_adaptive
+        ):
+            raise ValueError(
+                "Adaptive verification is only supported with DSpark or DFlash2"
+            )
 
         return self
 

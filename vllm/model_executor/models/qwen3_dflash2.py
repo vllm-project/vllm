@@ -186,6 +186,25 @@ def _score_edges(
     )
 
 
+def _confidence_rows(
+    predecessor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    predecessor_ids = torch.cat(
+        (
+            anchor_token_ids[:, None, None].expand(-1, 1, candidate_ids.shape[-1]),
+            candidate_ids[:, :-1],
+        ),
+        dim=1,
+    )
+    context = predecessor_table[predecessor_ids] * hidden[:, :, None]
+    return torch.einsum("blpr,r->blp", context, weight) + bias
+
+
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -215,10 +234,7 @@ class CandidateSelector(nn.Module):
             prefix=maybe_prefix(prefix, "hidden_projection"),
             return_bias=False,
         )
-        # Optional: some DFlash2 checkpoints ship a trained confidence head that
-        # scores each predecessor-conditioned candidate. Nothing in this change
-        # consumes it; building it here is what lets such a checkpoint load at
-        # all, instead of failing with an unknown-parameter error.
+        # Loading the optional head does not enable confidence computation.
         self.confidence_head: ReplicatedLinear | None = None
         if enable_confidence_head:
             self.confidence_head = ReplicatedLinear(
@@ -237,9 +253,10 @@ class CandidateSelector(nn.Module):
         unary_logits: torch.Tensor,
         hidden_states: torch.Tensor,
         anchor_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        compute_confidence: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         hidden = self.hidden_projection(hidden_states)
-        return _score_edges(
+        scores = _score_edges(
             self.predecessor_codebook,
             self.successor_codebook,
             candidate_ids,
@@ -248,6 +265,17 @@ class CandidateSelector(nn.Module):
             anchor_token_ids,
             self.top_k,
         )
+        if not compute_confidence or self.confidence_head is None:
+            return scores, None
+        confidence_logits = _confidence_rows(
+            self.predecessor_codebook,
+            candidate_ids,
+            hidden,
+            anchor_token_ids,
+            self.confidence_head.weight.squeeze(0),
+            self.confidence_head.bias.squeeze(0),
+        )
+        return scores, confidence_logits
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
