@@ -517,7 +517,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
                 # Without a spec split the non-spec tokens are exactly
                 # core_attn_out[:, :num_actual_tokens] in order, so both kernels
-                # can write their slice in place. 
+                # can write their slice in place.
                 write_out_in_place = spec_sequence_masks is None
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None

@@ -115,8 +115,7 @@ def chunk_kda_prefill(
         fused = fused_reason is None
         if not fused:
             msg = (
-                "Fused KDA chunk prefill was requested but cannot run: "
-                f"{fused_reason}."
+                f"Fused KDA chunk prefill was requested but cannot run: {fused_reason}."
             )
             if require_fused_chunk:
                 raise RuntimeError(msg)

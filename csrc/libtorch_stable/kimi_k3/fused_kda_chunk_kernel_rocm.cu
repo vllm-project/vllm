@@ -90,8 +90,10 @@ constexpr int kNTS = kBT / 32;
 // [16, 16] tile is 64 lanes x 4 floats, lane-major.  Every producer and
 // consumer then moves 16 B per lane at consecutive addresses -- one fully
 // coalesced dwordx4 per tile instead of 16 rows scattered 512 B apart.
-constexpr int kStKt = 64 * 4;          // one [16, 16] tile
-constexpr int kStTile = kNKT * kStKt;  // one 16-row slice of the plane
+constexpr int kStKt = 64 * 4;  // one [16, 16] tile
+// Referenced only inside the gfx950 walk; keep it for non-gfx950 objects.
+[[maybe_unused]] constexpr int kStTile =
+    kNKT * kStKt;  // 16-row slice of the plane
 
 // LDS mirrors each operand tile row-major with a padded row stride.  A fragment
 // read is 8 B per lane with its two halves 32 B apart, so the stride only
@@ -338,8 +340,7 @@ __device__ __forceinline__ void chunk_phase_a(const bf16_t* lds,
       for (int vt = 0; vt < kNV; ++vt) {
         accV[mt][vt] = mfma_bf16_k32(wf[buf][mt].v, sf[vt].v, accV[mt][vt]);
         if constexpr (PASS2)
-          accO[vt][mt] =
-              mfma_bf16_k32(sf[vt].v, qf[buf][mt].v, accO[vt][mt]);
+          accO[vt][mt] = mfma_bf16_k32(sf[vt].v, qf[buf][mt].v, accO[vt][mt]);
       }
   }
 
@@ -897,7 +898,8 @@ constexpr int kSG = kK + 4;
 __device__ __forceinline__ constexpr int lblk(int bi, int bj) {
   return (bi * (bi + 1) / 2 + bj) * 256;
 }
-constexpr int kS2 = kBT + 4;
+// Referenced only inside the gfx950 prologue; keep it for non-gfx950 objects.
+[[maybe_unused]] constexpr int kS2 = kBT + 4;
 
 struct PrologueParams {
   const bf16_t* q;
@@ -1313,14 +1315,14 @@ __global__ __launch_bounds__(NTHREAD,
       const float* Lb = s_akk + lblk(wave, wave);
 
       const f32x4 l2 = mm16f(Lb, 16, Lb, 16, lrow, lgrp);
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int r = 4 * lgrp + e;
         iv[r * 16 + lrow] =
             (r == lrow ? 1.f : 0.f) - Lb[r * 16 + lrow];  // I - L
         pw[r * 16 + lrow] = l2[e];                        // L^2
       }
-#pragma unroll
+  #pragma unroll
       for (int step = 0; step < 3; ++step) {
         const f32x4 t = mm16f(iv, 16, pw, 16, lrow, lgrp);
         const f32x4 p2 = step < 2 ? mm16f(pw, 16, pw, 16, lrow, lgrp)
@@ -1329,7 +1331,7 @@ __global__ __launch_bounds__(NTHREAD,
         // race the loads above and the update can be in place. The wave
         // barrier only stops the compiler from reordering them.
         __builtin_amdgcn_wave_barrier();
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) {
           const int r = 4 * lgrp + e;
           iv[r * 16 + lrow] += t[e];
@@ -1337,7 +1339,7 @@ __global__ __launch_bounds__(NTHREAD,
         }
         __builtin_amdgcn_wave_barrier();
       }
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int r = 4 * lgrp + e;
         s_ainv[(d0 + r) * kS2 + d0 + lrow] = iv[r * 16 + lrow];
@@ -1358,17 +1360,17 @@ __global__ __launch_bounds__(NTHREAD,
         f32x4 acc{0.f, 0.f, 0.f, 0.f};
         for (int m = j; m < i; ++m) {
           const float* Ab = s_ainv + m * 16 * kS2 + j * 16;
-#pragma unroll
+  #pragma unroll
           for (int kk = 0; kk < 16; kk += 4)
             acc = mfma_f32_16x16x4(Lrow[lblk(i, m) + kk + lgrp],
                                    Ab[(kk + lgrp) * kS2 + lrow], acc);
         }
         float* mt = s_mtm + wave * 256;
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) mt[(4 * lgrp + e) * 16 + lrow] = acc[e];
         const f32x4 r =
             mm16f(s_ainv + i * 16 * kS2 + i * 16, kS2, mt, 16, lrow, lgrp);
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e)
           s_ainv[(i * 16 + 4 * lgrp + e) * kS2 + j * 16 + lrow] = -r[e];
       }
@@ -1462,7 +1464,7 @@ __global__ __launch_bounds__(NTHREAD,
           // Read every tap before writing any: at T < kConvW - 1 the new cache
           // still overlaps the old one.
           bf16_t nxt[kConvW - 1];
-#pragma unroll
+  #pragma unroll
           for (int w = 0; w < kConvW - 1; ++w) {
             const int ti = T - (kConvW - 1) + w;
             bf16_t val = static_cast<bf16_t>(0.f);
@@ -1473,7 +1475,7 @@ __global__ __launch_bounds__(NTHREAD,
             nxt[w] = val;
           }
           bf16_t* dst = const_cast<bf16_t*>(c.cs);
-#pragma unroll
+  #pragma unroll
           for (int w = 0; w < kConvW - 1; ++w) dst[w * c.cs_tap + idx] = nxt[w];
         }
       };

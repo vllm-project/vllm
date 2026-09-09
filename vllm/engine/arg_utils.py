@@ -772,9 +772,9 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal[
-        "auto", "triton", "flashkda", "flashinfer", "hipkda"
-    ] | None = None
+    kda_prefill_backend: (
+        Literal["auto", "triton", "flashkda", "flashinfer", "hipkda"] | None
+    ) = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
