@@ -44,6 +44,7 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.config.cache import DEFAULT_MAMBA_CHECKPOINT_TOKEN
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -99,6 +100,25 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
     "Overriding `tokenize=False` to `True` because `prompt_embeds` "
     "post-processing requires tokenized IDs."
 )
+_MAMBA_CHECKPOINT_TOKEN_ERROR: Final[str] = (
+    "Expected mamba_checkpoint_token {token!r} to tokenize to exactly 1 "
+    "token, got {num_ids} ({ids!r})."
+)
+
+
+def _ensure_mamba_checkpoint_token(tokenizer: HfTokenizer, token: str) -> int:
+    """Register the configured Mamba checkpoint marker as one special token."""
+    tokenizer.add_special_tokens({"additional_special_tokens": [token]})
+    ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(
+            _MAMBA_CHECKPOINT_TOKEN_ERROR.format(
+                token=token,
+                num_ids=len(ids),
+                ids=ids,
+            )
+        )
+    return ids[0]
 
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
@@ -997,6 +1017,23 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             and isinstance(tokenizer, HfTokenizer)
         ):
             _ensure_prompt_embeds_placeholder_token(tokenizer)
+        cache_config = getattr(config, "cache_config", None)
+        enable_checkpoint = getattr(cache_config, "enable_mamba_checkpoint", False)
+        checkpoint_token = (
+            getattr(
+                cache_config,
+                "mamba_checkpoint_token",
+                DEFAULT_MAMBA_CHECKPOINT_TOKEN,
+            )
+            if enable_checkpoint
+            else None
+        )
+        if checkpoint_token is not None:
+            if not isinstance(tokenizer, HfTokenizer):
+                raise ValueError(
+                    "mamba_checkpoint_token requires a Hugging Face tokenizer"
+                )
+            _ensure_mamba_checkpoint_token(tokenizer, checkpoint_token)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
