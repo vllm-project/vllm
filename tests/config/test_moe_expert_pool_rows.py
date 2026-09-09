@@ -26,7 +26,9 @@ def test_negative_rows_are_rejected():
         OffloadConfig(moe_expert_pool_rows=-1)
 
 
-def test_cli_reaches_engine_args_and_offload_config():
+def test_cli_reaches_engine_args():
+    # Checks the CLI flag and the OffloadConfig field only; it does not
+    # exercise EngineArgs.create_engine_config (needs a model).
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--moe-expert-pool-rows", "16"])
     engine_args = EngineArgs.from_cli_args(args)
