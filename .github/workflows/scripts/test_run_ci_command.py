@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import http.client
 import io
 import json
 import unittest
@@ -8,6 +9,7 @@ import urllib.error
 from typing import Any
 from unittest.mock import patch
 
+from ci_update_branch import BranchUpdateError
 from run_ci_command import (
     CANCELABLE_BUILD_STATES,
     CI_AUTHORIZED_COMMENT_MARKER,
@@ -24,6 +26,7 @@ from run_ci_command import (
     RETRY_STATES,
     ApiError,
     BuildkiteClient,
+    GitHubClient,
     HttpTransport,
     authorize,
     create_build_payload,
@@ -47,7 +50,10 @@ def make_pr(**overrides: Any) -> dict[str, Any]:
         "head": {
             "label": "contributor:feature",
             "ref": "feature",
-            "repo": {"clone_url": "https://github.com/contributor/vllm.git"},
+            "repo": {
+                "clone_url": "https://github.com/contributor/vllm.git",
+                "full_name": "contributor/vllm",
+            },
             "sha": "0123456789abcdef",
         },
         "labels": [],
@@ -85,6 +91,7 @@ class FakeGitHub:
         comments: list[str] | None = None,
         pulls_for_commit: list[dict[str, Any]] | None = None,
         prs: dict[int, dict[str, Any]] | None = None,
+        behind: bool = False,
     ) -> None:
         self.comments = comments or []
         self.permission = permission
@@ -95,6 +102,33 @@ class FakeGitHub:
         self.reviews = reviews or []
         self.pulls_for_commit = pulls_for_commit or []
         self.prs = prs or {self.pr["number"]: self.pr}
+        self.behind = behind
+        self.branch_sha = "base-sha"
+        self.branch_calls: list[str] = []
+        self.merge_calls: list[tuple[int, str]] = []
+        self.update_calls: list[tuple[int, str]] = []
+        self.included_main_sha = "" if behind else self.branch_sha
+
+    def get_branch_sha(self, branch: str) -> str:
+        self.branch_calls.append(branch)
+        return self.branch_sha
+
+    def is_ancestor(self, base_sha: str, head_sha: str) -> bool:
+        return base_sha == self.included_main_sha
+
+    def merge_main_into_pr(self, pr: dict[str, Any], main_sha: str) -> str:
+        self.merge_calls.append((pr["number"], main_sha))
+        if main_sha == self.included_main_sha:
+            return pr["head"]["sha"]
+        self.update_calls.append((pr["number"], main_sha))
+        self.included_main_sha = main_sha
+        suffix = f"-{len(self.update_calls)}" if len(self.update_calls) > 1 else ""
+        self.pr = {
+            **self.pr,
+            "head": {**self.pr["head"], "sha": f"merged-head{suffix}"},
+        }
+        self.prs[pr["number"]] = self.pr
+        return self.pr["head"]["sha"]
 
     def get_pr(self, number: int) -> dict[str, Any]:
         try:
@@ -305,6 +339,25 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(delays, [])
         self.assertEqual(urlopen.call_count, 1)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_normalizes_response_read_failures(
+        self, urlopen: Any
+    ) -> None:
+        for failure in (
+            TimeoutError("Timed out"),
+            http.client.IncompleteRead(b"partial"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                response = FakeHttpResponse({})
+                urlopen.return_value = response
+                with (
+                    patch.object(response, "read", side_effect=failure),
+                    self.assertRaises(ApiError) as caught,
+                ):
+                    HttpTransport().request("https://api.buildkite.com/v2/builds")
+
+                self.assertIsNone(caught.exception.status)
 
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         commands = (
@@ -529,6 +582,398 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(github.reactions, ["eyes", "rocket"])
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
+        self.assertEqual(github.update_calls, [])
+        self.assertEqual(github.merge_calls, [(42, "base-sha")])
+        self.assertIn(
+            "The PR already includes upstream `main` (`base-sha`); "
+            "no merge was needed.",
+            github.comments[0],
+        )
+        self.assertIn(
+            "[Buildkite CI #123](https://buildkite.example/builds/123)",
+            github.comments[0],
+        )
+
+    def test_all_run_variants_evaluate_the_updated_head(self) -> None:
+        commands = (
+            COMMAND_RUN_CI,
+            COMMAND_RUN_CI_ALL,
+            COMMAND_RUN_CI_NIGHTLY,
+            COMMAND_RUN_AMD_CI,
+            COMMAND_RUN_AMD_CI_ALL,
+            COMMAND_RUN_AMD_CI_NIGHTLY,
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite([[], []])
+
+                run(make_event(command), github, buildkite)
+
+                self.assertEqual(github.update_calls, [(42, "base-sha")])
+                self.assertEqual(set(github.branch_calls), {"main"})
+                self.assertEqual(buildkite.created_builds[0]["commit"], "merged-head")
+                self.assertEqual(buildkite.list_calls[-1], ("merged-head", None))
+                reply = github.comments[0]
+                self.assertIn(
+                    "Merged upstream `main` (`base-sha`) into this PR "
+                    "as `merged-head`.",
+                    reply,
+                )
+                self.assertIn("](https://buildkite.example/builds/123)", reply)
+                self.assertLess(
+                    reply.index("Merged upstream"), reply.index("Triggered")
+                )
+
+    def test_each_new_run_updates_onto_main_after_it_advances(self) -> None:
+        for command in (COMMAND_RUN_CI, COMMAND_RUN_AMD_CI):
+            with self.subTest(command=command):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite([[], [], [], []])
+                run(make_event(command), github, buildkite)
+                github.branch_sha = "newer-main"
+                event = make_event(command)
+                event["comment"]["id"] = 100
+
+                run(event, github, buildkite)
+
+                self.assertEqual(
+                    github.merge_calls, [(42, "base-sha"), (42, "newer-main")]
+                )
+                self.assertEqual(
+                    [build["commit"] for build in buildkite.created_builds],
+                    ["merged-head", "merged-head-2"],
+                )
+
+    def test_release_pr_is_rejected_without_merging_onto_any_branch(self) -> None:
+        for command in (COMMAND_RUN_CI, COMMAND_RUN_AMD_CI, COMMAND_RETRY_FAILED):
+            for behind in (False, True):
+                with self.subTest(command=command, behind=behind):
+                    github = FakeGitHub(
+                        pr=make_pr(base={"ref": "releases/v1"}), behind=behind
+                    )
+                    buildkite = FakeBuildkite([[], []])
+                    if command == COMMAND_RETRY_FAILED:
+                        buildkite.build_lists.append(
+                            [
+                                {
+                                    "commit": "older-head",
+                                    "finished_at": "2026-07-28T02:00:00Z",
+                                    "number": 122,
+                                    "pull_request": {"id": 42},
+                                    "state": "failed",
+                                    "web_url": "https://buildkite.example/builds/122",
+                                }
+                            ]
+                        )
+                        buildkite.failed_job_lists = [
+                            [{"step_key": "cpu-tests", "type": "script"}]
+                        ]
+
+                    run(make_event(command), github, buildkite)
+
+                    self.assertEqual(github.branch_calls, [])
+                    self.assertEqual(github.update_calls, [])
+                    self.assertEqual(buildkite.created_builds, [])
+                    self.assertTrue(github.comments[0].startswith("❌ "))
+                    self.assertIn("No merge was attempted.", github.comments[0])
+                    self.assertIn("No new CI build was started.", github.comments[0])
+
+    @patch("run_ci_command.time.sleep")
+    def test_pending_branch_update_is_awaited_before_launch(self, sleep: Any) -> None:
+        github = FakeGitHub(behind=True)
+        original_pr = github.pr
+        github.merge_main_into_pr(original_pr, github.branch_sha)
+        merged_pr = github.pr
+        github.update_calls.clear()
+        buildkite = FakeBuildkite([[], []])
+        with (
+            patch.object(
+                github, "get_pr", side_effect=[original_pr] * 3 + [merged_pr] * 3
+            ),
+            patch.object(github, "merge_main_into_pr", return_value="merged-head"),
+        ):
+            run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        sleep.assert_called_once_with(5)
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merged-head")
+
+    def test_head_changed_before_preparation_is_not_updated(self) -> None:
+        github = FakeGitHub(behind=True)
+        changed_pr = make_pr(head={**github.pr["head"], "sha": "changed-head"})
+        buildkite = FakeBuildkite([[], []])
+        with patch.object(github, "get_pr", side_effect=[github.pr, changed_pr]):
+            run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(github.update_calls, [])
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertIn("No merge was attempted.", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
+
+    def test_branch_update_failure_prevents_evaluation(self) -> None:
+        for publish_attempted in (False, True):
+            with self.subTest(publish_attempted=publish_attempted):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite([[], []])
+                with patch.object(
+                    github,
+                    "merge_main_into_pr",
+                    side_effect=BranchUpdateError(
+                        "Failed", publish_attempted=publish_attempted
+                    ),
+                ):
+                    run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertTrue(github.comments[0].startswith("❌ "))
+                update_outcome = (
+                    "The PR update could not be confirmed on GitHub."
+                    if publish_attempted
+                    else "No merge was published."
+                )
+                self.assertIn(update_outcome, github.comments[0])
+                self.assertIn("No new CI build was started.", github.comments[0])
+
+    @patch("run_ci_command.time.sleep")
+    def test_pending_branch_update_times_out_without_evaluation(
+        self, sleep: Any
+    ) -> None:
+        github = FakeGitHub(behind=True)
+        buildkite = FakeBuildkite([[], []])
+        with patch.object(github, "merge_main_into_pr", return_value="merged-head"):
+            run(make_event(COMMAND_RUN_AMD_CI), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertGreater(sleep.call_count, 0)
+        self.assertLessEqual(sleep.call_count, 12)
+        self.assertIn("Merged upstream `main`", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
+
+    def test_concurrent_pr_changes_stop_evaluation(self) -> None:
+        for change in ("close", "retarget", "main", "different-head"):
+            with self.subTest(change=change):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite([[], []])
+
+                def update(
+                    pr: dict[str, Any],
+                    main_sha: str,
+                    github: FakeGitHub = github,
+                    change: str = change,
+                ) -> str:
+                    result = FakeGitHub.merge_main_into_pr(github, pr, main_sha)
+                    if change == "close":
+                        github.pr["state"] = "closed"
+                    elif change == "retarget":
+                        github.pr["base"] = {"ref": "another-base"}
+                    elif change == "main":
+                        github.branch_sha = "newer-main"
+                    else:
+                        github.pr["head"]["sha"] = "different-head"
+                    return result
+
+                with patch.object(github, "merge_main_into_pr", side_effect=update):
+                    run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertTrue(github.comments[0].startswith("❌ "))
+                self.assertIn("Merged upstream `main`", github.comments[0])
+                self.assertIn("No new CI build was started.", github.comments[0])
+
+    def test_read_failure_after_update_reports_update_without_build(self) -> None:
+        github = FakeGitHub(behind=True)
+        buildkite = FakeBuildkite([[], []])
+        with patch.object(
+            github,
+            "get_branch_sha",
+            side_effect=["base-sha", ApiError(503, "Unavailable")],
+        ):
+            run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(github.update_calls, [(42, "base-sha")])
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("Merged upstream `main`", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
+
+    def test_buildkite_lookup_failure_reports_actual_update_status_without_build(
+        self,
+    ) -> None:
+        for command, after_update in (
+            (COMMAND_RUN_CI, False),
+            (COMMAND_RUN_CI, True),
+            (COMMAND_RETRY_FAILED, False),
+        ):
+            with self.subTest(command=command, after_update=after_update):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite()
+                responses = (
+                    [[], ApiError(503, "Unavailable")]
+                    if after_update
+                    else [ApiError(503, "Unavailable")]
+                )
+                with patch.object(buildkite, "list_builds", side_effect=responses):
+                    run(make_event(command), github, buildkite)
+
+                expected_updates = [(42, "base-sha")] if after_update else []
+                update_message = (
+                    "Merged upstream `main`"
+                    if after_update
+                    else "No merge was attempted."
+                )
+                self.assertEqual(github.update_calls, expected_updates)
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertIn(update_message, github.comments[0])
+                self.assertIn("No new CI build was started.", github.comments[0])
+
+    def test_unconfirmed_build_creation_reports_update_without_claiming_no_build(
+        self,
+    ) -> None:
+        for response in (
+            ApiError(None, "Unavailable"),
+            ApiError(500, "Unavailable"),
+            None,
+            {},
+        ):
+            with self.subTest(response=response):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite([[], []])
+                with patch.object(
+                    buildkite,
+                    "create_build",
+                    side_effect=[response],
+                ):
+                    run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+                self.assertIn("Merged upstream `main`", github.comments[0])
+                self.assertIn(
+                    "Buildkite did not confirm that a new CI build was started.",
+                    github.comments[0],
+                )
+                self.assertNotIn("No new CI build was started.", github.comments[0])
+
+    def test_duplicate_comment_does_not_update_after_head_changes(self) -> None:
+        for command in (COMMAND_RUN_CI, COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED):
+            with self.subTest(command=command):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite(
+                    [
+                        [
+                            {
+                                "commit": "earlier-head",
+                                "meta_data": {
+                                    "github-comment-id": "99",
+                                    "github-pr-number": "42",
+                                },
+                                "web_url": "https://buildkite.example/builds/122",
+                            }
+                        ]
+                    ]
+                )
+
+                run(make_event(command), github, buildkite)
+
+                self.assertEqual(
+                    buildkite.list_calls, [(None, ("github-comment-id", "99"))]
+                )
+                self.assertEqual(github.branch_calls, [])
+                self.assertEqual(github.update_calls, [])
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertEqual(buildkite.retry_calls, [])
+                self.assertIn("No merge", github.comments[0])
+                self.assertIn("No new CI build", github.comments[0])
+
+    @patch("run_ci_command.GitBranchUpdater")
+    def test_update_token_is_isolated_from_github_api_reads(self, updater: Any) -> None:
+        for update_token in ("", "update-token"):
+            with self.subTest(update_token=update_token):
+                pr = make_pr()
+                transport = FakeTransport(
+                    (
+                        {"object": {"sha": "main-sha"}},
+                        pr,
+                        {"object": {"sha": "main-sha"}},
+                    )
+                )
+                github = GitHubClient(
+                    "bot-token",
+                    "vllm-project/vllm",
+                    transport,
+                    update_token=update_token,
+                )
+
+                def merge_main(*args: Any, **kwargs: Any) -> str:
+                    kwargs["before_push"]()
+                    return "merged-head"
+
+                updater.return_value.merge_main.side_effect = merge_main
+                main_sha = github.get_branch_sha("main")
+
+                self.assertEqual(github.merge_main_into_pr(pr, main_sha), "merged-head")
+
+                updater.assert_called_with(update_token or "bot-token")
+                self.assertEqual(
+                    updater.return_value.merge_main.call_args.args,
+                    ("vllm-project/vllm", pr, "main-sha"),
+                )
+                self.assertTrue(
+                    all(
+                        call["headers"]["Authorization"] == "Bearer bot-token"
+                        for call in transport.calls
+                    )
+                )
+                self.assertTrue(
+                    transport.calls[0]["url"].endswith(
+                        "/vllm-project/vllm/git/ref/heads/main"
+                    )
+                )
+
+    @patch("run_ci_command.GitBranchUpdater")
+    def test_update_publication_callback_rejects_changed_pr_or_main(
+        self, updater: Any
+    ) -> None:
+        for change in ("head", "closed", "base", "ref", "repo", "main"):
+            with self.subTest(change=change):
+                pr = make_pr()
+                current_pr = make_pr()
+                main_sha = "main-sha"
+                if change == "head":
+                    current_pr["head"]["sha"] = "other-head"
+                elif change == "closed":
+                    current_pr["state"] = "closed"
+                elif change == "base":
+                    current_pr["base"]["ref"] = "another-base"
+                elif change == "ref":
+                    current_pr["head"]["ref"] = "another-ref"
+                elif change == "repo":
+                    current_pr["head"]["repo"]["full_name"] = "another/fork"
+                else:
+                    main_sha = "newer-main"
+                github = GitHubClient(
+                    "token",
+                    "vllm-project/vllm",
+                    FakeTransport((current_pr, {"object": {"sha": main_sha}})),
+                )
+
+                def merge_main(*args: Any, **kwargs: Any) -> str:
+                    kwargs["before_push"]()
+                    return "merged-head"
+
+                updater.return_value.merge_main.side_effect = merge_main
+                with self.assertRaises(BranchUpdateError):
+                    github.merge_main_into_pr(pr, "main-sha")
+
+    def test_github_ancestry_requires_base_to_be_contained_in_head(self) -> None:
+        for status in ("ahead", "identical", "behind", "diverged"):
+            with self.subTest(status=status):
+                github = GitHubClient(
+                    "token", "vllm-project/vllm", FakeTransport({"status": status})
+                )
+                self.assertEqual(
+                    github.is_ancestor("base-sha", "head-sha"),
+                    status in {"ahead", "identical"},
+                )
 
     def test_amd_run_ignores_blocked_builds(self) -> None:
         for metadata in ({}, {"github-comment-id": "98"}):
@@ -568,6 +1013,8 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn("AMD CI is already running", github.comments[0])
+        self.assertIn("already includes upstream `main`", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
 
     def test_run_all_sets_buildkite_environment(self) -> None:
         github = FakeGitHub()
@@ -627,6 +1074,8 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
 
         self.assertEqual(buildkite.list_calls, [])
+        self.assertEqual(github.branch_calls, [])
+        self.assertEqual(github.update_calls, [])
         self.assertEqual(github.reactions, ["eyes"])
         self.assertTrue(github.comments[0].startswith("❌ "))
         self.assertIn("approve the PR", github.comments[0])
@@ -853,6 +1302,7 @@ class RunCiCommandTest(unittest.TestCase):
         )
         buildkite = FakeBuildkite(
             [
+                [],
                 [
                     {
                         "created_at": "2026-07-28T01:00:00Z",
@@ -861,13 +1311,18 @@ class RunCiCommandTest(unittest.TestCase):
                         "state": "failing",
                         "web_url": "https://buildkite.example/builds/123",
                     }
-                ]
+                ],
             ]
         )
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(123, RETRY_STATES)])
+        self.assertEqual(github.branch_calls, ["main"])
+        self.assertEqual(github.merge_calls, [])
+        self.assertEqual(github.update_calls, [])
         self.assertIn("Queued 3 failed job", github.comments[0])
+        self.assertIn("No merge was attempted.", github.comments[0])
+        self.assertIn("existing", github.comments[0])
 
     def test_amd_ci_retry_retries_only_the_current_head_build(self) -> None:
         github = FakeGitHub(
@@ -876,6 +1331,7 @@ class RunCiCommandTest(unittest.TestCase):
         )
         buildkite = FakeBuildkite(
             [
+                [],
                 [
                     {
                         "created_at": "2026-07-28T01:00:00Z",
@@ -884,25 +1340,62 @@ class RunCiCommandTest(unittest.TestCase):
                         "state": "failing",
                         "web_url": "https://buildkite.example/amd-ci/builds/321",
                     }
-                ]
+                ],
             ]
         )
 
         run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(321, RETRY_STATES)])
+        self.assertEqual(github.branch_calls, ["main"])
+        self.assertEqual(github.merge_calls, [])
+        self.assertEqual(github.update_calls, [])
         self.assertIn("Buildkite AMD CI #321", github.comments[0])
+        self.assertIn("No merge was attempted.", github.comments[0])
+        self.assertIn("existing", github.comments[0])
+
+    def test_retry_refuses_existing_builds_behind_main(self) -> None:
+        for command, run_command in (
+            (COMMAND_RETRY_FAILED, COMMAND_RUN_CI),
+            (COMMAND_RETRY_AMD_FAILED, COMMAND_RUN_AMD_CI),
+        ):
+            with self.subTest(command=command):
+                github = FakeGitHub(behind=True)
+                buildkite = FakeBuildkite(
+                    [
+                        [],
+                        [
+                            {
+                                "number": 123,
+                                "pull_request": {"id": 42},
+                                "web_url": "https://buildkite.example/builds/123",
+                            }
+                        ],
+                    ]
+                )
+
+                run(make_event(command), github, buildkite)
+
+                self.assertEqual(github.merge_calls, [])
+                self.assertEqual(buildkite.retry_calls, [])
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertIn("behind upstream `main`", github.comments[0])
+                self.assertIn(f"Use `{run_command}`", github.comments[0])
+                self.assertIn("No jobs were retried", github.comments[0])
 
     def test_amd_ci_retry_requires_a_build_for_the_current_head(self) -> None:
         github = FakeGitHub(
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
         )
-        buildkite = FakeBuildkite([[]])
+        buildkite = FakeBuildkite([[], []])
 
         run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
 
-        self.assertEqual(buildkite.list_calls, [("0123456789abcdef", None)])
+        self.assertEqual(
+            buildkite.list_calls,
+            [(None, ("github-comment-id", "99")), ("0123456789abcdef", None)],
+        )
         self.assertEqual(buildkite.retry_calls, [])
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn(
@@ -914,6 +1407,7 @@ class RunCiCommandTest(unittest.TestCase):
         github = FakeGitHub(
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
+            behind=True,
         )
         source_build = {
             "commit": "old-commit",
@@ -925,7 +1419,7 @@ class RunCiCommandTest(unittest.TestCase):
             "web_url": "https://buildkite.example/builds/122",
         }
         buildkite = FakeBuildkite(
-            [[], [source_build]],
+            [[], [], [source_build]],
             [
                 [
                     {
@@ -952,7 +1446,16 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(buildkite.job_list_calls, [122])
         self.assertEqual(len(buildkite.created_builds), 1)
         payload = buildkite.created_builds[0]
-        self.assertEqual(payload["commit"], "0123456789abcdef")
+        self.assertEqual(payload["commit"], "merged-head")
+        self.assertEqual(github.update_calls, [(42, "base-sha")])
+        self.assertIn(
+            "Merged upstream `main` (`base-sha`) into this PR as `merged-head`.",
+            github.comments[0],
+        )
+        self.assertIn(
+            "[Buildkite CI #123](https://buildkite.example/builds/123)",
+            github.comments[0],
+        )
         self.assertEqual(payload["message"], "PR #42 /ci retry by @author")
         self.assertEqual(
             json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
@@ -979,6 +1482,7 @@ class RunCiCommandTest(unittest.TestCase):
         )
         buildkite = FakeBuildkite(
             [
+                [],
                 [],
                 [
                     {
@@ -1008,6 +1512,7 @@ class RunCiCommandTest(unittest.TestCase):
         )
         buildkite = FakeBuildkite(
             [
+                [],
                 [],
                 [
                     {
@@ -1054,7 +1559,7 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(call["body"], {"states": RETRY_STATES})
 
     def test_ci_cancel_cancels_active_builds_for_pr_branch(self) -> None:
-        github = FakeGitHub()
+        github = FakeGitHub(behind=True)
         buildkite = FakeBuildkite(
             [
                 # Builds created under the head label (owner:branch).
@@ -1104,6 +1609,8 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_CANCEL_CI), github, buildkite)
 
         self.assertEqual(buildkite.cancel_calls, [123, 124, 126])
+        self.assertEqual(github.branch_calls, [])
+        self.assertEqual(github.update_calls, [])
         self.assertEqual(
             [request["branch"] for request in buildkite.list_requests],
             ["contributor:feature", "feature"],
@@ -1125,7 +1632,7 @@ class RunCiCommandTest(unittest.TestCase):
     def test_amd_ci_cancel_handles_command_and_fork_webhook_branches(self) -> None:
         pr = make_pr()
         pr["head"]["label"] = "contributor:feature"
-        github = FakeGitHub(pr=pr)
+        github = FakeGitHub(pr=pr, behind=True)
         buildkite = FakeBuildkite(
             [
                 [
@@ -1152,6 +1659,8 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_CANCEL_AMD_CI), github, buildkite)
 
         self.assertEqual(buildkite.cancel_calls, [322, 321])
+        self.assertEqual(github.branch_calls, [])
+        self.assertEqual(github.update_calls, [])
         self.assertEqual(
             [request["branch"] for request in buildkite.list_requests],
             ["contributor:feature", "feature"],

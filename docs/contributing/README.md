@@ -315,6 +315,45 @@ review process:
   the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
+- Every new `/ci run` or `/amd-ci run`, including `all` and `nightly`, first
+  merges the latest upstream `main` (`origin/main`) into the PR branch. This
+  works like GitHub's [**Update branch**](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/keeping-your-pull-request-in-sync-with-the-base-branch)
+  merge option and preserves existing commits and merge history. PRs must target
+  `main`; commands for other targets stop before any update or new build. If the
+  branch is already current, CI uses the same commit without creating a merge.
+- CI requires **zero commits behind** `origin/main`. The workflow checks the
+  published PR head against the latest `main` just before launching Buildkite.
+  Merge conflicts, missing push permissions, or detected changes during
+  preparation stop the new build. If `main` advances during preparation, run the
+  command again.
+- `/ci retry` also updates the PR before creating a new build for failed steps.
+  Retries of jobs in an existing build use that build's immutable commit and are
+  refused if it is behind current `main`; use `/ci run` or `/amd-ci run` to update
+  the PR and start a new build instead. Cancellation does not update the branch.
+  Direct Buildkite launches do not go through this command workflow.
+- The bot reply tells you whether it merged `main` or the PR was already current,
+  and links to the new build. If preparation fails, it explains what happened to
+  the branch and why no build was started. If a push or build request could not
+  be confirmed, the reply says so.
+
+The workflow needs permission to push to the PR branch. Its GitHub token can
+update branches in the same repository when repository rules allow it. For fork
+PRs, administrators must set the `CI_UPDATE_BRANCH_TOKEN` repository secret to a
+token whose identity can push to the contributor's branch. Maintainer accounts
+may use **Allow edits from maintainers** on eligible fork PRs; GitHub App
+installations need access to the fork. See GitHub's
+[fork contribution instructions](https://docs.github.com/en/pull-requests/how-tos/commit-changes/committing-changes-to-a-pull-request-branch-created-from-a-fork).
+Changes to workflow files also need workflow permissions. An explicit
+[push lease](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegtltexpectgt)
+prevents the update from overwriting commits a contributor pushes during
+preparation.
+
+Only the isolated Git process uses the update token; authorization checks and bot
+replies use the workflow token. The workflow does not execute PR code, and it
+disables inherited Git hooks and executable configuration. Follow-up GitHub
+Actions runs may need approval when using the workflow token; see
+GitHub's [workflow triggering rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow).
+The command starts Buildkite directly after checking the updated branch.
 
 ### Pull Request Limits and Escalation
 

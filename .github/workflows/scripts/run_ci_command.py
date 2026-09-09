@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import http.client
 import json
 import os
 import random
@@ -11,6 +12,8 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+from ci_update_branch import BranchUpdateError, GitBranchUpdater
 
 COMMAND_RUN_CI = "/ci run"
 COMMAND_RUN_CI_ALL = "/ci run all"
@@ -79,6 +82,10 @@ class ApiError(RuntimeError):
         self.status = status
 
 
+class CiPreparationError(RuntimeError):
+    pass
+
+
 def rate_limit_jitter() -> float:
     return random.uniform(1, 5)
 
@@ -137,6 +144,11 @@ class HttpTransport:
                     None,
                     f"API request failed: {error.reason}",
                 ) from error
+            except (OSError, http.client.HTTPException) as error:
+                raise ApiError(
+                    None,
+                    f"API request failed: {str(error) or type(error).__name__}",
+                ) from error
 
         if not response_body:
             return None
@@ -187,11 +199,14 @@ class GitHubClient:
         token: str,
         repository: str,
         transport: HttpTransport | None = None,
+        *,
+        update_token: str = "",
     ) -> None:
         if not token:
             raise RuntimeError("GH_TOKEN is not set.")
         self.owner, self.repo = repository.split("/", maxsplit=1)
         self.transport = transport or HttpTransport()
+        self.update_token = update_token or token
         self.headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -233,6 +248,45 @@ class GitHubClient:
 
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
+
+    def get_branch_sha(self, branch: str) -> str:
+        branch = urllib.parse.quote(branch, safe="")
+        response = self._request(self._repo_path(f"/git/ref/heads/{branch}"))
+        return response["object"]["sha"]
+
+    def is_ancestor(self, base_sha: str, head_sha: str) -> bool:
+        base_sha = urllib.parse.quote(base_sha, safe="")
+        head_sha = urllib.parse.quote(head_sha, safe="")
+        response = self._request(
+            self._repo_path(f"/compare/{base_sha}...{head_sha}?per_page=1")
+        )
+        return response["status"] in {"ahead", "identical"}
+
+    def merge_main_into_pr(self, pr: Mapping[str, Any], main_sha: str) -> str:
+        def verify_before_push() -> None:
+            current_pr = self.get_pr(pr["number"])
+            if (
+                current_pr["state"] != "open"
+                or current_pr["base"]["ref"] != "main"
+                or current_pr["head"]["sha"] != pr["head"]["sha"]
+                or current_pr["head"]["ref"] != pr["head"]["ref"]
+                or (current_pr["head"].get("repo") or {}).get("full_name")
+                != pr["head"]["repo"]["full_name"]
+            ):
+                raise BranchUpdateError(
+                    "The PR changed before the merge could be published."
+                )
+            if self.get_branch_sha("main") != main_sha:
+                raise BranchUpdateError(
+                    "Upstream `main` advanced before the merge could be published."
+                )
+
+        return GitBranchUpdater(self.update_token).merge_main(
+            f"{self.owner}/{self.repo}",
+            pr,
+            main_sha,
+            before_push=verify_before_push,
+        )
 
     def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
         commit = urllib.parse.quote(commit, safe="")
@@ -747,12 +801,16 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
+            "- Every new build first merges current upstream `main` into the PR; "
+            "no commits behind are allowed.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
             "the latest earlier CI build for this PR.\n"
             "- `/amd-ci retry` retries failed jobs in AMD CI for the current PR "
             "head. Use `/amd-ci run` when the current head has no AMD CI build.\n"
+            "- Existing-build retries require a commit that includes current "
+            "`main`. If it is behind, use `/ci run` or `/amd-ci run` instead.\n"
             "- `/ci cancel` cancels scheduled or running CI builds for this PR "
             "branch; `/amd-ci cancel` does the same for AMD CI only.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
@@ -794,6 +852,147 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
+def require_current_main(
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+) -> None:
+    if pr["base"]["ref"] != "main":
+        raise CiPreparationError(
+            f"The PR target branch changed. Comment `{command}` again."
+        )
+    latest_main_sha = github.get_branch_sha("main")
+    if not github.is_ancestor(latest_main_sha, pr["head"]["sha"]):
+        raise CiPreparationError(
+            "Upstream `main` advanced while preparing CI. "
+            f"Comment `{command}` again to merge its latest changes."
+        )
+
+
+def prepare_pr_for_ci(
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+) -> tuple[dict[str, Any], str]:
+    number = pr["number"]
+    original_head = pr["head"]["sha"]
+    update_message = "No merge was attempted."
+    changed_message = (
+        "The PR head, target branch, or open state changed while preparing CI. "
+        f"Comment `{command}` again."
+    )
+    try:
+        if pr["base"]["ref"] != "main":
+            raise CiPreparationError(
+                "Automatic CI preparation only merges upstream `main` and "
+                "requires a PR targeting `main`. "
+                f"This PR targets `{pr['base']['ref']}`."
+            )
+        current_pr = github.get_pr(number)
+        if (
+            current_pr["state"] != "open"
+            or current_pr["head"]["sha"] != original_head
+            or current_pr["base"]["ref"] != "main"
+        ):
+            raise CiPreparationError(changed_message)
+
+        main_sha = github.get_branch_sha("main")
+        update_message = "No merge was published."
+        try:
+            updated_sha = github.merge_main_into_pr(current_pr, main_sha)
+        except BranchUpdateError as error:
+            if error.publish_attempted:
+                update_message = "The PR update could not be confirmed on GitHub."
+            raise CiPreparationError(
+                f"{error} Resolve merge conflicts or missing branch-update "
+                "permissions before retrying. The workflow identity must be "
+                "allowed to push the PR branch; fork PRs may need a "
+                f"`CI_UPDATE_BRANCH_TOKEN`. Then comment `{command}` again."
+            ) from error
+
+        if updated_sha == original_head:
+            update_message = (
+                "The PR already includes upstream `main` "
+                f"(`{main_sha[:12]}`); no merge was needed."
+            )
+        else:
+            update_message = (
+                f"Merged upstream `main` (`{main_sha[:12]}`) into this PR "
+                f"as `{updated_sha[:12]}`."
+            )
+            for attempt in range(12):
+                current_pr = github.get_pr(number)
+                if current_pr["state"] != "open" or current_pr["base"]["ref"] != "main":
+                    raise CiPreparationError(changed_message)
+                head_sha = current_pr["head"]["sha"]
+                if head_sha != original_head:
+                    if head_sha != updated_sha:
+                        raise CiPreparationError(changed_message)
+                    break
+                if attempt < 11:
+                    time.sleep(5)
+            else:
+                raise CiPreparationError(
+                    "GitHub has not reported the updated PR head after the merge. "
+                    f"Comment `{command}` again."
+                )
+
+        refreshed_pr = github.get_pr(number)
+        if (
+            refreshed_pr["state"] != "open"
+            or refreshed_pr["head"]["sha"] != updated_sha
+        ):
+            raise CiPreparationError(changed_message)
+        require_current_main(github, refreshed_pr, command)
+    except (ApiError, CiPreparationError) as error:
+        raise CiPreparationError(
+            f"{update_message}\n\nNo new CI build was started. {error}"
+        ) from error
+    return refreshed_pr, update_message
+
+
+def create_build_with_update_status(
+    buildkite: BuildkiteClient,
+    payload: Mapping[str, Any],
+    update_message: str,
+    command: str,
+) -> dict[str, Any]:
+    try:
+        build = buildkite.create_build(payload)
+        if (
+            not isinstance(build, dict)
+            or build.get("number") is None
+            or not build.get("web_url")
+        ):
+            raise ApiError(None, "Buildkite API returned an invalid build response.")
+        return build
+    except RuntimeError as error:
+        ci_name = ci_name_for_command(command)
+        raise CiPreparationError(
+            f"{update_message}\n\nBuildkite did not confirm that a new {ci_name} "
+            "build was started. Check Buildkite before retrying. "
+            f"Buildkite reported: {error}"
+        ) from error
+
+
+def find_command_build(
+    buildkite: BuildkiteClient,
+    comment_id: int,
+    pr_number: int,
+) -> dict[str, Any] | None:
+    try:
+        builds = buildkite.list_builds(
+            None,
+            metadata=("github-comment-id", str(comment_id)),
+        )
+    except RuntimeError as error:
+        raise CiPreparationError(
+            "No merge was attempted.\n\nNo new CI build was started. "
+            f"Could not check existing Buildkite builds: {error}"
+        ) from error
+    return select_latest_build(builds, pr_number)
+
+
 def handle_run_ci(
     *,
     actor: str,
@@ -804,46 +1003,59 @@ def handle_run_ci(
     pr: Mapping[str, Any],
 ) -> str:
     ci_name = ci_name_for_command(command)
-    duplicate_builds = buildkite.list_builds(
-        pr["head"]["sha"],
-        metadata=("github-comment-id", str(comment_id)),
-    )
-    duplicate = select_latest_build(duplicate_builds, pr["number"])
+    duplicate = find_command_build(buildkite, comment_id, pr["number"])
     if duplicate:
         return (
             f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
+            "\n\nNo merge was attempted. No new CI build was started."
         )
 
-    current_builds = buildkite.list_builds(pr["head"]["sha"])
-    active_build = next(
-        (
-            build
-            for build in current_builds
-            if is_build_for_pr(build, pr["number"]) and blocks_new_run(command, build)
-        ),
-        None,
-    )
-    if active_build:
-        return (
-            f"{ci_name} is already running for this commit: {active_build['web_url']}"
+    pr, update_message = prepare_pr_for_ci(github, pr, command)
+    try:
+        current_builds = buildkite.list_builds(pr["head"]["sha"])
+        active_build = next(
+            (
+                build
+                for build in current_builds
+                if is_build_for_pr(build, pr["number"])
+                and blocks_new_run(command, build)
+            ),
+            None,
         )
+        if active_build:
+            return (
+                f"{update_message}\n\n{ci_name} is already running for this commit: "
+                f"{active_build['web_url']}\n\nNo new CI build was started."
+            )
 
-    current_pr = github.get_pr(pr["number"])
-    if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
-        return (
-            "The PR head changed while processing the command. "
-            f"Comment `{command}` again."
-        )
+        current_pr = github.get_pr(pr["number"])
+        if (
+            current_pr["state"] != "open"
+            or current_pr["head"]["sha"] != pr["head"]["sha"]
+        ):
+            raise CiPreparationError(
+                "The PR head or open state changed while processing the command. "
+                f"Comment `{command}` again."
+            )
+        require_current_main(github, current_pr, command)
+    except (ApiError, CiPreparationError) as error:
+        raise CiPreparationError(
+            f"{update_message}\n\nNo new CI build was started. {error}"
+        ) from error
 
-    build = buildkite.create_build(
+    build = create_build_with_update_status(
+        buildkite,
         create_build_payload(
             actor=actor,
             comment_id=comment_id,
             command=command,
             pr=current_pr,
-        )
+        ),
+        update_message,
+        command,
     )
     return (
+        f"{update_message}\n\n"
         f"Triggered [Buildkite {ci_name} #{build['number']}]({build['web_url']}) "
         f"for commit `{current_pr['head']['sha'][:12]}`."
     )
@@ -861,6 +1073,12 @@ def handle_retry_failed(
     ci_name = ci_name_for_command(command)
     run_command = run_command_for_command(command)
     retry_command = retry_command_for_command(command)
+    duplicate = find_command_build(buildkite, comment_id, pr["number"])
+    if duplicate:
+        return (
+            f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
+            "\n\nNo merge was attempted. No new CI build was started."
+        )
     builds = buildkite.list_builds(pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
     if build:
@@ -868,22 +1086,50 @@ def handle_retry_failed(
         if str(metadata.get("github-comment-id")) == str(comment_id):
             return (
                 f"{ci_name} was already requested by this comment: {build['web_url']}"
+                "\n\nNo merge was attempted. No new CI build was started."
             )
+
+        try:
+            current_pr = github.get_pr(pr["number"])
+            if (
+                current_pr["state"] != "open"
+                or current_pr["head"]["sha"] != pr["head"]["sha"]
+                or current_pr["base"]["ref"] != "main"
+            ):
+                raise CiPreparationError(
+                    "The PR changed before retrying CI or targets another branch. "
+                    f"Use `{run_command}` for a PR targeting `main`."
+                )
+            latest_main_sha = github.get_branch_sha("main")
+            if not github.is_ancestor(latest_main_sha, current_pr["head"]["sha"]):
+                raise CiPreparationError(
+                    "This build's commit is behind upstream `main`. "
+                    f"Use `{run_command}` to update the PR and start a new build; "
+                    "existing jobs cannot switch commits."
+                )
+        except (ApiError, CiPreparationError) as error:
+            raise CiPreparationError(
+                "No merge was attempted. No jobs were retried and no new CI "
+                f"build was started. {error}"
+            ) from error
 
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
             return (
                 "No failed, timed-out, or expired jobs need retrying: "
                 f"{build['web_url']}"
+                "\n\nNo merge was attempted. No new CI build was started."
             )
         return (
             f"Queued {retried['retried_jobs_count']} failed job(s) for retry in "
-            f"[Buildkite {ci_name} #{build['number']}]({build['web_url']})."
+            f"[Buildkite {ci_name} #{build['number']}]({build['web_url']}).\n\n"
+            "No merge was attempted. Retried jobs use the existing build's commit."
         )
 
+    no_build_message = "No merge was attempted. No new CI build was started.\n\n"
     if command == COMMAND_RETRY_AMD_FAILED:
         return (
-            "No AMD CI build exists for the current PR head. "
+            f"{no_build_message}No AMD CI build exists for the current PR head. "
             f"Use `{run_command}` first."
         )
 
@@ -899,11 +1145,13 @@ def handle_retry_failed(
     source_build = select_latest_build(previous_builds, pr["number"])
     if not source_build:
         return (
-            f"No earlier {ci_name} build exists for this PR. Use `{run_command}` first."
+            f"{no_build_message}No earlier {ci_name} build exists for this PR. "
+            f"Use `{run_command}` first."
         )
     if not source_build.get("finished_at") or is_active_build(source_build):
         return (
-            f"The previous {ci_name} build is still running: {source_build['web_url']}"
+            f"{no_build_message}The previous {ci_name} build is still running: "
+            f"{source_build['web_url']}"
         )
 
     failed_jobs = buildkite.list_failed_jobs(source_build["number"])
@@ -911,7 +1159,7 @@ def handle_retry_failed(
     missing_step_keys = [job for job in failed_script_jobs if not job.get("step_key")]
     if missing_step_keys:
         return (
-            f"[Buildkite {ci_name} #{source_build['number']}]"
+            f"{no_build_message}[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']}) has failed jobs without stable step "
             "keys, so they cannot be retried on a new commit. "
             f"Use `{run_command}`."
@@ -925,7 +1173,7 @@ def handle_retry_failed(
     )
     if setup_failures:
         return (
-            f"[Buildkite {ci_name} #{source_build['number']}]"
+            f"{no_build_message}[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']}) failed during CI setup, so its test "
             f"failure set is incomplete. Use `{run_command}` for the new commit."
         )
@@ -933,19 +1181,15 @@ def handle_retry_failed(
     step_keys = sorted(failed_step_keys)
     if not step_keys:
         return (
-            "No failed, timed-out, or expired jobs need retrying in "
+            f"{no_build_message}No failed, timed-out, or expired jobs need retrying in "
             f"[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']})."
         )
 
-    current_pr = github.get_pr(pr["number"])
-    if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
-        return (
-            "The PR head changed while processing the command. "
-            f"Comment `{retry_command}` again."
-        )
+    current_pr, update_message = prepare_pr_for_ci(github, pr, retry_command)
 
-    retry_build = buildkite.create_build(
+    retry_build = create_build_with_update_status(
+        buildkite,
         create_retry_build_payload(
             actor=actor,
             comment_id=comment_id,
@@ -953,9 +1197,12 @@ def handle_retry_failed(
             pr=current_pr,
             source_build=source_build,
             step_keys=step_keys,
-        )
+        ),
+        update_message,
+        command,
     )
     return (
+        f"{update_message}\n\n"
         f"Triggered [Buildkite {ci_name} #{retry_build['number']}]"
         f"({retry_build['web_url']}) for commit "
         f"`{current_pr['head']['sha'][:12]}`, running {len(step_keys)} failed "
@@ -1099,6 +1346,12 @@ def run(
             raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
         github.add_comment(issue_number, f"✅ {message}")
+    except CiPreparationError as error:
+        add_reaction_safely(github, comment_id, "-1")
+        github.add_comment(
+            issue_number,
+            f"❌ {error}\n\n{command_comment_marker(comment_id)}",
+        )
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise
@@ -1112,6 +1365,7 @@ def main() -> None:
     github = GitHubClient(
         os.environ.get("GH_TOKEN", ""),
         os.environ["GITHUB_REPOSITORY"],
+        update_token=os.environ.get("CI_UPDATE_BRANCH_TOKEN", ""),
     )
     event_name = os.environ.get("GITHUB_EVENT_NAME", "issue_comment")
     if event_name == "pull_request_target":

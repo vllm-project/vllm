@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   pull-requests: write
 
@@ -47,4 +47,5 @@ jobs:
           BUILDKITE_ORGANIZATION: vllm
           BUILDKITE_PIPELINE: ci
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+          CI_UPDATE_BRANCH_TOKEN: ${{ secrets.CI_UPDATE_BRANCH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
