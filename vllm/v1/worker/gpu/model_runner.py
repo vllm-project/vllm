@@ -996,8 +996,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
-                                self.cudagraph_manager.captured_token_counts(),
-                                self.max_num_reqs * self.decode_query_len,
+                                self.cudagraph_manager.captured_token_counts()
                             ):
                                 self._dummy_run(**batch)
                         self.adaptive_verification.set_initial_cost_curves(timings)
