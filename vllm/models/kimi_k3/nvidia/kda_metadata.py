@@ -11,7 +11,7 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -277,6 +277,32 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
         default=None, repr=False, compare=False
     )
     checkpoint: KDACheckpointMetadata | None = None
+
+    def snapshot_for_deferred_commit(self) -> "KimiK3KDAMetadata":
+        commit = self.recoverssm_commit
+        if commit is None:
+            return replace(self)
+        align = commit.align
+        if align is not None:
+            align = replace(
+                align,
+                block_table=align.block_table.clone(),
+                num_computed_tokens=align.num_computed_tokens.clone(),
+            )
+        return replace(
+            self,
+            recoverssm_commit=replace(
+                commit,
+                state_indices=commit.state_indices.clone(),
+                query_start_loc=commit.query_start_loc.clone(),
+                request_indices=(
+                    commit.request_indices.clone()
+                    if commit.request_indices is not None
+                    else None
+                ),
+                align=align,
+            ),
+        )
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor

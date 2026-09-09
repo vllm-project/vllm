@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -336,6 +337,9 @@ class MambaHybridModelState(DefaultModelState):
                 for_capture=for_capture,
             )
         return attn_metadata
+
+    def defer_postprocess_state(self) -> Callable[[], None] | None:
+        return self.recoverssm.defer_step() if self.recoverssm is not None else None
 
     def postprocess_state(
         self,

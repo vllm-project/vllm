@@ -3,6 +3,7 @@
 """Pipeline Parallelism utils for V2 Model Runner."""
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +33,7 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+    restore_model_state: Callable[[], None] | None = None
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -141,6 +143,8 @@ class PPHandler:
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         self.main_stream.wait_event(slot.event)
+        if slot.restore_model_state is not None:
+            slot.restore_model_state()
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
@@ -175,7 +179,11 @@ class PPHandler:
             )
             send.record_stream(self.broadcast_stream)
 
-    def receive(self, input_batch: InputBatch) -> bool:
+    def receive(
+        self,
+        input_batch: InputBatch,
+        restore_model_state: Callable[[], None] | None = None,
+    ) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
         requests in the batch."""
         assert not self.is_last_rank
@@ -230,6 +238,7 @@ class PPHandler:
             need_sampled_mask,
             gen_at_receive_np,
             draft_tokens,
+            restore_model_state,
         )
         return bool(need_sampled_mask.all())
 
