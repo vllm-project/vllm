@@ -78,6 +78,8 @@ def test_lora_load_metrics_track_adapter_changes():
         ("adapter-3", "gpu", "false"): 1.0,
     }
     assert _gauge(llm, "vllm:num_gpu_loaded_lora_adapters") == 2
+    assert _gauge(llm, "vllm:max_gpu_lora_adapters") == 2
+    assert _gauge(llm, "vllm:max_cpu_lora_adapters") == 3
     assert _gauge(llm, "vllm:num_cpu_loaded_lora_adapters") == 3
 
     llm.pin_lora(1)

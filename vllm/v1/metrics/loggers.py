@@ -1124,6 +1124,28 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 gauge_lora_cpu_adapters, per_engine_labelvalues
             )
 
+            gauge_lora_gpu_slots = self._gauge_cls(
+                name="vllm:max_gpu_lora_adapters",
+                documentation="Number of GPU LoRA slots (max_loras).",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            for gauge in create_metric_per_engine(
+                gauge_lora_gpu_slots, per_engine_labelvalues
+            ).values():
+                gauge.set(vllm_config.lora_config.max_loras)
+
+            gauge_lora_cpu_slots = self._gauge_cls(
+                name="vllm:max_cpu_lora_adapters",
+                documentation="Number of CPU cache LoRA slots (max_cpu_loras).",
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            for gauge in create_metric_per_engine(
+                gauge_lora_cpu_slots, per_engine_labelvalues
+            ).values():
+                gauge.set(vllm_config.lora_config.max_cpu_loras)
+
             self.gauge_lora_adapter_loaded = self._gauge_cls(
                 name="vllm:lora_adapter_loaded",
                 documentation=(

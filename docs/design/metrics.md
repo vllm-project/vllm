@@ -404,6 +404,11 @@ idle engine with statically configured adapters:
   removed when it is evicted.
 - `vllm:num_gpu_loaded_lora_adapters` and
   `vllm:num_cpu_loaded_lora_adapters`: counts per tier.
+- `vllm:max_gpu_lora_adapters` and `vllm:max_cpu_lora_adapters`: the
+  slot capacity per tier (`max_loras`, `max_cpu_loras`), set at startup
+  so a router can compare occupancy against capacity before the first
+  request; the `max_lora` label on the deprecated gauge above only
+  appears once an adapter has served.
 
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.
