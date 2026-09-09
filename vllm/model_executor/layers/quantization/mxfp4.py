@@ -771,9 +771,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w2_bias", w2_bias)
 
         # Build quant config
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self._build_moe_kernel(layer)
 
-        # Build kernel (modular or monolithic)
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the modular MoE kernel from the (already in-format) weights."""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -789,7 +791,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         if is_weights_pre_processed():
-            self._setup_kernel_from_pre_processed(layer)
+            # The IPC loader imports tensors that already went through a full
+            # process_weights_after_loading (weights permuted, scales
+            # interleaved into the TRTLLM kernel layout); only the non-tensor
+            # kernel objects are rebuilt. Verified with TRTLLM only.
+            if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+                raise RuntimeError(
+                    "weight cache IPC for MXFP4 MoE is only verified with the "
+                    f"FLASHINFER_TRTLLM_MXFP4_MXFP8 backend, got {self.mxfp4_backend}"
+                )
+            self._build_moe_kernel(layer)
             return
 
         w13 = layer.w13_weight
@@ -800,30 +811,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
-
-    def _setup_kernel_from_pre_processed(self, layer: RoutedExperts) -> None:
-        """Rebuild kernel state when weights arrive already post-processed.
-
-        The weight cache IPC loader imports tensors that already went through a
-        full ``process_weights_after_loading`` (weights permuted, scales
-        interleaved into the TRTLLM kernel layout). Only the non-tensor kernel
-        objects are rebuilt here; the weights are reused as-is.
-        """
-        if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
-            raise RuntimeError(
-                "weight cache IPC for MXFP4 MoE is only verified with the "
-                f"FLASHINFER_TRTLLM_MXFP4_MXFP8 backend, got {self.mxfp4_backend}"
-            )
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
-            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self,

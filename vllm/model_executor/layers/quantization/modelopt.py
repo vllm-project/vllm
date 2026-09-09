@@ -105,7 +105,7 @@ from vllm.model_executor.utils import (
     replace_parameter,
     set_weight_attrs,
 )
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -971,7 +971,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
         if is_weights_pre_processed():
-            self._setup_kernel_from_pre_processed(layer)
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                raise RuntimeError(
+                    "weight cache IPC for NVFP4 MoE is only verified with the "
+                    f"FLASHINFER_TRTLLM backend, got {self.nvfp4_backend}"
+                )
+            self._restore_padded_moe_dims(layer)
+            self._build_moe_kernel(layer)
             return
 
         # Use a single gscale for w13.
@@ -1017,7 +1023,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        # Setup modular kernel.
+        self._build_moe_kernel(layer)
+
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the modular MoE kernel from the (already in-format) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
@@ -1029,49 +1038,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def _setup_kernel_from_pre_processed(self, layer: RoutedExperts) -> None:
-        """Rebuild kernel state when weights arrive already post-processed.
+    def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
+        """Recover the padded ``moe_config`` dims from the exported weights.
 
-        The weight cache IPC loader imports tensors that already went through a
-        full ``process_weights_after_loading`` (block scales shuffled/padded,
-        ``w13_weight_scale_2`` collapsed to a single column). Only the
-        non-tensor state that tensor export cannot carry is rebuilt here: the
-        padded ``moe_config`` dims and the modular kernel objects.
-        """
-        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            raise RuntimeError(
-                "weight cache IPC for NVFP4 MoE is only verified with the "
-                f"FLASHINFER_TRTLLM backend, got {self.nvfp4_backend}"
-            )
-        self._restore_trtllm_moe_config_padding(layer)
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.experts_cls is not None
-        self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            backend=self.nvfp4_backend,
-            routing_tables=layer._expert_routing_tables(),
-        )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
-
-    def _restore_trtllm_moe_config_padding(self, layer: RoutedExperts) -> None:
-        """Reapply the padded dims align_*_for_fi stamps on ``moe_config``.
-
-        Mirrors align_trtllm_fp4_moe_hidden_dim_for_fi (hidden -> 256) and
-        align_fp4_moe_weights_for_fi (local intermediate -> 64 gated / 128) so
-        the kernel sees the same shapes it did on the exporting side.
+        The weight cache IPC loader imports tensors that already went through
+        ``process_weights_after_loading`` on the daemon (padded for the TRTLLM
+        kernel, then row-shuffled without shape change), so the padded dims are
+        read off the tensor shapes directly rather than re-derived from the
+        kernel's alignment constants.
         """
         mc = layer.moe_config
-        padded_hidden = round_up(mc.hidden_dim, 256)
+        padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
             if mc.hidden_dim_unpadded is None:
                 mc.hidden_dim_unpadded = mc.hidden_dim
             mc.hidden_dim = padded_hidden
-        min_alignment = 64 if layer.activation.is_gated else 128
-        mc.intermediate_size_per_partition = round_up(
-            mc.intermediate_size_per_partition, min_alignment
-        )
+        mc.intermediate_size_per_partition = layer.w2_weight.shape[2] * 2
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
