@@ -1223,14 +1223,36 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
+def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -> None:
+    from flashinfer import fp4_quantize
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    monkeypatch.setenv("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "0")
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[1, -1, -1] = 20.75
 
     quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
-    global_encode_scale = 1.0 / global_decode_scale
+    amax = weight.float().abs().amax((1, 2))
+    if e4m3_max is None:
+        global_encode_scale = (6.0 * 448) / amax
+        expected_decode_scale = global_encode_scale.reciprocal()
+    else:
+        global_encode_scale = torch.div(6.0 * e4m3_max, amax)
+        expected_decode_scale = torch.div(1.0, global_encode_scale)
+    torch.testing.assert_close(
+        global_decode_scale, expected_decode_scale, rtol=0, atol=0
+    )
+    quantize = scaled_fp4_quant if e4m3_max is None else fp4_quantize
     expected = [
-        scaled_fp4_quant(
+        quantize(
             expert_weight,
             expert_scale,
             is_sf_swizzled_layout=False,
@@ -1247,8 +1269,8 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
         torch.stack([expert_weight for expert_weight, _ in expected]),
     )
     assert torch.equal(
-        block_scale,
-        torch.stack([expert_scale for _, expert_scale in expected]),
+        block_scale.view(torch.uint8),
+        torch.stack([expert_scale for _, expert_scale in expected]).view(torch.uint8),
     )
 
 
