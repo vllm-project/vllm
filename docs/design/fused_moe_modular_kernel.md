@@ -183,10 +183,10 @@ FusedMoEExpertsModular performs the core of the fused MoE operations. The variou
 
 #### maybe_make_prepare_finalize
 
-The `maybe_make_prepare_finalize` method is responsible for constructing an instance of `FusedMoEPrepareAndFinalizeModular` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalizeModular` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptNvFp4FusedMoE` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
+The `maybe_make_prepare_finalize` method is responsible for constructing an instance of `FusedMoEPrepareAndFinalizeModular` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalizeModular` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptMoEMethod` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
 Please refer to the implementations in,
 
-* `ModelOptNvFp4FusedMoE`
+* `ModelOptMoEMethod`
 
 #### select_gemm_impl
 
@@ -197,7 +197,7 @@ Please refer to the implementations in,
 * `CompressedTensorsW8A8Fp8MoEMethod`
 * `CompressedTensorsW8A8Fp8MoECutlassMethod`
 * `Fp8MoEMethod`
-* `ModelOptNvFp4FusedMoE`
+* `ModelOptMoEMethod`
 derived classes.
 
 #### init_prepare_finalize
