@@ -128,7 +128,7 @@ API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 ```
 
 Once you see a `Serving on http://<address>:<port>/` line in the logs, the live preview is ready!
-Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whatever host/port you passed to `-a`.
+Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whichever host/port you passed to `-a`.
 
 For additional features and advanced configurations, refer to the:
 
