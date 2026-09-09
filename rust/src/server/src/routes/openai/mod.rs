@@ -9,5 +9,8 @@ pub(crate) mod utils;
 pub use chat_completions::chat_completions;
 pub(crate) use chat_completions::{ChatCompletionRequest, lower_chat_request};
 pub use completions::completions;
-pub(crate) use completions::{CompletionRequest, lower_completion_request};
+pub(crate) use completions::{
+    CompletionChoice, CompletionRequest, CompletionResponse, CompletionStreamChoice,
+    CompletionStreamResponse, completion_echo_text, lower_completion_request,
+};
 pub use models::list_models;

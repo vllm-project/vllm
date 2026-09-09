@@ -176,7 +176,9 @@ pub(super) fn prepare_completion_request(
     })
 }
 
-fn completion_echo_text(
+/// Prompt text echoed back northbound when `echo=true`, mirroring the Python
+/// completions path. Shared with the derender endpoint.
+pub(crate) fn completion_echo_text(
     request: &CompletionRequest,
     tokenizer: &dyn Tokenizer,
 ) -> Result<Option<String>, ApiError> {
