@@ -11,19 +11,39 @@ Thread pool:
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.base import JobId
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class Task:
+    key: OffloadKey
+    path: str
+    offset: int
+
+
+@dataclass
+class PoolJobResult:
+    """Outcome of a job whose tasks have all completed."""
+
+    job_id: JobId
+    success: bool
+    transfer_time: float
+    failed_tasks: list[Task]
 
 
 class JobState:
     """
     Thread-safe completion tracker for a set of per-block I/O tasks.
 
-    Each task calls task_done(success) when it finishes.
+    Each task calls task_done(keys, num_succeeded, success, transfer_time)
+    when it finishes.
     """
 
     __slots__ = (
@@ -32,6 +52,7 @@ class JobState:
         "_completed",
         "_success",
         "_transfer_time",
+        "_failed_tasks",
         "_lock",
     )
 
@@ -41,6 +62,7 @@ class JobState:
         self._completed = 0
         self._success = True
         self._transfer_time = 0.0
+        self._failed_tasks: list[Task] = []
         self._lock = threading.Lock()
 
     @property
@@ -48,15 +70,30 @@ class JobState:
         return self._job_id
 
     def task_done(
-        self, success: bool, transfer_time: float
-    ) -> tuple[bool, bool, float]:
-        """Returns if job completed and success flag"""
+        self,
+        batch: list[Task],
+        num_succeeded: int,
+        success: bool,
+        transfer_time: float,
+    ) -> PoolJobResult | None:
+        """
+        Records this task's outcome; returns the job's PoolJobResult once
+        every task has reported in, else None.
+        """
         with self._lock:
-            self._completed += 1
+            self._completed += len(batch)
             self._transfer_time += transfer_time
             if not success:
                 self._success = False
-            return self._completed == self._n_tasks, self._success, self._transfer_time
+                self._failed_tasks.extend(batch[num_succeeded:])
+            if self._completed != self._n_tasks:
+                return None
+            return PoolJobResult(
+                job_id=self._job_id,
+                success=self._success,
+                transfer_time=self._transfer_time,
+                failed_tasks=self._failed_tasks,
+            )
 
 
 class DualQueueThreadPool:
@@ -79,7 +116,7 @@ class DualQueueThreadPool:
         self._condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
-        self._finished_q: deque[tuple[JobId, bool, float]] = deque()
+        self._finished_q: deque[PoolJobResult] = deque()
         self._inflight_jobs = 0  # guarded by _condition
 
         for i in range(n_read_threads):
@@ -102,35 +139,87 @@ class DualQueueThreadPool:
             t.start()
             self._threads.append(t)
 
+    def _batch_tasks(
+        self,
+        tasks: list[Task],
+        n_threads: int,
+    ) -> Iterator[list[Task]]:
+        """
+        Batch tasks so that the request's tasks are split evenly across the
+        n_threads.
+        """
+        assert n_threads > 0
+
+        n_tasks = len(tasks)
+        q, r = divmod(n_tasks, n_threads)
+        batch_sizes = [q + 1 if i < r else q for i in range(n_threads)]
+        assert sum(batch_sizes) == n_tasks
+        start = 0
+        for bs in batch_sizes[: min(n_tasks, n_threads)]:
+            yield tasks[start : start + bs]
+            start += bs
+
+    def _enqueue(
+        self,
+        queue: deque,
+        make_io_fn: Callable[[list[Task]], Callable[[], None]],
+        job_id: JobId,
+        tasks: Iterable[Task],
+        n_tasks: int,
+        n_threads: int,
+    ) -> None:
+        """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
+        if n_tasks == 0:
+            self._finished_q.append(PoolJobResult(job_id, True, 0.0, []))
+            return
+        state = JobState(job_id, n_tasks)
+        task_lst = list(tasks)  # Materialize tasks out of self._condition
+        assert len(task_lst) == n_tasks, "Unaccounted tasks"
+        n_batches = 0
+        with self._condition:
+            self._inflight_jobs += 1
+            for batch in self._batch_tasks(task_lst, n_threads):
+                queue.append((make_io_fn(batch), batch, state))
+                n_batches += 1
+            self._condition.notify(n_batches)
+
     def enqueue_load(
         self,
         job_id: JobId,
         n_tasks: int,
-        tasks: Iterable[Callable],
+        tasks: Iterable[Task],
+        make_io_fn: Callable[[list[Task]], Callable[[], None]],
     ) -> None:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        with self._condition:
-            self._inflight_jobs += 1
-            for fn in tasks:
-                self._load_q.append((fn, state))
-            self._condition.notify(n_tasks)
+
+        self._enqueue(
+            self._load_q,
+            make_io_fn,
+            job_id,
+            tasks,
+            n_tasks=n_tasks,
+            n_threads=1,
+        )
 
     def enqueue_store(
         self,
         job_id: JobId,
         n_tasks: int,
-        tasks: Iterable[Callable],
+        tasks: Iterable[Task],
+        make_io_fn: Callable[[list[Task]], Callable[[], None]],
     ) -> None:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        with self._condition:
-            self._inflight_jobs += 1
-            for fn in tasks:
-                self._store_q.append((fn, state))
-            self._condition.notify(n_tasks)
 
-    def get_finished(self) -> list[tuple[JobId, bool, float]]:
+        self._enqueue(
+            self._store_q,
+            make_io_fn,
+            job_id,
+            tasks,
+            n_tasks=n_tasks,
+            n_threads=1,
+        )
+
+    def get_finished(self) -> list[PoolJobResult]:
         # No lock needed: deque is thread-safe for concurrent append/popleft,
         # and the manager is the sole popper.
         jobs = []
@@ -173,12 +262,12 @@ class DualQueueThreadPool:
                     return
                 primary = self._load_q if load_priority else self._store_q
                 secondary = self._store_q if load_priority else self._load_q
-                task, state = primary.popleft() if primary else secondary.popleft()
+                fn, batch, state = primary.popleft() if primary else secondary.popleft()
             try:
                 start_time = time.monotonic()
-                task()
+                fn()
                 transfer_time = time.monotonic() - start_time
-                job_finished, success, total_time = state.task_done(True, transfer_time)
+                result = state.task_done(batch, len(batch), True, transfer_time)
             except Exception as exc:
                 transfer_time = time.monotonic() - start_time
                 logger.error(
@@ -186,12 +275,14 @@ class DualQueueThreadPool:
                     state.job_id,
                     exc,
                 )
-                job_finished, success, total_time = state.task_done(
-                    False, transfer_time
-                )
+                # num_succeeded is only set on a partial failure (see
+                # io.batch_load_block); other exceptions leave none of this
+                # task's keys credited as successful.
+                num_succeeded = getattr(exc, "num_succeeded", 0)
+                result = state.task_done(batch, num_succeeded, False, transfer_time)
 
-            if job_finished:
+            if result is not None:
                 with self._condition:
-                    self._finished_q.append((state.job_id, success, total_time))
+                    self._finished_q.append(result)
                     self._inflight_jobs -= 1
                     self._condition.notify_all()
