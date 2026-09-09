@@ -357,6 +357,45 @@ def test_block_mask_direct_vs_slow_path():
     )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    reason="CUDA not available or PyTorch version < 2.9",
+)
+def test_rejects_kv_cache_too_large_for_int32_paged_offsets():
+    """Regression test for https://github.com/vllm-project/vllm/issues/50427.
+
+    The flex-attention kernel gathers paged K/V with int32 element offsets, so a
+    KV cache holding 2**31 or more elements wraps to a negative offset and reads
+    outside the cache. Metadata building must reject such a cache instead of
+    letting the kernel crash or return silently wrong attention output.
+    """
+    device = torch.device("cuda")
+    batch_spec = BatchSpec(seq_lens=[64], query_lens=[64], name="test_int32_offsets")
+
+    def build(num_gpu_blocks: int):
+        vllm_config = create_vllm_config(
+            model_name="facebook/opt-125m",
+            block_size=16,
+            num_gpu_blocks=num_gpu_blocks,
+            max_num_seqs=8,
+        )
+        kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, vllm_config.cache_config.block_size, device
+        )
+        builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
+        builder.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata)
+
+    spec = create_standard_kv_cache_spec(
+        create_vllm_config(model_name="facebook/opt-125m", block_size=16)
+    )
+    max_blocks = 2**31 // (16 * 2 * spec.num_kv_heads * spec.head_size)
+
+    build(max_blocks)
+    with pytest.raises(ValueError, match="overflow int32"):
+        build(max_blocks + 1)
+
+
 def test_physical_to_logical_mapping_handles_reused_blocks():
     """Regression test: reused physical blocks map to the latest logical block.
 
