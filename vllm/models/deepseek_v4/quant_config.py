@@ -14,16 +14,12 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4Config,
-    )
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 
 
 class DeepseekV4FP8Config(Fp8Config):
@@ -181,12 +177,14 @@ class DeepseekV4FP8Config(Fp8Config):
             if self.expert_dtype == "fp4":
                 if self.moe_quant_algo == "NVFP4":
                     from vllm.model_executor.layers.quantization.modelopt import (
-                        ModelOptNvFp4FusedMoE,
+                        build_moe_method,
                     )
 
-                    return ModelOptNvFp4FusedMoE(
-                        quant_config=self._get_nvfp4_config(),
-                        moe_config=layer.moe_config,
+                    return build_moe_method(
+                        self._get_nvfp4_config(),
+                        "NVFP4",
+                        prefix,
+                        layer.moe_config,
                     )
                 return Mxfp4MoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which

@@ -728,7 +728,7 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
 def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     quant_method, expected_use_a16, act_key_is_none
 ):
-    """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
+    """``ModelOptMoEMethod``: when the ckpt's ``quant_method`` is
     ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
     ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
     (their ``_supports_quant_scheme`` requires
@@ -737,8 +737,9 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     ckpt silently went to the cutlass W4A4 path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptMoEMethod,
         ModelOptNvFp4Config,
-        ModelOptNvFp4FusedMoE,
+        resolve,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kNvfp4Dynamic,
@@ -765,7 +766,10 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
             return_value=False,
         ),
     ):
-        moe = ModelOptNvFp4FusedMoE(config, MagicMock())
+        spec, ctx, format_scheme = resolve(quant_method, config, "")
+        moe = ModelOptMoEMethod(
+            spec, ctx, MagicMock(), quant_config=config, format_scheme=format_scheme
+        )
 
     assert moe.use_a16 is expected_use_a16
     _, kwargs = mock_select.call_args
