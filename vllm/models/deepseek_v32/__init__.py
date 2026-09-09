@@ -21,11 +21,8 @@ if current_platform.is_cuda():
     from .nvidia.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
     from .nvidia.mtp import DeepseekV32MTP
 elif current_platform.is_rocm():
-    # GLM-5.2 stays on the generic class so the registry default keeps the
-    # legacy path; the AMD DSA module is opted into via --model-class-overrides.
-    from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
-
     from .amd.model import DeepseekV32ForCausalLM
+    from .amd.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
     from .amd.mtp import DeepseekV32MTP
 else:
     # XPU and CPU keep the generic implementation.
