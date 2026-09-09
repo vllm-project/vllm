@@ -986,12 +986,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         - Logits constraint: M * N * 4 <= max_logits_bytes
 
         When a single request-level chunk still exceeds the logits budget,
-        sub-chunks on the query dimension (M) to bound peak memory. Bounds
-        the flat-gather workspace (N) and the dense M*N logits tensor the
-        non-paged backends (CUDA/XPU) allocate. Overridden by the CPU
-        builder, whose paged indexer kernels
-        (fp8_paged_mqa_logits_cpu/topk_transform_512_cpu) allocate neither --
-        see DeepseekV4CPUIndexerMetadataBuilder.
+        sub-chunks on the query dimension (M) to bound peak memory.
         """
         chunks: list[tuple[slice, slice]] = []
         n = len(compressed_seq_lens_cpu)
