@@ -413,6 +413,16 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
+        if hasattr(self.attn_backend, "supports_inline_scales"):
+            import inspect
+
+            sig = inspect.signature(self.attn_backend.get_impl_cls().__init__)
+            if "supports_inline_scales" in sig.parameters:
+                extra_impl_args.setdefault(
+                    "supports_inline_scales",
+                    self.attn_backend.supports_inline_scales,
+                )
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,

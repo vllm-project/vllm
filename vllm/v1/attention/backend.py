@@ -69,6 +69,13 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    # Whether this backend supports / packs per-token-head KV scales inline
+    # with the key/value data (content dim = 2 * (hs + pad)).
+    # Gather-based and sparse attention backends can set this to False to opt into
+    # decoupled side-tensor scale allocation (_k_scale_cache / _v_scale_cache),
+    # preserving 128-byte memory alignment for coalesced cache loads.
+    supports_inline_scales: ClassVar[bool] = True
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
