@@ -9,7 +9,6 @@ from weakref import WeakValueDictionary
 import torch
 from torch import nn
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -373,8 +372,7 @@ class KimiMoE(nn.Module):
         self._kimi_k3_large_front_initialized = True
 
         if (
-            not envs.VLLM_ROCM_USE_MERGED_MOE_FRONT
-            or not isinstance(self.experts, ROCmLatentMoERunner)
+            not isinstance(self.experts, ROCmLatentMoERunner)
             or self.shared_experts is None
             or self.routed_expert_down_proj is None
         ):

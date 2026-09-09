@@ -212,7 +212,6 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
-    VLLM_ROCM_USE_MERGED_MOE_FRONT: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1629,11 +1628,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
-    # Use a merged MoE-front projection for explicitly tuned model shapes.
-    # Routed experts remain on the native backend.
-    "VLLM_ROCM_USE_MERGED_MOE_FRONT": lambda: bool(
-        int(os.getenv("VLLM_ROCM_USE_MERGED_MOE_FRONT", "0"))
-    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
