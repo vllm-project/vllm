@@ -3,7 +3,10 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for Cohere Command models that use explicit START/END tags.
 pub struct CohereCmdReasoningParser {
@@ -15,11 +18,12 @@ impl CohereCmdReasoningParser {
     /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
+            inner: DelimitedReasoningParserBuilder::new(
                 tokenizer,
                 "<|START_THINKING|>",
                 "<|END_THINKING|>",
-            )?,
+            )
+            .build()?,
         })
     }
 }
@@ -33,8 +37,7 @@ impl ReasoningParser for CohereCmdReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {

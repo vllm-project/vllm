@@ -3,7 +3,10 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for legacy Kimi models that use Unicode thinking tags.
 pub struct KimiReasoningParser {
@@ -14,7 +17,8 @@ impl KimiReasoningParser {
     /// Create a Kimi parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "◁think▷", "◁/think▷")?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, "◁think▷", "◁/think▷")
+                .build()?,
         })
     }
 }
@@ -28,8 +32,7 @@ impl ReasoningParser for KimiReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {

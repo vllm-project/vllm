@@ -445,10 +445,12 @@ async fn run_roundtrip_reasoning_and_content_inner(
     let result = run_roundtrip(case, backends, &request, assistant).await?;
 
     assert_eq!(
-        result.parsed_message.reasoning().as_deref().map(str::trim),
-        effective_thinking.then_some(expected_reasoning)
+        result.parsed_message.reasoning().as_deref(),
+        effective_thinking.then_some(expected_reasoning),
+        "parsed message: {:#?}",
+        result.parsed_message
     );
-    assert_eq!(result.parsed_message.text().trim(), expected_text);
+    assert_eq!(result.parsed_message.text(), expected_text);
     assert_eq!(result.parsed_message.tool_calls().count(), 0);
 
     assert_eq!(
@@ -508,10 +510,12 @@ async fn run_roundtrip_tool_call_mix(
     .await?;
 
     assert_eq!(
-        result.parsed_message.reasoning().as_deref().map(str::trim),
-        Some(expected_reasoning)
+        result.parsed_message.reasoning().as_deref(),
+        Some(expected_reasoning),
+        "parsed message: {:#?}",
+        result.parsed_message
     );
-    assert_eq!(result.parsed_message.text().trim(), expected_text);
+    assert_eq!(result.parsed_message.text(), expected_text);
 
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
     assert_eq!(
@@ -714,11 +718,7 @@ async fn parse_completion(
 
     while let Some(event) = events.next().await {
         if let ChatEvent::Done { message, .. } = event? {
-            // TODO: currently our parsers are not very strict about preserving or trimming
-            // whitespace, so we trim here to avoid roundtrip failures due to
-            // insignificant whitespace differences. However, this may hurt token-level
-            // fidelity so we should consider improving them.
-            return Ok(message.trim());
+            return Ok(message);
         }
     }
 
