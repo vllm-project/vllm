@@ -788,7 +788,7 @@ def set_replicated_pcp_schedule(input_batch: InputBatch) -> None:
     )
 
 
-def moe_run_all_reduce(cudagraph_mode: CUDAGraphMode) -> bool:
+def moe_should_all_reduce(cudagraph_mode: CUDAGraphMode) -> bool:
     """Whether the MoE should all-reduce instead of gather/reduce-scatter."""
     if cudagraph_mode == CUDAGraphMode.PIECEWISE:
         return False

@@ -793,17 +793,17 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
         ) and not self._quant_method.supports_internal_mk
 
-    def _pcp_run_all_reduce(self) -> bool:
+    def _pcp_should_all_reduce(self) -> bool:
         """Whether this step's PCP dispatch runs all-reduce."""
         if not is_forward_context_available():
             return False
-        return get_forward_context().pcp_moe_run_all_reduce
+        return get_forward_context().pcp_moe_should_all_reduce
 
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        pcp_run_all_reduce: bool,
+        pcp_should_all_reduce: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
@@ -821,7 +821,7 @@ class MoERunner(MoERunnerInterface):
         if (
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
-            and not pcp_run_all_reduce
+            and not pcp_should_all_reduce
         ):
             hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
             router_logits = get_pcp_group().all_gather(router_logits, dim=0)
@@ -832,7 +832,7 @@ class MoERunner(MoERunnerInterface):
         self,
         shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor | UnfinalizedMoEOutput,
-        pcp_run_all_reduce: bool,
+        pcp_should_all_reduce: bool,
     ) -> (
         torch.Tensor
         | UnfinalizedMoEOutput
@@ -855,7 +855,7 @@ class MoERunner(MoERunnerInterface):
         ):
             if isinstance(hidden_states, UnfinalizedMoEOutput):
                 raise RuntimeError("PCP combine cannot consume a deferred MoE output.")
-            if pcp_run_all_reduce:
+            if pcp_should_all_reduce:
                 hidden_states = get_pcp_group().all_reduce(hidden_states)
             else:
                 hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
@@ -915,11 +915,11 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            pcp_run_all_reduce = self._pcp_run_all_reduce()
+            pcp_should_all_reduce = self._pcp_should_all_reduce()
             hidden_states, router_logits = self._maybe_dispatch(
                 hidden_states,
                 router_logits,
-                pcp_run_all_reduce,
+                pcp_should_all_reduce,
             )
 
             shared_output, hidden_states = self._apply_quant_method(
@@ -933,7 +933,7 @@ class MoERunner(MoERunnerInterface):
             return self._maybe_combine(
                 shared_output,
                 hidden_states,
-                pcp_run_all_reduce,
+                pcp_should_all_reduce,
             )
 
     #########################################################

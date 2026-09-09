@@ -44,7 +44,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.pcp_manager import (
     maybe_get_pcp_dummy_block_tables,
     maybe_get_pcp_dummy_slot_mappings,
-    moe_run_all_reduce,
+    moe_should_all_reduce,
     set_replicated_pcp_schedule,
 )
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -617,7 +617,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
-                    pcp_moe_run_all_reduce=moe_run_all_reduce(cg_mode),
+                    pcp_moe_should_all_reduce=moe_should_all_reduce(cg_mode),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
