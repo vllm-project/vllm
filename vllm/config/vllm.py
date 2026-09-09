@@ -674,6 +674,16 @@ class VllmConfig:
             )
             return False
 
+        # The V2 runner stages its host->device copies through UVA buffers,
+        # which need pinned host memory; without it the worker would die at
+        # init_device with a bare "UVA is not available".
+        if not is_uva_available():
+            logger.warning_once(
+                "Model Runner V2 requires UVA (pinned host memory); using the "
+                "V1 model runner instead."
+            )
+            return False
+
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             logger.warning_once(
@@ -2551,16 +2561,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        # The V2 runner stages its host->device copies through UVA buffers,
-        # which need pinned host memory. Where the platform reports none
-        # (WSL2 keeps pinned memory opt-in), the worker would otherwise die
-        # at init_device with a bare "UVA is not available".
-        if not is_uva_available():
-            unsupported.append(
-                "platforms without UVA (pinned host memory unavailable; "
-                "on WSL2 set VLLM_WSL2_ENABLE_PIN_MEMORY=1)"
-            )
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
@@ -2789,6 +2789,9 @@ class VllmConfig:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
             raise ValueError("Model Runner V2 requires Triton.")
+
+        if not is_uva_available():
+            raise ValueError("Model Runner V2 requires UVA (pinned host memory).")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
