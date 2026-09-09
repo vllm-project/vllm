@@ -85,6 +85,16 @@ on a validation environment that differs from the user's target deployment.
 | `max-num-batched-tokens` | Each scheduler iteration must share its token budget between active decodes and incoming prefills. | Input/output token shape, concurrency, and optional QPS/TPOT | Calculate decode budget + expected prefill demand, with vLLM scheduler constraints as floors. |
 | `data-parallel-size` | The required replica count depends on the requested throughput and the capacity of one replica. | Capacity target | Keep the recipe value today because per-replica SLA capacity is not known. |
 
+For `max-num-seqs` and `max-num-batched-tokens`, the optional benchmark sweep
+also measures the initial generated values against vLLM's normal serving
+defaults. The default-reference runs leave the selected scheduler option unset
+at engine-configuration time so vLLM can resolve its platform-, world-size-,
+model-, and usage-context-aware default rather than assuming a fixed numeric
+value. See [SWEEP_TUNING.md](SWEEP_TUNING.md).
+
+This serving-default comparison is distinct from the `SchedulerConfig` fallback
+constants used inside the initial tuning heuristics below.
+
 ## How Each Runtime Parameter Is Calculated
 
 ### `tensor-parallel-size`
