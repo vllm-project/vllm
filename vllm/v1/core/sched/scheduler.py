@@ -112,6 +112,11 @@ def _validate_mamba2_batch_invariant_config(vllm_config: VllmConfig) -> None:
             "Mamba2 batch invariance does not yet support prefix caching; "
             "disable --enable-prefix-caching."
         )
+    if vllm_config.cache_config.mamba_cache_mode != "none":
+        raise ValueError(
+            "Mamba2 batch invariance currently requires "
+            "mamba_cache_mode='none'; set --mamba-cache-mode none."
+        )
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is not None and kv_transfer_config.kv_connector is not None:
         raise ValueError(
@@ -2650,6 +2655,10 @@ class Scheduler(SchedulerInterface):
         return self.kv_cache_manager.usage
 
     def add_request(self, request: Request) -> None:
+        if self.need_mamba_chunk_invariant_split and request.resumable:
+            raise ValueError(
+                "Mamba2 batch invariance does not yet support streaming-input sessions."
+            )
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)

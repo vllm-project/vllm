@@ -61,6 +61,7 @@ def _mamba_vllm_config(
     backend: MambaBackendEnum = MambaBackendEnum.TRITON,
     stochastic_rounding: bool = False,
     use_replayssm: bool = False,
+    mamba_cache_mode: str = "none",
     enable_prefix_caching: bool = False,
     speculative_decoding: bool = False,
     multimodal: bool = False,
@@ -73,6 +74,7 @@ def _mamba_vllm_config(
         ),
         cache_config=SimpleNamespace(
             use_replayssm=use_replayssm,
+            mamba_cache_mode=mamba_cache_mode,
             enable_prefix_caching=enable_prefix_caching,
         ),
         speculative_config=(SimpleNamespace() if speculative_decoding else None),
@@ -101,6 +103,14 @@ def test_default_triton_configuration_is_allowed() -> None:
         (
             _mamba_vllm_config(use_replayssm=True),
             "not been validated with ReplaySSM",
+        ),
+        (
+            _mamba_vllm_config(mamba_cache_mode="align"),
+            "requires mamba_cache_mode='none'",
+        ),
+        (
+            _mamba_vllm_config(mamba_cache_mode="all"),
+            "requires mamba_cache_mode='none'",
         ),
         (
             _mamba_vllm_config(enable_prefix_caching=True),
@@ -263,6 +273,24 @@ def _enable_mamba_chunk_invariant_prototype(scheduler: Scheduler) -> None:
     scheduler.need_mamba_chunk_invariant_split = True
     scheduler.mamba_chunk_size = 256
     scheduler._mamba_chunk_reservation_pending = False
+
+
+def test_streaming_input_is_rejected_before_admission(tmp_path: Path) -> None:
+    scheduler = create_scheduler(
+        model=_offline_opt_model(tmp_path),
+        max_num_seqs=1,
+        max_num_batched_tokens=256,
+        max_model_len=512,
+        skip_tokenizer_init=True,
+    )
+    _enable_mamba_chunk_invariant_prototype(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    request.resumable = True
+
+    with pytest.raises(ValueError, match="does not yet support streaming-input"):
+        scheduler.add_request(request)
+
+    assert request.request_id not in scheduler.requests
 
 
 def _offline_opt_model(tmp_path: Path) -> str:

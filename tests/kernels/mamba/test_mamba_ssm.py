@@ -10,6 +10,7 @@ from tests.kernels.mamba.utils import selective_state_update_ref
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    override_ssm_config,
     selective_scan_fn,
     selective_state_update,
 )
@@ -233,51 +234,58 @@ def test_selective_state_update_round_state_each_token(cache_dtype, tie_hdim, ha
             **kwargs,
         )
 
-    reference_state = state.clone()
-    reference_out = torch.empty_like(x)
-    for seq, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
-        for token in range(start, end):
-            update(
-                reference_state,
-                reference_out[token : token + 1],
-                slice(token, token + 1),
-                indices[seq : seq + 1],
-            )
+    # Pin the launch shape so this test isolates packed replay semantics from
+    # effective-batch-dependent tuning.
+    with override_ssm_config((4, 4)):
+        reference_state = state.clone()
+        reference_out = torch.empty_like(x)
+        for seq, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+            for token in range(start, end):
+                update(
+                    reference_state,
+                    reference_out[token : token + 1],
+                    slice(token, token + 1),
+                    indices[seq : seq + 1],
+                )
 
-    # Include an unaligned split and empty sequences once shorter histories end.
-    for chunk_size in (256, 17):
-        actual_state = state.clone()
-        actual_out = torch.empty_like(x)
-        for start in range(0, max(lengths), chunk_size):
-            counts = [max(0, min(chunk_size, n - start)) for n in lengths]
-            token_ids = torch.tensor(
-                [
-                    offsets[i] + start + j
-                    for i, n in enumerate(counts)
-                    for j in range(n)
-                ],
-                device=DEVICE,
+        # Include an unaligned split and empty sequences once shorter histories end.
+        for chunk_size in (256, 17):
+            actual_state = state.clone()
+            actual_out = torch.empty_like(x)
+            for start in range(0, max(lengths), chunk_size):
+                counts = [max(0, min(chunk_size, n - start)) for n in lengths]
+                token_ids = torch.tensor(
+                    [
+                        offsets[i] + start + j
+                        for i, n in enumerate(counts)
+                        for j in range(n)
+                    ],
+                    device=DEVICE,
+                )
+                cu_seqlens = torch.tensor(
+                    [0, *counts], dtype=torch.int32, device=DEVICE
+                )
+                cu_seqlens = cu_seqlens.cumsum(0, dtype=torch.int32)
+                output = torch.empty_like(x[token_ids])
+                update(
+                    actual_state,
+                    output,
+                    token_ids,
+                    indices,
+                    cu_seqlens=cu_seqlens,
+                    round_state_each_token=True,
+                )
+                actual_out[token_ids] = output
+            assert (
+                torch.isfinite(actual_out).all() and torch.isfinite(actual_state).all()
             )
-            cu_seqlens = torch.tensor([0, *counts], dtype=torch.int32, device=DEVICE)
-            cu_seqlens = cu_seqlens.cumsum(0, dtype=torch.int32)
-            output = torch.empty_like(x[token_ids])
-            update(
-                actual_state,
-                output,
-                token_ids,
-                indices,
-                cu_seqlens=cu_seqlens,
-                round_state_each_token=True,
+            assert torch.equal(
+                actual_out.view(torch.uint8), reference_out.view(torch.uint8)
             )
-            actual_out[token_ids] = output
-        assert torch.isfinite(actual_out).all() and torch.isfinite(actual_state).all()
-        assert torch.equal(
-            actual_out.view(torch.uint8), reference_out.view(torch.uint8)
-        )
-        # Comparing the entire cache also checks that unused slots were not written.
-        assert torch.equal(
-            actual_state.view(torch.uint8), reference_state.view(torch.uint8)
-        )
+            # Comparing the entire cache also checks that unused slots were not written.
+            assert torch.equal(
+                actual_state.view(torch.uint8), reference_state.view(torch.uint8)
+            )
 
 
 @pytest.mark.parametrize("unsupported", ["stochastic_rounding", "speculative_decoding"])
