@@ -943,6 +943,7 @@ class ComputeLocalLogitsStatsKernel(
         target_logits_stride: int
         draft_logits_stride_0: int
         draft_logits_stride_1: int
+        local_logits_stride: int
         vocab_size: int
         num_speculative_steps: int
         block_size: int
@@ -956,6 +957,7 @@ class ComputeLocalLogitsStatsKernel(
         target_logits_stride: int,
         draft_logits_stride_0: int,
         draft_logits_stride_1: int,
+        local_logits_stride: int,
         vocab_size: int,
         num_speculative_steps: int,
         block_size: int,
@@ -972,6 +974,9 @@ class ComputeLocalLogitsStatsKernel(
             ),
             draft_logits_stride_1=triton_scalar_specialization_rep(
                 draft_logits_stride_1
+            ),
+            local_logits_stride=triton_scalar_specialization_rep(
+                local_logits_stride
             ),
             vocab_size=triton_scalar_specialization_rep(vocab_size),
             num_speculative_steps=triton_scalar_specialization_rep(
@@ -1016,6 +1021,7 @@ class ComputeLocalLogitsStatsKernel(
                 ),
             ),
             target_logits_stride=vocab_size,
+            local_logits_stride=triton.cdiv(vocab_size, 8192),
             vocab_size=vocab_size,
             num_speculative_steps=num_speculative_steps,
             block_size=8192,
@@ -1031,24 +1037,25 @@ class ComputeLocalLogitsStatsKernel(
             if compile_key.draft_dtype is None
             else TritonWarmupTensor(compile_key.draft_dtype)
         )
+        local_logits_stride = compile_key.local_logits_stride
         return triton_warmup_inputs(
             self.kernel,
             int64_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             target_ptr,
             compile_key.target_logits_stride,
             draft_ptr,
             compile_key.draft_logits_stride_0,
             compile_key.draft_logits_stride_1,
-            int32_ptr,
+            int64_ptr,
             int32_ptr,
             float32_ptr,
             compile_key.vocab_size,
@@ -1077,6 +1084,7 @@ class ComputeCumulativeLogPKernel(
         target_logits_stride: int
         draft_logits_stride_0: int
         draft_logits_stride_1: int
+        local_logits_stride: int
         vocab_num_blocks: int
         padded_vocab_num_blocks: int
         has_draft_logits: bool
@@ -1120,6 +1128,7 @@ class ComputeCumulativeLogPKernel(
                 ),
             ),
             target_logits_stride=vocab_size,
+            local_logits_stride=vocab_num_blocks,
             vocab_num_blocks=vocab_num_blocks,
             padded_vocab_num_blocks=triton.next_power_of_2(vocab_num_blocks),
         )
@@ -1139,19 +1148,19 @@ class ComputeCumulativeLogPKernel(
             TritonWarmupTensor(compile_key.target_dtype),
             compile_key.target_logits_stride,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             float32_ptr,
-            1,
-            int64_ptr,
+            compile_key.local_logits_stride,
+            int32_ptr,
             draft_ptr,
             compile_key.draft_logits_stride_0,
             compile_key.draft_logits_stride_1,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             int32_ptr,
-            int32_ptr,
+            int64_ptr,
             float32_ptr,
             compile_key.vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=compile_key.padded_vocab_num_blocks,
@@ -1179,6 +1188,7 @@ class ComputeLocalResidualMassKernel(
         target_logits_stride: int
         draft_logits_stride_0: int
         draft_logits_stride_1: int
+        local_logits_stride: int
         vocab_size: int
         num_speculative_steps: int
         vocab_num_blocks: int
@@ -1200,6 +1210,7 @@ class ComputeLocalResidualMassKernel(
             target_logits_stride=vocab_size,
             draft_logits_stride_0=num_speculative_steps * vocab_size,
             draft_logits_stride_1=vocab_size,
+            local_logits_stride=vocab_num_blocks,
             vocab_size=vocab_size,
             num_speculative_steps=num_speculative_steps,
             vocab_num_blocks=vocab_num_blocks,
@@ -1214,23 +1225,23 @@ class ComputeLocalResidualMassKernel(
         return triton_warmup_inputs(
             self.kernel,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             float32_ptr,
             TritonWarmupTensor(compile_key.target_dtype),
             compile_key.target_logits_stride,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             TritonWarmupTensor(compile_key.draft_dtype),
             compile_key.draft_logits_stride_0,
             compile_key.draft_logits_stride_1,
             float32_ptr,
-            1,
+            compile_key.local_logits_stride,
             float32_ptr,
-            1,
-            int64_ptr,
+            compile_key.local_logits_stride,
             int32_ptr,
+            int64_ptr,
             int32_ptr,
             float32_ptr,
             compile_key.vocab_size,
@@ -1258,6 +1269,9 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
         target_logits_stride: int
         draft_logits_stride_0: int
         draft_logits_stride_1: int
+        sampled_stride: int
+        local_logits_stride: int
+        local_residual_mass_stride: int
         vocab_num_blocks: int
         padded_vocab_num_blocks: int
         has_draft_logits: bool
@@ -1309,6 +1323,11 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
                 ),
             ),
             target_logits_stride=vocab_size,
+            sampled_stride=num_speculative_steps + 1,
+            local_logits_stride=vocab_num_blocks,
+            local_residual_mass_stride=(
+                vocab_num_blocks if use_block_verification else 0
+            ),
             vocab_num_blocks=vocab_num_blocks,
             padded_vocab_num_blocks=triton.next_power_of_2(vocab_num_blocks),
             synthetic_mode=synthetic_mode,
@@ -1324,31 +1343,32 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
             if compile_key.draft_dtype is None
             else TritonWarmupTensor(compile_key.draft_dtype)
         )
+        local_logits_stride = compile_key.local_logits_stride
         return triton_warmup_inputs(
             self.kernel,
             int64_ptr,
-            1,
+            compile_key.sampled_stride,
             int32_ptr,
             float32_ptr,
             float32_ptr,
             TritonWarmupTensor(compile_key.target_dtype),
             compile_key.target_logits_stride,
             int64_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
-            int64_ptr,
+            local_logits_stride,
+            int32_ptr,
             draft_ptr,
             compile_key.draft_logits_stride_0,
             compile_key.draft_logits_stride_1,
             float32_ptr,
-            1,
+            local_logits_stride,
             float32_ptr,
-            1,
+            local_logits_stride,
             int32_ptr,
-            int32_ptr,
+            int64_ptr,
             float32_ptr,
             int64_ptr,
             int64_ptr,
@@ -1360,7 +1380,7 @@ class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
                 and compile_key.has_draft_logits
                 else None
             ),
-            1 if compile_key.has_draft_logits else 0,
+            compile_key.local_residual_mass_stride,
             compile_key.vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=compile_key.padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=compile_key.has_draft_logits,
@@ -1386,6 +1406,7 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
         draft_dtype: torch.dtype | None
         resampled_max_dtype: torch.dtype
         target_logits_stride: int
+        resampled_stride: int
         draft_logits_stride_0: int
         draft_logits_stride_1: int
         vocab_size: int
@@ -1439,6 +1460,7 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
             ),
             resampled_max_dtype=torch.float64 if use_fp64 else torch.float32,
             target_logits_stride=vocab_size,
+            resampled_stride=triton.cdiv(vocab_size, 1024),
             vocab_size=vocab_size,
             block_size=1024,
             use_fp64=use_fp64,
@@ -1457,9 +1479,9 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
         return triton_warmup_inputs(
             self.kernel,
             int64_ptr,
-            1,
+            compile_key.resampled_stride,
             TritonWarmupTensor(compile_key.resampled_max_dtype),
-            1,
+            compile_key.resampled_stride,
             TritonWarmupTensor(compile_key.target_dtype),
             compile_key.target_logits_stride,
             float32_ptr,
@@ -1469,8 +1491,8 @@ class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
             float32_ptr,
             int32_ptr,
             int32_ptr,
-            int32_ptr,
             int64_ptr,
+            int32_ptr,
             float32_ptr,
             int64_ptr,
             int64_ptr,
@@ -1540,7 +1562,7 @@ class InsertResampledKernel(
             compile_key.resampled_local_max_stride,
             compile_key.resample_num_blocks,
             int32_ptr,
-            int32_ptr,
+            int64_ptr,
             TritonWarmupTensor(torch.float32),
             PADDED_RESAMPLE_NUM_BLOCKS=compile_key.padded_resample_num_blocks,
             grid=(1,),
