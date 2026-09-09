@@ -39,7 +39,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+    dbo_register_recv_hook,
+    dbo_yield,
+)
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
@@ -538,11 +542,9 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     """A failing microbatch surfaces as a named error, not a downstream KeyError.
 
     The model here never yields, so the microbatches run back to back and no
-    handoff is left outstanding when one of them dies. A microbatch that fails
-    *while its sibling is parked at a yield* hangs the step instead -- the
-    shared handoff protocol in `ubatching.py` has no way to unwind a parked
-    microbatch, and the V1 runner has the same gap. Fixing that means changing
-    `ubatching.py`, which is out of scope for the V2 runner.
+    handoff is left outstanding when one of them dies. The case where a sibling
+    *is* parked at a yield is covered by
+    `test_a_parked_sibling_unwinds_when_its_peer_dies`.
     """
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
@@ -581,3 +583,83 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     assert isinstance(result["error"], RuntimeError)
     assert "Microbatch 0" in str(result["error"])
     assert isinstance(result["error"].__cause__, ValueError)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_a_parked_sibling_unwinds_when_its_peer_dies():
+    """A microbatch parked at a yield must not wait for a handoff that cannot come.
+
+    Microbatches pass control around a ring, so one that raises mid-forward
+    never yields again. Without an abort signal the survivor blocks in
+    `_cpu_yield` forever and wedges the whole step.
+    """
+    vllm_config = _make_dbo_config()
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(vllm_config)
+
+    class _FailAfterYield(torch.nn.Module):
+        def forward(self, input_ids, positions, **kwargs):
+            # Microbatch 1 parks here waiting for 0 to hand control back.
+            dbo_yield()
+            if dbo_current_ubatch_id() == 0:
+                raise ValueError("boom")
+            return input_ids.float().unsqueeze(-1)
+
+    model_inputs = _make_model_inputs(8, device)
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+
+    result: dict[str, BaseException] = {}
+
+    def _call():
+        try:
+            runner.run(_FailAfterYield(), model_inputs, ubatch_state)
+        except BaseException as e:  # noqa: BLE001
+            result["error"] = e
+
+    caller = threading.Thread(target=_call, daemon=True)
+    caller.start()
+    caller.join(timeout=60.0)
+    assert not caller.is_alive(), (
+        "the surviving microbatch stayed parked on a handoff that never came"
+    )
+    assert isinstance(result["error"], RuntimeError)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_recv_hook_registered_after_the_peer_left_is_dropped():
+    """Registering a receive hook must tolerate a peer that already finished.
+
+    `__exit__` clears the peer's slot, so a microbatch still running its tail
+    finds `None` where its neighbour used to be. There is nobody left to run
+    the hook, so it is dropped rather than dereferenced.
+    """
+    vllm_config = _make_dbo_config()
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(vllm_config)
+
+    class _RegisterAfterPeerExits(torch.nn.Module):
+        def forward(self, input_ids, positions, **kwargs):
+            if dbo_current_ubatch_id() == 1:
+                # 0 has already run to completion and cleared its slot.
+                dbo_register_recv_hook(lambda: None)
+            else:
+                dbo_yield()
+            return input_ids.float().unsqueeze(-1)
+
+    model_inputs = _make_model_inputs(8, device)
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+
+    output = runner.run(_RegisterAfterPeerExits(), model_inputs, ubatch_state)
+    assert output.shape[0] == 8

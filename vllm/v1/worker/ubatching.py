@@ -17,6 +17,16 @@ _NUM_UBATCHES: int = 2
 _CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
+class UBatchAbortedError(RuntimeError):
+    """Raised in a microbatch whose sibling left the step early."""
+
+
+def _wake_all_ubatch_waiters() -> None:
+    for ctx in _CURRENT_CONTEXTS:
+        if ctx is not None:
+            ctx.cpu_wait_event.set()
+
+
 class UBatchContext:
     """
     Context manager for micro-batching synchronization using threading events.
@@ -33,6 +43,7 @@ class UBatchContext:
         cpu_signal_event: threading.Event,
         gpu_comm_done_event: torch.Event,
         gpu_compute_done_event: torch.Event,
+        aborted: threading.Event,
         schedule: str = "default",
     ):
         self.id = id
@@ -47,6 +58,7 @@ class UBatchContext:
         self.gpu_compute_done_event = gpu_compute_done_event
         self.schedule = schedule
         self.recv_hook = None
+        self.aborted = aborted
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
@@ -66,9 +78,17 @@ class UBatchContext:
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
         _CURRENT_CONTEXTS[self.id] = None
         del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        if exc_type is not None:
+            # Leaving mid-forward: the peers hand control around a ring, so a
+            # microbatch that never yields again would park the survivors on a
+            # handoff that cannot arrive. Mark the run aborted and wake every
+            # waiter so they unwind instead of hanging the step.
+            self.aborted.set()
         self.maybe_run_recv_hook()
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
+        if self.aborted.is_set():
+            _wake_all_ubatch_waiters()
         return False
 
     def _restore_context(self):
@@ -102,6 +122,11 @@ class UBatchContext:
         self.cpu_signal_event.set()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
+        if self.aborted.is_set():
+            raise UBatchAbortedError(
+                f"Microbatch {self.id} aborted: a sibling microbatch left the "
+                "step before handing control back"
+            )
         self._restore_context()
 
     def switch_to_comm(self):
@@ -157,11 +182,20 @@ def dbo_current_ubatch_id() -> int:
     return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
 
 
+def _current_ubatch_context() -> "UBatchContext | None":
+    """The calling thread's context, or None once it has left the step."""
+    if len(_THREAD_ID_TO_CONTEXT) == 0:
+        return None
+    ctx_idx = _THREAD_ID_TO_CONTEXT.get(threading.get_ident())
+    if ctx_idx is None:
+        return None
+    return _CURRENT_CONTEXTS[ctx_idx]
+
+
 def _register_ubatch_function(func):
     def wrapper(*args, **kwargs):
-        if len(_THREAD_ID_TO_CONTEXT) > 0:
-            ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-            ctx = _CURRENT_CONTEXTS[ctx_idx]
+        ctx = _current_ubatch_context()
+        if ctx is not None:
             func(ctx, *args, **kwargs)
 
     return wrapper
@@ -184,16 +218,19 @@ dbo_switch_to_compute_sync = _register_ubatch_function(
 
 
 def dbo_register_recv_hook(recv_hook):
-    if len(_THREAD_ID_TO_CONTEXT) > 0:
-        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
+    if len(_THREAD_ID_TO_CONTEXT) == 0:
+        return
+    ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+    next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
+    # The peer may already have left the step, in which case there is nobody
+    # left to run the hook and dropping it is the correct behaviour.
+    if next_ctx is not None:
         next_ctx.recv_hook = recv_hook
 
 
 def dbo_get_previous_event(func, *args, **kwargs):
-    if len(_THREAD_ID_TO_CONTEXT) > 0:
-        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        ctx = _CURRENT_CONTEXTS[ctx_idx]
+    ctx = _current_ubatch_context()
+    if ctx is not None:
         # execute callable on the ubatch compute stream to record/wait events there
         with torch.cuda.stream(ctx.compute_stream):
             return func(*args, **kwargs)
@@ -219,6 +256,8 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
+    # Shared by the whole group: set when any microbatch leaves early.
+    aborted = threading.Event()
     gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
     gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 
@@ -234,6 +273,7 @@ def make_ubatch_contexts(
             cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
             gpu_comm_done_event=gpu_comm_done_events[i],
             gpu_compute_done_event=gpu_compute_done_events[i],
+            aborted=aborted,
             schedule=schedule,
         )
         ctxs.append(ctx)
