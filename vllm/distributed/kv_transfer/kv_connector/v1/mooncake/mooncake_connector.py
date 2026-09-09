@@ -182,12 +182,30 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
+    total_num_kv_heads: int | None = None,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
         return True, 0, 0, local_kv_block_len
+
+    if total_num_kv_heads is not None:
+        consumer_cache_replicated = remote_tp_size > total_num_kv_heads
+        if producer_cache_replicated != consumer_cache_replicated:
+            local_head_count = max(total_num_kv_heads // local_tp_size, 1)
+            local_replica_count = max(local_tp_size // total_num_kv_heads, 1)
+
+            local_head = local_tp_rank * total_num_kv_heads // local_tp_size
+            remote_head = remote_tp_rank * total_num_kv_heads // remote_tp_size
+            bytes_per_head = local_kv_block_len // local_head_count
+
+            return (
+                local_tp_rank % local_replica_count == 0,
+                max(remote_head - local_head, 0) * bytes_per_head,
+                max(local_head - remote_head, 0) * bytes_per_head,
+                bytes_per_head,
+            )
 
     if tp_ratio > 0:
         if producer_cache_replicated:
@@ -233,6 +251,7 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
+    total_num_kv_heads: int | None = None,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -246,7 +265,11 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if producer_cache_replicated:
+    if total_num_kv_heads is not None:
+        # TP ranks beyond the KV-head count replicate existing shards.
+        local_tp_size = min(local_tp_size, total_num_kv_heads)
+        remote_tp_size = min(remote_tp_size, total_num_kv_heads)
+    elif producer_cache_replicated:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
@@ -1218,12 +1241,19 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        validation_err = _validate_asymmetric_region_lengths(
+        validation_err = self._validate_head_resharding_layout(
+            meta.remote_tp_size, local_regions
+        ) or _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            total_num_kv_heads=(
+                None
+                if self.use_mla or self.kv_cache_config.has_mamba_layers
+                else self.transfer_topo.total_num_kv_heads
+            ),
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
@@ -2035,6 +2065,31 @@ class MooncakeConnectorWorker:
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
+    def _validate_head_resharding_layout(
+        self, remote_tp_size: int, local_regions: list[TransferRegion]
+    ) -> str | None:
+        """Reject unsupported layouts before splitting or gathering KV heads."""
+        if self.use_mla or self.kv_cache_config.has_mamba_layers:
+            return None
+        num_kv_heads = self.transfer_topo.total_num_kv_heads
+        if min(self.tp_size, num_kv_heads) == min(remote_tp_size, num_kv_heads):
+            return None
+
+        for region in local_regions:
+            spec = self._layer_specs[region.layer_name]
+            if not isinstance(spec, AttentionSpec):
+                continue
+            if spec.page_size_bytes > spec.unpadded_page_size_bytes:
+                return (
+                    "Mooncake KV-head re-sharding is not supported for padded "
+                    f"KV pages (layer {region.layer_name})."
+                )
+            if spec.kv_quant_mode.is_nvfp4:
+                return (
+                    "Mooncake KV-head re-sharding is not supported for NVFP4 KV cache."
+                )
+        return None
+
     def _get_transfer_regions(
         self,
         base_addrs: list[int],
@@ -2073,6 +2128,11 @@ class MooncakeConnectorWorker:
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            total_num_kv_heads=(
+                None
+                if self.use_mla or self.kv_cache_config.has_mamba_layers
+                else self.transfer_topo.total_num_kv_heads
+            ),
         )
 
     def _log_debug_cache_registration(

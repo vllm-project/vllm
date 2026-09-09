@@ -26,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _compute_sender_transfer_plan,
+    _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -42,6 +44,93 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.mark.parametrize(
+    ("remote_tp_size", "expected_dst_offsets"),
+    [
+        (1, [0, None, 65536, None, 131072, None, 196608, None]),
+        (2, [0, None, 65536, None, 0, None, 65536, None]),
+    ],
+)
+@pytest.mark.parametrize("local_tp_rank", range(8))
+def test_sender_plan_replicated_gqa_tp8_to_smaller_tp(
+    remote_tp_size,
+    expected_dst_offsets,
+    local_tp_rank,
+):
+    expected_dst_offset = expected_dst_offsets[local_tp_rank]
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=local_tp_rank,
+        local_tp_size=8,
+        remote_tp_rank=local_tp_rank // (8 // remote_tp_size),
+        remote_tp_size=remote_tp_size,
+        local_kv_block_len=65536,
+        remote_kv_block_len=262144 // remote_tp_size,
+        producer_cache_replicated=True,
+        total_num_kv_heads=4,
+    )
+    if expected_dst_offset is None:
+        assert not plan[0]
+    else:
+        assert plan == (True, 0, expected_dst_offset, 65536)
+
+
+@pytest.mark.parametrize(
+    ("local_tp_size", "expected_src_offsets"),
+    [
+        (1, [0, 0, 65536, 65536, 131072, 131072, 196608, 196608]),
+        (2, [0, 0, 65536, 65536, 0, 0, 65536, 65536]),
+        (4, [0] * 8),
+    ],
+)
+@pytest.mark.parametrize("remote_tp_rank", range(8))
+def test_sender_plan_gqa_to_replicated_tp8(
+    local_tp_size,
+    expected_src_offsets,
+    remote_tp_rank,
+):
+    local_head_count = 4 // local_tp_size
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=remote_tp_rank // (8 // local_tp_size),
+        local_tp_size=local_tp_size,
+        remote_tp_rank=remote_tp_rank,
+        remote_tp_size=8,
+        local_kv_block_len=local_head_count * 65536,
+        remote_kv_block_len=65536,
+        producer_cache_replicated=False,
+        total_num_kv_heads=4,
+    )
+    assert plan == (True, expected_src_offsets[remote_tp_rank], 0, 65536)
+
+
+@pytest.mark.parametrize(
+    "local_tp,remote_tp,local_len,remote_len,valid",
+    [
+        (1, 8, 262144, 65536, True),
+        (8, 1, 65536, 262144, True),
+        (1, 8, 262144, 131072, False),
+        (8, 1, 131072, 262144, False),
+    ],
+)
+def test_region_length_validation_checks_replicated_gqa_heads(
+    local_tp, remote_tp, local_len, remote_len, valid
+):
+    """Replicated heads must have matching, whole per-head payloads."""
+    local_region = TransferRegion("layer", 0, 0, local_len, local_len)
+    remote_region = TransferRegion("layer", 0, 0, remote_len, remote_len)
+
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=[local_region],
+            remote_regions=[remote_region],
+            local_tp_size=local_tp,
+            remote_tp_size=remote_tp,
+            producer_cache_replicated=local_tp > 4,
+            total_num_kv_heads=4,
+        )
+        is None
+    ) == valid
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -150,9 +239,13 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
     worker._physical_blocks_per_logical_kv_block = 1
-    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
 
     block_len = 256
     remote_regions = [
