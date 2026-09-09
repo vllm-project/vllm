@@ -979,14 +979,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         max_logits_bytes: int,
         request_offset: int = 0,
     ) -> list[tuple[slice, slice]]:
-        """Split this step's prefill requests into (req_slice, query_slice)
-        chunks, respecting:
+        """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
           workspace)
         - Logits constraint: M * N * 4 <= max_logits_bytes
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
+
+        Returns list of (req_slice, query_slice) tuples.
         """
         chunks: list[tuple[slice, slice]] = []
         n = len(compressed_seq_lens_cpu)
