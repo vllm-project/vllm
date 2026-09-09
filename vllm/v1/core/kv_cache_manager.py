@@ -301,8 +301,9 @@ class KVCacheManager:
 
         # The junction to pin is where the lagging sparse-retention group stops
         # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
-        # the longest single-group hit. Sub-block gaps are left to the mask,
-        # which floors to the alignment boundary (a no-op there).
+        # the shared prefix reachable by all full-attention groups.
+        # Sub-block gaps are left to the mask, which floors to the alignment
+        # boundary (a no-op there).
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )

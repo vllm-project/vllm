@@ -919,11 +919,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate every full-attention group (target and draft) blocks
-        # to final hit_length.
+        # Bound shared checkpoints by every full-attention group's reusable
+        # prefix before truncating target and draft blocks to final hit_length.
         for group in self.attention_groups:
             if not isinstance(group.spec, FullAttentionSpec):
                 continue
+            longest_hit_length = min(
+                longest_hit_length, hit_length_by_group[group.group_ids[0]]
+            )
             group_block_size = self.single_type_managers[group.group_ids[0]].block_size
             num_blocks = cdiv(hit_length, group_block_size)
             for group_id in group.group_ids:
@@ -931,9 +934,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
 
-        # Uncached shared prefix detection: if any attn. group cached a longer
-        # prefix than the reconciled hit, it is an uncached common prefix across
-        # requests that a sparse-retention group hasn't cached yet.
+        # A shared prefix reachable by all full-attention groups may still
+        # need a checkpoint in a sparse-retention group.
         num_uncached_common_prefix_tokens = longest_hit_length - hit_length
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
