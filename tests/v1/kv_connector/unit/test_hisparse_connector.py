@@ -16,6 +16,10 @@ from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
+def test_hisparse_requires_block_outermost_device_layout():
+    assert HiSparseConnector.get_required_kvcache_layout(MagicMock()) == "BLHNC"
+
+
 def test_no_forward_enqueues_deferred_hisparse_transfers():
     """A zero-token step must still enqueue deferred post-forward transfers."""
     connector = object.__new__(ActiveKVConnector)
