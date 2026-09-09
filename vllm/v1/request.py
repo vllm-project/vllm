@@ -21,6 +21,7 @@ from vllm.v1.engine import (
     FinishReason,
 )
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
+from vllm.v1.streaming.retention import HistorySegment, StreamingRetentionParams
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -75,6 +76,7 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         session_id: str | None = None,
+        first_chunk: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
@@ -101,6 +103,10 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # Per-session retention config (read from
+        # `sampling_params.extra_args["streaming_retention"]` below);
+        # preserved across chunks by `_update_request_as_session`.
+        self.streaming_retention: StreamingRetentionParams | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
@@ -118,6 +124,12 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
+                _retention = sampling_params.extra_args.get("streaming_retention")
+                if isinstance(_retention, StreamingRetentionParams):
+                    self.streaming_retention = _retention  # in-process API
+                elif isinstance(_retention, dict):
+                    # Cross-process IPC: arrives as a plain dict.
+                    self.streaming_retention = StreamingRetentionParams(**_retention)
                 self.ec_transfer_params = sampling_params.extra_args.get(
                     "ec_transfer_params"
                 )
@@ -155,6 +167,23 @@ class Request:
                 t if is_tok else 0
                 for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
             ]
+
+        # Per-token positions, in lockstep with `_all_token_ids`. Populated
+        # lazily by the model runner on first prefill; extended per streaming
+        # chunk. Stored as 3-tuples: mRoPE models use all three coordinates,
+        # 1D-RoPE (text) models use coordinate 0 (vLLM's mRoPE convention
+        # already sets t == h == w for text tokens, so 1D is the degenerate
+        # case of the same array). `max_cached_position` is the highest
+        # position number in the KV cache; eviction never decrements it, so
+        # positions may have gaps after eviction.
+        self._mrope_positions: list[tuple[int, int, int]] = []
+        self.max_cached_position: int = -1
+        # 1D-RoPE (text) sessions: cumulative width of evicted token ranges.
+        # A text token's RoPE position is its index plus this offset, so a
+        # scalar replaces the full per-token array (the gaps are always
+        # "everything after the holes shifts up by the total hole width").
+        # Reset to 0 on re-prefill; incremented by eviction.
+        self.position_offset: int = 0
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
@@ -227,8 +256,33 @@ class Request:
 
         # Used for streaming
         self.resumable = resumable
+        self.first_chunk = first_chunk
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
+
+        # Per-session segment bookkeeping: filled by the scheduler as chunks
+        # arrive, consumed by `streaming.eviction` when over budget.
+        self.session_history: list[HistorySegment] = []
+        # Token ranges evicted scheduler-side since the last worker update,
+        # each in the _all_token_ids index space at eviction time. Drained
+        # into `NewRequestData.evicted_token_ranges` and replayed on the
+        # worker to slice its position arrays in lockstep.
+        self.pending_evicted_token_ranges: list[tuple[int, int]] = []
+
+        # Re-prefill bookkeeping. `reprefill_count` is observability only.
+        # `pending_reprefill` is set by `_reprefill_streaming_session` and
+        # drained into `NewRequestData.is_reprefill`, telling the worker to
+        # reset positions to 0 (vs. eviction, which only slices them).
+        self.reprefill_count: int = 0
+        self.pending_reprefill: bool = False
+        # A re-prefill must sample >=1 token to complete. When the trigger
+        # found the session idle between chunks, that token is a phantom
+        # reply and this tells `update_from_output` to discard it
+        # (delivering it would shift every later reply off by one chunk).
+        # NOT set when the trigger folded a queued chunk first: the
+        # re-prefilled prompt then ends with that unanswered chunk, so the
+        # first sample is a genuine reply token that must be kept.
+        self.reprefill_discard_next_sample: bool = False
 
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
@@ -257,6 +311,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             session_id=request.session_id,
+            first_chunk=request.first_chunk,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
@@ -322,6 +377,20 @@ class Request:
 
     def get_finished_reason(self) -> FinishReason | None:
         return RequestStatus.get_finished_reason(self.status)
+
+    def uses_persistent_encoder_cache(self) -> bool:
+        """True if encoder cache entries should live until their segment is
+        evicted, rather than be freed after each chunk's forward pass.
+
+        Re-prefill-enabled sessions need the surviving embeddings available at
+        the next re-prefill so the encoder need not re-run on every retained
+        frame. A `reprefill_threshold >= 1.0` (disabled) falls back to
+        per-chunk freeing.
+        """
+        return (
+            self.streaming_retention is not None
+            and self.streaming_retention.reprefill_threshold < 1.0
+        )
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)

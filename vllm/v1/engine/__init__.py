@@ -139,6 +139,9 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
+    # True only for the first chunk of a streaming-input (resumable) request;
+    # the scheduler rejects non-first chunks for unknown ids as stale.
+    first_chunk: bool = False
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
