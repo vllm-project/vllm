@@ -611,8 +611,11 @@ class Base(
 
         for i in range(start, end):
             if i not in self.attention_fusers:
-                in_range = layer_types and i < len(layer_types)
-                layer = f"{i} ({layer_types[i]})" if in_range else str(i)
+                layer = (
+                    f"{i} ({layer_types[i]})"
+                    if layer_types is not None and i < len(layer_types)
+                    else str(i)
+                )
                 raise ValueError(
                     f"Layer {layer} does not dispatch through the Transformers "
                     "attention interface and vLLM has no other way to handle it."

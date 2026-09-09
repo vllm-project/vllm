@@ -580,7 +580,7 @@ def _aliasing_reads(node: ast.expr) -> set[str]:
     would taint nearly every later name.
     """
     names: set[str] = set()
-    stack = [node]
+    stack: list[ast.AST] = [node]
     while stack:
         current = stack.pop()
         if isinstance(current, ast.Attribute) and current.attr in _METADATA_ATTRS:
@@ -660,9 +660,11 @@ def aliasing_names(
     while changed:
         changed = False
         for node in assigns:
-            if not _aliasing_reads(node.value) & names:
+            value = node.value
+            assert value is not None
+            if not _aliasing_reads(value) & names:
                 continue
-            targets = getattr(node, "targets", None) or [node.target]
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             stores = {
                 child.id
                 for target in targets
