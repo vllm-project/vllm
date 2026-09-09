@@ -51,15 +51,29 @@ class BaseOffloader(ABC):
     inference. Different strategies trade memory for compute/transfer time.
     """
 
+    supports_tower_offload: bool = False
+    """Whether `wrap_modules` also accepts modules routed by
+    `SupportsMultiModal._mark_tower_model`, outside the `make_layers` call.
+
+    Offloaders whose `wrap_modules` may only be called on the decoder layer
+    stack (e.g. `PrefetchOffloader`, which schedules prefetches over a
+    circular layer stack) must keep this `False`.
+    """
+
     @abstractmethod
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with offloading logic.
 
         Args:
             modules_generator: Generator yielding modules to potentially offload.
+            prefix: Name prefix prepended to parameter names before matching
+                them against the offloading parameter set. Used when the
+                modules are not the full model, so that name segments stay
+                fully qualified (e.g. `visual` for a tower module).
 
         Returns:
             List of modules, potentially with offloading hooks installed.
@@ -99,6 +113,7 @@ class NoopOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Return modules unchanged."""
         return list(modules_generator)

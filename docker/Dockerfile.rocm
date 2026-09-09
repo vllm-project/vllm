@@ -17,8 +17,9 @@ ARG INSTALL_LMCACHE=false
 ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
 # Users can specify a custom version compatible with their host drivers.
-# The default version has been tested with ioinic-dkms=25.11.1.001
-ARG AINIC_VERSION=1.117.3-hydra
+# The default version has been tested with ionic-dkms=26.03.3.001
+# (libionic1=54.0-187-1), required for MoRI-EP/NIXL on Pollara/AINIC.
+ARG AINIC_VERSION=1.117.5
 ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
@@ -898,6 +899,17 @@ RUN mkdir src && mv vllm src/vllm
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
+
+# Run the structural smoke test inside BuildKit, where the test image layers
+# are already available. Export only a build-scoped success marker.
+FROM test AS test_smoke
+ARG ROCM_SMOKE_ID
+RUN --network=none \
+    bash /vllm-workspace/.buildkite/scripts/rocm/smoke-test-image.sh --inside \
+    && printf '%s\n' "${ROCM_SMOKE_ID:-local}" > /vllm-smoke-ok
+
+FROM scratch AS export_test_smoke
+COPY --from=test_smoke /vllm-smoke-ok /
 
 # -----------------------
 # Final vLLM image

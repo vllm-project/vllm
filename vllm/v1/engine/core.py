@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -85,7 +85,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -333,8 +333,19 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # their small block_size would otherwise drag the global block_size
+            # below the real allocator block size and desync it from mamba.
+            participating = [
+                g.kv_cache_spec.block_size
+                for g in kv_cache_groups
+                if g.kv_cache_spec.prefix_cacheable
+            ]
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                participating
+                if participating
+                else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -429,25 +440,6 @@ class EngineCore:
             config_fields,
             supported_pooling_tasks,
         )
-
-    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
-        """Return msgspec-serializable metadata for scheduler KV cache groups."""
-        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
-        if kv_cache_config is None:
-            return []
-
-        metadata: list[dict[str, int | str | None]] = []
-        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-            spec = group.kv_cache_spec
-            metadata.append(
-                {
-                    "group_idx": group_idx,
-                    "kind": get_kv_cache_spec_kind(spec).value,
-                    "block_size": spec.block_size,
-                    "sliding_window": getattr(spec, "sliding_window", None),
-                }
-            )
-        return metadata
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
@@ -839,6 +831,13 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
+    def _finish_pause(self, clear_cache: bool) -> None:
+        # A completed pause promises an idle device: nothing else waits on
+        # the last dummy batch an idle DP rank launches.
+        self.model_executor.collective_rpc("synchronize_device")
+        if clear_cache:
+            self._reset_caches()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -855,7 +854,7 @@ class EngineCore:
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
@@ -865,8 +864,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if clear_cache:
-            self._reset_caches()
+        self._finish_pause(clear_cache)
 
         return None
 
@@ -1933,12 +1931,11 @@ class EngineCoreProc(EngineCore):
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            if clear_cache:
-                engine._reset_caches()
+            engine._finish_pause(clear_cache)
             future.set_result(None)
 
         if mode == "abort":
@@ -1951,8 +1948,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            if clear_cache:
-                self._reset_caches()
+            self._finish_pause(clear_cache)
             return None
 
         future = Future[Any]()
@@ -2017,6 +2013,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2265,9 +2262,9 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
