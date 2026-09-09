@@ -156,7 +156,11 @@ def test_non_causal_probe_follows_the_installed_signature(monkeypatch, supports_
     _install_fake_aiter_modules(
         monkeypatch, supports_fp8=True, supports_causal=supports_causal
     )
-    assert bool(rocm_aiter_ops.mla_decode_supports_non_causal()) is supports_causal
+    if supports_causal:
+        assert rocm_aiter_ops.mla_decode_supports_non_causal() is True
+    else:
+        with pytest.raises(RuntimeError, match="causal-only"):
+            rocm_aiter_ops.mla_decode_supports_non_causal()
 
 
 def test_aiter_mla_backend_fails_closed_without_causal_arg(monkeypatch):

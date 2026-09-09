@@ -1968,14 +1968,20 @@ class rocm_aiter_ops:
     def mla_decode_supports_non_causal(cls) -> bool:
         """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
 
-        Added in aiter v0.1.20. The ROCm Aiter MLA backend treats a missing
-        argument as a hard error rather than selecting another backend.
+        Added in aiter v0.1.20. A missing argument is a hard error rather
+        than a boolean the caller can use to pick another MLA backend.
         """
         import inspect
 
         from aiter.mla import mla_decode_fwd
 
-        return "causal" in inspect.signature(mla_decode_fwd).parameters
+        if "causal" not in inspect.signature(mla_decode_fwd).parameters:
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @classmethod
     @if_aiter_supported
