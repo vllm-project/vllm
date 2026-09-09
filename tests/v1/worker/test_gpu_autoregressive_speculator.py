@@ -460,41 +460,10 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     assert run_fullgraph.call_count == expected_graph_replays
 
 
-def test_pcp_multi_step_drafts_are_marked_as_decode(monkeypatch):
+def test_pcp_multi_step_drafts_are_marked_as_decode():
     speculator = object.__new__(_TestSpeculator)
-    speculator.num_speculative_steps = 2
-    speculator.current_draft_step = torch.tensor(0)
-    speculator.input_buffers = SimpleNamespace(
-        positions=torch.arange(2),
-        query_start_loc=torch.arange(3),
-    )
-    speculator.idx_mapping = torch.arange(2)
-    speculator.block_tables = SimpleNamespace(
-        compute_slot_mappings=Mock(return_value=torch.arange(2))
-    )
-    speculator.kv_cache_config = object()
     speculator.draft_prefill_prepare = Mock()
-    speculator._build_draft_attn_metadata = Mock(return_value={})
-    speculator._generate_draft = Mock()
-    monkeypatch.setattr(
-        spec_module, "build_slot_mappings_by_layer", Mock(return_value={})
-    )
-
-    speculator._multi_step_decode(
-        num_reqs=2,
-        skip_attn=False,
-        batch_desc=BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=2,
-            num_reqs=2,
-        ),
-        seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32),
-        num_tokens_across_dp=None,
-    )
-
-    is_prefilling = speculator._build_draft_attn_metadata.call_args.kwargs[
-        "is_prefilling"
-    ]
+    is_prefilling = speculator.draft_decode_is_prefilling(2)
     assert torch.equal(is_prefilling, torch.zeros(2, dtype=torch.bool))
 
 

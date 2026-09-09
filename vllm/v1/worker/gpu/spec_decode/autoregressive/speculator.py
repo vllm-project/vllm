@@ -253,6 +253,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
+        prefill = self.prepare_draft_prefill(
+            input_batch,
+            self.input_buffers.input_ids[:num_tokens_padded],
+            hidden_states,
+        )
+        hidden_states = prefill[2]
+        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
+
         self._copy_request_inputs(
             num_reqs,
             input_batch.idx_mapping,
@@ -272,13 +280,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             self.max_num_reqs,
         )
-
-        prefill = self.prepare_draft_prefill(
-            input_batch,
-            self.input_buffers.input_ids[:num_tokens_padded],
-            hidden_states,
-        )
-        self.hidden_states[:num_tokens_padded].copy_(prefill[2])
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -461,6 +462,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         prefill: DraftPrefillInputs | None = None,
     ) -> None:
+        last_token_indices = self.last_token_indices[:num_reqs]
+        positions = self.input_buffers.positions[last_token_indices]
+        # The output hidden state at position P (= positions) and the token id
+        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
+        # position before the sampled token, so the net adjustment is +1.
+        sample_src_positions = positions + 1
+        idx_mapping = self.idx_mapping[:num_reqs]
+
         last_hidden_states, hidden_states = self._run_model(
             num_tokens,
             attn_metadata,
@@ -479,17 +488,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 else restore(hidden_states)
             )
 
-        last_token_indices = self.last_token_indices[:num_reqs]
-        positions = self.input_buffers.positions[last_token_indices]
-        # The output hidden state at position P (= positions) and the token id
-        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
-        # position before the sampled token, so the net adjustment is +1.
-        sample_src_positions = positions + 1
         sample_hidden_states = last_hidden_states[last_token_indices]
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
             sample_hidden_states,
             sample_src_positions,
-            self.idx_mapping[:num_reqs],
+            idx_mapping,
             self.temperature,
             self.seeds,
             self.current_draft_step,
@@ -536,9 +539,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_tokens_padded=batch_desc.num_reqs or num_reqs,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
-                    is_prefilling=self.draft_decode_is_prefilling(
-                        batch_desc.num_reqs or num_reqs
-                    ),
                 )
 
             self.current_draft_step.fill_(step)
@@ -588,9 +588,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_padded=batch_desc.num_reqs or num_reqs,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
-                is_prefilling=self.draft_decode_is_prefilling(
-                    batch_desc.num_reqs or num_reqs
-                ),
             )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

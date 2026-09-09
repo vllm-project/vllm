@@ -1967,24 +1967,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
-        # Keep the target's rank-local representation for the sharded drafter.
-        # Sampling still restores the ordinary target hidden states globally.
-        spec_hidden_states = None
-        if self.speculator is not None and hasattr(
-            self.model, "get_mtp_target_hidden_states"
-        ):
-            pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-            spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+        draft_hidden_states = hidden_states
+        num_draft_tokens = hidden_states.shape[0]  # type: ignore[union-attr]
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
-        if spec_hidden_states is None:
-            spec_hidden_states = hidden_states
-        if self.pcp_manager is not None and aux_hidden_states is not None:
-            aux_hidden_states = [
-                self.pcp_manager.restore_hidden_states(states)
-                for states in aux_hidden_states
-            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2057,6 +2044,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+            # target returns a persistent buffer sized at max_num_batched_tokens;
+            # slice to the active token count that propose() expects.
+            spec_hidden_states = draft_hidden_states
+            if hasattr(self.model, "get_mtp_target_hidden_states"):
+                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                spec_hidden_states = pre_hc_hidden_states[:num_draft_tokens]  # type: ignore[union-attr]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
