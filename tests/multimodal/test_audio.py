@@ -744,6 +744,23 @@ class TestAudioChunking:
         # from start_idx, so the quietest scanned window starts at 19200.
         assert split_idx == 19200
 
+    def test_split_audio_rejects_multi_channel(self):
+        """Chunking is mono-only; stereo must fail loudly rather than silently.
+
+        find_split_point searches axis 0, so (channels, time) input would skip
+        the energy search entirely and split at fixed boundaries instead.
+        """
+        stereo = np.ones((2, 16000 * 65), dtype=np.float32)
+
+        with pytest.raises(ValueError, match="expects mono audio"):
+            split_audio(
+                audio_data=stereo,
+                sample_rate=16000,
+                max_clip_duration_s=30.0,
+                overlap_duration_s=1.0,
+                min_energy_window_size=1600,
+            )
+
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""
 

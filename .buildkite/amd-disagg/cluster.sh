@@ -60,7 +60,7 @@ export KV_PORT="${KV_PORT:-9711}"
 export LOCAL_PING_PORT="${LOCAL_PING_PORT:-61555}"
 
 # MoRIIO proxy: HTTP port clients/benchmark hit, plus the connector control ports.
-# PROXY_PING_PORT MUST be 36367 — the toy proxy hardcodes its zmq service-discovery
+# PROXY_PING_PORT MUST be 36367 — the proxy hardcodes its zmq service-discovery
 # socket on that port; prefill/decode register to PROXY_IP:PROXY_PING_PORT.
 export PROXY_IP="${PROXY_IP:-${PREFILL_IP}}"
 export PROXY_PORT="${PROXY_PORT:-10001}"
@@ -68,20 +68,18 @@ export PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 export HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 
-export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
+export PROXY_SCRIPT="${PROXY_SCRIPT:-/app/vllm/examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py}"
 
 # MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
 #   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
 #   1 -> "read_mode": true  (decode pulls KV from prefill; matches upstream disagg)
 export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
-# MORI_GPU_ARCHS is hard-set in the MoRI section below (must override the image's
-# multi-arch "gfx942;gfx950" default -- see the comment there).
 
 # ----------------------------------------------------------------- router / gateway
 # Selection for client (bench/accuracy) traffic:
-#   toy         -> the in-container MoRIIO toy proxy started by the launcher (default)
+#   proxy       -> the in-container MoRIIO proxy started by the launcher
 #   vllm-router -> an external `vllm/vllm-router` container started by the SLURM job
-#                  on the rank-0 node
+#                  on the rank-0 node (default)
 # Both use the SAME MoRIIO discovery mechanism (prefill/decode register to
 # PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
 export ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
@@ -89,7 +87,7 @@ export ROUTER_PORT="${ROUTER_PORT:-30000}"
 export ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Single client-facing port bench/accuracy target: the router port when routing,
-# else the toy proxy port. Env override always wins.
+# else the proxy port. Env override always wins.
 if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
     export GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
 else
@@ -111,25 +109,17 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 #
 #export HOME=/tmp
-#export HF_HOME="${HF_HOME:-/tmp/hf_home}"
-#export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
-# MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path").
-export VLLM_MORIIO_CONNECTOR_READ_MODE="${VLLM_MORIIO_CONNECTOR_READ_MODE:-1}"
+export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
 
-# ----------------------------------------------------------------- patch / scale
-# MoRIIO multi-node DP patch (vLLM PR #39276). auto = apply only when WIDE_EP_MODE=1
-# and xP>1 or yD>1; set 1 to force, 0 to skip.
-export APPLY_MORIIO_PATCH="${APPLY_MORIIO_PATCH:-auto}"
+# ----------------------------------------------------------------- scale
 # DP/EP group formation timeout across nodes (seconds).
 export DISTRIBUTED_TIMEOUT_SECONDS="${DISTRIBUTED_TIMEOUT_SECONDS:-7200}"
 
 # ----------------------------------------------------------------- RDMA / NCCL
 # AMD Pensando AINIC RoCE fabric: 8 NICs exposed as ionic_0..7 (netdevs eth2..9),
-# each rail on its own /24. GID index 1 + traffic class 104 are the
-# DigitalOcean-validated tunables (also preset cluster-wide in /etc/rccl.conf).
-# eth1 (VPC, 10.128.0.0/20) is the bootstrap/OOB socket; transport is RDMA over
-# the ionic devices. Matches /data/templates/spur-multinode-rccl-template.sh. [site]
+# each rail on its own /24. GID index 1 + traffic class 104
 _IB_DEVICES="${IB_DEVICES:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}"
 _IB_GID_INDEX="${NCCL_IB_GID_INDEX:-1}"
 export IB_DEVICES="${IB_DEVICES:-${_IB_DEVICES}}"
@@ -148,30 +138,18 @@ export NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-192}"
 export NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-22}"
 export NCCL_IB_RETRY_CNT="${NCCL_IB_RETRY_CNT:-12}"
+
 # MoRI uses the same NIC set as NCCL.
 export MORI_RDMA_DEVICES="${MORI_RDMA_DEVICES:-${_IB_DEVICES}}"
 export MORI_IB_GID_INDEX="${MORI_IB_GID_INDEX:-${_IB_GID_INDEX}}"
-# MoRI symmetric (shmem) heap. The 4G static default OOMs for DeepSeek-class EP
-# all2all ("Out of static heap memory! Requested: ~1.75GB"); 16G matches the VMM
-# default and leaves headroom for EP16. Accepts suffixes (e.g. 16G, 512M).
 export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
-# Pin mori's JIT target arch for its shmem/all2all kernels. MUST be a hard set
-# (not ${..:-gfx950}): the v0.23.0 image already exports MORI_GPU_ARCHS="gfx942;
-# gfx950", so a :- default is a no-op and the multi-arch value survives. mori's
-# detect_gpu_arch() then returns the FIRST _SUPPORTED_ARCHS=["gfx942","gfx950"]
-# entry that is a substring of it -> always "gfx942" -> builds a gfx942
-# shmem_kernels.hsaco that fails to load on MI350X/MI355X (CDNA4 = gfx950) with
-# "device kernel image is invalid", killing every EP worker at init (wide-EP
-# only; TP is unaffected). Hard-setting a single arch makes the match resolve to
-# gfx950. Override inline (MORI_GPU_ARCHS=gfx942 ...) only on a real gfx942 box.
+
+# Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
 
 # ----------------------------------------------------------------- benchmark
-# Space-separated ISL/OSL pairs and concurrency levels for the bench sweep.
-# Defaults are tuned for the CI gate; override inline for a fuller prod sweep.
 export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"
 export BENCHMARK_CON="${BENCHMARK_CON:-32 64}"
-# num-prompts per point = NUM_PROMPTS_FACTOR * concurrency (min BENCHMARK_MIN_PROMPTS).
 export NUM_PROMPTS_FACTOR="${NUM_PROMPTS_FACTOR:-2}"
 export BENCHMARK_MIN_PROMPTS="${BENCHMARK_MIN_PROMPTS:-32}"
 
@@ -180,9 +158,6 @@ export BENCHMARK_MIN_PROMPTS="${BENCHMARK_MIN_PROMPTS:-32}"
 export ACCURACY_TASKS="${ACCURACY_TASKS:-gsm8k}"
 export ACCURACY_NUM_CONCURRENT="${ACCURACY_NUM_CONCURRENT:-64}"
 export ACCURACY_MAX_RETRIES="${ACCURACY_MAX_RETRIES:-3}"
-# Correctness gate: the run FAILS if the parsed metric is below this threshold.
-# ACCURACY_METRIC is matched against the lm_eval metric name (before the comma,
-# e.g. "exact_match" for gsm8k); the max across filters/tasks is compared.
 export ACCURACY_METRIC="${ACCURACY_METRIC:-exact_match}"
 export ACCURACY_THRESHOLD="${ACCURACY_THRESHOLD:-0.90}"
 

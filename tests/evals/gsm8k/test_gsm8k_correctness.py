@@ -12,6 +12,7 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
 import shlex
 
 import pytest
+import requests
 import yaml
 
 from tests.utils import RemoteOpenAIServer
@@ -59,9 +60,32 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         seed=eval_config.get("seed", 42),
         request_timeout_seconds=request_timeout_seconds,
         gen_prefix=eval_config.get("gen_prefix", ""),
+        max_concurrency=eval_config.get("max_concurrency"),
     )
 
     return results
+
+
+def get_acceptance_length(server_url: str) -> float:
+    """Mean tokens emitted per verification step, from the server's counters.
+
+    1.0 means every draft was rejected (speculation bought nothing); the
+    theoretical maximum is 1 + num_speculative_tokens.
+    """
+    response = requests.get(f"{server_url.rstrip('/').removesuffix('/v1')}/metrics")
+    response.raise_for_status()
+    counters: dict[str, float] = {}
+    for line in response.text.splitlines():
+        if line.startswith("vllm:spec_decode_num_"):
+            name, _, value = line.partition(" ")
+            counters[name.split("{")[0]] = float(value)
+
+    num_drafts = counters.get("vllm:spec_decode_num_drafts_total", 0.0)
+    num_accepted = counters.get("vllm:spec_decode_num_accepted_tokens_total", 0.0)
+    assert num_drafts > 0, (
+        "no drafts recorded; speculative decoding did not run for this config"
+    )
+    return 1.0 + num_accepted / num_drafts
 
 
 def test_gsm8k_correctness(config_filename):
@@ -166,5 +190,17 @@ def test_gsm8k_correctness(config_filename):
             f"GSM8K metric too low: {measured_metric:.4f} < "
             f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
         )
+
+        # Speculative configs additionally assert that drafts are actually
+        # landing: accuracy alone passes even when every draft is rejected.
+        min_acceptance_length = eval_config.get("min_acceptance_length")
+        if min_acceptance_length is not None:
+            acceptance_length = get_acceptance_length(server_url)
+            print(f"  Mean acceptance length: {acceptance_length:.3f}")
+            print(f"  Minimum acceptance length: {min_acceptance_length:.3f}")
+            assert acceptance_length >= min_acceptance_length, (
+                f"Acceptance length too low: {acceptance_length:.3f} < "
+                f"{min_acceptance_length:.3f}"
+            )
 
         print(f"✅ GSM8K test passed for {eval_config['model_name']}")

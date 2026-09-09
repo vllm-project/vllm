@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -271,21 +272,9 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_type = config.layer_types[layer_idx]
-        is_full_attention = layer_type == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full_attention
-            else config.head_dim
-        )
-
-        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
 
         self.self_attn = Gemma4MTPAttention(
             config=config,
@@ -356,7 +345,9 @@ class Gemma4MultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
         quant_config = get_draft_quant_config(vllm_config)
         self.config = text_config
@@ -478,7 +469,9 @@ class Gemma4MTP(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
         self.quant_config = get_draft_quant_config(vllm_config)
         self.config = config
@@ -500,13 +493,14 @@ class Gemma4MTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if getattr(config, "tie_word_embeddings", True):
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             text_config.vocab_size,
             soft_cap=getattr(text_config, "final_logit_softcapping", None),
         )
 
+        self.masked_embedding: Gemma4MTPMaskedEmbedder | None
         if getattr(config, "use_ordered_embeddings", False):
             num_centroids = getattr(config, "num_centroids", 2048)
             top_k = getattr(config, "centroid_intermediate_top_k", 32)
@@ -527,9 +521,13 @@ class Gemma4MTP(nn.Module):
         else:
             self.masked_embedding = None
 
-        draft_cfg = vllm_config.speculative_config.draft_model_config
+        draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # graph capture in the V2 speculator, where indexing with a Python list
+        # would issue an unpinned H2D copy (illegal during capture).
+        self._suppress_idx: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -556,6 +554,7 @@ class Gemma4MTP(nn.Module):
     def _get_full_lm_head_weight(self) -> torch.Tensor:
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
+        assert self.masked_embedding is not None
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1:
@@ -581,8 +580,8 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_idx is not None:
+            logits.index_fill_(1, self._suppress_idx, -float("inf"))
         return logits
 
     def get_top_tokens(
@@ -590,6 +589,7 @@ class Gemma4MTP(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Sparse argmax via centroids masking. Returns token IDs directly."""
+        assert self.masked_embedding is not None
         return self.masked_embedding.get_top_tokens(
             hidden_states,
             self._get_full_lm_head_weight(),
@@ -598,4 +598,11 @@ class Gemma4MTP(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self._suppress_token_ids:
+            self._suppress_idx = torch.tensor(
+                self._suppress_token_ids,
+                dtype=torch.long,
+                device=next(self.parameters()).device,
+            )
+        return loaded

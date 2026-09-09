@@ -73,6 +73,10 @@ load_config() {
     # shellcheck disable=SC1090
     source "${CLUSTER_ENV}"
 
+    # Topology fanout normally arrives from cluster.sh; restate the defaults so
+    # the rank arithmetic is defined even when it does not.
+    : "${xP:=1}" "${yD:=1}"
+
     [[ -n "${_WIDE_EP_MODE_OVERRIDE}" ]] && WIDE_EP_MODE="${_WIDE_EP_MODE_OVERRIDE}"
     WIDE_EP_MODE="${WIDE_EP_MODE:-0}"
     case "${WIDE_EP_MODE}" in
@@ -83,7 +87,7 @@ load_config() {
 
     # node-mode orchestration knobs
     RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"     # bench | accuracy | none
-    HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-2400}"
+    HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"
 
     # MoRIIO KV transfer direction. 0 (default)
     MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
@@ -191,7 +195,7 @@ run_accuracy() {
       export HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0
       python3 -m lm_eval --model local-completions \
         --tasks "${ACCURACY_TASKS}" \
-        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True" \
+        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True,timeout=${ACCURACY_TIMEOUT:-3600}" \
         --output_path "${outdir}" \
         2>&1 | tee "${logf}"
     ) || eval_rc=$?
@@ -453,12 +457,12 @@ run_workload() {
 # rank 0: proxy + health-gate + workload, then write the completion sentinel.
 orchestrate_master() {
     local sentinel="$1" rc=0
-    # Front door: the toy proxy runs in-container (started here); the vllm-router
+    # Front door: the proxy runs in-container (started here); the vllm-router
     # runs as a SEPARATE container started by the SLURM job on this (rank-0) node,
     # so in that mode we don't start anything here.
     PROXY_PID=""
     if [[ "${ROUTER_TYPE:-vllm-router}" == "vllm-router" ]]; then
-        log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting toy proxy)"
+        log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting proxy)"
     else
         start_proxy_bg
     fi
@@ -471,7 +475,7 @@ orchestrate_master() {
             log "waiting for vllm-router on :${ROUTER_PORT} (up to 300s)"
             until /usr/bin/curl -sf "http://127.0.0.1:${ROUTER_PORT}/health" >/dev/null 2>&1; do
                 if (( $(date +%s) >= router_deadline )); then
-                    log "TIMEOUT waiting for vllm-router on :${ROUTER_PORT}"
+                    log "FAIL: vllm-router not ready on :${ROUTER_PORT} after 300s (bring-up)"
                     rc=1
                     break
                 fi
@@ -486,6 +490,7 @@ orchestrate_master() {
             set -e
         fi
     else
+        log "FAIL: health-gate did not pass — server bring-up failed"
         rc=1
     fi
     echo "${rc}" > "${sentinel}" 2>/dev/null || true
@@ -525,7 +530,6 @@ run_node() {
 
     # Shared-FS completion sentinel (LOG_PATH is shared & per-run/per-job).
     local sentinel="${LOG_PATH}/.disagg_done"
-    (( NODE_RANK == 0 )) && { rm -f "${sentinel}" 2>/dev/null || true; }
 
     log "node mode: rank=${NODE_RANK}/${total} role=${ROLE} master=${IS_MASTER} wide_ep=${WIDE_EP_MODE}(${PARALLEL_MODE})"
     log "topology: xP=${xP} yD=${yD} gpus/node=${GPUS_PER_NODE} IPADDRS=${IPADDRS}"
@@ -602,6 +606,9 @@ run_node() {
     local rc=0
     if (( NODE_RANK == 0 )); then
         orchestrate_master "${sentinel}" || rc=$?
+        # Canonical, human-readable end-of-run verdict for the login-node poller
+        # and CI logs (the .disagg_done sentinel remains the machine authority).
+        log "VERDICT: $( (( rc == 0 )) && echo PASS || echo FAIL) rc=${rc}"
     else
         watch_until_done "${sentinel}" || rc=$?
     fi

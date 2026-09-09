@@ -23,7 +23,7 @@
 #                        not already set, so precedence is:
 #                            caller/inline env  >  models.yaml env:
 #                        (Transport/fabric/engine env stays in cluster.sh,
-#                         e.g. VLLM_MORIIO_CONNECTOR_READ_MODE, VLLM_USE_V1.)
+#                         e.g. MORI_RDMA_DEVICES, NCCL_IB_HCA, VLLM_USE_V1.)
 #   base_flags         : always applied (both roles, both modes)
 #   prefill/decode.<tp|ep> : role + mode specific perf flags
 #   experimental_flags : optional extra flags (omit if empty)
@@ -36,17 +36,15 @@ models:
       VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
-      VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
-      VLLM_USE_AITER_TRITON_SILU_MUL: "0"
+      VLLM_ROCM_USE_AITER_FP8BMM: "false"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
-      ep: '--gpu-memory-utilization 0.75 --enforce-eager'
-        #ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: DeepSeek-V4-Pro
     env:
@@ -68,11 +66,16 @@ models:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
-    base_flags: "--trust-remote-code"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
+      VLLM_KV_CACHE_LAYOUT: "HND"
+    base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128 --language-model-only --kv-cache-dtype fp8"
     prefill:
-      tp: "--gpu-memory-utilization 0.85"
+      tp: "--gpu-memory-utilization 0.85 --enforce-eager"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: DeepSeek-R1-MXFP4
     env:
@@ -80,32 +83,45 @@ models:
       VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_FP8BMM: "false"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
+  # K2.5: align env/flags with K2.6 so aiter routes MoE to mxmoe_* (not moe2_*)
+  # at M=16384 bringup. Validated: gsm8k 0.919 (6864) / 0.932@250 (6879) on nightly.
   - model: Kimi-K2.5-MXFP4
     env:
       VLLM_ROCM_USE_AITER: "1"
-      VLLM_ROCM_USE_AITER_MOE: "1"
-      VLLM_ROCM_USE_AITER_RMSNORM: "1"
-    base_flags: "--trust-remote-code --attention-backend TRITON_MLA -ac.mla_prefill_backend=FLASH_ATTN --disable-custom-all-reduce"
+      AMDGCN_USE_BUFFER_OPS: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 1 --attention-backend ROCM_AITER_MLA"
     prefill:
-      tp: "--gpu-memory-utilization 0.85"
+      tp: "--gpu-memory-utilization 0.9"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
-      tp: "--gpu-memory-utilization 0.85"
+      tp: "--gpu-memory-utilization 0.9"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: Kimi-K2.6-MXFP4
     env:
       VLLM_ROCM_USE_AITER: "1"
       AMDGCN_USE_BUFFER_OPS: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
-    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 16 --attention-backend TRITON_MLA -ac.mla_prefill_backend=FLASH_ATTN --disable-custom-all-reduce"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 1 --attention-backend ROCM_AITER_MLA"
     prefill:
       tp: "--gpu-memory-utilization 0.9"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.9"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'

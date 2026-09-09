@@ -4,8 +4,7 @@
 NOTE: This API server is used only for demonstrating usage of AsyncEngine
 and simple performance benchmarks. It is not intended for production use.
 For production use, we recommend using our OpenAI compatible server.
-We are also not going to accept PRs modifying this file, please
-change `vllm/entrypoints/openai/api_server.py` instead.
+We are also not going to accept PRs modifying this file.
 """
 
 import asyncio
@@ -21,7 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.api_utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams

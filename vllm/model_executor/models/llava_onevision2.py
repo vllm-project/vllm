@@ -24,14 +24,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
-import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 from functools import lru_cache
 from typing import (
     Annotated,
     Any,
     Literal,
+    SupportsIndex,
+    SupportsInt,
+    TypedDict,
 )
 
 import numpy as np
@@ -39,12 +40,15 @@ import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, BatchFeature
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.dynamic_module_utils import (
+    get_class_from_dynamic_module,
+    resolve_trust_remote_code,
+)
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from typing_extensions import Buffer
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -98,6 +102,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.multimodal.video import (
@@ -108,6 +113,7 @@ from vllm.multimodal.video import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import _merge_mm_kwargs
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -131,17 +137,22 @@ def _load_ov2_processor(
     path = convert_model_repo_to_path(model)
     revision = revision or "main"
 
+    resolve_trust_remote_code(
+        trust_remote_code,
+        model,
+        has_local_code=False,
+        has_remote_code=True,
+    )
+
     processor_cls = get_class_from_dynamic_module(
         "processing_llava_onevision2.LlavaOnevision2Processor",
         path,
         revision=revision,
-        trust_remote_code=trust_remote_code,
     )
     video_processor_cls = get_class_from_dynamic_module(
         "video_processing_llava_onevision2.LlavaOnevision2VideoProcessor",
         path,
         revision=revision,
-        trust_remote_code=trust_remote_code,
     )
 
     # Slow Qwen2VLImageProcessor mirrors the remote processor (the Fast variant
@@ -165,13 +176,10 @@ def _load_ov2_processor(
     # codec video backend keeps its configured defaults.
     codec_config: dict = {}
     try:
-        config_file = os.path.join(path, "preprocessor_config.json")
-        if not os.path.isfile(config_file):
-            config_file = hf_hub_download(
-                path, "preprocessor_config.json", revision=revision
-            )
-        with open(config_file, encoding="utf-8") as f:
-            codec_config = json.load(f).get("codec", {}) or {}
+        preprocessor_config = get_hf_file_to_dict(
+            "preprocessor_config.json", path, revision
+        )
+        codec_config = (preprocessor_config or {}).get("codec", {}) or {}
     except Exception:
         logger.debug("OV2: no codec defaults found in preprocessor_config.json")
 
@@ -283,7 +291,7 @@ def _validate_video_sources(paths, model_config) -> list[str]:
 #   participates in the standard decode-stage pipeline.
 #
 # * codec backend: NOT a loader. OV2's codec path needs the video path string
-#   to survive into ``_call_hf_processor``, where the HF processor builds the
+#   to survive into ``_apply_hf_processor_main``, where the HF processor builds the
 #   codec canvas + smart_resize + patchify
 #   (pixel_values/image_grid_thw/patch_positions). That transform is
 #   path-level and inseparable; it cannot be reconstructed from pre-decoded
@@ -299,7 +307,7 @@ def prepare_codec_video_input(video_path: str) -> tuple:
 
     Returns ``(dummy_ndarray, metadata)`` where the ndarray satisfies the
     parser's 4-D shape check and the metadata carries the actual path to
-    our ``_call_hf_processor``. Use as::
+    our ``_apply_hf_processor_main``. Use as::
 
         multi_modal_data = {"video": prepare_codec_video_input("foo.mp4")}
 
@@ -436,7 +444,7 @@ def _create_field_factory(
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_embed_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             # OV2 first-class MM kwarg: per-patch (t,h,w)
             # positions required by the 3-D vision RoPE.
             patch_positions=MultiModalFieldConfig.flat_from_sizes(
@@ -446,7 +454,7 @@ def _create_field_factory(
                 "video", video_patch_sizes
             ),
             video_grid_thw=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_num_frames
+                "video", video_num_frames, keep_on_cpu=True
             ),
             patch_positions_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_patch_sizes
@@ -608,10 +616,6 @@ _OV2_FRAME_FACTOR = 2
 _OV2_FPS_MIN_FRAMES = 4
 
 
-def _round_by_factor(n: float, factor: int) -> int:
-    return round(n / factor) * factor
-
-
 def _ceil_by_factor(n: float, factor: int) -> int:
     import math as _math
 
@@ -728,6 +732,11 @@ class LlavaOnevision2VideoPixelInputs(TensorSchema):
 LlavaOnevision2ImageInputs = (
     LlavaOnevision2ImagePixelInputs | LlavaOnevision2ImageEmbeddingInputs
 )
+
+
+class LlavaOnevision2InputsByModality(TypedDict, total=False):
+    images: LlavaOnevision2ImageInputs | None
+    videos: LlavaOnevision2VideoPixelInputs | None
 
 
 class LlavaOnevision2VisionRotaryEmbedding(nn.Module):
@@ -1284,10 +1293,11 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         # ``video_needs_metadata=True`` makes the parser preserve both the
         # ``(frames, metadata)`` tuples from the frame backend and the
         # ``(dummy, {marker: path})`` tuples from prepare_codec_video_input;
-        # both are dispatched by metadata content in ``_call_hf_processor``.
+        # both are dispatched by metadata content in ``_apply_hf_processor_main``.
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_hf_processor(self, **kwargs: object):
@@ -1354,7 +1364,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             preprocessed = ImageSize(width=rw, height=rh)
         else:
             preprocessed = ImageSize(width=image_width, height=image_height)
-        padded_frames = num_frames + num_frames % temporal_patch_size
+        padded_frames = num_frames + (-num_frames % temporal_patch_size)
         grid_t = max(padded_frames // temporal_patch_size, 1)
         grid_h = preprocessed.height // patch_size
         grid_w = preprocessed.width // patch_size
@@ -1467,7 +1477,7 @@ class LlavaOnevision2DummyInputsBuilder(
         n_img = mm_counts.get("image", 0)
         n_vid = mm_counts.get("video", 0)
         w, h = self.info.get_image_size_with_most_features()
-        out: MultiModalDataDict = {}
+        out: dict[str, object] = {}
         if n_img:
             out["image"] = self._get_dummy_images(width=w, height=h, num_images=n_img)
         if n_vid:
@@ -1519,6 +1529,11 @@ class LlavaOnevision2DummyInputsBuilder(
 
 
 class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
@@ -1528,10 +1543,12 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_create_field_factory(self._spatial_merge_size),
             )
         return super()._parse_image_data(data)
@@ -1540,28 +1557,23 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
 class LlavaOnevision2MultiModalProcessor(
     BaseMultiModalProcessor[LlavaOnevision2ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Retained for symmetry; vLLM actually fetches the parser via
-        # info.get_data_parser() (see ProcessingInfo override above).
-        return LlavaOnevision2MultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # The wrapped OV2 processor is a bare custom class without the standard
-        # ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's default path
-        # fails; overriding this method routes the base class to call us
-        # directly.
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
-            dict(**mm_kwargs, **tok_kwargs)
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
         merged_kwargs.setdefault("return_tensors", "pt")
         call_kwargs = {
             k: v
@@ -1583,6 +1595,8 @@ class LlavaOnevision2MultiModalProcessor(
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
         _videos = mm_data.get("videos")
+        if _videos is not None and not isinstance(_videos, Sized):
+            raise TypeError(f"object of type '{type(_videos).__name__}' has no len()")
         videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
@@ -1630,22 +1644,25 @@ class LlavaOnevision2MultiModalProcessor(
                 if len(codec_video_paths) > 1
                 else codec_video_paths[0]
             )
-            # Route through the base ``_call_hf_processor`` so float-tensor
+            # Route through ``ctx.call_hf_processor`` so float-tensor
             # dtype postprocessing is applied automatically; inject
             # ``video_backend="codec"`` via mm_kwargs so the wrapped processor
             # dispatches to its codec branch.
-            output = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs={**mm_kwargs, "video_backend": "codec"},
-                tok_kwargs=tok_kwargs,
+            output = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(
+                    **{**hf_processor_mm_kwargs, "video_backend": "codec"}
+                ),
+                dict(text=prompt_text, **mm_data),
+                {**hf_processor_mm_kwargs, "video_backend": "codec"},
             )
             data = dict(output)
-            return BatchFeature(
+            processed_data = BatchFeature(
                 self._rename_codec_outputs_to_video(
                     data, codec_video_paths, hf_processor
                 )
             )
+            processed_data.update(passthrough_data)
+            return processed_data
 
         # ---- Frame backend (registered LlavaOnevision2VideoBackend) ------
         # Every non-codec video reaches here as a ``(frames_ndarray, metadata)``
@@ -1660,13 +1677,24 @@ class LlavaOnevision2MultiModalProcessor(
         # provided by the backend's ``compute_frames_index_to_sample``; SSRF /
         # local-file gating is enforced by the connector before decoding.
         if videos_present:
-            timestamp_decimals = int(
-                mm_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
+            timestamp_decimals = hf_processor_mm_kwargs.get(
+                "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
             )
+            if not isinstance(
+                timestamp_decimals, (str, Buffer, SupportsInt, SupportsIndex)
+            ):
+                raise TypeError(
+                    "int() argument must be a string, a bytes-like object "
+                    f"or a real number, not '{type(timestamp_decimals).__name__}'"
+                )
+            timestamp_decimals = int(timestamp_decimals)
 
             per_video_frames: list[list[Image.Image]] = []
             per_video_timestamps: list[list[float]] = []
-            for item in mm_data["videos"]:
+            videos = mm_data["videos"]
+            if not isinstance(videos, Iterable):
+                raise TypeError(f"Unsupported videos input: {type(videos)}")
+            for item in videos:
                 pil_frames, timestamps = _frame_video_to_pil_and_timestamps(item)
                 per_video_frames.append(pil_frames)
                 per_video_timestamps.append(timestamps)
@@ -1675,7 +1703,7 @@ class LlavaOnevision2MultiModalProcessor(
             # ``<{t} seconds><|vision_start|><|image_pad|><|vision_end|>``
             # blocks (matches the OV2 hf-chat reference exactly).
             new_prompt = _expand_video_markers_in_prompt(
-                prompt,
+                prompt_text,
                 per_video_timestamps,
                 timestamp_decimals=timestamp_decimals,
             )
@@ -1704,7 +1732,7 @@ class LlavaOnevision2MultiModalProcessor(
             row_is_video: list[bool] = []
             vid_idx = 0
             img_idx = 0
-            for marker in marker_pattern.finditer(prompt):
+            for marker in marker_pattern.finditer(prompt_text):
                 if marker.lastgroup == "video":
                     frames = per_video_frames[vid_idx]
                     vid_idx += 1
@@ -1727,16 +1755,15 @@ class LlavaOnevision2MultiModalProcessor(
             merged_mm_data.pop("videos", None)
             merged_mm_data["images"] = flat_frames
 
-            # Route through the base ``_call_hf_processor`` (applies float-tensor
+            # Route through ``ctx.call_hf_processor`` (applies float-tensor
             # dtype postprocessing automatically). The wrapped processor's image
             # branch ignores video/codec-only kwargs and does not forward extra
             # **kwargs to the image processor, so passing the full merged kwarg
             # set here is a no-op beyond return_tensors/padding.
-            output = super()._call_hf_processor(
-                prompt=new_prompt,
-                mm_data=merged_mm_data,
-                mm_kwargs=mm_kwargs,
-                tok_kwargs=tok_kwargs,
+            output = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                dict(text=new_prompt, **merged_mm_data),
+                hf_processor_mm_kwargs,
             )
             data = dict(output)
 
@@ -1793,18 +1820,21 @@ class LlavaOnevision2MultiModalProcessor(
                 (len(per_video_timestamps),), dtype=torch.long
             )
 
-            return BatchFeature(data)
+            processed_data = BatchFeature(data)
+            processed_data.update(passthrough_data)
+            return processed_data
 
         # ---- Image-only / text-only call --------------------------------
-        # No videos present: delegate to the base ``_call_hf_processor``, which
+        # No videos present: delegate to ``ctx.call_hf_processor``, which
         # runs the wrapped processor over the (possibly empty) image set and
         # applies float-tensor dtype postprocessing automatically.
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _rename_codec_outputs_to_video(
         self,
@@ -1885,25 +1915,28 @@ class LlavaOnevision2MultiModalProcessor(
         video_pad_id = vocab["<|video_pad|>"]
         vision_start_id = vocab["<|vision_start|>"]
         vision_end_id = vocab["<|vision_end|>"]
-        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+        newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
         merge_length = image_processor.merge_size**2
         decimals = int(hf_processor_mm_kwargs.get("timestamp_decimals", 1))
 
         def get_image_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
             n = int(grid_thw.prod(-1).sum()) // merge_length
             return [image_pad_id] * n
 
         def get_video_replacement(item_idx: int):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
             is_codec_field = out_item.get("video_is_codec")
-            is_codec = (
-                bool(int(is_codec_field.data.item()))
-                if is_codec_field is not None
-                else False
-            )
+            if is_codec_field is not None:
+                is_codec_data = is_codec_field.data
+                assert isinstance(is_codec_data, torch.Tensor)
+                is_codec = bool(int(is_codec_data.item()))
+            else:
+                is_codec = False
             tokens: list[int] = []
 
             if is_codec:
@@ -1914,6 +1947,8 @@ class LlavaOnevision2MultiModalProcessor(
                 # run, emit ``<sec seconds><|vision_start|><pad*N><|vision_end|>\n``.
                 patch_positions = out_item["patch_positions_videos"].data
                 fps_t = out_item["codec_fps"].data
+                assert isinstance(patch_positions, torch.Tensor)
+                assert isinstance(fps_t, torch.Tensor)
                 fps = float(int(fps_t.item())) / 1_000_000_000.0
                 runs = _codec_timestamp_runs(
                     patch_positions, fps, image_processor.merge_size
@@ -1928,6 +1963,7 @@ class LlavaOnevision2MultiModalProcessor(
                     tokens.extend(newline_ids)
             else:
                 timestamps = out_item["frame_timestamps"].data
+                assert isinstance(timestamps, torch.Tensor)
                 T_total = int(grid_thw.shape[0])
                 for t in range(T_total):
                     sec = float(timestamps[t].item())
@@ -2111,7 +2147,7 @@ class LlavaOnevision2ForConditionalGeneration(
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaOnevision2ImageEmbeddingInputs):
             image_embeds = image_input["image_embeds"]
         else:
             image_embeds = self.visual(
@@ -2156,8 +2192,13 @@ class LlavaOnevision2ForConditionalGeneration(
             )
         if isinstance(video_num_frames, list):
             video_num_frames = torch.cat([v.flatten() for v in video_num_frames])
-        else:
+        elif isinstance(video_num_frames, torch.Tensor):
             video_num_frames = video_num_frames.flatten()
+        else:
+            raise TypeError(
+                "video_num_frames must be a tensor or a list of tensors, "
+                f"got {type(video_num_frames)}"
+            )
         return LlavaOnevision2VideoPixelInputs(
             type="pixel_values_videos",
             pixel_values_videos=pixel_values_videos,
@@ -2192,8 +2233,10 @@ class LlavaOnevision2ForConditionalGeneration(
             cursor += n
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> LlavaOnevision2InputsByModality:
+        modalities = LlavaOnevision2InputsByModality()
         for key in kwargs:
             if key in ("pixel_values", "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(**kwargs)
@@ -2211,9 +2254,13 @@ class LlavaOnevision2ForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
         for modality in modalities:
             if modality == "images":
-                multimodal_embeddings += self._process_image_input(modalities["images"])
+                image_input = modalities["images"]
+                assert image_input is not None
+                multimodal_embeddings += self._process_image_input(image_input)
             elif modality == "videos":
-                multimodal_embeddings += self._process_video_input(modalities["videos"])
+                video_input = modalities["videos"]
+                assert video_input is not None
+                multimodal_embeddings += self._process_video_input(video_input)
         return multimodal_embeddings
 
     def get_input_embeddings(

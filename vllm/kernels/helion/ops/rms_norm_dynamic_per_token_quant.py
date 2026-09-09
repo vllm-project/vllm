@@ -48,7 +48,6 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         input = torch.randn(num_tokens, hidden_size, device="cuda", dtype=in_dtype)
         result = torch.empty(input.shape, device=input.device, dtype=out_dtype)
         scale = torch.empty((num_tokens, 1), device=input.device, dtype=scale_dtype)
-        scale_ub = torch.mean(input).to(scale_dtype)
         residual = torch.randn_like(input)
         weight = torch.normal(
             mean=1.0,
@@ -58,6 +57,16 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
         )
         epsilon = 1e-6
+        # scale_ub clamps the per-token amax of the RMS-normed, weighted output.
+        # Use a non-degenerate upper bound (midway between the mean and max of
+        # that magnitude) so clamping is partially active and the baseline
+        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
+        # input would collapse every scale to the floor and saturate the output.
+        # Mirrors the reference normalization in baseline() below.
+        x = input.to(torch.float32) + residual.to(torch.float32)
+        rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + epsilon)
+        x_norm_abs = ((x * rms).to(input.dtype) * weight).abs().to(torch.float32)
+        scale_ub = (0.5 * (x_norm_abs.mean() + x_norm_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey({"hidden_size": hidden_size, "num_tokens": num_tokens})
         inputs[config_key] = (result, input, weight, scale, epsilon, scale_ub, residual)
@@ -110,18 +119,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     return result
 
 
-def fake_impl(
-    result: torch.Tensor,  # [num_tokens, hidden_size]
-    input: torch.Tensor,  # [num_tokens, hidden_size]
-    weight: torch.Tensor,  # [hidden_size]
-    scale: torch.Tensor,  # [num_tokens, 1]
-    epsilon: float,
-    scale_ub: torch.Tensor | None = None,  # []
-    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
-) -> None:
-    return
-
-
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
@@ -170,7 +167,6 @@ def baseline(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],

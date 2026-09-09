@@ -19,6 +19,7 @@ class LRUCachePolicy(CachePolicy):
     """
 
     def __init__(self, cache_capacity: int):
+        super().__init__(cache_capacity)
         # Blocks with ref_cnt 0 (not participating in any loads/stores) ordered in LRU
         self.evictable_blocks: OrderedDict[OffloadKey, None] = OrderedDict()
         self.blocks: dict[OffloadKey, BlockStatus] = {}
