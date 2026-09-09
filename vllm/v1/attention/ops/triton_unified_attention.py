@@ -862,6 +862,32 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _select_query_block(
+    max_seqlen_q: int, num_queries_per_kv: int, head_size: int
+) -> tuple[int, int, bool]:
+    """Pick ``(BLOCK_M, BLOCK_Q, tuned)`` for the 2D query blocking.
+
+    Long prefill on gfx1151 is served far better by a wider query block than
+    the generic selection gives it. Architectures are opted in explicitly;
+    everything else keeps the generic block.
+
+    Returns:
+        The query block size, the derived per-KV-head block, and whether the
+        tuned path was taken (the launch config keys off the flag).
+    """
+    if max_seqlen_q >= 256 and _ON_GFX1151:
+        block_m = max(
+            64 if head_size >= 80 else 128,
+            triton.next_power_of_2(num_queries_per_kv),
+        )
+        return block_m, block_m // num_queries_per_kv, True
+
+    block_m = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    return block_m, block_m // num_queries_per_kv, False
+
+
 def _cap_num_stages_for_gfx11_lds(
     num_stages: int,
     block_m: int,
@@ -900,10 +926,12 @@ def _cap_num_stages_for_gfx11_lds(
 
 def _gfx11_launch_config(
     max_seqlen_q: int,
+    num_kv_heads: int,
     head_size: int,
     element_size: int,
     block_m: int,
     tile_size: int,
+    tuned_query_block: bool,
 ) -> dict[str, int]:
     """Launch parameters for the 2D unified-attention kernel on gfx11.
 
@@ -912,24 +940,42 @@ def _gfx11_launch_config(
 
     Args:
         max_seqlen_q: Longest query in the batch; ``1`` means decode.
+        num_kv_heads: KV head count, used to spot MQA.
         head_size: Attention head dimension.
         element_size: Bytes per query element.
         block_m: Query rows per block.
         tile_size: KV tile depth the kernel will launch with.
+        tuned_query_block: Whether ``_select_query_block`` took its tuned
+            gfx1151 path.
 
     Returns:
         Keyword arguments for the kernel launch.
     """
-    # A wide head lets the K/V tiles dominate LDS, so only a narrow-head
-    # decode can afford a deep pipeline.
-    num_stages = (1 if head_size >= 80 else 3) if max_seqlen_q == 1 else 1
+    waves_per_eu = 2
+    if max_seqlen_q == 1:
+        # A wide head lets the K/V tiles dominate LDS, so decode cannot
+        # afford a deep pipeline.
+        num_stages = 1 if head_size >= 80 else 3
+    else:
+        num_stages = 1
+        if tuned_query_block:
+            # A wider query block pays for a deeper pipeline and more
+            # occupancy per EU. Only reachable on gfx1151, the sole
+            # architecture measured here.
+            num_stages = 3
+            waves_per_eu = 6 if head_size >= 80 else 4
+            if head_size == 256 and num_kv_heads == 1:
+                # Gemma-2B style MQA: the single KV head starves the deeper
+                # pipeline, so keep it shallow.
+                num_stages = 1
+                waves_per_eu = 4
 
     return {
         "num_warps": 4,
         "num_stages": _cap_num_stages_for_gfx11_lds(
             num_stages, block_m, tile_size, head_size, element_size
         ),
-        "waves_per_eu": 2,
+        "waves_per_eu": waves_per_eu,
     }
 
 
@@ -1063,10 +1109,9 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    BLOCK_M, BLOCK_Q, tuned_query_block = _select_query_block(
+        max_seqlen_q, num_queries_per_kv, head_size
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
@@ -1228,7 +1273,13 @@ def unified_attention(
     launch_kwargs: dict[str, int] = {}
     if not use_3d and _ON_GFX11:
         launch_kwargs = _gfx11_launch_config(
-            max_seqlen_q, head_size, q.element_size(), BLOCK_M, tile_size
+            max_seqlen_q,
+            num_kv_heads,
+            head_size,
+            q.element_size(),
+            BLOCK_M,
+            tile_size,
+            tuned_query_block,
         )
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps

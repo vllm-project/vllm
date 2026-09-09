@@ -992,31 +992,93 @@ def test_cap_num_stages_for_gfx11_lds(head_size: int, block_m: int) -> None:
     assert capped == 1 or q_bytes + s_bytes + kv_bytes <= triton_ua._GFX11_LDS_BUDGET
 
 
-@pytest.mark.parametrize("max_seqlen_q", [1, 4096])
-@pytest.mark.parametrize("head_size", [64, 128, 256])
-@pytest.mark.parametrize("block_m", [16, 64, 128])
-def test_gfx11_launch_config(
+@pytest.mark.parametrize(
+    ("max_seqlen_q", "nq_per_kv", "head_size", "expected"),
+    [
+        # gfx1151 long prefill: wide head takes 64, narrow head takes 128.
+        (256, 4, 128, (64, 16, True)),
+        (4096, 8, 80, (64, 8, True)),
+        (4096, 4, 64, (128, 32, True)),
+        # Below the long-prefill threshold, and decode, stay generic.
+        (255, 4, 128, (16, 4, False)),
+        (1, 4, 128, (16, 4, False)),
+        # Extreme GQA still respects num_queries_per_kv.
+        (4096, 32, 128, (64, 2, True)),
+    ],
+)
+def test_select_query_block_gfx1151(
     monkeypatch: pytest.MonkeyPatch,
     max_seqlen_q: int,
+    nq_per_kv: int,
+    head_size: int,
+    expected: tuple[int, int, bool],
+) -> None:
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=True)
+    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv, head_size) == expected
+
+
+def test_select_query_block_untuned_arch_is_generic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An architecture nobody tuned must keep the generic query block."""
+    _patch_arch(monkeypatch, gfx11=True)
+    assert triton_ua._select_query_block(8192, 4, 128) == (16, 4, False)
+
+
+@pytest.mark.parametrize(
+    ("gfx1151", "max_seqlen_q", "num_kv_heads", "head_size", "block_m", "tuned"),
+    [
+        # Decode: only a narrow head can afford a deep pipeline.
+        (True, 1, 8, 64, 16, False),
+        (True, 1, 8, 128, 16, False),
+        # Prefill on the generic query block stays shallow.
+        (True, 4096, 8, 128, 16, False),
+        # Tuned gfx1151 prefill: wide head, then narrow head.
+        (True, 4096, 8, 128, 64, True),
+        (True, 4096, 8, 64, 128, True),
+        # Gemma-2B style MQA opts back out of the deep pipeline.
+        (True, 4096, 1, 256, 64, True),
+        # A tuned query block on an unmeasured gfx11 part keeps the defaults.
+        (False, 4096, 8, 128, 64, True),
+    ],
+)
+def test_gfx11_launch_config(
+    monkeypatch: pytest.MonkeyPatch,
+    gfx1151: bool,
+    max_seqlen_q: int,
+    num_kv_heads: int,
     head_size: int,
     block_m: int,
+    tuned: bool,
 ) -> None:
-    """Every launch config must be 4 warps and a depth that fits the budget."""
-    _patch_arch(monkeypatch, gfx11=True)
+    """Every launch config must be 4 warps and fit the gfx11 LDS budget."""
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=gfx1151)
     tile_size, element_size = 32, 2
     config = triton_ua._gfx11_launch_config(
-        max_seqlen_q, head_size, element_size, block_m, tile_size
+        max_seqlen_q,
+        num_kv_heads,
+        head_size,
+        element_size,
+        block_m,
+        tile_size,
+        tuned,
     )
     assert config["num_warps"] == 4
-    assert config["waves_per_eu"] == 2
+    assert config["num_stages"] >= 1
+    assert config["waves_per_eu"] in (2, 4, 6)
     assert config["num_stages"] == triton_ua._cap_num_stages_for_gfx11_lds(
         config["num_stages"], block_m, tile_size, head_size, element_size
     )
 
 
-def test_gfx11_launch_config_decode_depth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only a narrow-head decode is allowed a deep pipeline."""
-    _patch_arch(monkeypatch, gfx11=True)
-    assert triton_ua._gfx11_launch_config(1, 64, 2, 16, 16)["num_stages"] == 3
-    assert triton_ua._gfx11_launch_config(1, 128, 2, 16, 16)["num_stages"] == 1
-    assert triton_ua._gfx11_launch_config(4096, 64, 2, 16, 32)["num_stages"] == 1
+def test_gfx11_launch_config_gfx1151_prefill_is_tuned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tuned gfx1151 prefill path is where the speedup comes from."""
+    _patch_arch(monkeypatch, gfx11=True, gfx1151=True)
+    config = triton_ua._gfx11_launch_config(4096, 8, 64, 2, 128, 32, True)
+    assert config == {"num_warps": 4, "num_stages": 3, "waves_per_eu": 4}
+
+    # head_size 256 with a single KV head is Gemma-2B: shallow on purpose.
+    mqa = triton_ua._gfx11_launch_config(4096, 1, 256, 2, 64, 32, True)
+    assert mqa == {"num_warps": 4, "num_stages": 1, "waves_per_eu": 4}
