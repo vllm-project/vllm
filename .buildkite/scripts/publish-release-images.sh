@@ -221,5 +221,7 @@ if target_enabled cpu; then
   fi
 fi
 
+bash .buildkite/scripts/publish-vllm-bench-images.sh release
+
 echo ""
 echo "Successfully published ${TARGET} release images for v${RELEASE_VERSION}"
