@@ -223,7 +223,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.g_proj is not None:
             gate = self.g_proj(hidden_states)[0]
-            if envs.VLLM_ROCM_USE_FUSED_SIGMOID_GATE:
+            if envs.VLLM_ROCM_USE_AITER_FUSED_SIGMOID_GATE:
                 from aiter.ops.triton.fusions.fused_sigmoid_mul import (
                     fused_sigmoid_mul,
                 )

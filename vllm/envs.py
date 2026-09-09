@@ -145,7 +145,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FUSED_QKV_CONV: bool = False
-    VLLM_ROCM_USE_FUSED_SIGMOID_GATE: bool = False
+    VLLM_ROCM_USE_AITER_FUSED_SIGMOID_GATE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -1320,8 +1320,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use the aiter fused sigmoid-mul kernel.
     # By default is disabled.
-    "VLLM_ROCM_USE_FUSED_SIGMOID_GATE": lambda: (
-        os.getenv("VLLM_ROCM_USE_FUSED_SIGMOID_GATE", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_FUSED_SIGMOID_GATE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSED_SIGMOID_GATE", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
