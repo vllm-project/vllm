@@ -72,6 +72,12 @@ class CPUOffloadingManager(OffloadingManager):
             OrderedDict() if store_threshold >= 2 else None
         )
 
+        # Cache effectiveness counters (deltas flushed by get_stats()).
+        self._lookups_delta: int = 0
+        self._hits_delta: int = 0
+        self._misses_delta: int = 0
+        self._evictions_delta: int = 0
+
     # --- block pool ---
 
     def _get_num_free_blocks(self) -> int:
@@ -131,13 +137,33 @@ class CPUOffloadingManager(OffloadingManager):
         return RequestOffloadingContext()
 
     @override
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        # Drop any per-request state the policy is holding (SAE's
+        # session-merge pointer). No-op for LRU/ARC.
+        self._policy.on_request_finished(req_context)
+
+    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         block = self._policy.get(key)
+        # Signal to policies that this get() is a genuine request-driven
+        # lookup, distinct from the internal existence checks in
+        # prepare_load / prepare_store / complete_load / complete_store.
+        # SAE uses this to gate its session-merge pointer.
+        self._policy.record_lookup(key, req_context)
         if block is None:
-            return LookupResult.MISS
-        if not block.is_ready:
-            return LookupResult.HIT_PENDING
-        return LookupResult.HIT
+            result = LookupResult.MISS
+        elif not block.is_ready:
+            result = LookupResult.HIT_PENDING
+        else:
+            result = LookupResult.HIT
+        # HIT_PENDING counts as HIT; RETRY is not emitted by this method.
+        if result == LookupResult.MISS:
+            self._lookups_delta += 1
+            self._misses_delta += 1
+        elif result in (LookupResult.HIT, LookupResult.HIT_PENDING):
+            self._lookups_delta += 1
+            self._hits_delta += 1
+        return result
 
     @override
     def prepare_load(
@@ -186,8 +212,12 @@ class CPUOffloadingManager(OffloadingManager):
             self._record_accesses(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
             self.stores_skipped_in_current_batch += num_keys - len(keys)
-        # filter out blocks that are already stored
-        keys_to_store = [k for k in keys if self._policy.get(k) is None]
+        # Filter out blocks that are already stored.
+        # The count dropped by the filter (``num_blocks_in_cache``) is the number of
+        # already stored blocks
+        keys_list = list(keys)
+        keys_to_store = [k for k in keys_list if self._policy.get(k) is None]
+        num_blocks_in_cache = len(keys_list) - len(keys_to_store)
 
         if not keys_to_store:
             return PrepareStoreOutput(
@@ -209,11 +239,14 @@ class CPUOffloadingManager(OffloadingManager):
 
             # Blocks from the original input are excluded from eviction candidates:
             # a block that was already stored must remain in the cache after this call.
-            protected = set(keys)
-            evicted = self._policy.evict(num_blocks_to_evict, protected)
+            protected = set(keys_list)
+            evicted = self._policy.evict(
+                num_blocks_to_evict, protected, req_context, num_blocks_in_cache
+            )
             if evicted is None:
                 return None
 
+            self._evictions_delta += len(evicted)
             # cache-policy removes only idle blocks.
             self._num_evictable_cache_blocks -= len(evicted)
             assert self._num_evictable_cache_blocks >= 0
@@ -236,8 +269,13 @@ class CPUOffloadingManager(OffloadingManager):
             "Block pool did not allocate the expected number of blocks"
         )
 
-        for key, block in zip(keys_to_store, blocks):
-            self._policy.insert(key, block)
+        # Enable grouping inserts into sessions
+        self._policy.open_session(req_context, num_blocks_in_cache)
+        try:
+            for key, block in zip(keys_to_store, blocks):
+                self._policy.insert(key, block)
+        finally:
+            self._policy.close_session()
         self._num_write_pending_blocks += len(keys_to_store)
 
         # build store specs for allocated blocks
@@ -337,5 +375,18 @@ class CPUOffloadingManager(OffloadingManager):
                 self.stores_skipped_in_current_batch,
             )
             self.stores_skipped_in_current_batch = 0
+
+        stats.increase_counter(
+            CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, self._lookups_delta
+        )
+        stats.increase_counter(CPUOffloadingMetrics.CPU_BLOCK_HIT, self._hits_delta)
+        stats.increase_counter(CPUOffloadingMetrics.CPU_BLOCK_MISS, self._misses_delta)
+        stats.increase_counter(
+            CPUOffloadingMetrics.BLOCK_EVICTION, self._evictions_delta
+        )
+        self._lookups_delta = 0
+        self._hits_delta = 0
+        self._misses_delta = 0
+        self._evictions_delta = 0
 
         return stats

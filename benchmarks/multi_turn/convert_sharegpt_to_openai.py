@@ -25,7 +25,10 @@ def has_non_english_chars(text: str) -> bool:
 
 
 def content_is_valid(
-    content: str, min_content_len: int | None, max_content_len: int | None
+    content: str,
+    min_content_len: int | None,
+    max_content_len: int | None,
+    exclude_non_english: bool = True,
 ) -> bool:
     if min_content_len and len(content) < min_content_len:
         return False
@@ -33,7 +36,7 @@ def content_is_valid(
     if max_content_len and len(content) > max_content_len:
         return False
 
-    return has_non_english_chars(content)
+    return not (exclude_non_english and has_non_english_chars(content))
 
 
 def print_stats(
@@ -115,6 +118,7 @@ def convert_sharegpt_to_openai(
     min_turns: int | None = None,
     max_turns: int | None = None,
     model: str | None = None,
+    exclude_non_english: bool = True,
 ) -> None:
     if min_turns and max_turns:
         assert min_turns <= max_turns
@@ -257,7 +261,10 @@ def convert_sharegpt_to_openai(
 
                 content = m["content"]
                 valid_messages = content_is_valid(
-                    content, min_content_len, max_content_len
+                    content,
+                    min_content_len,
+                    max_content_len,
+                    exclude_non_english,
                 )
                 if not valid_messages:
                     break
@@ -334,6 +341,18 @@ def main() -> None:
         default=None,
         help="LLM model, only the tokenizer will be used",
     )
+    parser.add_argument(
+        "--exclude-non-english",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Exclude conversations whose messages contain non-ASCII "
+            "characters. Enabled by default (keeps only conversations "
+            "with at least one non-ASCII byte, matching the historical "
+            "behavior of this tool). Pass --no-exclude-non-english to "
+            "keep pure-English conversations as well."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -347,6 +366,7 @@ def main() -> None:
         args.min_turns,
         args.max_turns,
         args.model,
+        args.exclude_non_english,
     )
 
 
