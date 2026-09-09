@@ -24,7 +24,7 @@ import pytest
 import torch
 
 import vllm._aiter_ops  # noqa: F401 - ensure ops are registered
-from tests.kernels.utils import bf16_ulp_distance
+from tests.kernels.utils import bf16_ulp_distance, fp8_ulp_distance
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -529,6 +529,81 @@ def test_rocm_aiter_rmsnorm_with_add_fp8_group_quant_residual_accuracy():
         max_rel=0.5,
         max_fail_rate=0.01,
     )
+
+
+@pytest.mark.parametrize("m", [1, 32])
+def test_rocm_aiter_mla_dual_rmsnorm_group_quant_vs_sequential(m):
+    """Fused q/kv RMSNorm + q group-quant matches rms_norm -> group_fp8_quant.
+
+    M=1 covers the single-token decode case. M=0 is guarded by the caller
+    (the ROCm DeepSeek-V4 attention checks num_tokens > 0) and the op has
+    no zero-row guard itself, so it is intentionally not tested here.
+    """
+    require_aiter()
+    require_fp8()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    nq, nk, group_size = 1536, 576, 128
+    q = torch.randn(m, nq, dtype=torch.bfloat16)
+    kv = torch.randn(m, nk, dtype=torch.bfloat16)
+    q_weight = torch.ones(nq, dtype=torch.bfloat16)
+    kv_weight = torch.ones(nk, dtype=torch.bfloat16)
+    eps = 1e-5
+    fp8_dtype = current_platform.fp8_dtype()
+
+    fused_q, fused_scales, fused_kv = rocm_aiter_ops.fused_qk_rmsnorm_group_quant(
+        q, q_weight, eps, kv, kv_weight, eps, group_size=group_size
+    )
+    _assert_quant_shapes(fused_q, fused_scales, m, nq, fp8_dtype, nq // group_size)
+    assert fused_kv.shape == (m, nk)
+    assert fused_kv.dtype == kv.dtype
+
+    # q: dequantized comparison against the sequential composition.
+    normed_q = rocm_aiter_ops.rms_norm(q, q_weight, eps)
+    ref_q, ref_scales = rocm_aiter_ops.group_fp8_quant(normed_q, group_size)
+    _assert_rel_error_quality(
+        _dequantize_grouped(fused_q, fused_scales, group_size),
+        _dequantize_grouped(ref_q, ref_scales, group_size),
+        label="mla_dual_rmsnorm_group_quant",
+        mean_limit=0.05,
+        preferred_rel=0.05,
+        max_rel=0.5,
+        max_fail_rate=0.01,
+    )
+
+    # kv: both sides are aiter RMSNorm kernels; allow one bf16 ULP.
+    ref_kv = rocm_aiter_ops.rms_norm(kv, kv_weight, eps)
+    max_ulp = int(bf16_ulp_distance(fused_kv, ref_kv).max().item())
+    assert max_ulp <= 1, f"fused kv: max ULP {max_ulp} > 1"
+
+
+def test_rocm_aiter_mla_dual_rmsnorm_group_quant_strided_split_view():
+    """Split-view inputs, as produced by the DeepSeek-V4 q/kv split, match
+    contiguous inputs."""
+    require_aiter()
+    require_fp8()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    m, nq, nk, group_size = 16, 1536, 576, 128
+    qr_kv = torch.randn(m, nq + nk, dtype=torch.bfloat16)
+    q_view, kv_view = qr_kv.split([nq, nk], dim=-1)
+    assert not q_view.is_contiguous()
+    q_weight, kv_weight = torch.ones(nq + nk, dtype=torch.bfloat16).split([nq, nk])
+    eps = 1e-5
+
+    def run(q, kv):
+        return rocm_aiter_ops.fused_qk_rmsnorm_group_quant(
+            q, q_weight, eps, kv, kv_weight, eps, group_size=group_size
+        )
+
+    out_strided = run(q_view, kv_view)
+    out_contig = run(q_view.contiguous(), kv_view.contiguous())
+
+    q_ulp = int(fp8_ulp_distance(out_strided[0], out_contig[0]).max().item())
+    kv_ulp = int(bf16_ulp_distance(out_strided[2], out_contig[2]).max().item())
+    assert q_ulp <= 1, f"strided q: max fp8 ULP {q_ulp} > 1"
+    assert kv_ulp <= 1, f"strided kv: max bf16 ULP {kv_ulp} > 1"
+    torch.testing.assert_close(out_strided[1], out_contig[1])
 
 
 # -- End-to-end inference chain test ---------------------------------------
