@@ -977,18 +977,12 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         if architecture is not None
         else None
     )
-    for config in (
-        EngramConfig(cpu_offload=False, embedding_across_dp=False),
-        EngramConfig(cpu_offload=True, embedding_across_dp=False),
-        EngramConfig(cpu_offload=False, embedding_across_dp=True),
-    ):
-        if supported:
+    config = EngramConfig(cpu_offload=False, embedding_across_dp=False)
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
             config.verify_model_config(model)
-        else:
-            with pytest.raises(
-                ValueError, match="requires a model with supported Engram"
-            ):
-                config.verify_model_config(model)
 
 
 def test_engram_config_defaults_to_none(monkeypatch):

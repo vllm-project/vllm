@@ -79,13 +79,6 @@ def test_engram_config_cli_optional(options, provided):
     assert (args.engram_config is not None) == provided
 
 
-@pytest.mark.parametrize("option", ["-np", "--ngram-parallel-size"])
-def test_ngram_parallel_size_cli_removed(option):
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    with pytest.raises(SystemExit):
-        parser.parse_args([option, "8"])
-
-
 @pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [

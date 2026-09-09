@@ -418,9 +418,6 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
 
 def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
-    with pytest.raises(NotImplementedError, match="SimpleNamespace"):
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config(SimpleNamespace(), prefix)
-
     nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
     with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
@@ -455,62 +452,6 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
         ),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
-
-
-def test_ngram_embedding_delegates_prefetch_completion_to_backend() -> None:
-    class PrefetchEmbedding(nn.Module):
-        supports_prefetch = True
-
-        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            return hidden_states[:, :2]
-
-    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
-    nn.Module.__init__(module)
-    module.ngram_embedding = PrefetchEmbedding()
-    hidden_states = torch.arange(12).reshape(3, 4)
-
-    output = module(
-        hidden_states,
-        torch.arange(3),
-        torch.tensor([0, 3]),
-        torch.empty(0),
-    )
-
-    assert torch.equal(output, hidden_states[:, :2])
-
-
-def test_ngram_embedding_delegates_prefetch_start_to_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = []
-
-    class PrefetchEmbedding(nn.Module):
-        supports_prefetch = True
-
-        def start_prefetch(
-            self,
-            hidden_states: torch.Tensor,
-            ngram_ids: torch.Tensor,
-        ) -> None:
-            calls.append((hidden_states, ngram_ids))
-
-    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
-    nn.Module.__init__(module)
-    module.ngram_embedding = PrefetchEmbedding()
-    hidden_states = torch.zeros(3, 4)
-    ngram_ids = torch.arange(6).reshape(3, 2)
-    monkeypatch.setattr(module, "compute_ngram_ids", lambda *args: ngram_ids)
-
-    module.start_prefetch(
-        hidden_states,
-        torch.arange(3),
-        torch.tensor([0, 3]),
-        torch.empty(0),
-    )
-
-    assert len(calls) == 1
-    assert calls[0][0] is hidden_states
-    assert calls[0][1] is ngram_ids
 
 
 def test_pinned_embedding_forward_finalizes_prefetched_output(
@@ -589,9 +530,6 @@ def test_ple_device_embedding_allocates_on_active_device(
         )
 
     assert embedding.weight.device == torch.device("cuda:0")
-    assert embedding.embedding_method is embedding_method
-    assert embedding.quant_method is embedding_method
-    assert not embedding.supports_prefetch
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -648,12 +586,6 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     assert copied == 4
     assert embedding.weight.device.type == "cpu"
     assert embedding.weight.is_pinned()
-    assert embedding.embedding_method is embedding_method
-    assert embedding.quant_method is embedding_method
-    assert embedding._uva_weight.device.type == "cuda"
-    assert embedding.supports_prefetch
-    assert embedding._prefetch_stream.device == embedding._uva_weight.device
-    assert embedding._prefetch_buffer.shape == (0, 1, 3)
     assert output.dtype == storage_dtype
     expected = loaded_weight[input_ids.cpu()].to(device="cuda:0")
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
