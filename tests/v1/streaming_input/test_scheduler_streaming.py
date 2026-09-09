@@ -35,6 +35,7 @@ class DummyRequest(Request):
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
+        first_chunk=True,
     ):
         super().__init__(
             request_id=request_id,
@@ -45,6 +46,10 @@ class DummyRequest(Request):
             pooling_params=None,
             mm_features=mm_features,
             resumable=resumable,
+            # The frontend stamps first_chunk on the first chunk of every
+            # session (async_llm.handle_inputs); these tests construct
+            # session-opening requests directly, so stamp it here.
+            first_chunk=first_chunk,
         )
 
 

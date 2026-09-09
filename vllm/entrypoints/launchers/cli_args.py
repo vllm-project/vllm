@@ -252,6 +252,11 @@ class FrontendArgs(BaseFrontendArgs):
 
     host: str | None = None
     """Host name."""
+    enable_streaming: bool = False
+    """Enable the experimental streaming session API (POST/DELETE
+    /v1/streaming/*) for live, per-chunk captioning over long-running
+    streaming-input sessions. Off by default; requires a generate-capable
+    model."""
     port: int = 8000
     """Port number."""
     data_parallel_supervisor_port: int = 9256

@@ -57,42 +57,58 @@ class RequestOutputCollector:
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
-        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.outputs: deque[RequestOutput | PoolingRequestOutput | Exception] = deque()
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
+    @property
+    def output(self) -> RequestOutput | PoolingRequestOutput | Exception | None:
+        """Next output to be consumed (oldest pending), or None if drained."""
+        return self.outputs[0] if self.outputs else None
+
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
-        if self.output is None or isinstance(output, Exception):
-            self.output = output
+        if isinstance(output, Exception):
+            self.outputs.clear()
+            self.outputs.append(output)
             self.ready.set()
-        elif isinstance(self.output, RequestOutput) and isinstance(
-            output, RequestOutput
+            return
+        tail = self.outputs[-1] if self.outputs else None
+        if (
+            isinstance(tail, RequestOutput)
+            and isinstance(output, RequestOutput)
+            and not tail.finished
+            and all(c.finish_reason is None for c in tail.outputs)
         ):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
-        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
+            tail.add(output, aggregate=self.aggregate)
+        elif isinstance(tail, PoolingRequestOutput) and isinstance(
             output, PoolingRequestOutput
         ):
-            self.output = output
+            self.outputs[-1] = output
+        else:
+            self.outputs.append(output)
+            self.ready.set()
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
-        while (output := self.output) is None:
+        while not self.outputs:
             await self.ready.wait()
-        self.output = None
-        self.ready.clear()
+        output = self.outputs.popleft()
+        if not self.outputs:
+            self.ready.clear()
         if isinstance(output, Exception):
             raise output
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
         """Non-blocking get operation."""
-        output = self.output
-        if output is not None:
-            self.output = None
+        if not self.outputs:
+            return None
+        output = self.outputs.popleft()
+        if not self.outputs:
             self.ready.clear()
         if isinstance(output, Exception):
             raise output
@@ -704,6 +720,10 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
+            streaming_chunk_boundary = req_state.streaming_input and (
+                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+            )
+
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
@@ -713,7 +733,7 @@ class OutputProcessor:
                 kv_transfer_params,
                 ec_transfer_params,
             ):
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     request_output.finished = False
 
                 if req_state.queue is not None:
@@ -725,7 +745,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
@@ -733,9 +753,9 @@ class OutputProcessor:
                         req_state.input_chunk_queue = None
                 else:
                     self._finish_request(req_state)
-                    if not engine_core_output.finished:
-                        # If req not finished in EngineCore, but Detokenizer
-                        # detected stop string, abort needed in EngineCore.
+                    if req_state.streaming_input or not engine_core_output.finished:
+                        # EngineCore may still have the request live (stop
+                        # string detected, streaming abort/error); abort it.
                         reqs_to_abort.append(req_id)
 
                     # Track per-request stats

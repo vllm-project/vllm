@@ -66,6 +66,13 @@ def register_api_routers(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    if "generate" in supported_tasks and getattr(args, "enable_streaming", False):
+        from vllm.entrypoints.openai.streaming.api_router import (
+            attach_router as register_streaming_api_router,
+        )
+
+        register_streaming_api_router(app)
+
     if getattr(args, "enable_fault_tolerance", False):
         from vllm.entrypoints.serve.fault_tolerance.api_router import (
             register_fault_tolerance_api_router,
