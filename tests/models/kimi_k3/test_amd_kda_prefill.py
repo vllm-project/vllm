@@ -17,8 +17,6 @@ from vllm.platforms import current_platform
 def _requires_aiter_kda_prefill() -> None:
     if not current_platform.is_rocm():
         pytest.skip("Kimi-K3 AITER prefill requires ROCm")
-    if not kda_prefill._aiter_kda_prefill_ops_available():
-        pytest.skip("AITER KDA prefill kernels are not available")
 
 
 def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -43,8 +41,8 @@ def test_resolve_kda_prefill_backend(
 ) -> None:
     monkeypatch.setattr(
         kda_prefill,
-        "is_aiter_kda_prefill_supported",
-        lambda *args: True,
+        "is_fused_kda_chunk_supported",
+        lambda: False,
     )
     monkeypatch.setattr(
         kda_prefill.rocm_aiter_ops,
@@ -52,102 +50,9 @@ def test_resolve_kda_prefill_backend(
         lambda: aiter_enabled,
     )
 
-    actual = kda_prefill.resolve_kda_prefill_backend(
-        requested,
-        head_dim=128,
-        conv_width=4,
-        input_dtype=torch.bfloat16,
-        conv_state_dtype=torch.bfloat16,
-        recurrent_state_dtype=torch.float32,
-        lower_bound=-5.0,
-    )
+    actual = kda_prefill.resolve_kda_prefill_backend(requested)
 
     assert actual == expected
-
-
-def test_explicit_flashkda_rejects_unsupported_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        kda_prefill,
-        "is_aiter_kda_prefill_supported",
-        lambda *args: False,
-    )
-
-    with pytest.raises(RuntimeError, match="AITER FlashKDA requires"):
-        kda_prefill.resolve_kda_prefill_backend(
-            "flashkda",
-            head_dim=128,
-            conv_width=4,
-            input_dtype=torch.bfloat16,
-            conv_state_dtype=torch.bfloat16,
-            recurrent_state_dtype=torch.float32,
-            lower_bound=-5.0,
-        )
-
-
-def test_auto_falls_back_when_aiter_kda_is_unsupported(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        kda_prefill,
-        "is_aiter_kda_prefill_supported",
-        lambda *args: False,
-    )
-    monkeypatch.setattr(
-        kda_prefill.rocm_aiter_ops,
-        "is_enabled",
-        lambda: True,
-    )
-
-    assert (
-        kda_prefill.resolve_kda_prefill_backend(
-            "auto",
-            head_dim=128,
-            conv_width=4,
-            input_dtype=torch.bfloat16,
-            conv_state_dtype=torch.bfloat16,
-            recurrent_state_dtype=torch.float32,
-            lower_bound=-5.0,
-        )
-        == "triton"
-    )
-
-
-@pytest.mark.parametrize(
-    ("head_dim", "conv_width", "input_dtype", "state_dtype", "lower_bound"),
-    [
-        (64, 4, torch.bfloat16, torch.float32, -5.0),
-        (128, 3, torch.bfloat16, torch.float32, -5.0),
-        (128, 4, torch.float16, torch.float32, -5.0),
-        (128, 4, torch.bfloat16, torch.bfloat16, -5.0),
-        (128, 4, torch.bfloat16, torch.float32, None),
-        (128, 4, torch.bfloat16, torch.float32, -6.0),
-        (128, 4, torch.bfloat16, torch.float32, 0.0),
-    ],
-)
-def test_aiter_kda_prefill_rejects_unsupported_shapes_and_dtypes(
-    monkeypatch: pytest.MonkeyPatch,
-    head_dim: int,
-    conv_width: int,
-    input_dtype: torch.dtype,
-    state_dtype: torch.dtype,
-    lower_bound: float | None,
-) -> None:
-    monkeypatch.setattr(
-        kda_prefill,
-        "_aiter_kda_prefill_ops_available",
-        lambda: True,
-    )
-
-    assert not kda_prefill.is_aiter_kda_prefill_supported(
-        head_dim,
-        conv_width,
-        input_dtype,
-        torch.bfloat16,
-        state_dtype,
-        lower_bound,
-    )
 
 
 def test_kda_conv1d_weight_loader_populates_prefill_and_decode_copies() -> None:
@@ -375,15 +280,10 @@ def test_aiter_fused_qkv_conv_matches_vllm_prefill_conv() -> None:
 
 
 @torch.inference_mode()
-def test_aiter_flashkda_preserves_vllm_state_layout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_aiter_flashkda_preserves_vllm_state_layout() -> None:
     _requires_aiter_kda_prefill()
-    from aiter.ops.triton._triton_kernels.chunk_delta_attn import (
-        chunk_fwd as aiter_chunk_fwd,
-    )
-    from aiter.ops.triton.kimi_delta_attn import (
-        chunk_kimi_delta_attn,
+    from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+        chunk_kda_with_fused_gate,
     )
 
     torch.manual_seed(17)
@@ -414,27 +314,20 @@ def test_aiter_flashkda_preserves_vllm_state_layout(
         * 0.01
     )
 
-    monkeypatch.setattr(aiter_chunk_fwd, "CHUNK_DELTA_ATTN_USE_FLASH_KDA", False)
-    expected_out, expected_state = chunk_kimi_delta_attn(
-        q=q,
-        k=k,
-        v=v,
-        g=raw_gate,
-        beta=raw_beta,
+    expected_out, expected_state = chunk_kda_with_fused_gate(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        raw_g=raw_gate.clone(),
+        raw_beta=raw_beta.clone(),
         A_log=A_log,
-        dt_bias=dt_bias,
+        g_bias=dt_bias,
         lower_bound=-5.0,
         initial_state=initial_state.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=True,
-        use_beta_sigmoid_in_kernel=True,
-        safe_gate=True,
-        state_v_first=True,
-        chunk_size=32,
         cu_seqlens=cu_seqlens,
     )
-    monkeypatch.setattr(aiter_chunk_fwd, "CHUNK_DELTA_ATTN_USE_FLASH_KDA", True)
     actual_out, actual_state = kda_prefill.aiter_kda_prefill(
         q=q,
         k=k,

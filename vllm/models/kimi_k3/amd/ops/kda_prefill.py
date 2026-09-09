@@ -9,7 +9,7 @@ path.
 """
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 
@@ -22,6 +22,7 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     can_use_fused_kda_chunk,
     fused_kda_chunk,
     fused_kda_prologue,
+    is_fused_kda_chunk_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_conv1d_weight_loader,
@@ -198,7 +199,13 @@ def resolve_kda_prefill_backend(backend: str) -> KDAPrefillBackend:
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     if backend == "auto" and bool(rocm_aiter_ops.is_enabled()):
         return "flashkda"
-    return backend
+    if backend == "fused" and not is_fused_kda_chunk_supported():
+        raise RuntimeError(
+            "The fused KDA chunk kernel requires gfx950 and a build that includes it."
+        )
+    if backend == "auto":
+        return "fused" if is_fused_kda_chunk_supported() else "triton"
+    return cast(KDAPrefillBackend, backend)
 
 
 def make_kda_conv1d_weight_loader(
