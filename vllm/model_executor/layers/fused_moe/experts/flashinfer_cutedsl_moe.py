@@ -145,7 +145,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1 = (0,)
         workspace2 = (0,)
-        expected_hidden_dim = K if self.per_token_activation else K * 2
+        expected_hidden_dim = K if self.expects_unquantized_inputs else K * 2
         assert self.hidden_dim == expected_hidden_dim
         output = (M, self.hidden_dim)
         return (workspace1, workspace2, output)
@@ -172,7 +172,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        if self.per_token_activation:
+        if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
                 quantize_nvfp4_per_token_input(hidden_states)
             )

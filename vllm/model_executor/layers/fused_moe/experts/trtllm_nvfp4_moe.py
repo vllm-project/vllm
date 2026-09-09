@@ -331,7 +331,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # Static-global inputs arrive packed as uint8 (two FP4 values per
         # byte). Per-token inputs remain BF16 until _invoke_kernel computes the
         # row scale and quantizes them, so K is already the logical hidden dim.
-        expected_hidden_dim = K if self.per_token_activation else K * 2
+        expected_hidden_dim = K if self.expects_unquantized_inputs else K * 2
         assert self.hidden_dim == expected_hidden_dim
         output = (M, self.hidden_dim)
 
@@ -359,7 +359,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
-        if self.per_token_activation:
+        if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
                 quantize_nvfp4_per_token_input(hidden_states)
             )
@@ -425,7 +425,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
-        assert a1q_scale is not None or self.per_token_activation
+        assert a1q_scale is not None or self.expects_unquantized_inputs
 
         # DeepEP produces int64 indexes.
         topk_ids = topk_ids.to(dtype=torch.int32)
@@ -524,7 +524,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None or self.per_token_activation
+        assert a1q_scale is not None or self.expects_unquantized_inputs
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -536,7 +536,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         )
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
-        if self.per_token_activation:
+        if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
                 quantize_nvfp4_per_token_input(hidden_states)
             )
