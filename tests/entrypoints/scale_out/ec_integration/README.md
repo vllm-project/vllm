@@ -7,10 +7,10 @@ the scale-out endpoints, in the bash-script style of
 ## Topology
 
 ```text
-render (GPU-less)                encode (EC producer, --tokens-only)
+render (GPU-less)                encode (EC producer)
   /v1/chat/completions/render      /inference/v1/generate  (kwargs_data)
   /v1/chat/completions/derender                        |
-                     prefill (EC consumer, --tokens-only)
+                     prefill (EC consumer)
                        /inference/v1/generate  (mm_metadata + ec_transfer_params)
 ```
 

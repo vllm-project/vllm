@@ -10,8 +10,8 @@ output against a single-instance baseline.
 Topology under test (started by the bash script):
 
     render (GPU-less)   -- /v1/chat/completions/render, /derender
-    encode (EC producer, --tokens-only) -- /inference/v1/generate
-    prefill (EC consumer, --tokens-only) -- /inference/v1/generate
+    encode (EC producer) -- /inference/v1/generate
+    prefill (EC consumer) -- /inference/v1/generate
 
 The client renders each multimodal chat request once, sends the full
 ``kwargs_data`` to the encode instance, then sends metadata-only features
