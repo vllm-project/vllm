@@ -1131,7 +1131,7 @@ class OffloadingConnectorScheduler:
             # Skip prefix-hit chunks for block-level policy; for
             # request-level, next_stored_chunk_idx stays at 0 so all
             # chunks (including hits) are offloaded.
-            if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
+            if req_status.offloading_context.policy == OffloadPolicy.CHUNK_LEVEL:
                 group_state.next_stored_chunk_idx = num_chunks
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)

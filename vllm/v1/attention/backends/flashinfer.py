@@ -1779,6 +1779,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 class FlashInferImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -1884,6 +1885,14 @@ class FlashInferImpl(AttentionImpl):
         return self.cache_config.get_resolved_kv_cache_layout()
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
+        if quant_key == kNvfp4Dynamic and self.is_kvcache_nvfp4:
+            logger.warning_once(
+                "fuse_attn_quant: not registering the NVFP4-output attention "
+                "fusion with an NVFP4 KV cache (no such trtllm-gen kernel). "
+                "Layers whose o_proj takes NVFP4 input keep the unfused path "
+                "(FP8 -> BF16 -> o_proj quant); FP8-output fusion is unaffected."
+            )
+            return False
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
         # (SM100+) here.  Without that we cannot fuse the output quant.
         return (
@@ -2214,7 +2223,7 @@ class FlashInferImpl(AttentionImpl):
                     if needs_fp8_out_prefill:
                         output[
                             num_decode_tokens : num_decode_tokens + num_prefill_tokens
-                        ].copy_(out_prefill.to(output.dtype))
+                        ].copy_(out_prefill)
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
                 # prefill_query may be non-contiguous or have degenerate strides
@@ -2322,7 +2331,7 @@ class FlashInferImpl(AttentionImpl):
                 if needs_fp8_out:
                     output[
                         num_decode_tokens : num_decode_tokens + num_prefill_tokens
-                    ].copy_(out[:num_prefill_tokens].to(output.dtype))
+                    ].copy_(out[:num_prefill_tokens])
 
         if num_decode_tokens > 0:
             decode_query = query[:num_decode_tokens]
@@ -2397,7 +2406,7 @@ class FlashInferImpl(AttentionImpl):
                     )
 
                 if needs_fp8_out:
-                    output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
+                    output[:num_decode_tokens].copy_(out_decode)
             else:
                 assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode)
                 # decode_query may be non-contiguous or have degenerate strides
@@ -2559,7 +2568,7 @@ class FlashInferImpl(AttentionImpl):
                         get_dcp_group(),
                     )
                 elif needs_fp8_out:
-                    output[:num_decode_tokens].copy_(out.to(output.dtype))
+                    output[:num_decode_tokens].copy_(out)
         return output_padded
 
     def do_kv_cache_update(
