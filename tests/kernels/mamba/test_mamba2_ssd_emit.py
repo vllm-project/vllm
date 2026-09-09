@@ -36,7 +36,8 @@ def _paged(num_slots, shape, dtype, device):
 
 @pytest.mark.parametrize("chunk_size", [64, 128, 256])
 @pytest.mark.parametrize("seed", [0, 1])
-def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
+@pytest.mark.parametrize("gated", [False, True])
+def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed, gated):
     torch.manual_seed(seed)
     device = torch.device(DEVICE)
     nheads, head_dim, ngroups, dstate = 8, 64, 1, 64
@@ -55,7 +56,12 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
     dt = (0.5 * torch.randn(seqlen, nheads, device=device)).to(dtype)
     B = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
     C = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
-    ref_out, ref_states = single_shot_scan(x, dt, A, B, C, D, dt_bias, chunk_size)
+    z = (
+        torch.randn(seqlen, nheads, head_dim, device=device).to(dtype)
+        if gated
+        else None
+    )
+    ref_out, ref_states = single_shot_scan(x, dt, A, B, C, D, dt_bias, chunk_size, z=z)
 
     # sequence lives in slot 1 (slot 0 is the null block)
     num_slots, slot = 3, 1
@@ -110,6 +116,7 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
             out,
             D=D,
             current_x=x[pos : pos + 1],
+            z=None if z is None else z[pos : pos + 1],
         )
         assert torch.equal(out[0].view(torch.int16), ref_out[pos].view(torch.int16)), (
             f"position {pos} (chunk {chunk}, offset {t}) differs"
@@ -198,7 +205,8 @@ def test_fold_matches_single_shot_chunk_states(chunk_size):
 
 @pytest.mark.parametrize("chunk_size", [64, 128, 256])
 @pytest.mark.parametrize("seed", [0, 1])
-def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
+@pytest.mark.parametrize("gated", [False, True])
+def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed, gated):
     """Prefill through the replayed scan, then decode through emit, batched.
 
     Four sequences with prompts at different chunk offsets are prefilled with
@@ -235,8 +243,14 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
     dts = [(0.5 * torch.randn(L, nheads, device=device)).to(dtype) for L in total_lens]
     Bs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
     Cs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
+    zs = [
+        torch.randn(L, nheads, head_dim, device=device).to(dtype) if gated else None
+        for L in total_lens
+    ]
     refs = [
-        single_shot_scan(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)[0]
+        single_shot_scan(
+            xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size, z=zs[i]
+        )[0]
         for i in range(n)
     ]
 
@@ -254,12 +268,14 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
     computed = [0] * n
 
     def gather(seqs, active, lens):
+        if seqs[0] is None:
+            return None
         return torch.cat(
             [seqs[i][computed[i] : computed[i] + k] for i, k in zip(active, lens)]
         )
 
     def prefill(active, lens):
-        x, dt, B, C = (gather(s, active, lens) for s in (xs, dts, Bs, Cs))
+        x, dt, B, C, z = (gather(s, active, lens) for s in (xs, dts, Bs, Cs, zs))
         slots = all_slots[torch.tensor(active, device=device)]
         meta = build_exact_replay_metadata(
             [computed[i] for i in active], lens, chunk_size, device
@@ -279,15 +295,17 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
             meta=meta,
             chunk_size=chunk_size,
             buffers=buffers,
+            z=z,
         )
         return out
 
     def decode(active):
         # one padding row at the end, as a CUDA graph batch would have
         lens = [1] * len(active)
-        x, dt, B, C = (gather(s, active, lens) for s in (xs, dts, Bs, Cs))
+        x, dt, B, C, z = (gather(s, active, lens) for s in (xs, dts, Bs, Cs, zs))
         pad = lambda t: torch.cat([t, torch.randn_like(t[:1])])  # noqa: E731
         x, dt, B, C = pad(x), pad(dt), pad(B), pad(C)
+        z = None if z is None else pad(z)
         slots = torch.cat(
             [all_slots[torch.tensor(active, device=device)], all_slots.new_zeros(1)]
         )
@@ -311,6 +329,7 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
             pos=pos,
             chunk_size=chunk_size,
             buffers=buffers,
+            z=z,
         )
         return out[:-1]
 

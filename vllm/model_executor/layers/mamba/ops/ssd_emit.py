@@ -369,6 +369,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
     C_ptr,
     initstates_ptr,
     D_ptr,
+    z_ptr,
     slot_indices_ptr,
     positions_ptr,
     chunk_size: tl.constexpr,
@@ -402,8 +403,12 @@ def _chunk_scan_workspace_range_fwd_kernel(
     stride_init_states_hdim: tl.int64,
     stride_init_states_dstate: tl.constexpr,
     stride_D_head: tl.constexpr,
+    stride_z_row: tl.int64,
+    stride_z_head: tl.int64,
+    stride_z_hdim: tl.constexpr,
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
+    HAS_Z: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -571,6 +576,16 @@ def _chunk_scan_workspace_range_fwd_kernel(
         )
         acc += x_residual * D
 
+    if HAS_Z:
+        # Same order and arithmetic as _chunk_scan_fwd_kernel with HAS_Z: the
+        # gate multiplies the finished row in fp32 before it is stored.
+        z = tl.load(
+            z_ptr + row * stride_z_row + pid_h * stride_z_head + offs_n * stride_z_hdim,
+            mask=valid_emit & (offs_n < hdim),
+            other=0.0,
+        ).to(tl.float32)
+        acc *= (z * tl.sigmoid(z))[None, :]
+
     tl.store(
         x_ptr
         + slot * stride_x_slot
@@ -601,6 +616,7 @@ def _chunk_scan_workspace_range_fwd(
     positions,
     out,
     D=None,
+    z=None,
     *,
     current_x,
 ):
@@ -625,6 +641,8 @@ def _chunk_scan_workspace_range_fwd(
         assert D.shape == (nheads, headdim) or D.shape == (nheads,)
     assert current_x.shape == (num_rows, nheads, headdim)
     assert current_x.dtype == x.dtype
+    if z is not None:
+        assert z.shape == (num_rows, nheads, headdim)
     if num_rows == 0:
         return
 
@@ -644,6 +662,7 @@ def _chunk_scan_workspace_range_fwd(
             C_ptr=C,
             initstates_ptr=initial_states,
             D_ptr=D,
+            z_ptr=z if z is not None else out,
             slot_indices_ptr=slot_indices,
             positions_ptr=positions,
             chunk_size=chunk_size,
@@ -677,8 +696,12 @@ def _chunk_scan_workspace_range_fwd(
             stride_init_states_hdim=initial_states.stride(2),
             stride_init_states_dstate=initial_states.stride(3),
             stride_D_head=D.stride(0) if D is not None else 0,
+            stride_z_row=z.stride(0) if z is not None else 0,
+            stride_z_head=z.stride(1) if z is not None else 0,
+            stride_z_hdim=z.stride(2) if z is not None else 0,
             HAS_D=D is not None,
             D_HAS_HDIM=D.dim() == 2 if D is not None else True,
+            HAS_Z=z is not None,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
             # Same tiles as the pinned prefill chunk-scan kernel so the dot
             # products accumulate in the same order (smaller M tiles change
