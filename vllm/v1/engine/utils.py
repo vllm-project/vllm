@@ -710,11 +710,11 @@ class CoreEngineActorManager:
             for i in range(dp_size_to_allocate):
                 device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
                 if pack_strategy == "span":
-                    collected_bundles += device_bundle * n_device_on_node
-                    assert len(collected_bundles) <= world_size, (
-                        "collected_bundles should be <= world_size, "
-                        f"but got {len(collected_bundles)=} and {world_size=}"
-                    )
+                    # Clamp the node's contribution to the remaining slots:
+                    # a node with more free GPUs than world_size would
+                    # otherwise trip the assert below and crash startup.
+                    take = min(n_device_on_node, world_size - len(collected_bundles))
+                    collected_bundles += device_bundle * max(take, 0)
 
                     # we only create a placement group if we collected enough devices
                     if len(collected_bundles) < world_size:
