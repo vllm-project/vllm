@@ -271,7 +271,7 @@ def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
     module = cls(16)
     with torch.no_grad():
         module.weight.copy_(torch.randn(16))
-    built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
     with torch.no_grad():
         built.weight.copy_(module.weight)
     x = torch.randn(4, 16)
@@ -484,7 +484,7 @@ def test_tp_aware_class_is_cached_per_resolved_override(default_vllm_config):
         # The path that runs once per norm instance is `fuse`, not `_tp_aware`:
         # guard the one-class-per-norm-kind invariant where it can regress.
         m1, m2 = RMSNorm(16), RMSNorm(16)
-        fuser = get_fuser(m1)
+        fuser = get_fuser(m1, RMSNormFuser)
         built1 = fuser.fuse(m1, "norm", default_vllm_config)
         built2 = fuser.fuse(m2, "norm", default_vllm_config)
         assert type(built1) is type(built2) is first
@@ -509,7 +509,9 @@ def test_fuse_builds_the_registered_override(cls, base_name, default_vllm_config
     override = _plugin_norm(base, f"Fused{base_name}Override")
     with _registered(base, override):
         module = cls(16)
-        built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+        built = get_fuser(module, RMSNormFuser).fuse(
+            module, "norm", default_vllm_config
+        )
 
     assert isinstance(built, override)
     x = torch.randn(4, 16)
