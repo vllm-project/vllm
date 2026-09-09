@@ -14,7 +14,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
-    marlin_make_empty_g_idx,
+    marlin_make_empty,
     marlin_make_workspace_new,
     marlin_moe_padded_intermediate,
     marlin_pad_qweight,
@@ -319,16 +319,13 @@ def test_gptq_marlin_padded_round_trip(shape, group_size):
     device = torch.device("cuda")
 
     weight = torch.randn(size_k, size_n, dtype=dtype, device=device) / size_k**0.5
-    w_ref, q_w, s, _, _ = gptq_quantize_weights(
-        weight, quant_type, group_size, act_order=False
-    )
+    w_ref, q_w, s = gptq_quantize_weights(weight, quant_type, group_size)
     qweight = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
 
     padded_n, padded_k = marlin_padded_nk(size_n, size_k, group_size)
     qweight = marlin_pad_qweight(qweight, size_n, size_k, padded_n, padded_k)
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
-        perm=torch.empty(0, dtype=torch.int, device=device),
         size_k=padded_k,
         size_n=padded_n,
         num_bits=quant_type.size_bits,
@@ -343,14 +340,11 @@ def test_gptq_marlin_padded_round_trip(shape, group_size):
         input=x,
         weight=marlin_qweight,
         weight_scale=marlin_s,
-        weight_zp=marlin_make_empty_g_idx(device),
-        g_idx=marlin_make_empty_g_idx(device),
-        g_idx_sort_indices=marlin_make_empty_g_idx(device),
+        weight_zp=marlin_make_empty(device),
         workspace=marlin_make_workspace_new(device),
         wtype=quant_type,
         output_size_per_partition=size_n,
         input_size_per_partition=size_k,
-        is_k_full=True,
     )
     ref = x @ w_ref
 
@@ -480,7 +474,6 @@ def test_awq_zp_marlin_padded_round_trip(shape):
     qweight = marlin_pad_qweight(qweight, size_n, size_k, padded_n, padded_k)
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
-        perm=torch.empty(0, dtype=torch.int, device=device),
         size_k=padded_k,
         size_n=padded_n,
         num_bits=quant_type.size_bits,
@@ -503,13 +496,10 @@ def test_awq_zp_marlin_padded_round_trip(shape):
         weight=marlin_qweight,
         weight_scale=marlin_s,
         weight_zp=marlin_zp,
-        g_idx=marlin_make_empty_g_idx(device),
-        g_idx_sort_indices=marlin_make_empty_g_idx(device),
         workspace=marlin_make_workspace_new(device),
         wtype=quant_type,
         output_size_per_partition=size_n,
         input_size_per_partition=size_k,
-        is_k_full=True,
     )
     ref = x @ w_ref
 
@@ -585,9 +575,7 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
 
     def quant(w, size_k, size_n):
         # w is (size_n, size_k); gptq expects (size_k, size_n).
-        ref, q_w, s, _, _ = gptq_quantize_weights(
-            w.T, quant_type, group_size, act_order=False
-        )
+        ref, q_w, s = gptq_quantize_weights(w.T, quant_type, group_size)
         return ref, gptq_pack(q_w, bits, size_k, size_n), s
 
     w13_qw, w13_s, w13_ref = [], [], []
@@ -616,12 +604,11 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
     if group_size > 0:
         w2_scales = _pad_rows(w2_scales, padded_n // group_size)
 
-    sort_idx = torch.empty((e, 0), dtype=torch.int32, device=device)
     marlin_w13 = ops.gptq_marlin_moe_repack(
-        w13_qweight, sort_idx, w13_qweight.shape[1] * pack, w13_qweight.shape[2], bits
+        w13_qweight, w13_qweight.shape[1] * pack, w13_qweight.shape[2], bits
     )
     marlin_w2 = ops.gptq_marlin_moe_repack(
-        w2_qweight, sort_idx, w2_qweight.shape[1] * pack, w2_qweight.shape[2], bits
+        w2_qweight, w2_qweight.shape[1] * pack, w2_qweight.shape[2], bits
     )
     group_or_pack = group_size if group_size != -1 else pack
     marlin_w13_s = marlin_moe_permute_scales(
@@ -649,7 +636,6 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
         topk_ids,
         quant_type_id=quant_type.id,
         global_num_experts=e,
-        is_k_full=True,
     )
     with set_current_vllm_config(VllmConfig()):
         ref = torch_experts(
@@ -770,7 +756,6 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        is_k_full=True,
         workspace=layer.workspace,
     )
     with set_current_vllm_config(VllmConfig()):
@@ -848,7 +833,6 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape):
         topk_ids,
         quant_type_id=scalar_types.float8_e4m3fn.id,
         global_num_experts=e,
-        is_k_full=True,
         workspace=layer.workspace,
     )
     with set_current_vllm_config(VllmConfig()):
