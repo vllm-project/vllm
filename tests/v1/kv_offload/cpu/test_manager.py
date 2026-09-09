@@ -37,6 +37,7 @@ _EMPTY_REQ_CTX = make_req_context()
 
 def make_cpu_manager(
     num_blocks: int = 4,
+    tokens_per_chunk: int = 0,
     cache_policy: str = "lru",
     cache_policy_module_path: str | None = None,
     enable_events: bool = False,
@@ -45,6 +46,7 @@ def make_cpu_manager(
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_blocks=num_blocks,
+        tokens_per_chunk=tokens_per_chunk,
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
@@ -271,6 +273,19 @@ def test_cpu_manager_reports_cache_usage_gauge():
     # and usage drops.
     manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     check_usage_stats(manager, 0.0)
+
+
+def test_cpu_manager_reports_capacity_tokens_gauge():
+    manager = make_cpu_manager(num_blocks=4, tokens_per_chunk=64)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CAPACITY_TOKENS] == 256
+
+    # An unknown token span leaves the capacity unreported.
+    manager = make_cpu_manager(num_blocks=4)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert CPUOffloadingMetrics.CPU_CAPACITY_TOKENS not in stats.reduce()
 
 
 def test_cpu_manager_reports_allocation_size_histogram():
