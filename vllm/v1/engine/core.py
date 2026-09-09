@@ -129,6 +129,12 @@ class EngineCore:
         self.log_stats = log_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._pd_role: str | None = (
+            kv_transfer_config.pd_role if kv_transfer_config is not None else None
+        )
+        self._pd_role_epoch = 0
+        self._pending_pd_role: str | None = None
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -447,6 +453,9 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        if self._rejects_pd_role_request(request):
+            raise ValueError("Request does not match the active P/D role")
+
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -875,6 +884,83 @@ class EngineCore:
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
+
+    def get_pd_role_status(self) -> dict[str, Any]:
+        running, waiting = self.scheduler.get_request_counts()
+        pending_batches = len(self.batch_queue) if self.batch_queue else 0
+        # Unlike get_num_unfinished_requests(), these counts include queued
+        # streaming inputs. has_requests() also includes delayed connector frees.
+        drained = (
+            running == 0
+            and waiting == 0
+            and not self.scheduler.has_requests()
+            and pending_batches == 0
+        )
+        return {
+            "dp_rank": self.vllm_config.parallel_config.data_parallel_rank,
+            "role": self._pd_role,
+            "epoch": self._pd_role_epoch,
+            "pending_role": self._pending_pd_role,
+            "pending_epoch": (
+                self._pd_role_epoch + 1 if self._pending_pd_role is not None else None
+            ),
+            "running": running,
+            "waiting": waiting,
+            "pending_batches": pending_batches,
+            "drained": drained,
+        }
+
+    def prepare_pd_role(self, role: str, expected_epoch: int) -> dict[str, Any]:
+        if self._pd_role is None:
+            raise ValueError("P/D role switching was not enabled at startup")
+        if role not in ("prefill", "decode"):
+            raise ValueError(f"Invalid P/D role: {role}")
+        if expected_epoch != self._pd_role_epoch:
+            raise ValueError("Stale P/D role epoch")
+        if self.is_scheduler_paused():
+            raise ValueError("Cannot change P/D role while scheduling is paused")
+        if self._pending_pd_role not in (None, role):
+            raise ValueError("Another P/D role change is already prepared")
+        # Fence new adds without pausing the scheduler: existing requests and
+        # NIXL lease holders must continue through their normal completion path.
+        self._pending_pd_role = role
+        return self.get_pd_role_status()
+
+    def commit_pd_role(self, role: str, expected_epoch: int) -> dict[str, Any]:
+        if role not in ("prefill", "decode"):
+            raise ValueError(f"Invalid P/D role: {role}")
+        if (
+            self._pd_role == role
+            and self._pd_role_epoch == expected_epoch + 1
+            and self._pending_pd_role is None
+        ):
+            return self.get_pd_role_status()
+        if expected_epoch != self._pd_role_epoch or self._pending_pd_role != role:
+            raise ValueError("P/D role change does not match the prepared epoch")
+        if self.is_scheduler_paused() or not self.get_pd_role_status()["drained"]:
+            raise ValueError("P/D requests or KV transfers are still draining")
+        self._pd_role = role
+        self._pd_role_epoch += 1
+        self._pending_pd_role = None
+        return self.get_pd_role_status()
+
+    def cancel_pd_role(self, expected_epoch: int) -> dict[str, Any]:
+        if expected_epoch != self._pd_role_epoch:
+            raise ValueError("Cannot cancel a committed or stale P/D role epoch")
+        self._pending_pd_role = None
+        return self.get_pd_role_status()
+
+    def _rejects_pd_role_request(self, request: Request) -> bool:
+        if self._pd_role is None or request.abort_immediately:
+            return False
+        if self._pending_pd_role is not None:
+            return True
+        params = request.kv_transfer_params or {}
+        remote_decode = bool(params.get("do_remote_decode"))
+        remote_prefill = bool(params.get("do_remote_prefill"))
+        if remote_decode == remote_prefill:
+            return True
+        return self._pd_role != ("prefill" if remote_decode else "decode")
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
@@ -1539,6 +1625,14 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
+                return
+            if self._rejects_pd_role_request(req):
+                if req.kv_transfer_params:
+                    # Run the connector's pre-admission cleanup hook so a
+                    # rejected decode does not strand its remote prefill KV.
+                    req.abort_immediately = True
+                    self.add_request(req, request_wave)
+                self._send_error_outputs_to_client([req.request_id], req.client_index)
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:

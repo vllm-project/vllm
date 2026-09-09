@@ -42,6 +42,11 @@ class KVTransferConfig:
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
+    pd_role: Literal["prefill", "decode"] | None = None
+    """Opt into runtime P/D role switching, with this initial serving role.
+    Requires NixlConnector with kv_role='kv_both'; the transfer capability
+    remains fixed for the lifetime of the engine."""
+
     kv_rank: int | None = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:
     0 for prefill instance, 1 for decode instance.
@@ -92,6 +97,16 @@ class KVTransferConfig:
     def __post_init__(self) -> None:
         if self.engine_id is None:
             self.engine_id = str(uuid.uuid4())
+
+        if self.pd_role is not None and (
+            self.kv_connector != "NixlConnector"
+            or self.kv_role != "kv_both"
+            or self.get_from_extra_config("bidirectional_kv_xfer", False)
+        ):
+            raise ValueError(
+                "pd_role requires NixlConnector with kv_role='kv_both' "
+                "and bidirectional_kv_xfer disabled"
+            )
 
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):
             raise ValueError(
