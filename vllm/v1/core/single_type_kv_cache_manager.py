@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -710,6 +711,20 @@ class SingleTypeKVCacheManager(ABC):
     def new_step_starts(self) -> None:
         return None
 
+    def mark_checkpoint_ready(self, request_id: str) -> None:
+        return None
+
+    def has_unready_checkpoint(self, request: Request) -> bool:
+        return False
+
+    def prepare_same_step_mamba_consumer(
+        self, request_id: str, source_blocks: Sequence[KVCacheBlock]
+    ) -> None:
+        return None
+
+    def cleanup_same_step_mamba_consumer(self, request_id: str) -> None:
+        return None
+
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
@@ -829,12 +844,21 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
-        self._cache_partial_tail_block(request, num_tokens)
+        checkpoint_position = request.mamba_checkpoint_position
+        if checkpoint_position is not None:
+            self._cache_partial_tail_block(
+                request,
+                num_tokens,
+                boundary_tokens=checkpoint_position,
+            )
+        else:
+            self._cache_partial_tail_block(request, num_tokens)
 
     def _cache_partial_tail_block(
         self,
         request: Request,
         num_tokens: int,
+        boundary_tokens: int | None = None,
     ) -> None:
         """Cache the prompt tail when it ends inside a cache block.
 
@@ -843,7 +867,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
+        if boundary_tokens is None:
+            boundary_tokens = (
+                request.num_prompt_tokens // hash_block_size * hash_block_size
+            )
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -1439,6 +1466,9 @@ class MambaManager(SingleTypeKVCacheManager):
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         if self.mamba_cache_mode == "align":
+            self._checkpoint_hashes: dict[str, BlockHashWithGroupId] = {}
+            self._same_step_source_blocks: dict[str, KVCacheBlock] = {}
+
             # Mapping from request ID to the index of the block
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
@@ -1837,11 +1867,18 @@ class MambaManager(SingleTypeKVCacheManager):
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
+                same_step_source = self._same_step_source_blocks.pop(request_id, None)
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
                     cow_block = new_blocks[0]
                     new_blocks = new_blocks[1:]
-                    if blocks_allocated:
+                    if same_step_source is not None:
+                        assert not blocks_allocated
+                        assert same_step_source is source_block
+                        req_blocks[block_idx] = cow_block
+                        self.block_pool.free_blocks([source_block])
+                        returned_blocks = [cow_block] + returned_blocks
+                    elif blocks_allocated:
                         # The worker block table of a running request is
                         # append-only, so the request must stay on
                         # source_block. Move the cache entry to cow_block
@@ -1913,6 +1950,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
+            self._checkpoint_hashes.pop(request_id, None)
+            self._same_step_source_blocks.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
@@ -1934,6 +1973,95 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
+    def _cache_checkpoint_block(
+        self, request: Request, checkpoint_position: int
+    ) -> BlockHashWithGroupId | None:
+        hash_block_size = self.block_pool.hash_block_size
+        if checkpoint_position % hash_block_size != 0:
+            raise ValueError(
+                "mamba checkpoint position must be aligned to the prefix hash "
+                f"unit ({hash_block_size}), got {checkpoint_position}"
+            )
+        block_idx = checkpoint_position // self.block_size
+        if checkpoint_position % self.block_size == 0:
+            block_idx -= 1
+        blocks = self.req_to_blocks[request.request_id]
+        if not 0 <= block_idx < len(blocks):
+            return None
+        checkpoint_block = blocks[block_idx]
+        if checkpoint_block.is_null:
+            return None
+
+        if checkpoint_position % self.block_size == 0:
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=blocks,
+                num_cached_blocks=block_idx,
+                num_full_blocks=block_idx + 1,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+            )
+            checkpoint_hash = make_block_hash_with_group_id(
+                request.block_hashes[block_idx], self.kv_cache_group_id
+            )
+        else:
+            checkpoint_hash = self.block_pool.cache_partial_block(
+                request=request,
+                block=checkpoint_block,
+                num_tokens=checkpoint_position,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+                replace_existing_hashes=True,
+            )
+            if checkpoint_hash is None:
+                return None
+
+        if checkpoint_position % self.block_size != 0:
+            self._partial_hit_reqs[request.request_id] = (
+                block_idx,
+                checkpoint_block,
+            )
+            self.num_cached_block[request.request_id] = block_idx
+        else:
+            self.num_cached_block[request.request_id] = block_idx + 1
+        self._checkpoint_hashes[request.request_id] = checkpoint_hash
+        self.block_pool.mark_block_hash_unready(checkpoint_hash)
+        return checkpoint_hash
+
+    def mark_checkpoint_ready(self, request_id: str) -> None:
+        checkpoint_hash = self._checkpoint_hashes.pop(request_id, None)
+        if checkpoint_hash is not None:
+            self.block_pool.mark_block_hash_ready(checkpoint_hash)
+
+    def has_unready_checkpoint(self, request: Request) -> bool:
+        checkpoint_position = request.mamba_checkpoint_position
+        hash_block_size = self.block_pool.hash_block_size
+        if (
+            self.mamba_cache_mode != "align"
+            or checkpoint_position is None
+            or checkpoint_position <= 0
+            or checkpoint_position % hash_block_size != 0
+            or checkpoint_position > request.num_tokens
+        ):
+            return False
+        hash_index = checkpoint_position // hash_block_size - 1
+        if hash_index >= len(request.block_hashes):
+            return False
+        checkpoint_hash = make_block_hash_with_group_id(
+            request.block_hashes[hash_index], self.kv_cache_group_id
+        )
+        return self.block_pool.is_block_hash_unready(checkpoint_hash)
+
+    def prepare_same_step_mamba_consumer(
+        self, request_id: str, source_blocks: Sequence[KVCacheBlock]
+    ) -> None:
+        if self.mamba_cache_mode == "align" and source_blocks:
+            self._same_step_source_blocks[request_id] = source_blocks[-1]
+
+    def cleanup_same_step_mamba_consumer(self, request_id: str) -> None:
+        if self.mamba_cache_mode == "align":
+            self._same_step_source_blocks.pop(request_id, None)
+
     def cache_blocks(
         self,
         request: Request,
@@ -1942,6 +2070,20 @@ class MambaManager(SingleTypeKVCacheManager):
         *,
         replay_boundary: int,
     ) -> None:
+        checkpoint_position = request.mamba_checkpoint_position
+        if checkpoint_position is not None:
+            if self.mamba_cache_mode != "align":
+                raise ValueError(
+                    "explicit Mamba checkpoints require mamba_cache_mode='align'"
+                )
+            if num_tokens == checkpoint_position:
+                checkpoint_hash = self._cache_checkpoint_block(
+                    request, checkpoint_position
+                )
+                if checkpoint_hash is not None:
+                    self.cached_blocks_this_step.add(checkpoint_hash)
+            return
+
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
@@ -1955,9 +2097,9 @@ class MambaManager(SingleTypeKVCacheManager):
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
-            blocks = self.req_to_blocks[request.request_id]
-            for idx in range(num_cached_blocks_before, num_cached_blocks_after):
-                block = blocks[idx]
+            for block in self.req_to_blocks[request.request_id][
+                num_cached_blocks_before:num_cached_blocks_after
+            ]:
                 # Skip null blocks (align-mode skipped states) and blocks that
                 # were not cached this step — with sparse retention
                 # (reachable_block_mask) the intermediate state snapshots carry
@@ -1981,6 +2123,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+        if self.mamba_cache_mode == "align":
+            self._same_step_source_blocks.clear()
 
     def _cache_partial_tail_block(
         self,
