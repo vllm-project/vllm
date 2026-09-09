@@ -575,9 +575,9 @@ def fused_norm_rope(
         assert index_k_out.shape == index_k.shape
         index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
-    # `launch_pdl` is a CUDA-only Triton runtime kwarg; ROCm's Triton rejects it
-    # even when False, so only pass it when PDL is actually supported.
-    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
+    pdl_kwargs = (
+        {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
+    )
     _fused_norm_rope_kernel[(num_tokens, 4)](
         positions,
         # Q RMS norm
@@ -646,7 +646,6 @@ def fused_norm_rope(
         TOPK_BLOCK_SIZE=1024,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
-        USE_PDL=use_pdl,
         **pdl_kwargs,
     )
     return q_c_out
@@ -977,7 +976,9 @@ def fused_q(
         return index_q_fp8, index_weights_out, mqa_q
 
     use_pdl = current_platform.is_arch_support_pdl()
-    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
+    pdl_kwargs = (
+        {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
+    )
     _fused_q_kernel[(num_tokens, 3, grid_heads)](
         positions,
         q_pe,
@@ -1019,7 +1020,6 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
-        USE_PDL=use_pdl,
         **pdl_kwargs,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
