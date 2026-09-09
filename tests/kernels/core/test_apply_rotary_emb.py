@@ -231,9 +231,6 @@ def test_apply_rotary_emb_xpu_matches_native(
 
     with set_current_vllm_config(vllm_config):
         op = ApplyRotaryEmb(enforce_enable=True, is_neox_style=is_neox_style)
-        assert op.apply_rotary_emb_xpu is not None, (
-            "vllm_xpu_kernels.rotary.apply_rotary_emb failed to import on XPU"
-        )
 
         x = torch.randn(
             num_tokens, num_heads, head_size, device="xpu", dtype=torch.bfloat16

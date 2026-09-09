@@ -133,13 +133,6 @@ class ApplyRotaryEmb(CustomOp):
                     "flash_attn.ops.triton.rotary"
                 ).apply_rotary
 
-        self.apply_rotary_emb_xpu = None
-        if current_platform.is_xpu():
-            with suppress(ImportError):
-                self.apply_rotary_emb_xpu = import_module(
-                    "vllm_xpu_kernels.rotary"
-                ).apply_rotary_emb
-
     @staticmethod
     def forward_static(
         x: torch.Tensor,
@@ -253,13 +246,10 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch to the vllm_xpu_kernels SYCL apply_rotary_emb op when
-        available, otherwise fall back to forward_native."""
-        if self.apply_rotary_emb_xpu is None:
-            return self.forward_native(x, cos, sin)
+        from vllm_xpu_kernels.rotary import apply_rotary_emb
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
-        output = self.apply_rotary_emb_xpu(x, cos, sin, self.is_neox_style)
+        output = apply_rotary_emb(x, cos, sin, self.is_neox_style)
         return self._post_process(output, origin_shape, origin_dtype)
 
     def forward_hip(
