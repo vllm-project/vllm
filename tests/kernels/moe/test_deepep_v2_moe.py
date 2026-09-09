@@ -126,6 +126,23 @@ def _dtype_to_backend(dtype: torch.dtype) -> str:
     return "trtllm_fp8" if dtype == torch.float8_e4m3fn else "flashinfer_trtllm"
 
 
+def _scaled_tolerances(reference: torch.Tensor, frac: float) -> tuple[float, float]:
+    """Tolerances scaled to the magnitude of the reference output.
+
+    Kernel and reference disagree by a near-constant fraction of the signal at
+    every shape, while the signal itself grows with the accumulation length
+    (n, k). A fixed atol is therefore simultaneously too tight for the largest
+    (m, n, k) and far too loose for the smallest. Where the reference nearly
+    cancels to zero the elementwise rtol contributes almost nothing, so atol
+    alone has to carry that noise floor.
+
+    Measured max_err/std over the MNKs here peaks at 0.06 (bf16) and 0.33
+    (fp8), creeping up with element count as more of the error tail gets
+    sampled; ``frac`` leaves roughly 2x headroom on top of that.
+    """
+    return frac * reference.std().item(), 6e-2
+
+
 def _make_experts(
     experts_backend: str,
     config: TestConfig,
@@ -172,7 +189,8 @@ def _make_experts(
             moe_config=moe_config,
             quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
-        return fused_experts, w1_ep, w2_ep, torch_combined, 1e-1, 2e-1
+        atol, rtol = _scaled_tolerances(torch_combined, 0.15)
+        return fused_experts, w1_ep, w2_ep, torch_combined, atol, rtol
 
     from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
     from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
@@ -236,7 +254,11 @@ def _make_experts(
             w2_scale=w2_scale_ep,
         ),
     )
-    return fused_experts, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
+    # Both sides are fp8 approximations quantized differently (the reference
+    # per-token-group, the kernel in its own block layout), so fp8 needs a much
+    # larger fraction than the unquantized path above.
+    atol, rtol = _scaled_tolerances(torch_combined, 0.6)
+    return fused_experts, w1_ep, w2_ep, torch_combined, atol, rtol
 
 
 def _deep_ep_v2_moe(
