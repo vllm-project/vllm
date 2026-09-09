@@ -26,6 +26,7 @@ from quack.compile_utils import make_fake_tensor
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
+from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = ["bf16x3_router_gemm"]
 
@@ -522,12 +523,6 @@ _TILE_CONFIG_OVERRIDES = {
         256: (64, 32),
         512: (128, 32),
     },
-    (8192, 256): {
-        64: (64, 64),
-        128: (64, 32),
-        256: (128, 32),
-        512: (128, 19),
-    },
 }
 
 
@@ -610,7 +605,7 @@ def warmup_bf16x3_router_gemm(
     return configs
 
 
-def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
     N, K = X.shape
     M, _ = W.shape
@@ -627,3 +622,21 @@ def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     out = X.new_empty(N, M, dtype=torch.float32)
     splitk_reduce_triton(partials, out)
     return out
+
+
+def _bf16x3_router_gemm_fake(
+    X: torch.Tensor,
+    W: torch.Tensor,
+) -> torch.Tensor:
+    return X.new_empty((X.shape[0], W.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="bf16x3_router_gemm",
+    op_func=_bf16x3_router_gemm,
+    fake_impl=_bf16x3_router_gemm_fake,
+)
+
+
+def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.bf16x3_router_gemm(X, W)

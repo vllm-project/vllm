@@ -188,7 +188,11 @@ class GateLinear(ReplicatedLinear):
 
         # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.ops.vllm.bf16x3_router_gemm(x, self.weight)
+            from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+                bf16x3_router_gemm,
+            )
+
+            output = bf16x3_router_gemm(x, self.weight)
             return output, None
 
         # Tier 4: cuBLAS bf16→fp32
@@ -206,24 +210,6 @@ class GateLinear(ReplicatedLinear):
 
 
 _FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
-
-
-def bf16x3_router_gemm_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-) -> torch.Tensor:
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-        bf16x3_router_gemm,
-    )
-
-    return bf16x3_router_gemm(x, weight)
-
-
-def bf16x3_router_gemm_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
 
 
 def fp32_router_gemm_dispatch_impl(
@@ -253,10 +239,10 @@ def fp32_router_gemm_dispatch_impl(
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
         from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            bf16x3_router_gemm,
+            _bf16x3_router_gemm,
         )
 
-        return bf16x3_router_gemm(x, weight)
+        return _bf16x3_router_gemm(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 
@@ -268,12 +254,6 @@ def fp32_router_gemm_dispatch_fake(
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
 
-
-direct_register_custom_op(
-    op_name="bf16x3_router_gemm",
-    op_func=bf16x3_router_gemm_impl,
-    fake_impl=bf16x3_router_gemm_fake,
-)
 
 direct_register_custom_op(
     op_name="fp32_router_gemm_dispatch",
