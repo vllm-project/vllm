@@ -14,6 +14,7 @@ mod kimi_k2;
 mod minimax_m2;
 mod minimax_m3;
 mod parameters;
+mod pythonic;
 mod qwen_coder;
 mod seed_oss;
 #[cfg(any(test, feature = "test-util"))]
@@ -32,6 +33,7 @@ pub use json::{
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub use pythonic::{Llama4PythonicToolParser, Olmo3PythonicToolParser, PythonicToolParser};
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};

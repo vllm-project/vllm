@@ -248,3 +248,71 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_new_registers_pythonic_parsers_by_name() {
+    // Pythonic parsers are selected explicitly with `--tool-call-parser
+    // pythonic` / `llama4_pythonic`, matching Python; model-name routing for
+    // `llama-4` stays on the JSON parser.
+    let factory = ToolParserFactory::new();
+
+    for name in [names::PYTHONIC, names::LLAMA4_PYTHONIC] {
+        assert!(factory.contains(name));
+        factory.create(name, &[]).unwrap();
+    }
+    assert_eq!(
+        factory.resolve_name_for_model("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+        Some(names::LLAMA4_JSON)
+    );
+}
+
+#[test]
+fn factory_parses_pythonic_tool_call_list() {
+    let factory = ToolParserFactory::new();
+
+    let mut parser = factory.create(names::PYTHONIC, &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser.parse_into("[get_weather(city='Tokyo', days=3)]", &mut output).unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo","days":3}"#);
+}
+
+#[test]
+fn factory_new_registers_olmo3_by_name() {
+    // OLMo 3 is selected explicitly with `--tool-call-parser olmo3`, matching
+    // Python; neither side maps an OLMo model-name pattern to it.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::OLMO3));
+    factory.create(names::OLMO3, &[]).unwrap();
+    assert_eq!(
+        factory.resolve_name_for_model("allenai/Olmo-3-7B-Instruct"),
+        None
+    );
+}
+
+#[test]
+fn factory_parses_olmo3_function_calls_block() {
+    let factory = ToolParserFactory::new();
+
+    let mut parser = factory.create(names::OLMO3, &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser
+        .parse_into(
+            "<function_calls>\nget_weather(city='Tokyo', days=3)\n</function_calls>",
+            &mut output,
+        )
+        .unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo","days":3}"#);
+}

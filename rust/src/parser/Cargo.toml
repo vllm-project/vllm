@@ -80,5 +80,15 @@ name = "granite4"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "pythonic"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "olmo3"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true
