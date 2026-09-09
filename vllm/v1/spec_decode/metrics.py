@@ -27,6 +27,7 @@ class SpecDecodingStats:
     num_drafts: int = 0
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
+    num_emitted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
 
@@ -38,10 +39,13 @@ class SpecDecodingStats:
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft(
+        self, num_draft_tokens: int, num_accepted_tokens: int, num_emitted_tokens: int
+    ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        self.num_emitted_tokens += num_emitted_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -68,6 +72,7 @@ class SpecDecodingLogging:
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
+        self.num_emitted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
@@ -75,6 +80,7 @@ class SpecDecodingLogging:
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
+        self.num_emitted_tokens.append(spec_decoding_stats.num_emitted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
         )
@@ -85,6 +91,7 @@ class SpecDecodingLogging:
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        num_emitted_tokens = np.sum(self.num_emitted_tokens)
         draft_throughput = 0
         accepted_throughput = 0
 
@@ -110,8 +117,9 @@ class SpecDecodingLogging:
             else float("nan")
         )
 
-        # Conventionally, mean acceptance length includes the bonus token
-        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
+        mean_acceptance_length = (
+            num_emitted_tokens / num_drafts if num_drafts > 0 else 1.0
+        )
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
