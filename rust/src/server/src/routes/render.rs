@@ -55,7 +55,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
                 owned_by: "vllm".to_string(),
                 root: Some(state.model.clone()),
                 parent: None,
-                max_model_len: Some(state.text.max_model_len()),
+                max_model_len: state.max_model_len,
             })
             .collect(),
     })
