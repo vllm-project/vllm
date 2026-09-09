@@ -4,18 +4,15 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from vllm.distributed.kv_events import (
-    MEDIUM_CPU,
-    BlockRemoved,
-    BlockStored,
-    KVCacheEvent,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.hisparse.cache_manager import HiSparseHotManager, HiSparseResidentManager
+from vllm.v1.hisparse.cache_manager import (
+    HiSparseHotManager,
+    HiSparseResidentManager,
+    HiSparseSourceManager,
+)
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
@@ -84,30 +81,6 @@ class HiSparseCoordinator:
     point the owner's page is nulled and its block table republished.
     """
 
-    @staticmethod
-    def create_host_block_pool(
-        kv_cache_config: KVCacheConfig,
-        *,
-        enable_caching: bool,
-        hash_block_size: int,
-        enable_kv_cache_events: bool,
-        metrics_collector: KVCacheMetricsCollector | None,
-    ) -> BlockPool | None:
-        num_blocks = kv_cache_config.hisparse_host_num_blocks
-        if num_blocks is None:
-            return None
-        return BlockPool(
-            num_gpu_blocks=num_blocks,
-            enable_caching=enable_caching
-            and any(
-                group.host_resident and group.kv_cache_spec.prefix_cacheable
-                for group in kv_cache_config.kv_cache_groups
-            ),
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
-
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
@@ -133,15 +106,20 @@ class HiSparseCoordinator:
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
                 assert not group.host_resident
+            if isinstance(manager, (HiSparseHotManager, HiSparseResidentManager)):
+                manager.coordinator = self
         self.resident_managers = tuple(resident_managers)
         self.hot_managers = tuple(hot_managers)
-        self.host_manager: SingleTypeKVCacheManager | None = None
+        self.host_manager: HiSparseSourceManager | None = None
         self.host_group_id: int | None = None
         self.max_spill_pages = 0
-        if host_group_ids := kv_cache_config.host_group_ids:
-            (host_group_id,) = host_group_ids
-            self.host_group_id = host_group_id
-            self.host_manager = managers[host_group_id]
+        for group_id, manager in enumerate(managers):
+            if isinstance(manager, HiSparseSourceManager):
+                if self.host_manager is not None:
+                    raise ValueError("Only one HiSparse host group is supported.")
+                self.host_group_id = group_id
+                self.host_manager = manager
+                manager.coordinator = self
         self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.transition_watermark = 0
@@ -186,145 +164,23 @@ class HiSparseCoordinator:
             self.request_states[request_id] = state
         return state
 
-    def commit_computed_blocks(
-        self,
-        request_id: str,
-        new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
-    ) -> None:
-        has_cpu_history = self.host_group_id is not None and bool(
-            new_computed_blocks[self.host_group_id]
-        )
-        if self.resident_managers and has_cpu_history:
-            state = self._get_request_state(request_id)
-            assert self.host_group_id is not None
-            host_blocks = new_computed_blocks[self.host_group_id]
-            num_host_blocks = len(host_blocks)
-            state.valid_pages.update(range(num_host_blocks))
-            state.ready_prefix_pages = max(num_host_blocks, state.ready_prefix_pages)
-            self._adopt_copies(request_id, state, host_blocks)
-            state.copies_recorded_blocks = max(
-                state.copies_recorded_blocks, num_host_blocks
-            )
-        if not self.resident_managers or has_cpu_history:
-            for manager in self.hot_managers:
-                manager.require_hot(request_id)
-
-    # ------------------------------------------------------------------
-    # Host pool helpers
-    # ------------------------------------------------------------------
+    def commit_computed_blocks(self, request_id: str, num_host_pages: int) -> None:
+        """Account for a prefix hit on host pages the request now references."""
+        if not self.resident_managers or self.host_manager is None:
+            return
+        host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+        num_host_pages = min(num_host_pages, len(host_blocks))
+        if num_host_pages == 0:
+            return
+        state = self._get_request_state(request_id)
+        state.valid_pages.update(range(num_host_pages))
+        state.ready_prefix_pages = max(num_host_pages, state.ready_prefix_pages)
+        self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
+        state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
         return manager.block_pool if manager is not None else None
-
-    def owns_block(self, block: KVCacheBlock) -> bool:
-        pool = self.get_host_block_pool()
-        return (
-            pool is not None
-            and 0 <= block.block_id < len(pool.blocks)
-            and pool.blocks[block.block_id] is block
-        )
-
-    def has_host_capacity(self, num_blocks: int) -> bool:
-        pool = self.get_host_block_pool()
-        return (
-            num_blocks == 0
-            if pool is None
-            else num_blocks <= pool.get_num_free_blocks()
-        )
-
-    def get_num_host_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> int:
-        manager = self.host_manager
-        if manager is None:
-            return 0
-        return manager.get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks[manager.kv_cache_group_id],
-            total_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
-        )
-
-    def can_admit_async_load(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        num_local_computed_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        inflight_prefills: Iterable[Request],
-        full_sequence_must_fit: bool,
-    ) -> bool:
-        """Keep enough host capacity for in-flight prefills to finish."""
-        manager = self.host_manager
-        if manager is None:
-            return True
-        num_tokens = min(
-            request.num_tokens if full_sequence_must_fit else num_computed_tokens,
-            self.max_model_len,
-        )
-        required = manager.get_num_blocks_to_allocate(
-            request.request_id,
-            num_tokens,
-            new_computed_blocks[manager.kv_cache_group_id],
-            num_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens,
-            apply_admission_cap=full_sequence_must_fit,
-        )
-        for inflight in inflight_prefills:
-            full_num_tokens = min(inflight.num_tokens, self.max_model_len)
-            required += manager.get_num_blocks_to_allocate(
-                inflight.request_id,
-                full_num_tokens,
-                (),
-                inflight.num_computed_tokens,
-                inflight.num_computed_tokens,
-                full_num_tokens,
-                apply_admission_cap=True,
-            )
-        return self.has_host_capacity(required)
-
-    def free_host_blocks(self, blocks: Iterable[KVCacheBlock]) -> list[KVCacheBlock]:
-        """Free owned host blocks and return blocks from other pools."""
-        host_blocks: list[KVCacheBlock] = []
-        other_blocks: list[KVCacheBlock] = []
-        for block in blocks:
-            (host_blocks if self.owns_block(block) else other_blocks).append(block)
-        if host_blocks:
-            pool = self.get_host_block_pool()
-            assert pool is not None
-            pool.free_blocks(host_blocks)
-        return other_blocks
-
-    def evict_host_blocks(self, block_ids: set[int]) -> bool:
-        pool = self.get_host_block_pool()
-        if pool is None:
-            return False
-        pool.evict_blocks(block_ids)
-        return True
-
-    def reset_prefix_cache(self) -> bool:
-        pool = self.get_host_block_pool()
-        return pool is None or pool.reset_prefix_cache()
-
-    def take_events(self) -> list[KVCacheEvent]:
-        pool = self.get_host_block_pool()
-        events = [] if pool is None else pool.take_events()
-        for event in events:
-            if isinstance(event, (BlockStored, BlockRemoved)):
-                event.medium = MEDIUM_CPU
-        return events
 
     # ------------------------------------------------------------------
     # GPU copies of published host pages
@@ -519,26 +375,23 @@ class HiSparseCoordinator:
             if self._plan_spill(request_id, page_idx, after_forward=True):
                 budget -= 1
 
-    def cache_host_blocks_when_ready(
+    def publish_when_ready(
         self,
         request: Request,
         num_computed_tokens: int,
         retention_interval: int | None,
         *,
         replay_boundary: int,
-        publish: bool = True,
     ) -> None:
-        """Run the per-step residency work; publish host hashes once durable."""
-        self.plan_prefix_materialization(request.request_id, num_computed_tokens)
-        self.update_residency(request.request_id)
+        """Publish host-source hashes only after their pages are durable."""
         manager = self.host_manager
-        if manager is None or not publish:
+        if manager is None:
             return
         num_pages = num_computed_tokens // manager.block_size
         request_id = request.request_id
         state = self._get_request_state(request_id)
         if state.ready_prefix_pages >= num_pages:
-            manager.cache_blocks(
+            manager.publish_blocks(
                 request,
                 num_computed_tokens,
                 retention_interval=retention_interval,
@@ -563,7 +416,7 @@ class HiSparseCoordinator:
         if publication is None or state.ready_prefix_pages < publication.num_pages:
             return
         assert self.host_manager is not None
-        self.host_manager.cache_blocks(
+        self.host_manager.publish_blocks(
             publication.request,
             publication.num_computed_tokens,
             retention_interval=publication.retention_interval,
@@ -707,6 +560,12 @@ class HiSparseCoordinator:
                 ):
                     return False
         return True
+
+    def take_dirty_request_ids(self) -> set[str]:
+        """Requests whose resident pages changed since the last step."""
+        request_ids = self.block_table_updates
+        self.block_table_updates = set()
+        return request_ids
 
     def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
         updates = {

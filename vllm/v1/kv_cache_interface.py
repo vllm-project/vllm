@@ -1352,6 +1352,7 @@ class KVCacheTensor:
 class KVCacheGroupRole(str, Enum):
     DEFAULT = "default"
     HISPARSE_INDEXER = "hisparse_indexer"
+    HISPARSE_SOURCE = "hisparse_source"
 
 
 @dataclass

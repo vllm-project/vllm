@@ -19,7 +19,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
-from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -104,16 +103,6 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
         )
 
-        self.enable_caching = enable_caching
-        host_block_pool = HiSparseCoordinator.create_host_block_pool(
-            kv_cache_config,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
-        assert host_block_pool is not None or not kv_cache_config.host_group_ids
-
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
@@ -149,20 +138,16 @@ class KVCacheCoordinator(ABC):
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
-                block_pool=(
-                    host_block_pool if kv_cache_group.host_resident else self.block_pool
-                ),
+                block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
+                role=kv_cache_group.role,
                 dcp_world_size=dcp_world_size_for_kv_cache_spec(
                     kv_cache_group.kv_cache_spec, dcp_world_size
                 ),
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
-                needs_kv_cache_zeroing=(
-                    not kv_cache_group.host_resident
-                    and self.kv_cache_config.needs_kv_cache_zeroing
-                ),
+                needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -172,9 +157,8 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
 
-        self.hisparse_coordinator = HiSparseCoordinator(
-            kv_cache_config, self.single_type_managers, max_model_len
-        )
+        for manager in self.single_type_managers:
+            manager.attach(self.single_type_managers, kv_cache_config, max_model_len)
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -183,6 +167,29 @@ class KVCacheCoordinator(ABC):
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
+
+    def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
+        """Complete block-table rows for requests some group rewrote in place."""
+        request_ids: set[str] = set()
+        for manager in self.single_type_managers:
+            request_ids |= manager.take_block_table_updates()
+        return {
+            request_id: tuple(
+                [block.block_id for block in manager.req_to_blocks.get(request_id, [])]
+                for manager in self.single_type_managers
+            )
+            for request_id in request_ids
+        }
+
+    def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            manager.complete_external_load(request_id, num_computed_tokens)
+
+    def has_pending_work(self) -> bool:
+        return any(manager.has_pending_work() for manager in self.single_type_managers)
+
+    def has_pending_frees(self) -> bool:
+        return any(manager.has_pending_frees() for manager in self.single_type_managers)
 
     def get_num_blocks_to_allocate(
         self,
@@ -222,9 +229,6 @@ class KVCacheCoordinator(ABC):
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
-            group = self.kv_cache_config.kv_cache_groups[i]
-            if group.host_resident:
-                continue
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
@@ -288,10 +292,6 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
-        self.hisparse_coordinator.commit_computed_blocks(
-            request_id,
-            new_computed_blocks,
-        )
         if num_external_computed_tokens > 0:
             for manager in self.single_type_managers:
                 manager.allocate_external_computed_blocks(
@@ -374,10 +374,7 @@ class KVCacheCoordinator(ABC):
             0, num_computed_tokens - self.num_reprefillable_tokens
         )
         for manager in self.single_type_managers:
-            if (
-                not self.enable_caching
-                or manager is self.hisparse_coordinator.host_manager
-            ):
+            if not manager.enable_caching:
                 continue
             manager.cache_blocks(
                 request,
@@ -385,13 +382,6 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
                 replay_boundary=replay_boundary,
             )
-        self.hisparse_coordinator.cache_host_blocks_when_ready(
-            request,
-            num_tokens_to_cache,
-            self.retention_interval,
-            replay_boundary=replay_boundary,
-            publish=self.enable_caching,
-        )
 
     def free(self, request_id: str) -> None:
         """
@@ -400,7 +390,6 @@ class KVCacheCoordinator(ABC):
         Args:
             request_id: The request ID.
         """
-        self.hisparse_coordinator.free(request_id)
         for manager in self.single_type_managers:
             manager.free(request_id)
 
@@ -418,7 +407,6 @@ class KVCacheCoordinator(ABC):
         Returns:
             The request's blocks in allocation order.
         """
-        self.hisparse_coordinator.free(request_id)
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
             blocks.extend(manager.pop_blocks_for_free(request_id))
@@ -823,10 +811,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         replay_boundary = self.get_replay_boundary(request)
         for manager in self.single_type_managers:
-            if (
-                not self.enable_caching
-                or manager is self.hisparse_coordinator.host_manager
-            ):
+            if not manager.enable_caching:
                 continue
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -855,13 +840,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 retention_interval=self.retention_interval,
                 replay_boundary=replay_boundary,
             )
-        self.hisparse_coordinator.cache_host_blocks_when_ready(
-            request,
-            cached_num_computed_tokens,
-            self.retention_interval,
-            replay_boundary=replay_boundary,
-            publish=self.enable_caching,
-        )
 
     def find_longest_cache_hit(
         self,

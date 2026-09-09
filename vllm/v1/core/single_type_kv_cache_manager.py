@@ -26,6 +26,8 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -106,7 +108,6 @@ class SingleTypeKVCacheManager(ABC):
         # for each request, so that we can free the blocks when the request
         # is finished.
         self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
-
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
@@ -114,6 +115,8 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
+        # Whether this group's cache lives in host memory; set by ``attach``.
+        self.host_resident = False
         self._null_block = block_pool.null_block
 
         # Whether this group's prefix-cache hits drop the EAGLE/MTP lookahead
@@ -382,6 +385,37 @@ class SingleTypeKVCacheManager(ABC):
             if self._record_new_block_ids:
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return cow_blocks + new_blocks
+
+    def attach(
+        self,
+        managers: Sequence["SingleTypeKVCacheManager"],
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+    ) -> None:
+        """Called once every group's manager exists, for cross-group setup."""
+        group = kv_cache_config.kv_cache_groups[self.kv_cache_group_id]
+        self.host_resident = group.host_resident
+        if self.host_resident:
+            self._record_new_block_ids = False
+
+    # Groups whose cache is partly off-device drive worker-side work through
+    # the hooks below; the defaults describe a purely device-resident group.
+
+    def take_block_table_updates(self) -> set[str]:
+        """Requests whose block table this group rewrote in place."""
+        return set()
+
+    def complete_external_load(self, request_id: str, num_computed_tokens: int) -> None:
+        """A connector finished loading external KV for the request."""
+        return None
+
+    def has_pending_work(self) -> bool:
+        """Whether worker-side work must complete before the engine quiesces."""
+        return False
+
+    def has_pending_frees(self) -> bool:
+        """Whether in-flight worker work will free blocks without preemption."""
+        return False
 
     @property
     def records_new_block_ids(self) -> bool:
@@ -2156,6 +2190,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
+    role: KVCacheGroupRole | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -2173,7 +2208,7 @@ def get_manager_for_kv_cache_spec(
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
     """
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, role)
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
@@ -2202,6 +2237,7 @@ def register_all_kvcache_specs(vllm_config):
     from vllm.v1.hisparse.cache_manager import (
         HiSparseHotManager,
         HiSparseResidentManager,
+        HiSparseSourceManager,
     )
 
     KVCacheSpecRegistry.register(
@@ -2218,6 +2254,9 @@ def register_all_kvcache_specs(vllm_config):
         HiSparseResidentSpec,
         HiSparseResidentManager,
         uniform_type_base_spec=HiSparseResidentSpec,
+    )
+    KVCacheSpecRegistry.register_role_manager(
+        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
     )
 
     KVCacheSpecRegistry.register(
