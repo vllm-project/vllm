@@ -975,7 +975,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "mtp.": None,
-        }
+        },
     )
 
     packed_modules_mapping = {
