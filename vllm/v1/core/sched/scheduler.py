@@ -2811,7 +2811,8 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
-        if self.connector_prefix_cache_stats is not None:
+        if self.log_stats:
+            assert self.connector_prefix_cache_stats is not None
             self.connector_prefix_cache_stats.reset = True
 
         return True
@@ -2915,7 +2916,7 @@ class Scheduler(SchedulerInterface):
         Returns optional kv transfer parameters to be included with the
         request outputs.
         """
-        if self.connector is None or self.vllm_config.kv_transfer_config is None:
+        if self.connector is None:
             return False, None
 
         finished_partial_tails: list[tuple[int, int, int]] = []

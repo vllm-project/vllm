@@ -591,7 +591,7 @@ class KVCacheManager:
                 total_computed_tokens=total_computed_tokens,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
-                reserved_blocks=reserved_blocks + watermark_blocks,
+                reserved_blocks=watermark_blocks,
                 reserved_host_blocks=reserved_host_blocks,
                 apply_admission_cap=True,
             ):

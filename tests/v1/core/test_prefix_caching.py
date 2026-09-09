@@ -4476,6 +4476,42 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     )
 
 
+@pytest.mark.parametrize(("reserved_blocks", "fits"), [(4, True), (10, False)])
+def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
+    reserved_blocks, fits
+):
+    """Reservations constrain the current allocation, not the entire prompt."""
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=11,  # Ten usable blocks after the null block.
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config, max_model_len=128, enable_caching=True, hash_block_size=block_size
+    )
+    request = make_request("chunk", list(range(128)), block_size, sha256)
+
+    blocks = manager.allocate_slots(
+        request,
+        block_size,
+        full_sequence_must_fit=True,
+        reserved_blocks=reserved_blocks,
+    )
+
+    assert (blocks is not None) is fits
+
+
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     """The cap only loosens the SWA group; a prompt that exceeds the
     full-attention pool capacity must still be rejected."""
