@@ -44,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlRequestMetrics,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -75,6 +76,19 @@ from .utils import (
     create_vllm_config,
     make_kv_cache_config,
 )
+
+
+def test_request_transfer_metrics_aggregate():
+    first = NixlRequestMetrics(
+        {"req": {"kv_transfer_bytes": 128, "kv_transfer_worker_time_ms": 3}}
+    )
+    second = NixlRequestMetrics(
+        {"req": {"kv_transfer_bytes": 256, "kv_transfer_worker_time_ms": 2}}
+    )
+    merged = first.aggregate(second).get_request_metrics()
+    assert merged == {
+        "req": {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 5}
+    }
 
 
 @pytest.fixture(scope="module", autouse=True)

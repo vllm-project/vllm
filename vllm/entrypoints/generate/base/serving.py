@@ -50,6 +50,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
+    kv_transfer_params: dict | None = None,
 ) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
@@ -94,11 +95,18 @@ def build_per_request_timing_metrics(
             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
 
     return PerRequestMetrics(
+        prefill_queue_time_ms=(kv_transfer_params or {})
+        .get("prefill_metrics", {})
+        .get("queue_time_ms"),
+        prefill_time_to_first_token_ms=(kv_transfer_params or {})
+        .get("prefill_metrics", {})
+        .get("time_to_first_token_ms"),
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        **(metrics.kv_transfer_metrics or {}),
         remote_kv_wait_time_ms=(
             metrics.remote_kv_wait_time * 1000
             if metrics.remote_kv_wait_time is not None

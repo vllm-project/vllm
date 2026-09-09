@@ -232,6 +232,7 @@ class GenerateResponseStreamChoice(BaseModel):
 
 
 class GenerateStreamResponse(BaseModel):
+    request_metrics: PerRequestMetrics | None = None
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(

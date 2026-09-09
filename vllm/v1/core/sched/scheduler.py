@@ -2120,6 +2120,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         remote_kv_wait_time=remote_kv_wait_time,
+                        kv_transfer_metrics=request.kv_transfer_metrics or None,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -2941,6 +2942,16 @@ class Scheduler(SchedulerInterface):
 
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
+
+        metadata = kv_connector_output.kv_connector_worker_meta
+        if metadata is not None:
+            for request_id, metrics in metadata.get_request_metrics().items():
+                request = self.requests.get(request_id)
+                if request is not None:
+                    for name, value in metrics.items():
+                        request.kv_transfer_metrics[name] = (
+                            request.kv_transfer_metrics.get(name, 0) + value
+                        )
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():

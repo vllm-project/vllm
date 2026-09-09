@@ -101,6 +101,7 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
     remote_kv_wait_time: float | None = None
+    kv_transfer_metrics: dict[str, float] | None = None
 
 
 class EngineCoreOutputs(

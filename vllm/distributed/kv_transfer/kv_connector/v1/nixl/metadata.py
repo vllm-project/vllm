@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 
@@ -17,6 +18,22 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+
+
+@dataclass
+class NixlRequestMetrics(KVConnectorWorkerMetadata):
+    requests: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    def get_request_metrics(self) -> dict[str, dict[str, float]]:
+        return self.requests
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> "NixlRequestMetrics":
+        for request_id, metrics in other.get_request_metrics().items():
+            target = self.requests.setdefault(request_id, {})
+            for name, value in metrics.items():
+                target[name] = target.get(name, 0) + value
+        return self
+
 
 GET_META_MSG = b"get_meta_msg"
 

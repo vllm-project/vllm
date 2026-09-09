@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    NixlRequestMetrics,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -658,6 +659,8 @@ class NixlBaseConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
         self.xfer_stats = NixlKVConnectorStats()
+        self.request_metrics = NixlRequestMetrics()
+        self.pending_request_metrics: dict[str, dict[str, float]] = {}
 
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
@@ -2498,6 +2501,13 @@ class NixlBaseConnectorWorker:
                         # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
+                        metrics = self.pending_request_metrics.setdefault(req_id, {})
+                        for name, value in (
+                            ("kv_transfer_worker_time_ms", res.xferDuration / 1e3),
+                            ("kv_transfer_post_worker_time_ms", res.postDuration / 1e3),
+                            ("kv_transfer_bytes", res.totalBytes),
+                        ):
+                            metrics[name] = metrics.get(name, 0) + value
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
@@ -2520,6 +2530,9 @@ class NixlBaseConnectorWorker:
                     self._handle_failed_transfer(req_id, handle)
 
             if not in_progress:
+                completed_metrics = self.pending_request_metrics.pop(req_id, None)
+                if completed_metrics is not None:
+                    self.request_metrics.requests[req_id] = completed_metrics
                 # Only report request as completed when all transfers are done.
                 done_req_ids.add(req_id)
                 del transfers[req_id]
@@ -2914,6 +2927,8 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
+        self.pending_request_metrics.clear()
+        self.request_metrics.requests.clear()
         for handle in self.src_xfer_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_block_size.clear()

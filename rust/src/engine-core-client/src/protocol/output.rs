@@ -133,6 +133,8 @@ pub struct EngineCoreOutput {
     pub spec_decode_metrics: Option<OpaqueValue>,
     #[serde(default)]
     pub remote_kv_wait_time: Option<f64>,
+    #[serde(default)]
+    pub kv_transfer_metrics: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -444,6 +446,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             remote_kv_wait_time: None,
+                            kv_transfer_metrics: None,
                         },
                     ],
                     scheduler_stats: None,

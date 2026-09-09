@@ -368,6 +368,7 @@ class ServingTokens(GenerateBaseServing):
             build_per_request_timing_metrics(
                 final_res.metrics,
                 num_generated_tokens,
+                request.kv_transfer_params,
             )
             if self.enable_per_request_metrics
             else None
@@ -384,6 +385,12 @@ class ServingTokens(GenerateBaseServing):
             ec_transfer_params=final_res.ec_transfer_params,
             request_metrics=request_metrics,
         )
+
+        if request_metrics is not None and response.kv_transfer_params is not None:
+            response.kv_transfer_params["prefill_metrics"] = {
+                "queue_time_ms": request_metrics.queue_time_ms,
+                "time_to_first_token_ms": request_metrics.time_to_first_token_ms,
+            }
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -464,6 +471,15 @@ class ServingTokens(GenerateBaseServing):
                     )
 
                     chunk = GenerateStreamResponse(
+                        request_metrics=(
+                            build_per_request_timing_metrics(
+                                res.metrics,
+                                sum(num_generated_tokens),
+                                request.kv_transfer_params,
+                            )
+                            if self.enable_per_request_metrics and res.finished
+                            else None
+                        ),
                         request_id=request_id,
                         choices=[
                             GenerateResponseStreamChoice(

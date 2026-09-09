@@ -667,6 +667,10 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if req_state.stats is not None and engine_core_output.kv_transfer_metrics:
+                req_state.stats.kv_transfer_metrics = (
+                    engine_core_output.kv_transfer_metrics
+                )
             if (
                 engine_core_output.remote_kv_wait_time is not None
                 and req_state.stats is not None

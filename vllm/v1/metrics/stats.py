@@ -234,6 +234,7 @@ class RequestStateStats:
     first_token_latency: float = 0.0
 
     remote_kv_wait_time: float | None = None
+    kv_transfer_metrics: dict[str, float] | None = None
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False

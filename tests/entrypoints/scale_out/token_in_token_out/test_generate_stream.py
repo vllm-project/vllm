@@ -208,7 +208,8 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
 
 
 @pytest.mark.asyncio
-async def test_serve_tokens_returns_enabled_request_metrics():
+@pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_returns_enabled_request_metrics(stream):
     engine = _mock_engine()
     metrics = RequestStateStats(
         queued_ts=1.0,
@@ -217,6 +218,10 @@ async def test_serve_tokens_returns_enabled_request_metrics():
         last_token_ts=9.0,
         first_token_latency=6.0,
         remote_kv_wait_time=0.75,
+        kv_transfer_metrics={
+            "kv_transfer_worker_time_ms": 10.0,
+            "kv_transfer_bytes": 1024,
+        },
     )
 
     async def mock_generate(*args, **kwargs):
@@ -234,17 +239,32 @@ async def test_serve_tokens_returns_enabled_request_metrics():
         token_ids=[1, 2, 3],
         sampling_params=SamplingParams(max_tokens=1),
         model=MODEL_NAME,
-        stream=False,
+        stream=stream,
+        kv_transfer_params={
+            "prefill_metrics": {"queue_time_ms": 12.0, "time_to_first_token_ms": 25.0}
+        },
     )
 
     response = await serving.serve_tokens(request)
 
-    assert isinstance(response, GenerateResponse)
-    assert response.request_metrics is not None
-    assert response.request_metrics.queue_time_ms == 1000.0
-    assert response.request_metrics.time_to_first_token_ms == 3000.0
-    assert response.request_metrics.generation_time_ms == 4000.0
-    assert response.request_metrics.remote_kv_wait_time_ms == 750.0
+    if stream:
+        chunks = _parse_sse_chunks([chunk async for chunk in response])
+        result = next(
+            chunk["request_metrics"]
+            for chunk in chunks
+            if chunk != "[DONE]" and chunk.get("request_metrics")
+        )
+    else:
+        assert isinstance(response, GenerateResponse)
+        result = response.request_metrics.model_dump()
+    assert result["queue_time_ms"] == 1000.0
+    assert result["time_to_first_token_ms"] == 3000.0
+    assert result["generation_time_ms"] == 4000.0
+    assert result["remote_kv_wait_time_ms"] == 750.0
+    assert result["kv_transfer_worker_time_ms"] == 10.0
+    assert result["kv_transfer_bytes"] == 1024
+    assert result["prefill_queue_time_ms"] == 12.0
+    assert result["prefill_time_to_first_token_ms"] == 25.0
 
 
 @pytest.mark.asyncio

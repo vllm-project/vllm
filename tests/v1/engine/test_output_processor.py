@@ -1475,3 +1475,99 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+@pytest.mark.parametrize("coalesce", [False, True])
+@pytest.mark.parametrize("stream_interval", [1, 2])
+def test_sampling_masks_follow_output_token_boundaries(
+    output_kind, coalesce, stream_interval
+):
+    import numpy as np
+
+    from vllm.v1.outputs import SamplingMaskLists
+
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.detokenizer.output_token_ids = []
+    state.detokenizer.num_output_tokens.side_effect = lambda: len(
+        state.detokenizer.output_token_ids
+    )
+    state.stream_interval = stream_interval
+    state.sent_tokens_offset = 0
+    state.external_req_id = "request"
+    state.parent_req = None
+    state.prompt = None
+    state.prompt_token_ids = [1]
+    state.lora_request = None
+    state.num_cached_tokens = 0
+    state.num_cache_creation_tokens = 0
+    state.stats = None
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+    collector = RequestOutputCollector(output_kind, "request")
+
+    expected = [[10, 11], [20], [30, 31]]
+    received = []
+    for position, support in enumerate(expected):
+        state.detokenizer.output_token_ids.append(support[0])
+        state.sampling_mask_chunks.append(
+            SamplingMaskLists(np.asarray(support), np.asarray([0, len(support)]))
+        )
+        finished = position == len(expected) - 1
+        result = state.make_request_output(
+            [support[0]], None, FinishReason.LENGTH if finished else None, None
+        )
+        if result is None:
+            continue
+        collector.put(result)
+        if not coalesce:
+            received.append(collector.get_nowait())
+    if coalesce:
+        received.append(collector.get_nowait())
+
+    if output_kind == RequestOutputKind.DELTA:
+        masks = [
+            support
+            for result in received
+            for support in result.outputs[0].sampling_mask.token_ids
+        ]
+        assert masks == expected
+        for result in received:
+            completion = result.outputs[0]
+            assert len(completion.sampling_mask.token_ids) == len(completion.token_ids)
+        assert state.sampling_mask_chunks == []
+    else:
+        assert received[-1].outputs[0].sampling_mask.token_ids == expected
+
+
+def test_sampling_mask_multi_token_delta_and_empty_finish():
+    import numpy as np
+
+    from vllm.v1.outputs import SamplingMaskLists
+
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+    state.sampling_mask_chunks = [
+        SamplingMaskLists(np.asarray([10, 11, 20]), np.asarray([0, 2, 3]))
+    ]
+
+    completion = state._new_completion_output([10, 20], None, None)
+    assert completion.sampling_mask.token_ids == [[10, 11], [20]]
+    terminal = state._new_completion_output([], FinishReason.LENGTH, None)
+    assert terminal.sampling_mask is None

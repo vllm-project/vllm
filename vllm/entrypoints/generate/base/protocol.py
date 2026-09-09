@@ -61,6 +61,23 @@ class PerRequestMetrics(OpenAIBaseModel):
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
     remote_kv_wait_time_ms: float | None = None
+    kv_transfer_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Sum of completed-transfer telemetry durations across handles "
+            "and workers; worker time, not wall-clock KV wait."
+        ),
+    )
+    kv_transfer_post_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Sum of transfer-post durations across handles and workers; "
+            "may overlap transfer duration."
+        ),
+    )
+    kv_transfer_bytes: int | None = None
+    prefill_queue_time_ms: float | None = None
+    prefill_time_to_first_token_ms: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):

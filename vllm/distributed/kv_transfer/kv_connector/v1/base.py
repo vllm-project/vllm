@@ -158,6 +158,9 @@ class KVConnectorWorkerMetadata(ABC):
     being passed to the Scheduler KVConnector.
     """
 
+    def get_request_metrics(self) -> dict[str, dict[str, float]]:
+        return {}
+
     @abstractmethod
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
