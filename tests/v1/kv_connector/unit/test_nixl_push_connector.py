@@ -1422,19 +1422,28 @@ def _member_worker(
     return worker
 
 
-def test_member_group_ids_route_descriptor_blocks():
+@pytest.mark.parametrize(
+    ("region_num_blocks", "expected"),
+    [(None, [1, 2, 15, 21, 22]), ([4, 7, 5], [1, 2, 9, 12, 13])],
+)
+def test_member_group_ids_route_descriptor_blocks(region_num_blocks, expected):
     worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
     desc_ids = worker._compute_desc_ids(
         block_ids=[[1, 2], [5]],
         dst_num_blocks=10,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        region_num_blocks=region_num_blocks,
     )
-    assert desc_ids.tolist() == [1, 2, 15, 21, 22]
+    assert desc_ids.tolist() == expected
 
 
 def test_member_metadata_round_trip():
     metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.region_num_blocks = [4]
+    metadata.region_group_ids = [-1]
+    metadata.region_names = ["L0"]
+    metadata.region_mem_types = ["VRAM"]
 
     encoded = msgspec.msgpack.encode(metadata)
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
@@ -1472,12 +1481,20 @@ def test_member_alignment_expands_pooled_regions():
     assert worker._member_group_ids == (0, 1, 0)
 
     metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_num_blocks = [4, 6]
+    metadata.region_group_ids = [-1, 0]
+    metadata.region_names = ["a", "b"]
+    metadata.region_mem_types = ["VRAM", "VRAM"]
     worker._align_remote_regions_by_member(metadata)
 
     assert metadata.kv_caches_base_addr == [0xA000, 0xA000, 0xB000]
     assert metadata.block_lens == [128, 128, 128]
     assert metadata.block_strides == [128, 128, 128]
     assert metadata.region_members == [["a"], ["a.swa"], ["b"]]
+    assert metadata.region_num_blocks == [4, 4, 6]
+    assert metadata.region_group_ids == [-1, -1, 0]
+    assert metadata.region_names == ["a", "a.swa", "b"]
+    assert metadata.region_mem_types == ["VRAM", "VRAM", "VRAM"]
 
 
 def test_member_alignment_filters_and_reorders_a_pp_stage():
@@ -1488,6 +1505,10 @@ def test_member_alignment_filters_and_reorders_a_pp_stage():
         [65536, 65536, 32768, 32768],
         [131072, 131072, 65536, 65536],
     )
+    metadata.region_num_blocks = [4, 6, 8, 10]
+    metadata.region_group_ids = [0, 0, 1, 1]
+    metadata.region_names = ["l2", "l0", "l3", "l1"]
+    metadata.region_mem_types = ["VRAM"] * 4
 
     worker._align_remote_regions_by_member(metadata)
 
@@ -1496,9 +1517,19 @@ def test_member_alignment_filters_and_reorders_a_pp_stage():
     assert metadata.kv_caches_base_addr == [0xC000, 0xD000]
     assert metadata.block_lens == [65536, 32768]
     assert metadata.block_strides == [131072, 65536]
+    assert metadata.region_num_blocks == [4, 8]
+    assert metadata.region_group_ids == [0, 1]
+    assert metadata.region_names == ["l2", "l3"]
+    assert metadata.region_mem_types == ["VRAM", "VRAM"]
 
 
-def test_member_descriptors_pair_layers_across_asymmetric_pp_split():
+@pytest.mark.parametrize(
+    ("local_num_blocks", "remote_num_blocks"),
+    [([4, 4], [4, 4, 4]), ([4, 6], [3, 5, 7])],
+)
+def test_member_descriptors_pair_layers_across_asymmetric_pp_split(
+    local_num_blocks, remote_num_blocks
+):
     """A PP split can leave each stage a different mix of attention types.
 
     Stage 1 owns L3 (full) pooled with L4 (sliding) in region 0, and L5 (full)
@@ -1510,6 +1541,7 @@ def test_member_descriptors_pair_layers_across_asymmetric_pp_split():
     worker.block_stride_per_layer = [256, 512]
     worker._region_is_mla = [False, False]
     worker.num_blocks = 4
+    worker.region_num_blocks = local_num_blocks
     worker.device_id = 0
 
     consumer = _agent_metadata(
@@ -1519,6 +1551,7 @@ def test_member_descriptors_pair_layers_across_asymmetric_pp_split():
         [256, 512, 1024],
     )
     consumer.num_blocks = 4
+    consumer.region_num_blocks = remote_num_blocks
     worker._align_remote_regions_by_member(consumer)
 
     # L3 -> remote region 1, L4 -> 2, L5 -> 2. Pairing by index would have sent
@@ -1528,8 +1561,15 @@ def test_member_descriptors_pair_layers_across_asymmetric_pp_split():
     plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
     local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
     remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
-    local_ids = worker._compute_desc_ids([[1, 2], [3]], 4, None, 1)
-    remote_ids = worker._compute_desc_ids([[0, 1], [2]], 4, None, 1)
+    local_counts = [local_num_blocks[i] for i in worker._member_local_regions]
+    local_ids = worker._compute_desc_ids(
+        [[1, 2], [3]], 4, None, 1, region_num_blocks=local_counts
+    )
+    remote_ids = worker._compute_desc_ids(
+        [[0, 1], [2]], 4, None, 1, region_num_blocks=consumer.region_num_blocks
+    )
+    assert len(local_descs) == sum(local_counts)
+    assert len(remote_descs) == sum(consumer.region_num_blocks)
 
     # Each pair addresses the same layer's blocks despite different pooling
     # and strides. L3 and L5 use group 0; L4 uses group 1.
@@ -1565,20 +1605,16 @@ def test_member_alignment_is_canonical_across_remote_orderings():
 def test_member_alignment_is_idempotent():
     worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
     metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_num_blocks = [4, 6]
+    metadata.region_group_ids = [-1, 0]
+    metadata.region_names = ["a", "b"]
+    metadata.region_mem_types = ["VRAM", "VRAM"]
 
     worker._align_remote_regions_by_member(metadata)
-    aligned = (
-        list(metadata.kv_caches_base_addr),
-        list(metadata.block_lens),
-        list(metadata.block_strides),
-    )
+    aligned = msgspec.msgpack.encode(metadata)
     worker._align_remote_regions_by_member(metadata)
 
-    assert (
-        metadata.kv_caches_base_addr,
-        metadata.block_lens,
-        metadata.block_strides,
-    ) == aligned
+    assert msgspec.msgpack.encode(metadata) == aligned
 
 
 def test_member_alignment_rejects_missing_local_member():
@@ -1603,6 +1639,21 @@ def test_member_alignment_rejects_inconsistent_remote_metadata():
 
     with pytest.raises(AssertionError, match="lengths disagree"):
         worker._align_remote_regions_by_member(metadata)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["region_num_blocks", "region_group_ids", "region_names", "region_mem_types"],
+)
+def test_member_alignment_rejects_inconsistent_region_geometry(field):
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["b"]], [0xA000, 0xB000], [128, 128])
+    setattr(metadata, field, [])
+    original = msgspec.msgpack.encode(metadata)
+
+    with pytest.raises(AssertionError, match="lengths disagree"):
+        worker._align_remote_regions_by_member(metadata)
+    assert msgspec.msgpack.encode(metadata) == original
 
 
 def test_set_region_members_rejects_duplicate_local_member():
