@@ -336,16 +336,22 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             advance_draft_positions=self.advance_draft_positions,
         )
 
+        decode_batch_sync, num_batch_tokens = (
+            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, num_query_per_req=1)
+            if dp_sync is not None
+            else (None, num_reqs)
+        )
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
         decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
-            num_reqs,
+            num_batch_tokens,
             uniform_token_count=1,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            dp_sync=decode_batch_sync,
         )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
@@ -505,7 +511,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 attn_metadata = self._build_draft_attn_metadata(
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    num_tokens_padded=batch_desc.num_tokens,
+                    # One query per request; exclude DP-only model padding.
+                    num_tokens_padded=batch_desc.num_reqs or num_reqs,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
                 )
@@ -553,7 +560,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                # One query per request; exclude DP-only model padding.
+                num_tokens_padded=batch_desc.num_reqs or num_reqs,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
             )
