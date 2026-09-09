@@ -164,7 +164,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
 # fmt: on
 
 # Which quantization methods support EPLB.
-# ModelOptMoEMethod.supports_eplb is key-dependent: False for FP8, True for NVFP4.
+# ModelOptMoEMethod.supports_eplb is False for FP8.
 # TODO: double check modelopt fp8
 # modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
 EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
