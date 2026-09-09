@@ -25,6 +25,9 @@ import triton
 import triton.language as tl
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 FP8_MAX = tl.constexpr(448.0)
 # Scale granularity (codec): one FP32 scale per QUANT_BLOCK elements, per the
@@ -221,6 +224,9 @@ class Fp8HostStagedAllReduce:
         self._cap = 0
         self._wire: torch.Tensor | None = None
         self.disabled = False
+        # Quality-sensitive wire codec: keep the active choice visible in
+        # the journal (the backend-selection line cannot distinguish it).
+        logger.info_once(f"Host-staged AR active: wire codec={codec}")
 
     def _wire_bytes(self, n: int) -> int:
         # e4m3: n payload bytes + 4B scale per QUANT_BLOCK.
