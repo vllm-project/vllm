@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalPageMapping,
-    GPULoadStoreSpec,
+    DevicePointers,
     LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
@@ -243,69 +243,36 @@ class SingleDirectionOffloadingHandler:
 
     def __init__(
         self,
-        gpu_tensors: list[torch.Tensor],
         cpu_tensors: list[torch.Tensor],
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
     ):
-        """
-        Initialize a SingleDirectionOffloadingHandler.
+        """Initialize a SingleDirectionOffloadingHandler.
 
         Args:
-            gpu_tensors: list of GPU KV cache tensors.
-                Each of shape (num_gpu_blocks, gpu_page_size_bytes) with dtype int8.
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
-                Order should match gpu_tensors.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
         """
-        assert len(gpu_tensors) == len(cpu_tensors)
-        assert len(gpu_tensors) > 0
+        assert len(cpu_tensors) > 0
 
-        canonical_bytes_per_block = (
-            _canonical_block_sizes(layer_refs_per_group, len(gpu_tensors))
-            if canonical_layout
-            else None
-        )
-
-        # assert input tensors are as expected
-        for t_idx, (gpu_tensor, cpu_tensor) in enumerate(zip(gpu_tensors, cpu_tensors)):
-            assert gpu_tensor.dtype == torch.int8
-            assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
+        for cpu_tensor in cpu_tensors:
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
-            _, gpu_page_size = gpu_tensor.shape
-            _, cpu_page_size = cpu_tensor.shape
-            if canonical_bytes_per_block is not None:
-                assert (
-                    cpu_page_size == canonical_bytes_per_block[t_idx] * blocks_per_chunk
-                )
-            else:
-                assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
-        self.src_tensors: list[torch.Tensor] = (
-            gpu_tensors if gpu_to_cpu else cpu_tensors
-        )
-        self.dst_tensors: list[torch.Tensor] = (
-            cpu_tensors if gpu_to_cpu else gpu_tensors
-        )
+        self.cpu_tensors = cpu_tensors
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
             layer_refs_per_group, gpu_to_cpu
         )
-
-        # GPU blocks may be smaller
-        # cpu_page_size = gpu_page_size * blocks_per_chunk.
-        self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
-        self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
+        self.blocks_per_chunk = blocks_per_chunk
 
         # Per (group, ref) static copy plans for the canonical layout
         self._canonical_copy_plans: list[list[CopyPlan]] | None = (
@@ -321,9 +288,8 @@ class SingleDirectionOffloadingHandler:
         )
         # Reusable per-block base-pointer scratch for the canonical fill,
         # sized to the largest possible group (grown on demand)
-        num_scratch_blocks = gpu_tensors[0].shape[0] if canonical_layout else 0
-        self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
-        self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
+        num_scratch_blocks = cpu_tensors[0].shape[0] if canonical_layout else 0
+        self._scratch_bases_cpu = np.empty(num_scratch_blocks, dtype=np.uint64)
 
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
@@ -356,11 +322,11 @@ class SingleDirectionOffloadingHandler:
     def _fill_direct_ops(
         self,
         g_idx: int,
-        group_src: np.ndarray,
-        group_dst: np.ndarray,
+        device_ptrs: DevicePointers,
+        dev_ptr_offset: int,
+        cpu_block_ids: np.ndarray,
         group_size: int,
-        src_skip_count: int,
-        dst_skip_count: int,
+        cpu_skip_count: int,
         all_src: np.ndarray,
         all_dst: np.ndarray,
         all_sizes: np.ndarray,
@@ -371,24 +337,30 @@ class SingleDirectionOffloadingHandler:
 
         Returns (op_idx past the filled descriptors, bytes added)."""
         num_bytes = 0
-        for data_ref in self.layer_refs_per_group[g_idx]:
+        for d, data_ref in enumerate(self.layer_refs_per_group[g_idx]):
             t_idx = data_ref.tensor_idx
             end_idx = op_idx + group_size
 
-            compute_sub_block_ptrs(
-                group_src,
-                self.src_blocks_per_chunk,
-                all_src[op_idx:end_idx],
-                self.src_tensors[t_idx],
-                skip_count=src_skip_count,
-            )
-            compute_sub_block_ptrs(
-                group_dst,
-                self.dst_blocks_per_chunk,
-                all_dst[op_idx:end_idx],
-                self.dst_tensors[t_idx],
-                skip_count=dst_skip_count,
-            )
+            ptr_start = dev_ptr_offset + d * group_size
+            gpu_ptrs = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
+            if self.gpu_to_cpu:
+                all_src[op_idx:end_idx] = gpu_ptrs
+                compute_sub_block_ptrs(
+                    cpu_block_ids,
+                    self.blocks_per_chunk,
+                    all_dst[op_idx:end_idx],
+                    self.cpu_tensors[t_idx],
+                    skip_count=cpu_skip_count,
+                )
+            else:
+                all_dst[op_idx:end_idx] = gpu_ptrs
+                compute_sub_block_ptrs(
+                    cpu_block_ids,
+                    self.blocks_per_chunk,
+                    all_src[op_idx:end_idx],
+                    self.cpu_tensors[t_idx],
+                    skip_count=cpu_skip_count,
+                )
 
             all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
             num_bytes += group_size * data_ref.page_size_bytes
@@ -398,11 +370,11 @@ class SingleDirectionOffloadingHandler:
     def _fill_canonical_ops(
         self,
         g_idx: int,
-        group_src: np.ndarray,
-        group_dst: np.ndarray,
+        device_ptrs: DevicePointers,
+        dev_ptr_offset: int,
+        cpu_block_ids: np.ndarray,
         group_size: int,
-        src_skip_count: int,
-        dst_skip_count: int,
+        cpu_skip_count: int,
         all_src: np.ndarray,
         all_dst: np.ndarray,
         all_sizes: np.ndarray,
@@ -418,35 +390,38 @@ class SingleDirectionOffloadingHandler:
         # buffers' int64 are bit-equivalent for addresses
         all_src_u64 = all_src.view(np.uint64)
         all_dst_u64 = all_dst.view(np.uint64)
-        if group_size > len(self._scratch_bases_src):
-            self._scratch_bases_src = np.empty(group_size, dtype=np.uint64)
-            self._scratch_bases_dst = np.empty(group_size, dtype=np.uint64)
+        if group_size > len(self._scratch_bases_cpu):
+            self._scratch_bases_cpu = np.empty(group_size, dtype=np.uint64)
 
         num_bytes = 0
-        for plan, data_ref in zip(
-            self._canonical_copy_plans[g_idx], self.layer_refs_per_group[g_idx]
+        for d, (plan, data_ref) in enumerate(
+            zip(
+                self._canonical_copy_plans[g_idx],
+                self.layer_refs_per_group[g_idx],
+            )
         ):
             if plan.num_frags == 0:
                 continue
             t_idx = data_ref.tensor_idx
 
             # 1. Base byte pointer of every block on each side
-            block_bases_src = self._scratch_bases_src[:group_size]
-            block_bases_dst = self._scratch_bases_dst[:group_size]
+            ptr_start = dev_ptr_offset + d * group_size
+            gpu_bases = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
+            cpu_bases = self._scratch_bases_cpu[:group_size]
             compute_sub_block_ptrs(
-                group_src,
-                self.src_blocks_per_chunk,
-                block_bases_src,
-                self.src_tensors[t_idx],
-                skip_count=src_skip_count,
+                cpu_block_ids,
+                self.blocks_per_chunk,
+                cpu_bases,
+                self.cpu_tensors[t_idx],
+                skip_count=cpu_skip_count,
             )
-            compute_sub_block_ptrs(
-                group_dst,
-                self.dst_blocks_per_chunk,
-                block_bases_dst,
-                self.dst_tensors[t_idx],
-                skip_count=dst_skip_count,
-            )
+
+            if self.gpu_to_cpu:
+                block_bases_src = gpu_bases
+                block_bases_dst = cpu_bases
+            else:
+                block_bases_src = cpu_bases
+                block_bases_dst = gpu_bases
 
             # 2. On store, keep only the blocks this rank is elected to write
             mapping = data_ref.mapping
@@ -456,9 +431,9 @@ class SingleDirectionOffloadingHandler:
                     block_bases_src,
                     block_bases_dst,
                     mapping,
-                    group_dst,
+                    cpu_block_ids,
                     group_size,
-                    dst_skip_count,
+                    cpu_skip_count,
                 )
             num_active_blocks = len(block_bases_src)
 
@@ -493,63 +468,35 @@ class SingleDirectionOffloadingHandler:
         block_bases_src: np.ndarray,
         block_bases_dst: np.ndarray,
         mapping: CanonicalPageMapping,
-        group_dst: np.ndarray,
+        cpu_block_ids: np.ndarray,
         group_size: int,
-        dst_skip_count: int,
+        cpu_skip_count: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Keep only the blocks this rank writes: replicated ranks take turns
         writing shared canonical pages, keyed by the rank-consistent CPU-side
         canonical page id."""
         cpu_page_ids = _canonical_page_ids(
-            group_dst,
-            self.dst_blocks_per_chunk,
+            cpu_block_ids,
+            self.blocks_per_chunk,
             group_size,
-            dst_skip_count,
+            cpu_skip_count,
         )
         writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
         return block_bases_src[writer_mask], block_bases_dst[writer_mask]
 
     def transfer_async(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self,
+        job_id: int,
+        device_ptrs: DevicePointers,
+        cpu_spec: BlockIDsLoadStoreSpec,
     ) -> bool:
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+        cpu_blocks = cpu_spec.block_ids
+        assert cpu_blocks.ndim == 1
+        num_cpu_blocks = len(cpu_blocks)
 
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        num_src_blocks = len(src_blocks)
-        num_dst_blocks = len(dst_blocks)
-
-        # There are 2 types of transfers:
-        # 1. GPU -> CPU
-        # 2. CPU -> GPU
-        #
-        # transfers are also to CPU blocks, EXCEPT MAYBE for the first and last block.
-        # i.e. the first and last CPU blocks in src_blocks can match against
-        # a smaller (byte-wise) set of GPU blocks in dst_blocks.
-        # In such cases, we may need to skip some gpu-sized sub-blocks,
-        # and start reading/writing from the middle of the first CPU block.
-        # If we have multiple KV cache groups (when using HMA with hybrid models),
-        # we may have a partial first/last CPU block per each group.
-        # The group_sizes parameter encodes the size of each group of blocks
-        # in the GPU dst_blocks.
-        # If group_sizes is None, we assume all blocks belong to a single group.
-        # The logical_offset parameter maps each group of blocks to its logical
-        # offset inside the request, counting in GPU blocks.
-        # This allows us to find the correct starting position
-        # in the matching first CPU block.
-
-        # extract group_sizes from the GPU spec
-        gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
-        assert isinstance(gpu_spec, GPULoadStoreSpec)
-        group_sizes = gpu_spec.group_sizes
+        group_sizes = device_ptrs.group_block_counts
+        block_indices = device_ptrs.block_indices
         assert len(group_sizes) == len(self.layer_refs_per_group)
-
-        # extract block indices from the GPU spec
-        block_indices = gpu_spec.block_indices
         assert len(block_indices) == len(self.layer_refs_per_group)
 
         num_copy_ops = self._estimate_max_copy_ops(group_sizes)
@@ -570,49 +517,41 @@ class SingleDirectionOffloadingHandler:
         all_dst = dst.numpy()
         all_sizes = sizes.numpy()
 
-        src_offset = 0
-        dst_offset = 0
+        cpu_offset = 0
+        dev_ptr_offset = 0
         op_idx = 0
-        # count total number of bytes copied
         num_transfer_bytes = 0
         for g_idx, (group_size, block_idx) in enumerate(
             zip(group_sizes, block_indices)
         ):
+            n_data_refs = len(self.layer_refs_per_group[g_idx])
             if group_size == 0:
                 continue
 
-            src_logical_blocks_to_skip = block_idx % self.src_blocks_per_chunk
-            dst_logical_blocks_to_skip = block_idx % self.dst_blocks_per_chunk
-            src_logical_blocks_count = group_size + src_logical_blocks_to_skip
-            dst_logical_blocks_count = group_size + dst_logical_blocks_to_skip
-
-            dst_blocks_count = cdiv(dst_logical_blocks_count, self.dst_blocks_per_chunk)
-            dst_end_offset = dst_offset + dst_blocks_count
-            assert dst_end_offset <= num_dst_blocks
-
-            src_blocks_count = cdiv(src_logical_blocks_count, self.src_blocks_per_chunk)
-            src_end_offset = src_offset + src_blocks_count
-            assert src_end_offset <= num_src_blocks
+            cpu_skip = block_idx % self.blocks_per_chunk
+            cpu_logical_count = group_size + cpu_skip
+            cpu_blocks_count = cdiv(cpu_logical_count, self.blocks_per_chunk)
+            cpu_end_offset = cpu_offset + cpu_blocks_count
+            assert cpu_end_offset <= num_cpu_blocks
 
             op_idx, group_bytes = self._fill_group_ops(
                 g_idx,
-                group_src=src_blocks[src_offset:src_end_offset],
-                group_dst=dst_blocks[dst_offset:dst_end_offset],
+                device_ptrs=device_ptrs,
+                dev_ptr_offset=dev_ptr_offset,
+                cpu_block_ids=cpu_blocks[cpu_offset:cpu_end_offset],
                 group_size=group_size,
-                src_skip_count=src_logical_blocks_to_skip,
-                dst_skip_count=dst_logical_blocks_to_skip,
+                cpu_skip_count=cpu_skip,
                 all_src=all_src,
                 all_dst=all_dst,
                 all_sizes=all_sizes,
                 op_idx=op_idx,
             )
             num_transfer_bytes += group_bytes
+            cpu_offset = cpu_end_offset
+            dev_ptr_offset += group_size * n_data_refs
 
-            src_offset = src_end_offset
-            dst_offset = dst_end_offset
-
-        assert src_offset == num_src_blocks
-        assert dst_offset == num_dst_blocks
+        assert cpu_offset == num_cpu_blocks
+        assert dev_ptr_offset == len(device_ptrs.ptrs)
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
         assert op_idx <= num_copy_ops
@@ -733,8 +672,7 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
-        self.src_tensors.clear()
-        self.dst_tensors.clear()
+        self.cpu_tensors.clear()
         if sync_error is not None:
             raise sync_error
 
@@ -771,13 +709,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             else None
         )
 
-        gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         for t_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
-                (-1, gpu_page_size_bytes)
-            )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
             if canonical_bytes_per_block is not None:
@@ -803,11 +737,9 @@ class CPUOffloadingWorker(OffloadingWorker):
                     time.monotonic() - t0,
                 )
 
-            gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
         self._store_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
@@ -816,7 +748,6 @@ class CPUOffloadingWorker(OffloadingWorker):
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
@@ -825,16 +756,18 @@ class CPUOffloadingWorker(OffloadingWorker):
         )
 
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
         """Async GPU -> CPU."""
-        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+        return self._store_handler.transfer_async(job_id, device_ptrs, dst_spec)
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self, job_id: int, src_spec: LoadStoreSpec, device_ptrs: DevicePointers
     ) -> bool:
         """Async CPU -> GPU."""
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
+        return self._load_handler.transfer_async(job_id, device_ptrs, src_spec)
 
     def get_finished(self) -> list[TransferResult]:
         return self._store_handler.get_finished() + self._load_handler.get_finished()
