@@ -118,7 +118,10 @@ fn build_router_with_options(
         .route("/detokenize", post(tokenize::detokenize));
 
     if scale_out_endpoints_enabled {
-        router = router.route("/inference/v1/generate", post(inference::generate));
+        router = router
+            .route("/inference/v1/generate", post(inference::generate))
+            .route("/v1/chat/completions/render", post(render::render_chat))
+            .route("/v1/completions/render", post(render::render_completion));
     } else {
         info!(
             "scale-out endpoints are disabled; set \

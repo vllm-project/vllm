@@ -159,3 +159,30 @@ async fn render_completion(
         stream_options,
     )?]))
 }
+
+// Handlers that work with AppState for the main API server
+use crate::state::AppState;
+
+pub(crate) async fn render_chat(
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    ValidatedJson(_body): ValidatedJson<ChatCompletionRequest>,
+) -> Result<Json<GenerateRequest>, ApiError> {
+    Err(ApiError::not_implemented(
+        "Render endpoints are not yet implemented in the Rust frontend. \
+         Use VLLM_USE_RUST_FRONTEND=0 or deploy a dedicated render server.",
+        None,
+    ))
+}
+
+pub(crate) async fn render_completion(
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    ValidatedJson(_body): ValidatedJson<CompletionRequest>,
+) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    Err(ApiError::not_implemented(
+        "Render endpoints are not yet implemented in the Rust frontend. \
+         Use VLLM_USE_RUST_FRONTEND=0 or deploy a dedicated render server.",
+        None,
+    ))
+}
