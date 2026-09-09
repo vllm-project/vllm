@@ -922,9 +922,8 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
     scheduler.kv_cache_manager.remove_skipped_blocks.assert_called_once()
 
 
-def test_block_pool_touch_pins_released_cow_target():
-    """The connector can rescue an offered CoW target after its step-scoped
-    retention is released by using the bound BlockPool's touch method."""
+def test_boundary_state_offload_pins_released_cow_target():
+    """A drained boundary-state handoff keeps its released CoW block alive."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -972,10 +971,6 @@ def test_block_pool_touch_pins_released_cow_target():
     ((_group_id, block_id, boundary_tokens),) = offloads["0"]
     assert boundary_tokens == 6
     cow_block = manager.block_pool.blocks[block_id]
-    assert cow_block.ref_cnt == 0
-    assert block_id in _free_block_ids(manager)
-
-    manager.block_pool.touch([cow_block])
     assert cow_block.ref_cnt == 1
     assert block_id not in _free_block_ids(manager)
 

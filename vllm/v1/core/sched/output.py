@@ -279,7 +279,8 @@ class SchedulerOutput:
     kv_connector_metadata: KVConnectorMetadata | None = None
 
     # Whether any scheduled request consumes KV that the connector loads
-    # synchronously during this step (load_async=False).
+    # synchronously during this step (load_async=False). Connectors may also
+    # set this from build_connector_meta when a step needs a pre-forward start.
     has_sync_kv_loads: bool = False
 
     # EC Cache Connector metadata
@@ -293,6 +294,9 @@ class SchedulerOutput:
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Complete block-table rows that replace incrementally appended block IDs.
+    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None

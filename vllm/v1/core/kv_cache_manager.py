@@ -183,6 +183,12 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # Groups whose lookup keeps blocks past the reconciled cache hit.
+        self.retained_hit_group_ids = tuple(
+            manager.kv_cache_group_id
+            for manager in self.coordinator.single_type_managers
+            if manager.retains_longer_hit
+        )
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -292,11 +298,9 @@ class KVCacheManager:
                 if num_blocks > 0:
                     group = self.kv_cache_config.kv_cache_groups[group_idx]
                     block_size = group.kv_cache_spec.block_size
-                    self.block_pool.emit_cached_block_events(
-                        request,
-                        num_blocks,
-                        block_size,
-                        group_idx,
+                    manager = self.coordinator.single_type_managers[group_idx]
+                    manager.block_pool.emit_cached_block_events(
+                        request, num_blocks, block_size, group_idx
                     )
 
         # The junction to pin is where the lagging sparse-retention group stops
@@ -463,6 +467,17 @@ class KVCacheManager:
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            if self.retained_hit_group_ids:
+                # These groups looked up blocks past the reconciled hit; adopt
+                # only the part the external hit reaches.
+                reused = num_new_computed_tokens + num_external_computed_tokens
+                groups = list(new_computed_block_list)
+                for group_id in self.retained_hit_group_ids:
+                    manager = self.coordinator.single_type_managers[group_id]
+                    groups[group_id] = groups[group_id][
+                        : cdiv(reused, manager.block_size)
+                    ]
+                new_computed_block_list = tuple(groups)
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
@@ -564,7 +579,7 @@ class KVCacheManager:
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
+        if delay_cache_blocks:
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
@@ -639,7 +654,10 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.block_pool.reset_prefix_cache():
+        pools = dict.fromkeys(
+            manager.block_pool for manager in self.coordinator.single_type_managers
+        )
+        if not all([pool.reset_prefix_cache() for pool in pools]):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -741,6 +759,8 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                continue
             if isinstance(
                 group.kv_cache_spec,
                 (CrossAttentionSpec, EncoderOnlyAttentionSpec),

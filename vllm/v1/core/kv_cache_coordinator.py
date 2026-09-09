@@ -141,6 +141,7 @@ class KVCacheCoordinator(ABC):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
+                role=kv_cache_group.role,
                 dcp_world_size=dcp_world_size_for_kv_cache_spec(
                     kv_cache_group.kv_cache_spec, dcp_world_size
                 ),
@@ -176,7 +177,7 @@ class KVCacheCoordinator(ABC):
         apply_admission_cap: bool = False,
     ) -> int:
         """
-        Get the number of blocks needed to be allocated for the request.
+        Get the number of device blocks needed to be allocated for the request.
 
         Args:
             request_id: The request ID.
@@ -341,6 +342,8 @@ class KVCacheCoordinator(ABC):
         """
         replay_boundary = self.get_replay_boundary(request)
         for manager in self.single_type_managers:
+            if not manager.enable_caching:
+                continue
             # Only cache tokens with finalized KV. The last num_reprefillable_tokens
             # tokens can be re-prefilled during multi-module MTP.
             num_tokens_to_cache = max(
@@ -560,7 +563,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
-            block_pool=self.block_pool,
+            block_pool=self.single_type_managers[0].block_pool,
             kv_cache_spec=self.kv_cache_spec,
             drop_eagle_block=0 in self.eagle_group_ids,
             alignment_tokens=self.block_size,
@@ -721,12 +724,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
 
-            # Try to find an existing group with the same spec
+            # Try to find an existing group with the same spec and manager.
+            # A role-selected manager can give identical specs different
+            # managers, which do not share a lookup.
             for idx, group in enumerate(self.attention_groups):
-                if group.spec == spec:
-                    assert manager_cls is group.manager_cls, (
-                        "Expected same manager class for identical KV cache specs."
-                    )
+                if group.spec == spec and manager_cls is group.manager_cls:
                     group.group_ids.append(i)
                     if use_eagle and not group.use_eagle:
                         self.attention_groups[idx] = group._replace(use_eagle=True)
@@ -777,6 +779,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         replay_boundary = self.get_replay_boundary(request)
         for manager in self.single_type_managers:
+            if not manager.enable_caching:
+                continue
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
@@ -890,7 +894,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_hashes=block_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
+                    block_pool=self.single_type_managers[first_group_id].block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
@@ -924,7 +928,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for group in self.attention_groups:
             if not isinstance(group.spec, FullAttentionSpec):
                 continue
-            group_block_size = self.single_type_managers[group.group_ids[0]].block_size
+            first_manager = self.single_type_managers[group.group_ids[0]]
+            if first_manager.retains_longer_hit:
+                # This group's cache outlives its siblings'; keep its own hit so
+                # an external hit can extend the others into it.
+                continue
+            group_block_size = first_manager.block_size
             num_blocks = cdiv(hit_length, group_block_size)
             for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
@@ -961,7 +970,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
-                block_pool=self.block_pool,
+                block_pool=manager.block_pool,
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,

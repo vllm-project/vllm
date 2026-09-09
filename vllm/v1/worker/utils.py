@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -24,7 +24,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
-    MultipleOf,
+    select_common_block_size_from_constraints,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -165,6 +165,9 @@ class KVBlockZeroer:
                     continue
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
+                    continue
+                if kv.device.type != self.device.type:
+                    # Host-resident groups are not zeroed by the GPU kernel.
                     continue
                 dp = kv.data_ptr()
 
@@ -347,51 +350,13 @@ def select_common_block_size(
         ValueError: If no valid block size found.
     """
 
-    def block_size_is_supported(
-        backends: list[type[AttentionBackend]], block_size: int
-    ) -> bool:
-        """Check if the block size is supported by all backends."""
-        for backend in backends:
-            is_supported = False
-            for supported_size in backend.get_supported_kernel_block_sizes():
-                if isinstance(supported_size, int):
-                    if block_size == supported_size:
-                        is_supported = True
-                elif isinstance(supported_size, MultipleOf):
-                    if block_size % supported_size.base == 0:
-                        is_supported = True
-                else:
-                    raise ValueError(f"Unknown supported size: {supported_size}")
-            if not is_supported:
-                return False
-        return True
-
-    # Case 1: if the block_size of kv cache manager is supported by all backends,
-    # return it directly.
-    if block_size_is_supported(backends, kv_manager_block_size):
+    if not backends:
         return kv_manager_block_size
 
-    # Case 2: otherwise, the block_size must be an `int`-format supported size of
-    # at least one backend. Iterate over all `int`-format supported sizes in
-    # descending order and return the first one that is supported by all backends.
-    # Simple proof:
-    # If the supported size b is in MultipleOf(x_i) format for all attention
-    # backends i, and b a factor of kv_manager_block_size, then
-    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
-    # return kv_manager_block_size in case 1.
-    all_int_supported_sizes = set(
-        supported_size
-        for backend in backends
-        for supported_size in backend.get_supported_kernel_block_sizes()
-        if isinstance(supported_size, int)
+    return select_common_block_size_from_constraints(
+        kv_manager_block_size,
+        [backend.get_supported_kernel_block_sizes() for backend in backends],
     )
-
-    for supported_size in sorted(all_int_supported_sizes, reverse=True):
-        if kv_manager_block_size % supported_size != 0:
-            continue
-        if block_size_is_supported(backends, supported_size):
-            return supported_size
-    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
 
 
 def allocate_kv_cache(
@@ -399,17 +364,21 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    host_allocator: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
-    groups overlay each other, so tensors may address the same bytes.
+    groups overlay each other, so tensors may address the same bytes. Host-resident
+    tensors share a second backing, taken from ``host_allocator`` when given.
+    Layers whose spec has no per-layer view map to their backing tensor instead.
     """
-    if not kv_cache_config.kv_cache_tensors:
+    tensors = kv_cache_config.kv_cache_tensors
+    if not tensors:
         return {}
 
-    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+    sizes = {tensor.size for tensor in tensors if not tensor.host_resident}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
     # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
@@ -426,10 +395,21 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    backings = {False: torch.zeros(buf_size, dtype=torch.int8, device=device)}
+
+    host_sizes = {tensor.size for tensor in tensors if tensor.host_resident}
+    assert len(host_sizes) <= 1, "Host KV cache tensors must share one backing."
+    if host_sizes:
+        host_size = host_sizes.pop()
+        backings[True] = (
+            host_allocator(host_size)
+            if host_allocator is not None
+            else torch.zeros(host_size, dtype=torch.int8, device="cpu")
+        )
 
     kv_caches: dict[str, torch.Tensor] = {}
-    for tensor in kv_cache_config.kv_cache_tensors:
+    for tensor in tensors:
+        buf = backings[tensor.host_resident]
         layer_name = tensor.layers[0]
         group_id, group = next(
             (group_id, group)
@@ -439,8 +419,11 @@ def allocate_kv_cache(
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]
+        if not spec.has_layer_views:
+            kv_caches.update((name, buf) for name in tensor.layers)
+            continue
 
-        num_blocks = kv_cache_config.num_blocks
+        num_blocks = kv_cache_config.num_blocks_of(tensor)
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
@@ -485,7 +468,10 @@ def prepare_kernel_block_sizes(
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             continue
-        if isinstance(kv_cache_spec, AttentionSpec):
+        if not kv_cache_spec.has_layer_views:
+            # Raw storage groups have no backend to split their blocks for.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
@@ -672,14 +658,19 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    host_write_event: torch.Event | None = None,
 ) -> None:
     if not kv_cache_block_copies:
         return
 
-    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices_np = np.array(
+        [(copy.src_block_id, copy.dst_block_id) for copy in kv_cache_block_copies],
+        dtype=np.int64,
+    )
     indices: torch.Tensor | None = None
     seen: set[tuple[torch.device, int]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
+    host_writes_synchronized = False
     for cache in kv_caches:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. data_ptr distinguishes per-layer views of a shared allocation.
@@ -688,6 +679,13 @@ def copy_kv_cache_blocks_inplace(
             continue
         seen.add(key)
 
+        if (
+            cache.device.type == "cpu"
+            and host_write_event is not None
+            and not host_writes_synchronized
+        ):
+            host_write_event.synchronize()
+            host_writes_synchronized = True
         if indices is None:
             indices = async_tensor_h2d(indices_np, device=cache.device)
         assert cache.device == indices.device

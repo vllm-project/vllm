@@ -3,7 +3,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.hisparse.binding import HiSparseHostAllocator, bind_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -30,6 +31,9 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,10 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+            # Raw storage groups are laid out by their owner, not by a backend.
+            attn_groups.append([])
+            continue
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
@@ -216,15 +224,34 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     kv_cache_allocation_context: AbstractContextManager | None = None,
+    *,
+    block_tables: "BlockTables | None" = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
+    host_allocator = None
+    if vllm_config.attention_config.hisparse_config is not None:
+        host_allocator = HiSparseHostAllocator(kv_cache_config)
     with allocation_context:
         kv_caches = allocate_kv_cache(
             kv_cache_config,
             device,
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
+            host_allocator=host_allocator,
         )
+        if host_allocator is not None:
+            assert block_tables is not None
+            bind_hisparse_kv_caches(
+                forward_context=forward_context,
+                kv_cache_config=kv_cache_config,
+                kv_caches=kv_caches,
+                block_tables=block_tables,
+                pinned_host_pools=host_allocator.registered_pools,
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+            )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -235,12 +262,18 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
+    bindable_caches = {
+        name: cache for name, cache in kv_caches.items() if name in forward_context
+    }
     bind_kv_cache(
-        kv_caches,
+        bindable_caches,
         forward_context,
         runner_kv_caches,
         num_attn_module,
         kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
+    runner_kv_caches.extend(
+        cache for name, cache in kv_caches.items() if name not in forward_context
     )
     return kv_caches
 
@@ -288,6 +321,8 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).

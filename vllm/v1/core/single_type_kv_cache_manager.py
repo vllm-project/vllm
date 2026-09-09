@@ -23,7 +23,10 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -47,6 +50,10 @@ class SingleTypeKVCacheManager(ABC):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    # Whether this group's cache hit may outlive the reconciled hit, so its
+    # lookup result is not trimmed to the shared boundary.
+    retains_longer_hit: bool = False
 
     def __init__(
         self,
@@ -2154,6 +2161,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
+    role: KVCacheGroupRole | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -2171,7 +2179,7 @@ def get_manager_for_kv_cache_spec(
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
     """
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, role)
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
@@ -2183,7 +2191,7 @@ def get_manager_for_kv_cache_spec(
     # FullAttentionSpec sizing without a separate admission cap.
     if isinstance(
         kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec),
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
@@ -2197,10 +2205,29 @@ def get_manager_for_kv_cache_spec(
 
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
+    from vllm.v1.hisparse.cache_manager import (
+        HiSparseHotManager,
+        HiSparseResidentManager,
+        HiSparseSourceManager,
+    )
+
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
         FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseHotSpec,
+        HiSparseHotManager,
+        uniform_type_base_spec=HiSparseHotSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseResidentSpec,
+        HiSparseResidentManager,
+        uniform_type_base_spec=HiSparseResidentSpec,
+    )
+    KVCacheSpecRegistry.register_role_manager(
+        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
     )
 
     KVCacheSpecRegistry.register(

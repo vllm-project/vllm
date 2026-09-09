@@ -42,6 +42,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
     )
