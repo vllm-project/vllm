@@ -137,17 +137,38 @@ def new_kv_cache_spec(
     sliding_window=None,
     attention_chunk_size=None,
     kv_quant_mode=KVQuantMode.NONE,
+    cache_dtype=None,
 ):
     return FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
+        cache_dtype=cache_dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
         kv_quant_mode=kv_quant_mode,
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_attention_spec_merge_preserves_logical_cache_dtype():
+    specs = [
+        new_kv_cache_spec(
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            cache_dtype="fp8_e4m3",
+        )
+        for _ in range(2)
+    ]
+
+    assert FullAttentionSpec.merge(specs).cache_dtype == "fp8_e4m3"
+
+    with pytest.raises(AssertionError):
+        FullAttentionSpec.merge(
+            [specs[0], replace(specs[1], cache_dtype="nvfp4")]
+        )
 
 
 def test_kv_cache_config_selects_only_transferable_groups():
@@ -2783,13 +2804,20 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     )
 
 
-def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
+def new_mla_spec(
+    cache_dtype_str=None,
+    block_size: int = 16,
+    cache_dtype=None,
+    kv_quant_mode=KVQuantMode.NONE,
+):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.float32,
+        cache_dtype=cache_dtype,
+        kv_quant_mode=kv_quant_mode,
         cache_dtype_str=cache_dtype_str,
     )
 
@@ -3169,6 +3197,17 @@ def test_merge_mla_spec():
     mla_spec = kv_cache_specs[0].merge(kv_cache_specs)
     assert mla_spec == new_mla_spec()
 
+    quantized_specs = [
+        new_mla_spec(
+            cache_dtype="fp8_e4m3",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+        for _ in range(2)
+    ]
+    merged_quantized = quantized_specs[0].merge(quantized_specs)
+    assert merged_quantized.cache_dtype == "fp8_e4m3"
+    assert merged_quantized.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+
     kv_cache_specs = [
         new_mla_spec(cache_dtype_str="fp8_ds_mla"),
         new_mla_spec(cache_dtype_str="fp8_ds_mla"),
@@ -3196,6 +3235,31 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_logical_cache_dtype():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype="fp8_e4m3",
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.cache_dtype == "fp8_e4m3"
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+
+    with pytest.raises(AssertionError):
+        SlidingWindowMLASpec.merge([specs[0], replace(specs[1], cache_dtype="nvfp4")])
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
