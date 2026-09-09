@@ -17,7 +17,7 @@ use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    OutputDispatch, OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
@@ -164,14 +164,25 @@ impl ClientInner {
     }
 
     /// Send a whole engine output batch to the request streams with one
-    /// registry lock acquisition. Returns the outputs whose requests are no
-    /// longer tracked.
+    /// registry lock acquisition. Returns inactive outputs and engine requests
+    /// that must be aborted because their consumers fell behind.
     pub fn send_outputs(
         &self,
         outputs: impl IntoIterator<Item = EngineCoreStreamOutput>,
-    ) -> Vec<EngineCoreStreamOutput> {
+    ) -> (Vec<EngineCoreStreamOutput>, BTreeMap<EngineId, Vec<String>>) {
         let mut registry = self.request_reg.lock();
-        outputs.into_iter().filter_map(|output| registry.send_output(output)).collect()
+        let mut inactive = Vec::new();
+        let mut slow_consumers: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
+        for output in outputs {
+            match registry.send_output(output) {
+                OutputDispatch::Sent => {}
+                OutputDispatch::Unrouted(output) => inactive.push(output),
+                OutputDispatch::Overflow(engine_id, request_id) => {
+                    slow_consumers.entry(engine_id).or_default().push(request_id);
+                }
+            }
+        }
+        (inactive, slow_consumers)
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -461,7 +472,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                         weight_version: weight_version.clone(),
                         output,
                     });
-                    for output in inner.send_outputs(outputs) {
+                    let (inactive, slow_consumers) = inner.send_outputs(outputs);
+                    for output in inactive {
                         debug!(
                             request_id = output.request_id,
                             "dropping output for inactive request"
@@ -473,6 +485,19 @@ pub(crate) async fn run_output_dispatcher_loop(
                         && let Some(handles) = inner.iteration_metrics.get(&batch.engine_index)
                     {
                         handles.iteration_tokens_total.observe(iteration_tokens as f64);
+                    }
+
+                    for (engine_id, request_ids) in slow_consumers {
+                        warn!(
+                            ?engine_id,
+                            ?request_ids,
+                            "aborting slow request output consumers"
+                        );
+                        if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await
+                        {
+                            warn!(?engine_id, ?request_ids, error = %error.as_report(),
+                                "failed to abort slow request output consumers");
+                        }
                     }
 
                     // The sender for normally-finished requests should have already been removed
