@@ -100,7 +100,10 @@ class ECExampleConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(filename, device=device)["ec_cache"]
+            with gpu_sync_allowed():
+                ec_cache = safetensors.torch.load_file(filename, device=device)[
+                    "ec_cache"
+                ]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
