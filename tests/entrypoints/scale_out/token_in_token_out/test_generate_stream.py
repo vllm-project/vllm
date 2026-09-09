@@ -219,6 +219,8 @@ async def test_serve_tokens_returns_enabled_request_metrics(stream):
         first_token_latency=6.0,
         remote_kv_wait_time=0.75,
         kv_transfer_metrics={
+            "kv_initial_queue_wait_time_ms": 7.0,
+            "kv_post_receive_queue_wait_time_ms": 2.0,
             "kv_transfer_worker_time_ms": 10.0,
             "kv_transfer_bytes": 1024,
         },
@@ -245,6 +247,7 @@ async def test_serve_tokens_returns_enabled_request_metrics(stream):
                 "queue_time_ms": 12.0,
                 "time_to_first_token_ms": 25.0,
                 "kv_allocation_wait_time_ms": 3.0,
+                "kv_initial_queue_wait_time_ms": 4.0,
             }
         },
     )
@@ -270,6 +273,9 @@ async def test_serve_tokens_returns_enabled_request_metrics(stream):
     assert result["prefill_queue_time_ms"] == 12.0
     assert result["prefill_time_to_first_token_ms"] == 25.0
     assert result["prefill_kv_allocation_wait_time_ms"] == 3.0
+    assert result["prefill_kv_initial_queue_wait_time_ms"] == 4.0
+    assert result["kv_initial_queue_wait_time_ms"] == 7.0
+    assert result["kv_post_receive_queue_wait_time_ms"] == 2.0
 
 
 @pytest.mark.asyncio

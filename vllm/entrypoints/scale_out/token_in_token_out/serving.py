@@ -393,6 +393,9 @@ class ServingTokens(GenerateBaseServing):
                 "kv_allocation_wait_time_ms": (
                     request_metrics.kv_allocation_wait_time_ms
                 ),
+                "kv_initial_queue_wait_time_ms": (
+                    request_metrics.kv_initial_queue_wait_time_ms
+                ),
             }
 
         # Log complete response if output logging is enabled

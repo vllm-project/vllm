@@ -1083,6 +1083,13 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                for phase, started_at in request.kv_queue_started_at.items():
+                    key = f"kv_{phase}_queue_wait_time_ms"
+                    request.kv_transfer_metrics[key] = (
+                        request.kv_transfer_metrics.get(key, 0)
+                        + (time.monotonic() - started_at) * 1000
+                    )
+                request.kv_queue_started_at.clear()
                 if (
                     self.connector is not None
                     and request.kv_allocation_started_at is None
@@ -2437,6 +2444,7 @@ class Scheduler(SchedulerInterface):
                     self.num_spec_tokens
                 )
             if self.connector is not None:
+                request.kv_queue_started_at["initial"] = time.monotonic()
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
@@ -2916,6 +2924,7 @@ class Scheduler(SchedulerInterface):
                 return False
             self._update_waiting_for_remote_kv(request)
             request.stop_remote_kv_wait()
+            request.kv_queue_started_at["post_receive"] = time.monotonic()
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:

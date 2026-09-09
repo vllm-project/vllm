@@ -2195,12 +2195,15 @@ def test_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path, remot
     )
     request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
     scheduler.add_request(request)
+    request.kv_queue_started_at["initial"] -= 1
     with monkeypatch.context() as context:
         context.setattr(
             scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
         )
         scheduler.schedule()
     assert request.kv_allocation_started_at is not None
+    assert request.kv_transfer_metrics["kv_initial_queue_wait_time_ms"] >= 1000
+    assert not request.kv_queue_started_at
     assert request.remote_kv_wait_started_at is None
     assert "kv_allocation_wait_time_ms" not in request.kv_transfer_metrics
     request.kv_allocation_started_at -= 1
@@ -2210,6 +2213,12 @@ def test_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path, remot
     if remote_load:
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert request.remote_kv_wait_started_at is not None
+        scheduler.finished_recving_kv_req_ids.add(request.request_id)
+        assert scheduler._try_promote_blocked_waiting_request(request)
+        request.kv_queue_started_at["post_receive"] -= 1
+        scheduler.schedule()
+        assert request.kv_transfer_metrics["kv_post_receive_queue_wait_time_ms"] >= 1000
+        assert not request.kv_queue_started_at
     else:
         assert request.status == RequestStatus.RUNNING
         assert request.remote_kv_wait_started_at is None

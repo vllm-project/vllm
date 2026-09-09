@@ -61,6 +61,19 @@ class PerRequestMetrics(OpenAIBaseModel):
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
     remote_kv_wait_time_ms: float | None = None
+    kv_initial_queue_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Scheduler admission to the first KV allocation attempt, in wall time."
+        ),
+    )
+    kv_post_receive_queue_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Accumulated wall time from remote-KV request promotion to the next "
+            "allocation attempt; excludes worker transfer and allocation retries."
+        ),
+    )
     kv_allocation_wait_time_ms: float | None = Field(
         default=None,
         description=(
@@ -92,6 +105,7 @@ class PerRequestMetrics(OpenAIBaseModel):
     prefill_queue_time_ms: float | None = None
     prefill_time_to_first_token_ms: float | None = None
     prefill_kv_allocation_wait_time_ms: float | None = None
+    prefill_kv_initial_queue_wait_time_ms: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):
