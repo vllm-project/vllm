@@ -504,7 +504,12 @@ class TestClientFlows:
             }
         )
         loads = session.poll().loads
-        assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=True)]
+        assert len(loads) == 1
+        assert loads[0].job_id == 1
+        assert loads[0].kv_request_id == "req-1"
+        assert loads[0].success is True
+        assert loads[0].transfer_time is not None
+        assert loads[0].transfer_time >= 0
 
     def test_transfer_done_failure(self):
         session, conn, _ = _make_session()
@@ -521,7 +526,12 @@ class TestClientFlows:
             }
         )
         loads = session.poll().loads
-        assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=False)]
+        assert len(loads) == 1
+        assert loads[0].job_id == 1
+        assert loads[0].kv_request_id == "req-1"
+        assert loads[0].success is False
+        assert loads[0].transfer_time is not None
+        assert loads[0].transfer_time >= 0
 
     def test_finish_request_sends_abort(self):
         session, conn, _ = _make_session()
@@ -2147,7 +2157,16 @@ class TestBidirectional:
         loads = result_.loads
         stores = result_.stores
 
-        assert LoadResult(job_id=200, kv_request_id="req-cli", success=True) in loads
+        matching_loads = [
+            load
+            for load in loads
+            if load.job_id == 200
+            and load.kv_request_id == "req-cli"
+            and load.success is True
+        ]
+        assert len(matching_loads) == 1
+        assert matching_loads[0].transfer_time is not None
+        assert matching_loads[0].transfer_time >= 0
         assert StoreResult(job_id=100, success=True) in stores
 
 
