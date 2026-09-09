@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     should_continue_final_message,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def _single_chat_message(item):
@@ -223,8 +224,9 @@ class TestResponsesUtils:
             encrypted_content="TOP_SECRET_MESSAGE",
             status=None,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError) as exc_info:
             construct_chat_messages_with_tool_call([item])
+        assert exc_info.value.parameter == "input"
 
         output_item = ResponseOutputMessage(
             id="msg_bf585bbbe3d500e0",
@@ -350,7 +352,7 @@ class TestReasoningItemContentPriority:
         assert formatted["reasoning"] == ""
 
     def test_encrypted_content_raises(self):
-        """Encrypted content should still raise ValueError."""
+        """Encrypted content should raise VLLMValidationError."""
         item = ResponseReasoningItem(
             id="reasoning_6",
             summary=[
@@ -369,8 +371,9 @@ class TestReasoningItemContentPriority:
             encrypted_content="ENCRYPTED",
             status=None,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError) as exc_info:
             construct_chat_messages_with_tool_call([item])
+        assert exc_info.value.parameter == "input"
 
     @patch("vllm.entrypoints.openai.responses.utils.logger")
     def test_summary_with_multiple_entries_uses_first(self, mock_logger):

@@ -230,6 +230,9 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         return QuarkW8A8Fp8.get_min_capability()
 
     def process_weights_after_loading(self, layer) -> None:
+        # Quark exports the dequant multiplier as ``weight_scale`` (the same
+        # numerical convention as DeepSeek's ``weight_scale_inv``). Kernels
+        # multiply ``weight * scale``; do not invert here.
         self.fp8_linear.process_weights_after_loading(layer)
 
     def create_weights(
@@ -280,8 +283,10 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
             weight_loader,
             scale_dtype=scale_dtype,
         )
-        # DeepSeek V4 weight mappers route checkpoint ".scale" tensors here.
-        layer.register_parameter("weight_scale_inv", weight_scale)
+        # Match Quark-exported checkpoints (``.weight_scale``).
+        # ``Fp8LinearMethod.create_weights`` registers weight_scale_inv, which has the
+        # same semantic meaning as Quark's `weight_scale`.
+        layer.register_parameter("weight_scale", weight_scale)
 
         assert self.activation_quant_key is not None
         self.fp8_linear = init_fp8_linear_kernel(

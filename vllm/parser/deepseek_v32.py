@@ -75,6 +75,10 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
@@ -84,7 +88,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
             # Parallel tool calls
@@ -92,8 +96,14 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # A tool call ends the turn: stay in TOOL_BETWEEN so any text
+            # after the block is dropped.
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
+                (),
+            ),
+            (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
                 (),
             ),
         },
