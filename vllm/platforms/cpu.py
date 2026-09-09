@@ -213,9 +213,12 @@ class CpuPlatform(Platform):
         # the default block size regardless of user preference to avoid a
         # runtime kernel dispatch failure. AMX MLA has no such constraint
         # (same AMX-available condition as get_attn_backend_cls), so it's
-        # excluded from this override. DeepSeek-V4's sparse MLA cache and
-        # compressor state cache have their own block-size requirements, so
-        # it's excluded from this whole cascade too.
+        # excluded from this override. DeepSeek-V4 is also excluded here and
+        # handled in its own branch below: its sparse-MLA and indexer
+        # backends declare block_size=256 as their only supported kernel
+        # block size (DeepseekV4SparseMLABackend/DeepseekV4IndexerBackend),
+        # so it needs the same override-regardless-of-preference treatment
+        # as CPU MLA, just with a different value.
         cpu_mla_enabled = (
             not is_deepseek_v4
             and model_config is not None
@@ -251,6 +254,17 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 16
+        elif is_deepseek_v4:
+            if (
+                cache_config.user_specified_block_size
+                and cache_config.block_size != 256
+            ):
+                logger.warning(
+                    "DeepSeek-V4 CPU backend requires block_size=256, "
+                    "overriding user-specified block_size=%s.",
+                    cache_config.block_size,
+                )
+            cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
