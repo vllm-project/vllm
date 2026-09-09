@@ -15,6 +15,23 @@ from vllm.third_party.flash_linear_attention.ops.op import exp
 from vllm.triton_utils import tl, triton
 
 
+def token_stride(x: torch.Tensor) -> int:
+    """Token stride (elements) of a ``[B, T, H, D]`` or ``[B, T, H]`` tensor.
+
+    The recurrent kernel walks tokens with this stride and addresses heads
+    densely inside a token, so each token's ``[H, D]`` (or ``[H]``) block must
+    be contiguous, tokens must not overlap, and with ``B > 1`` sequence ``n``
+    must start at token ``n * T`` (dense batch). Column slices of a wider
+    per-token projection buffer satisfy this and are consumed in place.
+    """
+    st = x.stride()
+    assert x.dim() in (3, 4) and st[-1] == 1, (x.shape, st)
+    assert x.dim() == 3 or st[2] == x.shape[3], (x.shape, st)
+    assert st[1] >= x.shape[2] * (x.shape[3] if x.dim() == 4 else 1), (x.shape, st)
+    assert x.shape[0] == 1 or st[0] == x.shape[1] * st[1], (x.shape, st)
+    return st[1]
+
+
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
@@ -52,9 +69,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
-    # Token strides of q/k/v/beta (elements). Contiguous inputs pass H*K, H*K,
-    # HV*V and HV (or HV*V for headwise beta); column slices of a wider
-    # projection buffer pass that buffer's row stride, avoiding a copy.
+    # Token strides of q/k/v/beta (elements), see `token_stride`.
     stride_q_t,
     stride_k_t,
     stride_v_t,
@@ -272,10 +287,10 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
-        stride_q_t=H * K,
-        stride_k_t=H * K,
-        stride_v_t=HV * V,
-        stride_beta_t=HV * (V if beta.ndim == v.ndim else 1),
+        stride_q_t=token_stride(q),
+        stride_k_t=token_stride(k),
+        stride_v_t=token_stride(v),
+        stride_beta_t=token_stride(beta),
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
