@@ -288,6 +288,13 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
+        groups = attn_groups[i]
+        if not groups:
+            # This model owns no layer in this KV cache group. A drafter builds
+            # its attention groups from active_layer_names only, so
+            # init_attn_backend appends [] for every group it does not own, and
+            # everything below would be constructed and immediately discarded.
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).
@@ -325,7 +332,7 @@ def build_attn_metadata(
             **common_attn_metadata_extra_kwargs,
         )
 
-        for attn_group in attn_groups[i]:
+        for attn_group in groups:
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
