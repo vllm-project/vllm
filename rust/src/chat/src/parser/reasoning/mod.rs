@@ -7,10 +7,10 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser,
+    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -25,6 +25,7 @@ pub mod names {
     pub const GEMMA4: &str = "gemma4";
     pub const INKLING: &str = "inkling";
     pub const GLM45: &str = "glm45";
+    pub const GLM47: &str = "glm47";
     pub const HY_V3: &str = "hy_v3";
     pub const HY_V4: &str = "hy_v4";
     pub const KIMI: &str = "kimi";
@@ -69,6 +70,7 @@ impl ReasoningParserFactory {
             .register_unified_dummy(names::GEMMA4)
             .register_unified_dummy(names::INKLING)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
+            .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_unified_dummy(names::HY_V3)
             .register_unified_dummy(names::HY_V4)
             .register_parser::<KimiReasoningParser>(names::KIMI)
@@ -91,8 +93,8 @@ impl ReasoningParserFactory {
             .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("qwq", names::DEEPSEEK_R1)
             .register_pattern("qwen3", names::QWEN3)
-            .register_pattern("glm-5", names::GLM45)
-            .register_pattern("glm-4.7", names::GLM45)
+            .register_pattern("glm-5", names::GLM47)
+            .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("hy3", names::HY_V3)
