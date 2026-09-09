@@ -183,20 +183,28 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support speculative decoding yet."
             )
-        if vllm_config.compilation_config.cudagraph_mode.mixed_mode() == (
-            CUDAGraphMode.FULL
-        ):
-            raise NotImplementedError(
-                "MRV2 PCP cannot capture a FULL CUDA graph over mixed batches."
-            )
-        if (
-            parallel_config.decode_context_parallel_size > 1
-            and parallel_config.dcp_comm_backend != "ag_rs"
-        ):
-            raise NotImplementedError(
-                "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
-                f"'{parallel_config.dcp_comm_backend}'."
-            )
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if parallel_config.decode_context_parallel_size > 1:
+            if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL:
+                raise NotImplementedError(
+                    "MRV2 PCP cannot capture a FULL CUDA graph over mixed batches."
+                )
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
+                    f"'{parallel_config.dcp_comm_backend}'."
+                )
+        else:
+            is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+            if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
+                    "Set -cc.cudagraph_mode=NONE."
+                )
+            if cudagraph_mode.has_full_cudagraphs():
+                raise NotImplementedError(
+                    "MRV2 PCP supports PIECEWISE CUDA graphs only."
+                )
 
     @staticmethod
     def _reorder_segments(
