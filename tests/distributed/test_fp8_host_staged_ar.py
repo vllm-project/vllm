@@ -331,10 +331,7 @@ def fp8_hs_ar_target(
     # CUDA_VISIBLE_DEVICES).
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     # opt in before the TP group (and its CudaCommunicator) is constructed
-    os.environ["VLLM_HOST_STAGED_AR"] = "1"
-    os.environ["VLLM_HOST_STAGED_AR_NVFP4"] = (
-        "1" if codec == "nvfp4" else "0"
-    )
+    os.environ["VLLM_HOST_STAGED_AR"] = codec
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)

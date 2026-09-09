@@ -267,8 +267,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
-    VLLM_HOST_STAGED_AR: bool = False
-    VLLM_HOST_STAGED_AR_NVFP4: bool = False
+    VLLM_HOST_STAGED_AR: str | None = None
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1885,19 +1884,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
     ),
-    # Host-staged quantized allreduce (default E4M3, per-128 scale) for TP
-    # groups on PCIe fabrics without working P2P: quantize locally,
-    # exchange the compressed payload over NCCL send/recv (host-staged
-    # transport), dequantize and reduce locally. Prefill-sized messages
-    # only.
-    "VLLM_HOST_STAGED_AR": lambda: bool(
-        int(os.getenv("VLLM_HOST_STAGED_AR", "0"))
-    ),
-    # NVFP4 wire codec (e2m1 payload, per-16 E4M3 scale) for the host-
-    # staged AR instead of the default E4M3 codec: halves the wire
-    # size. Quality-sensitive opt-in; E4M3 stays the default.
-    "VLLM_HOST_STAGED_AR_NVFP4": lambda: bool(
-        int(os.getenv("VLLM_HOST_STAGED_AR_NVFP4", "0"))
+    # Host-staged quantized allreduce (wire codec selector) for TP groups
+    # on PCIe fabrics without working P2P: quantize locally, exchange
+    # the compressed payload over NCCL send/recv (host-staged transport),
+    # dequantize and reduce locally. Prefill-sized messages only.
+    # "e4m3" = per-128 E4M3 payload + FP32 scale (the measured bit-exact
+    # codec); "nvfp4" = OCP NVFP4, e2m1 payload (2 elements/byte) +
+    # per-16 E4M3 scale (~55% wire bytes, quality-sensitive opt-in);
+    # unset = disabled.
+    "VLLM_HOST_STAGED_AR": env_with_choices(
+        "VLLM_HOST_STAGED_AR",
+        None,
+        ["e4m3", "nvfp4"],
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(

@@ -72,12 +72,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
-            use_fp8_host_staged_ar = envs.VLLM_HOST_STAGED_AR
-            # Wire codec for the host-staged AR: nvfp4 halves the wire
-            # bytes; e4m3 is the default and the measured bit-exact codec.
-            fp8_hs_ar_codec = (
-                "nvfp4" if envs.VLLM_HOST_STAGED_AR_NVFP4 else "e4m3"
-            )
+            # Wire codec for the host-staged AR (None = disabled): e4m3
+            # is the measured bit-exact codec; nvfp4 halves the wire
+            # bytes (quality-sensitive opt-in).
+            host_staged_ar_codec = envs.VLLM_HOST_STAGED_AR
+            use_fp8_host_staged_ar = host_staged_ar_codec is not None
+            fp8_hs_ar_codec = host_staged_ar_codec or "e4m3"
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
