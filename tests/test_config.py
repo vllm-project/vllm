@@ -14,6 +14,7 @@ import pydantic
 import pytest
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
+from transformers import BertConfig
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
@@ -53,6 +54,45 @@ DEVICE_TYPE = current_platform.device_type
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+@pytest.mark.parametrize("cache_dtype", ["fp8_e4m3", "turboquant_k8v4"])
+def test_encoder_only_rejects_quantized_kv_cache(tmp_path: Path, cache_dtype: str):
+    model_path = tmp_path / "bert"
+    BertConfig(architectures=["BertModel"]).save_pretrained(model_path)
+    model_config = ModelConfig(str(model_path), runner="pooling", max_model_len=128)
+
+    with pytest.raises(ValueError) as exc_info:
+        VllmConfig(
+            model_config=model_config,
+            cache_config=CacheConfig(cache_dtype=cache_dtype),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+    error = str(exc_info.value)
+    assert cache_dtype in error
+    assert "encoder-only attention" in error
+    assert "--kv-cache-dtype auto" in error
+
+
+@pytest.mark.parametrize(
+    ("attn_type", "cache_dtype"),
+    [
+        ("encoder_only", "auto"),
+        ("encoder_only", "bfloat16"),
+        ("decoder", "fp8_e4m3"),
+        ("decoder", "turboquant_k8v4"),
+    ],
+)
+def test_encoder_only_kv_cache_validation_allows_compatible_configs(
+    attn_type: str, cache_dtype: str
+):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(attn_type=attn_type),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+    )
+
+    VllmConfig._verify_encoder_only_kv_cache_dtype(config)
 
 
 def test_kda_recoverssm_derivation_is_revalidated():
