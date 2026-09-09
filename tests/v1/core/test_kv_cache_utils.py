@@ -166,9 +166,7 @@ def test_attention_spec_merge_preserves_logical_cache_dtype():
     assert FullAttentionSpec.merge(specs).cache_dtype == "fp8_e4m3"
 
     with pytest.raises(AssertionError):
-        FullAttentionSpec.merge(
-            [specs[0], replace(specs[1], cache_dtype="nvfp4")]
-        )
+        FullAttentionSpec.merge([specs[0], replace(specs[1], cache_dtype="nvfp4")])
 
 
 def test_kv_cache_config_selects_only_transferable_groups():
