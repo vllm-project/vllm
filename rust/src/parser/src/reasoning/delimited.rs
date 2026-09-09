@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 
 use super::{ReasoningDelta, ReasoningError, Result};
 
@@ -19,7 +19,7 @@ use super::{ReasoningDelta, ReasoningError, Result};
 pub(crate) struct DelimitedReasoningParser {
     tokenizer: DynTokenizer,
     current_in_reasoning: bool,
-    buffer: String,
+    buffer: DecodedText,
     start_token: String,
     end_token: String,
     start_token_id: u32,
@@ -55,7 +55,7 @@ impl DelimitedReasoningParser {
         Ok(Self {
             tokenizer,
             current_in_reasoning: default_in_reasoning,
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             start_token,
             end_token,
             start_token_id,
@@ -81,44 +81,58 @@ impl DelimitedReasoningParser {
     }
 
     /// Parse one decoded text delta and return its reasoning/content split.
-    pub(crate) fn push(&mut self, delta: &str) -> ReasoningDelta {
-        self.buffer.push_str(delta);
+    pub(crate) fn push(&mut self, delta: DecodedText) -> ReasoningDelta {
+        self.buffer.append(delta);
 
-        let partial_suffix_len = self.partial_suffix_len(&self.buffer);
-        let stable_len = self.buffer.len() - partial_suffix_len;
-        let pending_suffix = self.buffer.split_off(stable_len);
-        let stable_text = std::mem::replace(&mut self.buffer, pending_suffix);
+        let partial_suffix_len = self.partial_suffix_len(&self.buffer.text);
+        let stable_len = self.buffer.text.len() - partial_suffix_len;
+        let stable = self.buffer.drain_prefix(stable_len);
 
-        self.parse_stable_text(&stable_text)
+        self.parse_stable_text(stable)
     }
 
     /// Flush any buffered partial delimiter suffix at end of stream.
     pub(crate) fn finish(&mut self) -> ReasoningDelta {
-        let stable_text = std::mem::take(&mut self.buffer);
-        self.parse_stable_text(&stable_text)
+        // `drain_prefix(text.len())` takes trailing zero-width tokens too.
+        let stable = self.buffer.drain_prefix(self.buffer.text.len());
+        self.parse_stable_text(stable)
     }
 
     /// Parse text that is known not to end with a partial delimiter suffix.
-    fn parse_stable_text(&mut self, mut stable: &str) -> ReasoningDelta {
+    ///
+    /// Reasoning and content pieces keep the attributions of the tokens that
+    /// produced them; delimiter marker spans are drained and dropped, keeping
+    /// marker tokens out of any count.
+    fn parse_stable_text(&mut self, mut stable: DecodedText) -> ReasoningDelta {
         let mut delta = ReasoningDelta::default();
 
-        while !stable.is_empty() {
+        while !stable.text.is_empty() {
             if self.current_in_reasoning {
-                if let Some(end_idx) = stable.find(&self.end_token) {
-                    delta.push_reasoning(&stable[..end_idx]);
-                    stable = &stable[end_idx + self.end_token.len()..];
+                if let Some(end_idx) = stable.text.find(&self.end_token) {
+                    delta.push_reasoning(stable.drain_prefix(end_idx));
+                    let _ = stable.drain_prefix(self.end_token.len());
                     self.current_in_reasoning = false;
                 } else {
                     delta.push_reasoning(stable);
-                    break;
+                    return delta;
                 }
-            } else if let Some(start_idx) = stable.find(&self.start_token) {
-                delta.push_content(&stable[..start_idx]);
-                stable = &stable[start_idx + self.start_token.len()..];
+            } else if let Some(start_idx) = stable.text.find(&self.start_token) {
+                delta.push_content(stable.drain_prefix(start_idx));
+                let _ = stable.drain_prefix(self.start_token.len());
                 self.current_in_reasoning = true;
             } else {
                 delta.push_content(stable);
-                break;
+                return delta;
+            }
+        }
+
+        // A remainder with empty text may still carry zero-width tokens;
+        // attribute them to the current state.
+        if !stable.attributions.is_empty() {
+            if self.current_in_reasoning {
+                delta.push_reasoning(stable);
+            } else {
+                delta.push_content(stable);
             }
         }
 
