@@ -77,7 +77,7 @@ def test_sampling_mask_lists_to_nested_list():
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
-@pytest.skipif(
+@pytest.mark.skipif(
     current_platform.is_xpu(),
     reason="CI failed on XPU with Triton, Skipped until sycl kernel merged. "
     "See https://github.com/vllm-project/vllm/pull/55851",
