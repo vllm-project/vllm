@@ -53,6 +53,17 @@ OPTIONS_WVSPLITK_FP8 = [
 
 DTYPES = [torch.bfloat16, torch.float16]
 
+# kWvSlots in csrc/rocm/skinny_gemms.cu; beyond it streams take overflow
+# workspaces.
+WVSPLITKRC_SLOTS = 8
+
+# The CU count is the grid size. Production passes num_compute_units(); a small
+# value manufactures better concurrency for these tests.
+WVSPLITKRC_TEST_CU = 16
+
+# Gate spin, ~125 ms on gfx950 -- must outlast the host enqueue loop it gates.
+_GATE_CYCLES = 300_000_000
+
 # Specific (N, K, M) combinations for targeted testing
 NKM_FACTORS_LLMM1 = [
     # Small, medium, large cases
@@ -250,25 +261,21 @@ def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
-@pytest.mark.parametrize("n_streams", [8, 12])
+@pytest.mark.parametrize("n_streams", [WVSPLITKRC_SLOTS, WVSPLITKRC_SLOTS + 4])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
 def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
-    """Test that wvSplitKrc works as expected under concurrent multi-stream usage.
+    """Concurrent streams must not share a split-K workspace.
 
-    The split-K reduction stages fp32 partials and a counter in a workspace that
-    is cleared by protocol rather than per invocation, so two streams sharing one
-    workspace corrupt each other's reduction and produce wrong results rather
-    than failing.
-
-    n_streams > 8 additionally forces the overflow path, since slots are handed
-    out only to the first 8 distinct streams.
+    The workspace is cleared by protocol rather than per invocation, so sharing
+    one corrupts the reduction and returns wrong numbers rather than failing.
+    n_streams > WVSPLITKRC_SLOTS additionally exercises the overflow path.
     """
     torch.manual_seed(seed)
 
-    n, k, m = 16, 2048, 1024
+    n, k, m = 16, 2048, 256
     iters = 4
     xavier = math.sqrt(2 / k)
 
@@ -280,20 +287,14 @@ def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
     torch.accelerator.synchronize()
 
     streams = [torch.Stream() for _ in range(n_streams)]
-    # Gate every stream on one event so the launches overlap instead of draining
-    # one stream before the next is enqueued.
-    start = torch.Event()
-    start.record()
-
     outs: list[list[torch.Tensor]] = [[] for _ in range(n_streams)]
-    for s in streams:
-        s.wait_event(start)
+    _release_together(streams)
     # Round-robin the enqueues so kernels from different streams are in flight
     # at the same time.
     for _ in range(iters):
         for i, s in enumerate(streams):
-            with torch.accelerator.stream(s):
-                outs[i].append(ops.wvSplitKrc(As[i], B, num_compute_units(), None))
+            with torch.cuda.stream(s):
+                outs[i].append(ops.wvSplitKrc(As[i], B, WVSPLITKRC_TEST_CU, None))
     for s in streams:
         torch.accelerator.current_stream().wait_stream(s)
     torch.accelerator.synchronize()
@@ -301,6 +302,68 @@ def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
     for i in range(n_streams):
         for out in outs[i]:
             torch.testing.assert_close(out, refs[i], atol=1e-3, rtol=1e-2)
+
+
+def _release_together(streams):
+    """Release every stream at once, once everything below is enqueued.
+
+    An event recorded on an idle stream is already complete, so waiting on it
+    gates nothing -- the spin, not the event, is what holds the streams.
+    """
+    blocker = torch.Stream()
+    with torch.cuda.stream(blocker):
+        torch.cuda._sleep(_GATE_CYCLES)
+        gate = torch.Event()
+        gate.record()
+    for s in streams:
+        s.wait_event(gate)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_graph_concurrent_replay(dtype, seed):
+    """Graphs replayed concurrently must not share a split-K workspace.
+
+    Capture bakes the workspace pointer into the kernel arguments, so the
+    launching stream no longer identifies the execution, and torch captures
+    several graphs on the same reused side stream. The gate and the small CU
+    count are load-bearing: without them the replays do not overlap.
+    """
+    torch.manual_seed(seed)
+    n, k, m, n_graphs, rounds, replays = 16, 2048, 256, 4, 5, 20
+    xavier = math.sqrt(2 / k)
+
+    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
+    As = [
+        torch.randn(n, k, dtype=dtype, device="cuda") * xavier for _ in range(n_graphs)
+    ]
+    refs = [torch.nn.functional.linear(A, B, None) for A in As]
+    # The pool allocation must happen before any capture, as
+    # warmup_rocm_skinny_gemm_workspaces() arranges in production.
+    ops.wvSplitKrc(As[0], B, WVSPLITKRC_TEST_CU, None)
+    torch.accelerator.synchronize()
+
+    graphs, outs = [], []
+    for A in As:
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            outs.append(ops.wvSplitKrc(A, B, WVSPLITKRC_TEST_CU, None))
+        graphs.append(g)
+
+    streams = [torch.Stream() for _ in graphs]
+    for _ in range(rounds):
+        _release_together(streams)
+        for _ in range(replays):
+            for g, s in zip(graphs, streams):
+                with torch.cuda.stream(s):
+                    g.replay()
+        for s in streams:
+            torch.accelerator.current_stream().wait_stream(s)
+        torch.accelerator.synchronize()
+        for out, ref in zip(outs, refs):
+            torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
