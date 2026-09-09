@@ -249,7 +249,11 @@ class FusedInvRopeFP8QuantKernel(
             rope_dim=rope_dim,
             quant_group_size=128,
             tma_aligned_scales=capability.major >= 10,
-            launch_pdl=(False, True),
+            # PDL is NVIDIA-only; compiling launch_pdl=True on ROCm emits
+            # griddepcontrol PTX and fails hsaco linking (#56030).
+            launch_pdl=(False, True)
+            if current_platform.is_arch_support_pdl()
+            else (False,),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
