@@ -138,10 +138,10 @@ def _prepare(layer, dtype, k, n):
     cfg = MPLinearLayerConfig(
         full_weight_shape=(k, n), partition_weight_shape=(k, n),
         weight_type=WEIGHT_TYPE, act_type=dtype,
-        group_size=GROUP, zero_points=False, has_g_idx=False)
+        group_size=GROUP, zero_points=False)
     kernel = RDNA3W4A16LinearKernel(cfg, w_q_param_name="qweight",
                                     w_s_param_name="scales",
-                                    w_zp_param_name=None, w_gidx_param_name=None)
+                                    w_zp_param_name=None)
     kernel.process_weights_after_loading(layer)
     return kernel._get_weight_params(layer)
 
@@ -155,15 +155,15 @@ def _reference(m, k, dtype, seed, q_int4_kn, scales_gn):
     return x, x.float() @ w_f32
 
 
-def _run_op(x, w_q, w_zp, w_s, w_g_idx):
-    return torch.ops._rocm_C.gptq_gemm_rdna3(x, w_q, w_zp, w_s, w_g_idx, False)
+def _run_op(x, w_q, w_zp, w_s):
+    return torch.ops._rocm_C.gptq_gemm_rdna3(x, w_q, w_zp, w_s, False)
 
 
 def _outputs_and_ref(M, K, N, seed, dtype, repeats=1):
     layer, q_int4_kn, scales_gn = _build_layer(K, N, seed, dtype)
-    w_q, w_s, w_zp, w_g_idx = _prepare(layer, dtype, K, N)
+    w_q, w_s, w_zp = _prepare(layer, dtype, K, N)
     x, ref = _reference(M, K, dtype, seed, q_int4_kn, scales_gn)
-    outs = [_run_op(x, w_q, w_zp, w_s, w_g_idx) for _ in range(repeats)]
+    outs = [_run_op(x, w_q, w_zp, w_s) for _ in range(repeats)]
     return outs, ref
 
 
@@ -342,7 +342,7 @@ def _compute_wmma_k_split_mn(m, n, k, m_tile, n_tile):
 def _assert_v7v8_no_split_routing(dtype, m, n, k):
     """Assert the shape deterministically routes to the V7/V8 128x64
     kernel with k_split == 1: WMMA dispatch (bf16 M>=16 / fp16 M>=64),
-    the M >= 128 non-act-order branch, and the no-split threshold."""
+    the M >= 128 branch, and the no-split threshold."""
     assert (dtype == torch.bfloat16 and m >= 16) or \
            (dtype == torch.float16 and m >= 64), "not the WMMA path"
     assert m >= 128, "below the V7/V8 (128x64) branch"
