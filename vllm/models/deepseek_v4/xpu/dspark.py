@@ -279,6 +279,14 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.compute_logits(hidden_states)
 
+    def compute_draft_topk(
+        self, hidden_states: torch.Tensor, k: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_ids, values = self.logits_processor.get_top_k_tokens(
+            self.lm_head, self.model.norm(hidden_states), k
+        )
+        return token_ids, values.to(hidden_states.dtype)
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -287,6 +295,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def score_draft_candidates(
+        self,
+        markov_embed: torch.Tensor,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.markov_head.score_gathered(
+            markov_embed, values, token_ids, self.logits_processor.scale
+        )
 
     # --- Weight loading ---
 
