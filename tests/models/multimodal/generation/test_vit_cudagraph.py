@@ -336,6 +336,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         image_prompt=minicpmv_25_chat_template(
             "(<image>./</image>)\nWhat is in this image?"
         ),
+        # CI runs on 35GB MIG slices: every budget captures one graph per
+        # patch-grid bucket, so the default budgets through max_model_len
+        # OOM there. A small budget set covers the test images (each item
+        # is at most (max_slice_num + 1) * query_num = 640 tokens).
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+        },
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
@@ -347,6 +354,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         video_prompt=minicpmv_chat_template(
             "(<video>./</video>)\nDescribe this video in one sentence."
         ),
+        max_model_len=2048,
+        # Fewer frames keep the video item within the 1024 budget.
+        num_video_frames=4,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
@@ -358,6 +372,12 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         video_prompt=minicpmv_chat_template(
             "(<video>./</video>)\nDescribe this video in one sentence."
         ),
+        max_model_len=2048,
+        num_video_frames=4,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
