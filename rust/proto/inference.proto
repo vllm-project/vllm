@@ -147,7 +147,7 @@ message StructuredOutput {
 }
 
 message StoppingCriteria {
-  // Default (0) is currently 20
+  // A value of 0 uses the server default or remaining context.
   uint32 max_new_tokens = 1;
   // Default (0) means no minimum
   uint32 min_new_tokens = 2;
