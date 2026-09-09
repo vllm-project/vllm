@@ -253,6 +253,15 @@ class QuantizationConfig(ABC):
         """Return a checkpoint-selected KV-cache dtype for one layer."""
         return None
 
+    def has_layerwise_kv_cache(self) -> bool:
+        """Whether this config resolves KV dtype from a per-layer recipe.
+
+        This describes checkpoint capability, not observed dtype divergence.
+        It may be true for a recipe whose listed layers all use one format;
+        callers need this before layer cache specs have been constructed.
+        """
+        return False
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
