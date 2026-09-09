@@ -265,6 +265,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
@@ -1423,29 +1424,10 @@ def unified_mla_attention_with_output(
     )
 
 
-def unified_mla_attention_with_output_fake(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-    quant_group_size: int | None = None,
-    quant_scale_ue8m0: bool | None = None,
-    quant_col_major: bool | None = None,
-    quant_tma_aligned: bool | None = None,
-    q_dcp_replicated: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="unified_mla_attention_with_output",
     op_func=unified_mla_attention_with_output,
     mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.flexible_layout,),
 )
@@ -2510,8 +2492,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
                 - query_start_loc_cpu[reqs_start:num_reqs]
             )
-            context_lens_cpu = (
-                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+            context_lens_cpu = torch.empty(
+                num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
+            )
+            torch.subtract(
+                seq_lens_cpu[reqs_start:num_reqs],
+                prefill_query_lens_cpu,
+                out=context_lens_cpu,
             )
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
@@ -2550,6 +2537,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
+                assert seq_lens is not None, (
+                    "MLA DCP decode requires seq_lens on CommonAttentionMetadata"
+                )
+                if dcp_local_seq_lens is None:
+                    dcp_local_seq_lens = get_dcp_local_seq_lens(
+                        seq_lens,
+                        dcp_size=self.dcp_world_size,
+                        dcp_rank=get_dcp_group().rank_in_group,
+                        cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    )
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 
