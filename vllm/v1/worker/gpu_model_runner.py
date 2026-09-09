@@ -1704,15 +1704,28 @@ class GPUModelRunner(
 
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
-        xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
+        xdrope_model = cast(SupportsXDRoPE, model)
+
+        # `prompt_embeds` is a passthrough modality, models' XD-RoPE code
+        # assumes per-feature grid info, so filter it out.
+        xdrope_features = [
+            f for f in req_state.mm_features if f.modality != "prompt_embeds"
+        ]
+
+        if req_state.prompt_token_ids is not None:
+            input_tokens = req_state.prompt_token_ids
+        elif req_state.prompt_embeds is not None:
+            seq_len = req_state.prompt_embeds.shape[0]
+            input_tokens = list(range(seq_len))
+        else:
+            raise ValueError(
+                "XD-RoPE requires either prompt_token_ids or prompt_embeds."
+            )
 
         req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
-            req_state.mm_features,
+            input_tokens,
+            xdrope_features,
         )
 
     def _extract_mm_kwargs(
