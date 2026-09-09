@@ -186,6 +186,7 @@ def _execute_migration_batch(
     layer_idx: int,
 ) -> None:
     """Execute one batch of rank-pair-disjoint expert transfers."""
+    # NIXL drains its transfer context in execute(), so each batch restores it.
     communicator.set_transfer_context(old_indices, layer_idx)
     for flow in batch:
         if flow.src_rank == ep_rank:
@@ -208,6 +209,7 @@ def _execute_migration_batch(
                     flow.src_rank,
                     expert_id=expert_id,
                 )
+    # Combining execute calls would erase the scheduler's batch boundaries.
     communicator.execute()
 
 
