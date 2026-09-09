@@ -589,15 +589,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             # Preserve each cache type's alignment requirements after applying
             # its topology-aware block-table width.
-            token_alignment = (
-                None
-                if isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
-                else spec.block_table_token_alignment
-            )
             max_num_blocks = get_block_table_width(
                 max_num_blocks,
                 spec.block_size,
-                token_alignment=token_alignment,
+                token_alignment=spec.block_table_token_alignment,
             )
             max_num_blocks_per_group.append(max_num_blocks)
 

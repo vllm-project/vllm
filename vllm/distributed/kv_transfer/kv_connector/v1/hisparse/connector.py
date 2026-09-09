@@ -78,6 +78,7 @@ class HiSparseConnectorScheduler:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+        self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
@@ -127,17 +128,12 @@ class HiSparseConnectorScheduler:
             )
         )
         row_mirrors = {}
-        for (
-            request_id,
-            scheduled_count,
-        ) in scheduler_output.num_scheduled_tokens.items():
-            scheduled_start = num_computed_tokens[request_id]
+        for request_id, scheduled_start, scheduled_count in scheduled_requests:
             mirror_start = scheduled_start
             if self.async_speculative:
                 mirror_start = max(
                     0,
-                    scheduled_start
-                    - scheduler_output.num_output_placeholders.get(request_id, 0),
+                    scheduled_start - self.requests[request_id].num_output_placeholders,
                 )
             row_mirrors[request_id] = self.coordinator.build_row_mirrors(
                 (
@@ -292,7 +288,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         blocks: KVCacheBlocks,
         num_external_tokens: int,
     ) -> None:
-        return
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.requests[request.request_id] = request
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -309,6 +306,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.requests.pop(request.request_id, None)
         return False, None
 
 

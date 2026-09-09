@@ -97,13 +97,9 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
-        device_caching = enable_caching and any(
-            not group.host_resident and group.enable_prefix_caching
-            for group in kv_cache_config.kv_cache_groups
-        )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=device_caching,
+            enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
@@ -156,9 +152,7 @@ class KVCacheCoordinator(ABC):
                 block_pool=(
                     host_block_pool if kv_cache_group.host_resident else self.block_pool
                 ),
-                enable_caching=(
-                    enable_caching and kv_cache_group.enable_prefix_caching
-                ),
+                enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size_for_kv_cache_spec(
                     kv_cache_group.kv_cache_spec, dcp_world_size
@@ -387,11 +381,7 @@ class KVCacheCoordinator(ABC):
         num_tokens_to_cache = max(
             0, num_computed_tokens - self.num_reprefillable_tokens
         )
-        for group, manager in zip(
-            self.kv_cache_config.kv_cache_groups, self.single_type_managers
-        ):
-            if not group.enable_prefix_caching:
-                continue
+        for manager in self.single_type_managers:
             if manager is self.hisparse_coordinator.host_manager:
                 continue
             manager.cache_blocks(
@@ -771,7 +761,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # shareable, so they must not participate in hit lookup (their
             # manager-level hooks already no-op). Their slot in the per-group
             # hit tuple stays empty.
-            if not g.enable_prefix_caching or not g.kv_cache_spec.prefix_cacheable:
+            if not g.kv_cache_spec.prefix_cacheable:
                 continue
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
@@ -836,11 +826,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         replay_boundary = self.get_replay_boundary(request)
-        for group, manager in zip(
-            self.kv_cache_config.kv_cache_groups, self.single_type_managers
-        ):
-            if not group.enable_prefix_caching:
-                continue
+        for manager in self.single_type_managers:
             if manager is self.hisparse_coordinator.host_manager:
                 continue
             num_tokens_to_cache = cached_num_computed_tokens

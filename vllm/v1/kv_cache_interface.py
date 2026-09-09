@@ -847,6 +847,10 @@ class CircularBufferSpec(AttentionSpec):
     reads the open group's committed keys from the ring.
     """
 
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # The ring occupies one block per request for its whole lifetime.
         del vllm_config
@@ -1365,10 +1369,6 @@ class KVCacheGroupSpec:
     is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
-    # Whether this group participates in persistent prefix-cache lookup.
-    # Ephemeral accelerator-side replicas set this to False; their source
-    # group remains authoritative and they are rebuilt when a prefix is reused.
-    enable_prefix_caching: bool = True
     # Whether this group is part of the externally transferable KV state.
     # Ephemeral accelerator-side replicas are rebuilt from their transferable
     # source group after a connector load.

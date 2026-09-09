@@ -19,7 +19,7 @@ def get_computed_blocks_for_group_completion(
     persistent_group_ids = {
         group_id
         for group_id, group in enumerate(cache_manager.kv_cache_config.kv_cache_groups)
-        if group.enable_prefix_caching
+        if group.kv_cache_spec.prefix_cacheable
     }
     completion_group_ids = completion_group_ids.intersection(persistent_group_ids)
     fixed_group_ids = persistent_group_ids - completion_group_ids
@@ -63,7 +63,7 @@ def truncate_group_completion_blocks(
             strict=True,
         )
     ):
-        if not group.enable_prefix_caching:
+        if not group.kv_cache_spec.prefix_cacheable:
             truncated.append(list(group_blocks))
             continue
         endpoint = (

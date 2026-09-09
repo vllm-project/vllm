@@ -810,7 +810,7 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
-            if not group.enable_prefix_caching:
+            if not group.kv_cache_spec.prefix_cacheable:
                 continue
             if isinstance(
                 group.kv_cache_spec,

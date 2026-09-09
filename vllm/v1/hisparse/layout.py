@@ -174,7 +174,6 @@ def create_hisparse_layout(
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
-        enable_prefix_caching=True,
         enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
@@ -209,7 +208,6 @@ def create_hisparse_layout(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
         )
@@ -221,7 +219,6 @@ def create_hisparse_layout(
                     page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
                 ),
-                enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
         )

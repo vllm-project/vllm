@@ -89,7 +89,7 @@ class HiSparseCoordinator:
             num_gpu_blocks=num_blocks,
             enable_caching=enable_caching
             and any(
-                group.host_resident and group.enable_prefix_caching
+                group.host_resident and group.kv_cache_spec.prefix_cacheable
                 for group in kv_cache_config.kv_cache_groups
             ),
             hash_block_size=hash_block_size,

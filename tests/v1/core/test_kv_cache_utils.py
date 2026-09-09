@@ -188,7 +188,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
     assert set(host_specs) == {"model.layers.0.self_attn"}
     assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
-    assert indexer_group.enable_prefix_caching
+    assert indexer_group.kv_cache_spec.prefix_cacheable
     assert host_group.enable_kv_transfer
     auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
     assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)

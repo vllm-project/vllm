@@ -21,6 +21,7 @@ from vllm.distributed.kv_events import (
     BlockStored,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
     HiSparseConnectorScheduler,
 )
 from vllm.lora.request import LoRARequest
@@ -174,7 +175,6 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["indexer"],
             source_spec,
-            enable_prefix_caching=True,
             enable_kv_transfer=transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         ),
@@ -186,7 +186,6 @@ def make_hisparse_kv_cache_config(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
             ),
-            enable_prefix_caching=False,
             enable_kv_transfer=transfer_device_cache,
         )
     )
@@ -198,7 +197,6 @@ def make_hisparse_kv_cache_config(
                 page_size=HISPARSE_BLOCK_SIZE * 4,
                 blocks_per_request=2,
             ),
-            enable_prefix_caching=False,
             enable_kv_transfer=False,
         )
     )
@@ -266,6 +264,10 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
         draft_kv_lookahead=4,
     )
     scheduler.bind_coordinator(coordinator)
+    request = SimpleNamespace(request_id="request", num_output_placeholders=3)
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = scheduler
+    connector.update_state_after_alloc(request, None, 0)
     scheduler_output = SimpleNamespace(
         block_table_updates=None,
         kv_cache_block_copies=None,
@@ -276,12 +278,19 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
             num_computed_tokens=[103],
         ),
         num_scheduled_tokens={"request": 4},
-        num_output_placeholders={"request": 3},
     )
 
     scheduler.build_connector_meta(scheduler_output)
 
     coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 11),))
+
+    # Acceptance arrives between steps; the connector must read the live count.
+    request.num_output_placeholders = 1
+    scheduler.build_connector_meta(scheduler_output)
+    coordinator.build_row_mirrors.assert_called_with((("request", 102, 9),))
+
+    connector.request_finished_all_groups(request, ())
+    assert not scheduler.requests
 
 
 def test_hisparse_reports_when_context_is_fully_resident():
