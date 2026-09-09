@@ -21,19 +21,6 @@ _REGION_GLOB = "/dev/shm/vllm_offload_*.mmap*"
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
 
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
-    """Spin-wait until the file reaches expected_size (creator truncated it)."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.fstat(fd).st_size >= expected_size:
-            return
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
-            )
-        time.sleep(0.005)
-
-
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
     mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
 

@@ -774,7 +774,7 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
 def test_published_file_is_fully_sized(iid):
     """A joiner never observes a partial region: the name appears only once
     the creator has sized the file."""
-    with _region(iid, num_blocks=4) as r:
+    with _region(iid, num_chunks=4) as r:
         assert os.stat(r.mmap_path).st_size == r.total_size_bytes
 
 
@@ -782,7 +782,7 @@ def test_joining_a_differently_sized_region_fails_fast(iid):
     """A region sized by another configuration must raise an explanatory
     error rather than block until a timeout, and must not keep the fd: it
     carries the flock, so a leak here leaves the region unreclaimable."""
-    with _region(iid, num_blocks=4) as r:
+    with _region(iid, num_chunks=4) as r:
         inode = os.fstat(r.fd).st_ino
         held = len(_fds_for_inode(inode))
         with pytest.raises(RuntimeError, match="different offloading configuration"):
