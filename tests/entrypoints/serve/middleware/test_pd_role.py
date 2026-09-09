@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 
+from vllm.entrypoints.serve.pd_role.api_router import router
 from vllm.entrypoints.serve.pd_role.middleware import PDRoleMiddleware
 from vllm.entrypoints.serve.pd_role.state import PDRoleState
 
@@ -134,8 +135,11 @@ async def test_role_switch_requires_every_rank_acknowledgement():
 
 @pytest.mark.asyncio
 async def test_prepare_timeout_cancels_every_prepared_rank():
+    """Rollback remains nonterminal and fenced until every rank acknowledges."""
     prepared_roles: list[str | None] = [None, None]
     calls = []
+    cancelling = asyncio.Event()
+    release_cancel = asyncio.Event()
 
     async def call_all(method, *args):
         calls.append(method)
@@ -143,6 +147,8 @@ async def test_prepare_timeout_cancels_every_prepared_rank():
             prepared_roles[:] = ["decode", "decode"]
             await asyncio.Event().wait()
         if method == "cancel_pd_role":
+            cancelling.set()
+            await release_cancel.wait()
             prepared_roles[:] = [None, None]
         return [
             {"role": "prefill", "epoch": 0, "pending_role": role}
@@ -150,8 +156,37 @@ async def test_prepare_timeout_cancels_every_prepared_rank():
         ]
 
     state = PDRoleState("prefill", 2, call_all)
-    state.start("decode", 0, 0.01)
-    await state.task
+    app = FastAPI()
+    app.state.pd_role = state
+    app.include_router(router)
+    app.add_middleware(PDRoleMiddleware)
+
+    @app.post("/v1/completions")
+    async def completion():
+        return {"accepted": True}
+
+    headers = {"x-vllm-pd-role": "prefill", "x-vllm-pd-epoch": "0"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://test"
+    ) as client:
+        state.start("decode", 0, 1)
+        try:
+            await asyncio.wait_for(cancelling.wait(), 2)
+            status = (await client.get("/v1/pd_role")).json()
+            assert status["phase"] == "rolling_back"
+            assert (status["role"], status["epoch"]) == ("prefill", 0)
+            assert prepared_roles == ["decode", "decode"]
+            rejected = await client.post("/v1/completions", headers=headers)
+            assert rejected.status_code == 409
+            assert rejected.json()["phase"] == "rolling_back"
+        finally:
+            release_cancel.set()
+            await state.task
+        status = (await client.get("/v1/pd_role")).json()
+        assert status["phase"] == "ready"
+        assert (
+            await client.post("/v1/completions", headers=headers)
+        ).status_code == 200
     assert calls == ["prepare_pd_role", "cancel_pd_role"]
     assert prepared_roles == [None, None]
     assert state.phase == "ready"

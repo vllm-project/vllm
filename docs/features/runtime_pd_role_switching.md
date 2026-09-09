@@ -76,8 +76,10 @@ The router remains responsible for reserved handoffs and for retaining enough
 prefill and decode capacity throughout the transition.
 
 A drain timeout restores admission only after every prepared rank has cancelled
-the old transaction. A failed or uncertain commit leaves the group fenced with
-`phase="failed"`; it must not be returned to routing automatically. A successful
+the old transaction. The group stays fenced with `phase="rolling_back"` until
+cancellation is acknowledged. A failed cancellation or uncertain commit leaves
+the group fenced with `phase="failed"`; it must not be returned to routing
+automatically. A successful
 transition preserves request execution, but draining and temporarily reduced
 fleet capacity can affect latency. Continuous availability requires another ready
 group for each role.

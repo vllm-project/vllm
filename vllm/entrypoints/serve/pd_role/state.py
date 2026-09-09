@@ -94,7 +94,7 @@ class PDRoleState:
             prepared = self.phase == "preparing"
             committing = self.phase == "committing"
             self.error = f"{type(exc).__name__}: {exc}"
-            self.phase = "failed"
+            self.phase = "failed" if committing else "rolling_back"
             if not committing:
                 try:
                     if prepared:
@@ -106,6 +106,7 @@ class PDRoleState:
                             raise RuntimeError("Engine ranks are still fenced")
                     self.phase = "ready"
                 except Exception as rollback_exc:
+                    self.phase = "failed"
                     self.error += f"; rollback failed: {rollback_exc}"
             # A possibly partial commit remains fenced; never publish readiness.
         finally:
