@@ -219,30 +219,18 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             Output tensor after MoE computation
         """
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            select_experts,
+            cpu_select_experts,
         )
 
-        renormalize = self.moe_config.routing_method in (
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
-        )
-
-        # TODO(bnell): this could be factored into a CPURouter class and
-        # turn this into a modular kernel
         # Perform topk selection
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids = cpu_select_experts(
+            moe_config=self.moe_config,
             hidden_states=hidden_states,
             router_logits=router_logits,
-            use_grouped_topk=num_expert_group is not None,
-            top_k=self.moe_config.experts_per_token,
-            renormalize=renormalize,
-            topk_group=topk_group,
             num_expert_group=num_expert_group,
-            scoring_func="softmax",
-            routed_scaling_factor=(
-                routed_scaling_factor if routed_scaling_factor is not None else 1.0
-            ),
+            topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         hidden_size = self.moe_config.hidden_dim
