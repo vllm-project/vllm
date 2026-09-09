@@ -58,6 +58,7 @@ def exact_replay_ssd(
     meta,
     chunk_size: int,
     buffers: ExactReplayBuffers,
+    z: torch.Tensor | None = None,
 ) -> None:
     """Run one exact-replay SSD step for a batch of sequences.
 
@@ -85,6 +86,10 @@ def exact_replay_ssd(
         meta: an ``ExactReplayMetadata`` built for these sequences.
         chunk_size: the model's SSD chunk size.
         buffers: the partial-chunk input buffers.
+        z: optional ``(num_tokens, nheads, head_dim)`` gate; when given, the
+            scan kernel multiplies each output row by ``silu(z)`` in fp32
+            before rounding, the way the fused training path does. The gate
+            only touches a token's own row, so re-fed rows get zeros.
     """
     nheads, head_dim = x.shape[1], x.shape[2]
     ngroups, dstate = B.shape[1], B.shape[2]
@@ -107,8 +112,12 @@ def exact_replay_ssd(
         B_aug[meta.step_dst] = B
         C_aug[meta.step_dst] = C
         out_aug = torch.empty_like(x_aug)
+        z_aug = None
+        if z is not None:
+            z_aug = z.new_zeros((n_aug, nheads, head_dim))
+            z_aug[meta.step_dst] = z
     else:
-        x_aug, dt_aug, B_aug, C_aug, out_aug = x, dt, B, C, out
+        x_aug, dt_aug, B_aug, C_aug, out_aug, z_aug = x, dt, B, C, out, z
 
     initial_states = torch.where(
         meta.has_boundary_state[:, None, None, None], ssm_state[slots], 0
@@ -121,7 +130,7 @@ def exact_replay_ssd(
         C_aug,
         chunk_size=chunk_size,
         D=D,
-        z=None,
+        z=z_aug,
         dt_bias=dt_bias,
         seq_idx=meta.seq_idx,
         cu_seqlens=meta.cu_seqlens,
@@ -164,6 +173,7 @@ def exact_replay_emit(
     pos: torch.Tensor,
     chunk_size: int,
     buffers: ExactReplayBuffers,
+    z: torch.Tensor | None = None,
 ) -> None:
     """One decode step, one token per row, through the row-gated kernels.
 
@@ -189,6 +199,8 @@ def exact_replay_emit(
             partial chunk, i.e. its computed token count modulo ``chunk_size``.
         chunk_size: the model's SSD chunk size.
         buffers: the partial-chunk input buffers.
+        z: optional ``(num_rows, nheads, head_dim)`` gate applied to each
+            row inside the kernel, as in :func:`exact_replay_ssd`.
     """
     num_rows, nheads, _ = x.shape
     ngroups = B.shape[1]
@@ -225,5 +237,6 @@ def exact_replay_emit(
         out,
         D=D,
         current_x=x,
+        z=z,
     )
     _fold_chunk_fwd(buffers.x, buffers.B, dt_out, dA_cumsum, ssm_state, slots, pos)
