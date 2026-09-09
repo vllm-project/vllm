@@ -496,9 +496,20 @@ def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
     )
 
 
-# Accuracy-constrained overrides from GB300 sweeps. Other shapes use
-# ``(next_power_of_2(N) // 4, 16)`` in this token range.
+# Accuracy-constrained (BN, split_k) configs from GB300 sweeps.
 _TILE_CONFIG_OVERRIDES = {
+    (2816, 256): {  # Hunyuan-V4
+        64: (16, 16),
+        128: (32, 16),
+        256: (64, 16),
+        512: (128, 16),
+    },
+    (3072, 256): {  # MiniMax-M2
+        64: (16, 16),
+        128: (32, 16),
+        256: (64, 16),
+        512: (128, 16),
+    },
     (4096, 192): {  # Hunyuan-V3
         64: (32, 32),
         128: (64, 32),
@@ -527,12 +538,9 @@ def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     if 32 < N <= 512:
         token_bucket = triton.next_power_of_2(N)
         overrides = _TILE_CONFIG_OVERRIDES.get((K, M))
-        BN, split_k = (
-            overrides[token_bucket]
-            if overrides is not None
-            else (token_bucket // 4, 16)
-        )
-        return BN, min(split_k, k_tiles)
+        if overrides is not None:
+            BN, split_k = overrides[token_bucket]
+            return BN, min(split_k, k_tiles)
 
     # next power of 2 within 8 and 128
     BN = triton.next_power_of_2(N)
