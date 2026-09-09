@@ -972,3 +972,51 @@ def test_get_tile_size_gfx11_matches_block_size(
                 head_size, -1, element_size=2, is_prefill=is_prefill, block_size=16
             )
             assert tile == 16
+
+
+@pytest.mark.parametrize("head_size", [80, 128, 256, 512])
+@pytest.mark.parametrize("block_m", [16, 64, 128])
+def test_cap_num_stages_for_gfx11_lds(head_size: int, block_m: int) -> None:
+    """Pipeline depth must never push the estimated LDS past the budget."""
+    tile_size, element_size = 32, 2
+    capped = triton_ua._cap_num_stages_for_gfx11_lds(
+        3, block_m, tile_size, head_size, element_size
+    )
+    assert 1 <= capped <= 3
+    q_bytes = block_m * head_size * element_size
+    s_bytes = block_m * tile_size * 4
+    kv_bytes = capped * 2 * tile_size * head_size * element_size
+    # A single stage is the floor, so the tightest shapes still exceed the
+    # budget on paper; the tile shrink in _get_tile_size is what keeps them
+    # launchable.
+    assert capped == 1 or q_bytes + s_bytes + kv_bytes <= triton_ua._GFX11_LDS_BUDGET
+
+
+@pytest.mark.parametrize("max_seqlen_q", [1, 4096])
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@pytest.mark.parametrize("block_m", [16, 64, 128])
+def test_gfx11_launch_config(
+    monkeypatch: pytest.MonkeyPatch,
+    max_seqlen_q: int,
+    head_size: int,
+    block_m: int,
+) -> None:
+    """Every launch config must be 4 warps and a depth that fits the budget."""
+    _patch_arch(monkeypatch, gfx11=True)
+    tile_size, element_size = 32, 2
+    config = triton_ua._gfx11_launch_config(
+        max_seqlen_q, head_size, element_size, block_m, tile_size
+    )
+    assert config["num_warps"] == 4
+    assert config["waves_per_eu"] == 2
+    assert config["num_stages"] == triton_ua._cap_num_stages_for_gfx11_lds(
+        config["num_stages"], block_m, tile_size, head_size, element_size
+    )
+
+
+def test_gfx11_launch_config_decode_depth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a narrow-head decode is allowed a deep pipeline."""
+    _patch_arch(monkeypatch, gfx11=True)
+    assert triton_ua._gfx11_launch_config(1, 64, 2, 16, 16)["num_stages"] == 3
+    assert triton_ua._gfx11_launch_config(1, 128, 2, 16, 16)["num_stages"] == 1
+    assert triton_ua._gfx11_launch_config(4096, 64, 2, 16, 32)["num_stages"] == 1
