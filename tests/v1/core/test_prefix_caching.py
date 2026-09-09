@@ -577,21 +577,84 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-def test_hisparse_full_sequence_admission_preserves_host_reservations():
-    """A first chunk must not admit a prompt using another prefill's host budget."""
-    manager = make_hisparse_kv_cache_manager(32, 5)
+@pytest.mark.parametrize(
+    "full_sequence_must_fit,host_num_blocks,admitted",
+    [(True, 6, False), (True, 8, True), (False, 4, False), (False, 5, True)],
+)
+def test_hisparse_async_admission_preserves_host_reservations(
+    full_sequence_must_fit, host_num_blocks, admitted, tmp_path
+):
+    """A new transfer must leave room for an in-flight prefill to finish."""
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+    )
+    manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = manager.kv_cache_config
+    scheduler.scheduler_reserve_full_isl = full_sequence_must_fit
+    inflight = make_request(
+        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    scheduler.add_request(inflight)
+    scheduler.schedule()
+    assert inflight in scheduler._inflight_prefills
+
+    request = make_request(
+        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    assert (request in scheduler._inflight_prefills) == admitted
+    assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
+
+
+@pytest.mark.parametrize(
+    "evictable,local_tokens,admitted",
+    [
+        (False, HISPARSE_BLOCK_SIZE, True),
+        (True, HISPARSE_BLOCK_SIZE, False),
+        (False, HISPARSE_BLOCK_SIZE - 1, False),
+    ],
+)
+def test_hisparse_async_admission_accounts_for_host_cache_hits(
+    evictable, local_tokens, admitted
+):
+    """Evictable hits and partial-hit copies consume the reserved host budget."""
+    manager = make_hisparse_kv_cache_manager(32, 7 if evictable else 8)
+    inflight = make_request(
+        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, inflight, HISPARSE_BLOCK_SIZE) is not None
+    coordinator = manager.hisparse_coordinator
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    hit = host_pool.get_new_blocks(1)[0]
+    if evictable:
+        host_pool.free_blocks([hit])
+    assert host_pool.get_num_free_blocks() == 5
     request = make_request(
         "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
 
     assert (
-        manager.allocate_slots(
+        coordinator.can_admit_async_load(
             request,
-            num_new_tokens=HISPARSE_BLOCK_SIZE,
+            2 * HISPARSE_BLOCK_SIZE,
+            local_tokens,
+            ([hit], [], [], []),
+            [inflight],
             full_sequence_must_fit=True,
-            reserved_host_blocks=2,
         )
-        is None
+        == admitted
     )
 
 

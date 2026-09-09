@@ -1191,32 +1191,39 @@ class Scheduler(SchedulerInterface):
                     )
 
                 reserved_blocks = 0
-                reserved_host_blocks = 0
+                host_capacity_available = True
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
-                    if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
-                        reserved_host_blocks = (
-                            self._inflight_prefill_reserved_host_blocks()
+                    host_capacity_available = (
+                        self.kv_cache_manager.hisparse_coordinator.can_admit_async_load(
+                            request,
+                            num_computed_tokens,
+                            num_new_local_computed_tokens,
+                            new_computed_blocks.blocks,
+                            self._inflight_prefills,
+                            self.scheduler_reserve_full_isl,
                         )
+                    )
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    num_new_computed_tokens=num_new_local_computed_tokens,
-                    new_computed_blocks=new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=num_encoder_tokens,
-                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
-                    reserved_blocks=reserved_blocks,
-                    reserved_host_blocks=reserved_host_blocks,
-                    has_scheduled_reqs=bool(self.running),
-                )
+                new_blocks = None
+                if host_capacity_available:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                        full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                        reserved_blocks=reserved_blocks,
+                        has_scheduled_reqs=bool(self.running),
+                    )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -2977,32 +2984,10 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _request_remaining_host_blocks(self, request: Request) -> int:
-        """HiSparse host blocks needed to hold the request's full sequence."""
-        full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return (
-            self.kv_cache_manager.hisparse_coordinator.get_num_host_blocks_to_allocate(
-                request_id=request.request_id,
-                num_tokens=full_num_tokens,
-                new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
-                total_computed_tokens=request.num_computed_tokens,
-                num_local_computed_tokens=request.num_computed_tokens,
-                num_tokens_main_model=full_num_tokens,
-                apply_admission_cap=True,
-            )
-        )
-
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Device reservations needed by all in-flight prefills."""
         return sum(
             self._request_remaining_blocks(request)
-            for request in self._inflight_prefills
-        )
-
-    def _inflight_prefill_reserved_host_blocks(self) -> int:
-        """HiSparse host reservation needed by all in-flight prefills."""
-        return sum(
-            self._request_remaining_host_blocks(request)
             for request in self._inflight_prefills
         )
 

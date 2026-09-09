@@ -100,6 +100,7 @@ class HiSparseCoordinator:
         max_model_len: int,
     ) -> None:
         self.managers = managers
+        self.max_model_len = max_model_len
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -313,6 +314,47 @@ class HiSparseCoordinator:
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
         )
+
+    def can_admit_async_load(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_local_computed_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        inflight_prefills: Iterable[Request],
+        full_sequence_must_fit: bool,
+    ) -> bool:
+        """Keep enough host capacity for in-flight prefills to finish."""
+        manager = self.host_manager
+        if manager is None:
+            return True
+        num_tokens = min(
+            request.num_tokens if full_sequence_must_fit else num_computed_tokens,
+            self.max_model_len,
+        )
+        required = manager.get_num_blocks_to_allocate(
+            request.request_id,
+            num_tokens,
+            new_computed_blocks[manager.kv_cache_group_id],
+            num_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens,
+            apply_admission_cap=full_sequence_must_fit,
+        )
+        for inflight in inflight_prefills:
+            full_num_tokens = min(inflight.num_tokens, self.max_model_len)
+            required += manager.get_num_blocks_to_allocate(
+                inflight.request_id,
+                full_num_tokens,
+                (),
+                inflight.num_computed_tokens,
+                inflight.num_computed_tokens,
+                full_num_tokens,
+                apply_admission_cap=True,
+            )
+        # Reclamation only pins host blocks already owned by requests, so this
+        # budget remains valid through the subsequent device allocation check.
+        return self.has_host_capacity(required)
 
     def free_host_blocks(self, blocks: Iterable[KVCacheBlock]) -> list[KVCacheBlock]:
         """Free owned host blocks and return blocks from other pools."""

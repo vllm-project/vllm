@@ -410,7 +410,6 @@ class KVCacheManager:
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         reserved_blocks: int,
-        reserved_host_blocks: int,
         apply_admission_cap: bool = False,
     ) -> bool:
         """Check capacity, reclaiming resident HiSparse pages if needed."""
@@ -425,7 +424,7 @@ class KVCacheManager:
                 num_tokens_main_model,
                 apply_admission_cap=apply_admission_cap,
             )
-            if not hisparse.has_host_capacity(host_blocks + reserved_host_blocks):
+            if not hisparse.has_host_capacity(host_blocks):
                 return False
 
         for attempt in range(2):
@@ -463,7 +462,6 @@ class KVCacheManager:
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
-        reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
@@ -492,8 +490,6 @@ class KVCacheManager:
                 requests when chunked prefill would otherwise only check the first chunk
             reserved_blocks: Free device blocks that must remain available for
                 other in-flight sequences.
-            reserved_host_blocks: HiSparse host blocks that must remain available
-                for other in-flight sequences.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
 
@@ -592,7 +588,6 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 reserved_blocks=watermark_blocks,
-                reserved_host_blocks=reserved_host_blocks,
                 apply_admission_cap=True,
             ):
                 return None
@@ -627,7 +622,6 @@ class KVCacheManager:
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
             reserved_blocks=reserved_blocks + watermark_blocks,
-            reserved_host_blocks=reserved_host_blocks,
         ):
             return None
 
