@@ -84,6 +84,48 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def _compressed_tensors_actorder_config(actorder):
+    return {
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 4,
+                    "type": "int",
+                    "strategy": "group",
+                    "group_size": 128,
+                    "symmetric": True,
+                    "dynamic": False,
+                    "actorder": actorder,
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
+)
+def test_compressed_tensors_rejects_runtime_activation_order(actorder):
+    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+        CompressedTensorsConfig.from_config(
+            _compressed_tensors_actorder_config(actorder)
+        )
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.STATIC, ActivationOrdering.WEIGHT, False, None]
+)
+def test_compressed_tensors_accepts_preordered_weights(actorder):
+    config = CompressedTensorsConfig.from_config(
+        _compressed_tensors_actorder_config(actorder)
+    )
+    assert config.target_scheme_map["Linear"]["weights"].actorder == (
+        actorder.value if isinstance(actorder, ActivationOrdering) else None
+    )
+
+
 @pytest.mark.parametrize(
     "model_args",
     [
@@ -271,15 +313,6 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
             None,
             8,
             True,
-            False,
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-            "group",
-            128,
-            8,
-            False,
-            True,
         ),
     ],
 )
@@ -287,7 +320,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
     not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
+    model, strategy, group, pack_factor, symmetric = wNa16_args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -302,7 +335,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
-            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
@@ -924,35 +956,6 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
-
-
-@pytest.mark.parametrize(
-    "actorder,group_size,part,full,expected",
-    [
-        # actorder="group" with real grouping: must load full-K w2 scales and,
-        # when sharded (part != full), report is_k_full=False.
-        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
-        # actorder="group" but unsharded (part == full): full scales, k_full.
-        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
-        # actorder="group" with channel-wise (group_size == -1): no full load.
-        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
-        # "static"/"weight" reorder at quant time -> shard normally + k_full.
-        # Regression: static actorder under TP must keep is_k_full=True so the
-        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
-        ("static", 32, 64, 128, (False, 64, True)),
-        ("weight", 32, 64, 128, (False, 64, True)),
-        (None, 32, 64, 128, (False, 64, True)),
-    ],
-)
-def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
-        CompressedTensorsWNA16MoEMethod,
-    )
-
-    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
-        actorder, group_size, part, full
-    )
-    assert result == expected
 
 
 @pytest.mark.parametrize("num_bits", range(2, 9))
