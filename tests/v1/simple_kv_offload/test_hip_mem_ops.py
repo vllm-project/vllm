@@ -131,11 +131,61 @@ def test_copy_blocks_chunks_at_descriptor_cap(
     counts = _record_counts(monkeypatch)
     monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", max_desc)
 
-    ids = list(range(num_blocks))
+    ids = list(range(0, 2 * num_blocks, 2))
     copy_blocks(ids, ids, _fake_params(num_layers))
 
     assert counts == expected_counts
     assert sum(counts) == num_layers * num_blocks
+
+
+@pytest.mark.parametrize(
+    ("src_ids", "dst_ids", "expected_counts"),
+    [
+        ([1], [2], [2]),
+        ([1, 2, 3], [5, 6, 7], [2]),
+        ([1, 2, 3], [2, 4, 6], [3, 3]),
+        ([1, 3, 5], [2, 3, 4], [3, 3]),
+        ([3, 2, 1], [6, 5, 4], [3, 3]),
+        ([1, 1, 2], [2, 4, 5], [3, 1]),
+        ([1, 2, 5, 6, 7, 4], [2, 3, 7, 8, 6, 5], [3, 3, 2]),
+    ],
+)
+def test_copy_blocks_coalesces_only_contiguous_source_and_destination(
+    monkeypatch, src_ids, dst_ids, expected_counts
+):
+    """Merged copies preserve mapped bytes and untouched blocks in every region."""
+    sources = [np.arange(30, dtype=np.uint8), np.arange(50, dtype=np.uint8)]
+    destinations = [np.full_like(src, 255) for src in sources]
+    params = _fake_params(2)._replace(
+        src_bases=np.array([src.ctypes.data for src in sources], dtype=np.uint64),
+        dst_bases=np.array([dst.ctypes.data for dst in destinations], dtype=np.uint64),
+        bpb=np.array([3, 5], dtype=np.uint64),
+    )
+    counts = []
+
+    def copy_descriptors(dst, src, sizes, count, *rest):
+        counts.append(count)
+        arrays = [
+            np.ctypeslib.as_array((ctypes.c_uint64 * count).from_address(ptr))
+            for ptr in (src, dst, sizes)
+        ]
+        for source, destination, size in zip(*arrays):
+            ctypes.memmove(int(destination), int(source), int(size))
+        return 0
+
+    monkeypatch.setattr(cuda_mem_ops, "_batch_memcpy", (copy_descriptors, 0))
+    monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 3)
+    copy_blocks(src_ids, dst_ids, params)
+
+    assert counts == expected_counts
+    for source, destination, block_bytes in zip(sources, destinations, params.bpb):
+        expected = np.full_like(source, 255)
+        block_bytes = int(block_bytes)
+        for src_id, dst_id in zip(src_ids, dst_ids):
+            expected[dst_id * block_bytes : (dst_id + 1) * block_bytes] = source[
+                src_id * block_bytes : (src_id + 1) * block_bytes
+            ]
+        np.testing.assert_array_equal(destination, expected)
 
 
 def test_copy_blocks_noop_on_empty(monkeypatch):
