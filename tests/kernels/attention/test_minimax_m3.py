@@ -1722,54 +1722,26 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
         sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
 
 
-def test_aiter_consolidated_qknorm_capability_probe(monkeypatch):
-    import aiter
-
+def test_aiter_consolidated_qknorm_enabled(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops
 
-    def legacy_op(*args, asm_layout=False):
-        pass
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", legacy_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", None)
-    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_is_available()
+    scale = torch.tensor([0.25])
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, scale)
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e4m3", scale, scale)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8")
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, None)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
 
-    def consolidated_op(*args, asm_layout=False, skip_index_branch=False):
-        pass
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
 
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", consolidated_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", None)
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_is_available()
-
-    monkeypatch.delattr(
-        aiter, "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE", raising=False
-    )
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE", None)
-    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_packed_shuffle()
-
-    monkeypatch.setattr(
-        aiter,
-        "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE",
-        True,
-        raising=False,
-    )
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE", None)
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_packed_shuffle()
-
-    monkeypatch.delattr(
-        aiter, "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q", raising=False
-    )
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
-    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_fp8_index_q()
-
-    monkeypatch.setattr(
-        aiter,
-        "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q",
-        True,
-        raising=False,
-    )
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_fp8_index_q()
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
 
 
 def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
@@ -1792,17 +1764,7 @@ def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
     }
 
 
-@pytest.mark.parametrize(
-    ("unequal_page_spans", "packed_capability", "expected_called"),
-    [
-        (True, False, False),
-        (True, True, True),
-        (False, False, True),
-    ],
-)
-def test_aiter_consolidated_qknorm_packed_capability_gate(
-    monkeypatch, unequal_page_spans, packed_capability, expected_called
-):
+def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
     import aiter
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -1813,18 +1775,12 @@ def test_aiter_consolidated_qknorm_packed_capability_gate(
         calls.append((args, kwargs))
 
     monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
-    monkeypatch.setattr(
-        rocm_aiter_ops,
-        "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE",
-        packed_capability,
-    )
     call_args = _fake_aiter_qknorm_args()
     call_args["kv_cache_k"] = torch.empty(2, 1)
-    call_args["kv_cache_v"] = torch.empty(1 if unequal_page_spans else 2, 1)
+    call_args["kv_cache_v"] = torch.empty(1, 1)
 
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args) is expected_called
-    assert bool(calls) is expected_called
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -1848,13 +1804,12 @@ def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
         calls.append((args, kwargs))
 
     monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
     call_args = _fake_aiter_qknorm_args(kv_cache_dtype)
     k_scale = torch.tensor([0.25])
     v_scale = torch.tensor([0.5])
     call_args.update(k_scale=k_scale, v_scale=v_scale)
 
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
     assert len(calls) == 1
     kwargs = calls[0][1]
     assert kwargs["kv_cache_dtype"] == aiter_dtype
@@ -1881,8 +1836,6 @@ def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
 
     fp8 = current_platform.fp8_dtype()
     monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", True)
     call_args = _fake_aiter_qknorm_args("fp8")
     call_args.update(
         k_scale=torch.tensor([0.25]),
@@ -1892,26 +1845,9 @@ def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
         num_index_heads=1,
     )
 
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
     assert calls[0]["index_cache_dtype"] == "fp8"
     assert calls[0]["kv_cache_dtype"] == "fp8_e4m3_static"
-
-
-def test_aiter_consolidated_qknorm_fp8_index_q_requires_capability(monkeypatch):
-    import aiter
-
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    def unexpected_call(*args, **kwargs):
-        pytest.fail("fp8 index_q must fall back when AITER cannot emit it")
-
-    fp8 = current_platform.fp8_dtype()
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", unexpected_call)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", False)
-    call_args = _fake_aiter_qknorm_args()
-    call_args.update(index_q_out=torch.empty(1, dtype=fp8), num_index_heads=1)
-    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
 
 
 @pytest.mark.parametrize("skip_index_branch", [False, True])
@@ -1928,7 +1864,6 @@ def test_aiter_consolidated_qknorm_full_and_skip_index_args(
         calls.append(kwargs)
 
     monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
     call_args = _fake_aiter_qknorm_args()
     if skip_index_branch:
         call_args.update(skip_index_branch=True)
@@ -1943,7 +1878,7 @@ def test_aiter_consolidated_qknorm_full_and_skip_index_args(
             index_slot_mapping=tensor,
         )
 
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
     kwargs = calls[0]
     assert kwargs["skip_index_branch"] is skip_index_branch
     if skip_index_branch:
@@ -1961,17 +1896,12 @@ def test_aiter_consolidated_qknorm_full_and_skip_index_args(
 
 
 def test_aiter_consolidated_qknorm_rejects_fp8_e5m2(monkeypatch):
-    import aiter
-
     from vllm._aiter_ops import rocm_aiter_ops
 
-    def unexpected_call(*args, **kwargs):
-        pytest.fail("unsupported dtype must fall back before invoking AITER")
-
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", unexpected_call)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
-    call_args = _fake_aiter_qknorm_args("fp8_e5m2")
-    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    scale = torch.tensor([0.25])
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
 
 
 def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
@@ -1987,9 +1917,7 @@ def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
 )
 @pytest.mark.parametrize("skip_index_branch", [False, True])
 @pytest.mark.parametrize("fp8_index", [False, True])
-def test_aiter_consolidated_qknorm_real_packed_shuffle(
-    monkeypatch, skip_index_branch, fp8_index
-):
+def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_index):
     from vllm._aiter_ops import rocm_aiter_ops
 
     torch.manual_seed(20260831)
@@ -2068,9 +1996,6 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(
         )
     scale = torch.tensor([0.02], dtype=torch.float32, device="cuda")
 
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", None)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE", None)
-    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
     kwargs = {}
     if not skip_index_branch:
         kwargs = {
@@ -2080,7 +2005,7 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(
             "index_q_out": index_q_out,
             "index_slot_mapping": index_slot_mapping,
         }
-    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(
         qkv,
         weights[0],
         weights[1],

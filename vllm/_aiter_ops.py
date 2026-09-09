@@ -1776,11 +1776,6 @@ class rocm_aiter_ops:
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-    # Lazily probed to avoid importing (and potentially compiling) AITER while
-    # this module is imported.
-    _FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED: bool | None = None
-    _FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE: bool | None = None
-    _FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q: bool | None = None
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -1992,55 +1987,26 @@ class rocm_aiter_ops:
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
     @classmethod
-    def fused_qknorm_idxrqknorm_is_available(cls) -> bool:
-        """Whether AITER has the consolidated MiniMax-M3 fused op."""
-        if cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED is None:
-            try:
-                import inspect
+    @if_aiter_supported
+    def fused_qknorm_idxrqknorm_enabled(
+        cls,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+    ) -> bool:
+        """Whether MiniMax-M3 can use AITER's consolidated fused QK-norm.
 
-                from aiter import fused_qknorm_idxrqknorm
-
-                parameters = tuple(
-                    inspect.signature(fused_qknorm_idxrqknorm).parameters
-                )
-                cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED = (
-                    bool(parameters) and parameters[-1] == "skip_index_branch"
-                )
-            except (ImportError, AttributeError, TypeError, ValueError):
-                cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED = False
-        return cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED
-
-    @classmethod
-    def fused_qknorm_idxrqknorm_supports_packed_shuffle(cls) -> bool:
-        """Whether AITER accepts offset packed-SHUFFLE K/V page spans."""
-        if cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE is None:
-            try:
-                from aiter import (
-                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE,
-                )
-
-                cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE = bool(
-                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE
-                )
-            except (ImportError, AttributeError):
-                cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE = False
-        return cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE
-
-    @classmethod
-    def fused_qknorm_idxrqknorm_supports_fp8_index_q(cls) -> bool:
-        """Whether AITER can emit unit-scale e4m3 index_q (4787 q_idx)."""
-        if cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q is None:
-            try:
-                from aiter import (
-                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q,
-                )
-
-                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = bool(
-                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q
-                )
-            except (ImportError, AttributeError):
-                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = False
-        return cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q
+        Requires AITER to be installed and enabled. bf16 (``auto``) always
+        qualifies; fp8 e4m3 also needs K/V scales. Other cache dtypes fall
+        back to vLLM's fused kernel.
+        """
+        if not cls._AITER_ENABLED:
+            return False
+        if kv_cache_dtype == "auto":
+            return True
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return k_scale is not None and v_scale is not None
+        return False
 
     @classmethod
     def fused_qknorm_idxrqknorm(
@@ -2068,40 +2034,26 @@ class rocm_aiter_ops:
         index_q_out: torch.Tensor | None = None,
         index_slot_mapping: torch.Tensor | None = None,
         skip_index_branch: bool = False,
-    ) -> bool:
-        """Run consolidated MiniMax-M3 fusion, or report it unsupported.
+    ) -> None:
+        """Run consolidated MiniMax-M3 QK-norm fusion.
 
-        Capability and cache dtype are checked before invocation. Runtime
-        failures from a supported AITER op are deliberately propagated.
+        Callers must check ``fused_qknorm_idxrqknorm_enabled`` first. Runtime
+        failures from the AITER op are deliberately propagated.
         """
-        if not cls.fused_qknorm_idxrqknorm_is_available():
-            return False
-        if (
-            kv_cache_k.shape[0] != kv_cache_v.shape[0]
-            and not cls.fused_qknorm_idxrqknorm_supports_packed_shuffle()
-        ):
-            return False
-
         if kv_cache_dtype == "auto":
             aiter_kv_cache_dtype = "auto"
             aiter_k_scale = None
             aiter_v_scale = None
         elif kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if k_scale is None or v_scale is None:
-                return False
             aiter_kv_cache_dtype = "fp8_e4m3_static"
             aiter_k_scale = k_scale
             aiter_v_scale = v_scale
         else:
-            return False
-
-        if _is_fp8_e4m3_tensor(
-            index_q_out
-        ) and not cls.fused_qknorm_idxrqknorm_supports_fp8_index_q():
-            return False
-        aiter_index_cache_dtype = (
-            "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
-        )
+            raise ValueError(
+                "AITER fused QK-norm requires kv_cache_dtype 'auto', 'fp8', "
+                f"or 'fp8_e4m3', got {kv_cache_dtype!r}"
+            )
+        aiter_index_cache_dtype = "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
 
         from aiter import fused_qknorm_idxrqknorm
 
@@ -2133,7 +2085,6 @@ class rocm_aiter_ops:
             asm_layout=True,
             skip_index_branch=skip_index_branch,
         )
-        return True
 
     @classmethod
     @if_aiter_supported

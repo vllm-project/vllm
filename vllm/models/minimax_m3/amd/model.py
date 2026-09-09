@@ -945,10 +945,17 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         q = qkv.new_empty((num_tokens, self.q_size))
         key_cache = value_cache = page16_slot_mapping = None
+        k_scale = v_scale = None
+        use_fused_qknorm = False
         if self.use_aiter_sparse_pa:
             key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
             page16_slot_mapping = self._get_aiter_sparse_pa_slot_mapping(
                 main_slot_mapping, key_cache, value_cache
+            )
+            k_scale = getattr(self, "_k_scale", None)
+            v_scale = getattr(self, "_v_scale", None)
+            use_fused_qknorm = rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled(
+                self.kv_cache_dtype, k_scale, v_scale
             )
         if self.skip_index_topk:
             index_q = None
@@ -956,27 +963,28 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 assert key_cache is not None
                 assert value_cache is not None
                 assert page16_slot_mapping is not None
-                fused = rocm_aiter_ops.fused_qknorm_idxrqknorm(
-                    qkv,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
-                    positions,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    rotary_dim,
-                    eps,
-                    page16_slot_mapping,
-                    key_cache,
-                    value_cache,
-                    q,
-                    self.kv_cache_dtype,
-                    getattr(self, "_k_scale", None),
-                    getattr(self, "_v_scale", None),
-                    num_index_heads=self.num_idx_heads,
-                    skip_index_branch=True,
-                )
-                if not fused:
+                if use_fused_qknorm:
+                    rocm_aiter_ops.fused_qknorm_idxrqknorm(
+                        qkv,
+                        self.q_norm.weight,
+                        self.k_norm.weight,
+                        cos_sin_cache,
+                        positions,
+                        self.num_heads,
+                        self.num_kv_heads,
+                        rotary_dim,
+                        eps,
+                        page16_slot_mapping,
+                        key_cache,
+                        value_cache,
+                        q,
+                        self.kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                        num_index_heads=self.num_idx_heads,
+                        skip_index_branch=True,
+                    )
+                else:
                     ops.fused_minimax_m3_qknorm_rope_kv_insert(
                         qkv,
                         self.q_norm.weight,
@@ -1041,31 +1049,32 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 assert value_cache is not None
                 assert page16_slot_mapping is not None
                 index_cache = self.indexer.index_cache.kv_cache
-                fused = rocm_aiter_ops.fused_qknorm_idxrqknorm(
-                    qkv,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
-                    positions,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    rotary_dim,
-                    eps,
-                    page16_slot_mapping,
-                    key_cache,
-                    value_cache,
-                    q,
-                    self.kv_cache_dtype,
-                    getattr(self, "_k_scale", None),
-                    getattr(self, "_v_scale", None),
-                    self.index_q_norm.weight,
-                    self.index_k_norm.weight,
-                    self.num_idx_heads,
-                    index_cache,
-                    index_q,
-                    index_slot_mapping,
-                )
-                if not fused:
+                if use_fused_qknorm:
+                    rocm_aiter_ops.fused_qknorm_idxrqknorm(
+                        qkv,
+                        self.q_norm.weight,
+                        self.k_norm.weight,
+                        cos_sin_cache,
+                        positions,
+                        self.num_heads,
+                        self.num_kv_heads,
+                        rotary_dim,
+                        eps,
+                        page16_slot_mapping,
+                        key_cache,
+                        value_cache,
+                        q,
+                        self.kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                        self.index_q_norm.weight,
+                        self.index_k_norm.weight,
+                        self.num_idx_heads,
+                        index_cache,
+                        index_q,
+                        index_slot_mapping,
+                    )
+                else:
                     ops.fused_minimax_m3_qknorm_rope_kv_insert(
                         qkv,
                         self.q_norm.weight,
