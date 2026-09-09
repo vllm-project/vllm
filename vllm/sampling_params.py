@@ -544,6 +544,8 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
+        if self.extra_args:
+            self._verify_extra_args()
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -655,6 +657,26 @@ class SamplingParams(
                 f"Got bad_words={self.bad_words}"
             )
 
+    def _verify_extra_args(self) -> None:
+        # JSON accepts arbitrary integers, but the engine's MessagePack
+        # transport only supports signed/unsigned 64-bit integers.
+        pending: list[Any] = [self.extra_args]
+        visited: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, int) and not -(2**63) <= value < 2**64:
+                raise VLLMValidationError(
+                    "extra_args integers must be between -2**63 and 2**64 - 1.",
+                    parameter="extra_args",
+                )
+            if isinstance(value, (dict, list, tuple)) and id(value) not in visited:
+                visited.add(id(value))
+                if isinstance(value, dict):
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                else:
+                    pending.extend(value)
+
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
             raise VLLMValidationError(
@@ -706,6 +728,17 @@ class SamplingParams(
                 prompt_token_ids = tokenizer.encode(
                     text=prompt, add_special_tokens=False
                 )
+
+                if not prompt_token_ids:
+                    if not add_prefix_space:
+                        raise VLLMValidationError(
+                            "bad_words entries must tokenize to at least one token.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
+                    # The unprefixed form is still enforceable when only the
+                    # optional space-prefixed form tokenizes to nothing.
+                    continue
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
