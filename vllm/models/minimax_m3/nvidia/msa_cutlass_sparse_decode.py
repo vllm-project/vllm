@@ -251,12 +251,14 @@ def should_prepare_decode_metadata(
     kv_cache_dtype: str,
     page_size: int,
     topk_blocks: int,
+    min_batch_size: int | None = None,
 ) -> bool:
     """Return whether a graph shape can use the CUTLASS decode path."""
     total_q = batch_size * decode_query_len
-    min_batch_size = _min_cutlass_batch_size(
-        decode_query_len, num_q_heads, num_kv_heads
-    )
+    if min_batch_size is None:
+        min_batch_size = _min_cutlass_batch_size(
+            decode_query_len, num_q_heads, num_kv_heads
+        )
     return (
         supports_cutlass_sparse_decode(
             decode_backend=decode_backend,
