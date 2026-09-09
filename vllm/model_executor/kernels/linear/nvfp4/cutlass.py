@@ -10,15 +10,19 @@ from vllm._custom_ops import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
     pad_nvfp4_weight_for_cutlass,
+    restore_nvfp4_cutlass_padding_cols,
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
+
+    ipc_pre_processed_safe = True
 
     @classmethod
     def is_supported(
@@ -33,6 +37,9 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            restore_nvfp4_cutlass_padding_cols(layer)
+            return
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
