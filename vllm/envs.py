@@ -1888,14 +1888,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # on PCIe fabrics without working P2P: quantize locally, exchange
     # the compressed payload over NCCL send/recv (host-staged transport),
     # dequantize and reduce locally. Prefill-sized messages only.
-    # "e4m3" = per-128 E4M3 payload + FP32 scale (the measured bit-exact
+    # "fp8" = per-128 E4M3 payload + FP32 scale (the measured bit-exact
     # codec); "nvfp4" = OCP NVFP4, e2m1 payload (2 elements/byte) +
     # per-16 E4M3 scale (~55% wire bytes, quality-sensitive opt-in);
     # unset = disabled.
     "VLLM_HOST_STAGED_AR": env_with_choices(
         "VLLM_HOST_STAGED_AR",
         None,
-        ["e4m3", "nvfp4"],
+        ["fp8", "nvfp4"],
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(

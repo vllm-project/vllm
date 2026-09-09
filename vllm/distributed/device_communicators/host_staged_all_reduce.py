@@ -13,10 +13,10 @@ when P2P is unavailable. Both ranks materialize the result from the
 same two wire payloads, and each dequantized side is rounded to BF16
 before the add, so the replicated activations stay bit-identical.
 
-Codecs: "e4m3" (default) is the measured b12x codec — per-128 E4M3
+Codecs: "fp8" (default) is the measured b12x codec — per-128 E4M3
 payload + FP32 scale, n + n/32 wire bytes. "nvfp4" is OCP NVFP4 —
 e2m1 payload (2 elements/byte) + per-16 E4M3 scale, n/2 + n/16 wire
-bytes (54.5% of e4m3); quality-sensitive, opt-in.
+bytes (54.5% of fp8); quality-sensitive, opt-in.
 """
 
 import os
@@ -171,10 +171,10 @@ def _load_fp4_cuda():
             os.environ["TORCH_CUDA_ARCH_LIST"] = old
 
 
-class Fp8HostStagedAllReduce:
+class HostStagedAllReduce:
     """Quantized allreduce exchanged over NCCL send/recv.
 
-    World size must be 2. The wire codec is "e4m3" (default: per-128
+    World size must be 2. The wire codec is "fp8" (default: per-128
     E4M3 payload + FP32 scale) or "nvfp4" (OCP NVFP4: e2m1 payload,
     2 elements/byte, per-16 E4M3 scale). Buffers grow lazily to the
     largest admitted message; NCCL owns the host staging (SHM
@@ -187,9 +187,9 @@ class Fp8HostStagedAllReduce:
         rank: int,
         device: torch.device,
         cpu_group: dist.ProcessGroup,
-        codec: str = "e4m3",
+        codec: str = "fp8",
     ) -> None:
-        assert codec in ("e4m3", "nvfp4")
+        assert codec in ("fp8", "nvfp4")
         assert pynccl_comm.world_size == 2
         self._comm = pynccl_comm
         self.rank = rank
@@ -208,9 +208,9 @@ class Fp8HostStagedAllReduce:
         logger.info_once(f"Host-staged AR active: wire codec={codec}")
 
     def _wire_bytes(self, n: int) -> int:
-        # e4m3: n payload bytes + 4B scale per QUANT_BLOCK.
+        # fp8: n payload bytes + 4B scale per QUANT_BLOCK.
         # nvfp4: n/2 payload bytes + 1B scale per NVFP4_SCALE_BLOCK.
-        if self._codec == "e4m3":
+        if self._codec == "fp8":
             return n + 4 * (n // QUANT_BLOCK)
         return n // 2 + n // NVFP4_SCALE_BLOCK
 
@@ -230,7 +230,7 @@ class Fp8HostStagedAllReduce:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """(payload, scale) views into wire side `side` for n elements."""
         wire = self._wire[side, : self._wire_bytes(n)]
-        if self._codec == "e4m3":
+        if self._codec == "fp8":
             payload = wire[:n].view(torch.float8_e4m3fn)
             scale = wire[n:].view(torch.float32)
         else:
@@ -256,7 +256,7 @@ class Fp8HostStagedAllReduce:
         scale: torch.Tensor,
         n: int,
     ) -> None:
-        if self._codec == "e4m3":
+        if self._codec == "fp8":
             _quant_fp8_kernel[(n // KERNEL_BLOCK,)](
                 input_, payload, scale,
                 BLOCK=KERNEL_BLOCK, GROUP=QUANT_BLOCK, num_warps=4
@@ -303,7 +303,7 @@ class Fp8HostStagedAllReduce:
     ) -> torch.Tensor:
         if not self.should_use(input_):
             raise ValueError(
-                "input not admitted by FP8 host-staged allreduce: "
+                "input not admitted by host-staged allreduce: "
                 f"shape={tuple(input_.shape)} dtype={input_.dtype} "
                 f"contiguous={input_.is_contiguous()}"
             )
