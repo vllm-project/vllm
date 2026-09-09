@@ -29,6 +29,7 @@ class SpecDecodingStats:
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
+    num_committed_tokens: int = 0
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -38,10 +39,16 @@ class SpecDecodingStats:
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft(
+        self,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_committed_tokens: int,
+    ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        self.num_committed_tokens += num_committed_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -68,6 +75,7 @@ class SpecDecodingLogging:
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
+        self.num_committed_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
@@ -75,6 +83,7 @@ class SpecDecodingLogging:
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
+        self.num_committed_tokens.append(spec_decoding_stats.num_committed_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
         )
@@ -85,21 +94,24 @@ class SpecDecodingLogging:
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        num_committed_tokens = np.sum(self.num_committed_tokens)
         draft_throughput = 0
         accepted_throughput = 0
+        committed_throughput = 0
 
         elapsed_time = time.monotonic() - self.last_log_time
         if elapsed_time > 0:
             draft_throughput = num_draft_tokens / elapsed_time
             accepted_throughput = num_accepted_tokens / elapsed_time
+            committed_throughput = num_committed_tokens / elapsed_time
 
         if self.is_diffusion:
             self._log_diffusion(
                 log_fn,
                 num_denoising_steps=num_drafts,
                 num_canvas_tokens=num_draft_tokens,
-                num_committed_tokens=num_accepted_tokens,
-                committed_throughput=accepted_throughput,
+                num_committed_tokens=num_committed_tokens,
+                committed_throughput=committed_throughput,
             )
             self.reset()
             return
@@ -110,8 +122,8 @@ class SpecDecodingLogging:
             else float("nan")
         )
 
-        # Conventionally, mean acceptance length includes the bonus token
-        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
+        # Mean acceptance length is based on tokens committed after stop handling.
+        mean_acceptance_length = num_committed_tokens / num_drafts
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
@@ -182,12 +194,10 @@ class SpecDecodingProm:
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_draft_tokens_total[$interval])
 
-    The mean acceptance length (conventionally including bonus tokens)
-    can be calculated using:
-
-      1 + (
-      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts[$interval]))
+    The terminal-aware mean acceptance length is reported by the text logger
+    and per-request metrics. The raw Prometheus counters below intentionally
+    preserve verifier acceptance semantics, so they do not contain enough
+    information to reconstruct terminal stop truncation.
 
     A per-position acceptance rate vector can be computed using
 

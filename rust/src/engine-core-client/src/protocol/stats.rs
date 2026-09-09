@@ -72,6 +72,9 @@ pub struct SpecDecodingStats {
     pub num_draft_tokens: u64,
     /// Number of accepted drafted tokens.
     pub num_accepted_tokens: u64,
+    /// Number of tokens actually committed after EOS/stop handling.
+    #[serde(default)]
+    pub num_committed_tokens: u64,
     /// Accepted drafted tokens counted by draft position.
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }

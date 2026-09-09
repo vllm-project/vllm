@@ -149,6 +149,7 @@ pub struct CudagraphLogKey {
 #[derive(Default)]
 pub struct SchedulerLogStatsInterval {
     pub spec_num_drafts: u64,
+    pub spec_committed_tokens: u64,
     pub spec_accepted_tokens_per_pos: Vec<u64>,
     pub cudagraph_counts: BTreeMap<CudagraphLogKey, u64>,
 }
@@ -157,6 +158,7 @@ impl SchedulerLogStatsInterval {
     /// Merge another drained interval into this one.
     pub fn merge(&mut self, other: Self) {
         self.spec_num_drafts += other.spec_num_drafts;
+        self.spec_committed_tokens += other.spec_committed_tokens;
 
         if self.spec_accepted_tokens_per_pos.len() < other.spec_accepted_tokens_per_pos.len() {
             self.spec_accepted_tokens_per_pos
@@ -183,9 +185,15 @@ pub struct SchedulerLogStatsAccumulator {
 
 impl SchedulerLogStatsAccumulator {
     /// Observe spec-decoding fields needed for per-position text-log rates.
-    pub fn observe_spec_decode(&self, num_drafts: u64, accepted_tokens_per_pos: &[u64]) {
+    pub fn observe_spec_decode(
+        &self,
+        num_drafts: u64,
+        accepted_tokens_per_pos: &[u64],
+        num_committed_tokens: u64,
+    ) {
         let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
         inner.spec_num_drafts += num_drafts;
+        inner.spec_committed_tokens += num_committed_tokens;
 
         if inner.spec_accepted_tokens_per_pos.len() < accepted_tokens_per_pos.len() {
             inner.spec_accepted_tokens_per_pos.resize(accepted_tokens_per_pos.len(), 0);
@@ -593,14 +601,15 @@ mod tests {
     fn log_stats_accumulator_drains_interval_data() {
         let accumulator = SchedulerLogStatsAccumulator::default();
 
-        accumulator.observe_spec_decode(2, &[1, 2]);
-        accumulator.observe_spec_decode(3, &[3, 4, 5]);
+        accumulator.observe_spec_decode(2, &[1, 2], 2);
+        accumulator.observe_spec_decode(3, &[3, 4, 5], 3);
         accumulator.observe_cudagraph(8, 16, 8, "FULL");
         accumulator.observe_cudagraph(8, 16, 8, "FULL");
 
         let interval = accumulator.drain();
 
         assert_eq!(interval.spec_num_drafts, 5);
+        assert_eq!(interval.spec_committed_tokens, 5);
         assert_eq!(interval.spec_accepted_tokens_per_pos, vec![4, 6, 5]);
         assert_eq!(
             interval

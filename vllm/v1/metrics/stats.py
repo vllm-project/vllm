@@ -319,6 +319,7 @@ class RequestSpecDecodeMetrics:
             (length ``num_spec_tokens + 1``).
         num_draft_tokens: Total proposed draft tokens, after the
             grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
+        num_committed_tokens: Total tokens committed after EOS/stop handling.
         per_step_accepted: Ordered accepted-draft count per verify step
             (``detailed`` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
@@ -330,6 +331,7 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    num_committed_tokens: int = 0
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -339,10 +341,19 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        detailed: bool = False,
+        num_committed_tokens: int | None = None,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
+        self.num_committed_tokens += (
+            num_accepted + 1
+            if num_committed_tokens is None
+            else num_committed_tokens
+        )
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
@@ -352,13 +363,15 @@ class RequestSpecDecodeMetrics:
 
         ``acceptance_histogram`` is a dense list indexed by accepted draft count
         ``j`` (length ``num_spec_tokens + 1``). ``mean_acceptance_length``
-        includes the bonus token (``j + 1``); ``draft_acceptance_rate`` is
-        draft-only, full precision. Per-step arrays are included only when
+        is based on tokens committed after EOS/stop handling; ``draft_acceptance_rate``
+        remains draft-only, full precision. Per-step arrays are included only when
         populated (``detailed`` level).
         """
         num_spec_steps = sum(self.histogram)
         num_accepted = sum(j * count for j, count in enumerate(self.histogram))
-        mean_al = 1.0 + num_accepted / num_spec_steps if num_spec_steps else 1.0
+        mean_al = (
+            self.num_committed_tokens / num_spec_steps if num_spec_steps else 1.0
+        )
         rate = num_accepted / self.num_draft_tokens if self.num_draft_tokens else 0.0
         result: dict[str, Any] = {
             "mean_acceptance_length": mean_al,
@@ -366,6 +379,7 @@ class RequestSpecDecodeMetrics:
             "acceptance_histogram": list(self.histogram),
             "num_spec_steps": num_spec_steps,
             "num_accepted_draft_tokens": num_accepted,
+            "num_committed_tokens": self.num_committed_tokens,
             "num_draft_tokens": self.num_draft_tokens,
             "num_spec_tokens": self.num_spec_tokens,
         }

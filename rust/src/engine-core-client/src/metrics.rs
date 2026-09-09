@@ -225,6 +225,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         handles.log_stats.observe_spec_decode(
             spec_decoding_stats.num_drafts,
             &spec_decoding_stats.num_accepted_tokens_per_pos,
+            spec_decoding_stats.num_committed_tokens,
         );
 
         for (position, accepted_tokens) in
