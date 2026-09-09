@@ -104,6 +104,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
@@ -145,6 +146,12 @@ QUANT_ALGOS = [*LINEAR_ALGOS, "MIXED_PRECISION"]
 def algos_owned_by(config_name: str) -> tuple[str, ...]:
     """The linear algos a given config accepts, for its quant_algo validation."""
     return tuple(a for a, (owner, _) in LINEAR_ALGOS.items() if owner == config_name)
+
+
+MODELOPT_MIXED_KV_CACHE_DTYPES = {
+    "FP8": "fp8_e4m3",
+    "NVFP4": "nvfp4",
+}
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
@@ -330,15 +337,16 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo")
 
-            # "kv_cache_scheme" (a dict) instead of "kv_cache_quant_algo" (a string).
-            kv_cache_scheme = config.get("kv_cache_scheme")
-            if isinstance(kv_cache_scheme, dict) and (
-                kv_cache_scheme.get("type") == "float"
-                and kv_cache_scheme.get("num_bits") == 8
-            ):
-                kv_cache_quant_method = "FP8"
-            else:
-                kv_cache_quant_method = None
+            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+            if kv_cache_quant_method is None:
+                # Compressed-tensors uses "kv_cache_scheme" (a dict) instead
+                # of "kv_cache_quant_algo" (a string).
+                kv_cache_scheme = config.get("kv_cache_scheme")
+                if isinstance(kv_cache_scheme, dict) and (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 8
+                ):
+                    kv_cache_quant_method = "FP8"
 
             # "ignore" is the key in config.json
             exclude_modules = config.get("ignore", [])
@@ -1474,9 +1482,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     Supports checkpoints where different layers use different quantization
     algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
-    The per-layer algorithm is specified in the ``quantized_layers`` dict
-    inside ``config.json``'s ``quantization_config`` (preferred) or the
-    legacy ``hf_quant_config.json``.
+    Weight algorithms are specified in ``quantized_layers``. Layer-wise KV
+    cache algorithms are specified in the versioned
+    ``kv_cache_quantized_layers`` mapping.
     """
 
     def __init__(
@@ -1484,6 +1492,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         kv_cache_quant_method: str | None,
         exclude_modules: list[str],
         quantized_layers: dict[str, dict[str, Any]],
+        kv_cache_quantized_layers: dict[str, dict[str, Any]],
+        kv_cache_schema_version: int | None,
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
         w4a16_nvfp4_config: ModelOptNvFp4Config,
@@ -1492,6 +1502,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
+        self.kv_cache_quantized_layers = kv_cache_quantized_layers
+        self.kv_cache_schema_version = kv_cache_schema_version
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
@@ -1559,17 +1571,55 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         group_size: int | None,
         **kwargs: Any,
     ) -> "ModelOptMixedPrecisionConfig":
-        if "quantization" in original_config:
-            quantized_layers = original_config["quantization"].get(
-                "quantized_layers", {}
-            )
-        else:
-            quantized_layers = original_config.get("quantized_layers", {})
+        quantization_config = original_config.get("quantization", original_config)
 
-        if not quantized_layers:
+        quantized_layers = quantization_config.get("quantized_layers", {})
+        kv_cache_quantized_layers: dict[str, dict[str, Any]] = {}
+        kv_cache_schema_version = quantization_config.get("kv_cache_schema_version")
+
+        if kv_cache_quant_method == "MIXED_PRECISION":
+            if type(kv_cache_schema_version) is not int or kv_cache_schema_version != 1:
+                raise ValueError(
+                    "ModelOpt mixed KV cache requires kv_cache_schema_version=1"
+                )
+            raw_kv_layers = quantization_config.get("kv_cache_quantized_layers")
+            if not isinstance(raw_kv_layers, dict) or not raw_kv_layers:
+                raise ValueError(
+                    "ModelOpt mixed KV cache requires a non-empty "
+                    "'kv_cache_quantized_layers' mapping"
+                )
+            for layer_name, layer_info in raw_kv_layers.items():
+                if not isinstance(layer_name, str) or not layer_name:
+                    raise ValueError(
+                        "kv_cache_quantized_layers keys must be non-empty strings"
+                    )
+                if not isinstance(layer_info, dict):
+                    raise ValueError(
+                        f"KV-cache entry for {layer_name!r} must be a dictionary"
+                    )
+                quant_algo = layer_info.get("quant_algo")
+                if not isinstance(quant_algo, str):
+                    raise ValueError(
+                        f"KV-cache entry for {layer_name!r} requires a string "
+                        "'quant_algo'"
+                    )
+                quant_algo = quant_algo.upper()
+                if quant_algo not in MODELOPT_MIXED_KV_CACHE_DTYPES:
+                    raise ValueError(
+                        f"Unsupported ModelOpt layer-wise KV-cache format "
+                        f"{quant_algo!r} for {layer_name!r}. Supported formats are "
+                        f"{sorted(MODELOPT_MIXED_KV_CACHE_DTYPES)}."
+                    )
+                kv_cache_quantized_layers[layer_name] = {
+                    **layer_info,
+                    "quant_algo": quant_algo,
+                }
+
+        if not quantized_layers and not kv_cache_quantized_layers:
             raise ValueError(
                 "MIXED_PRECISION quant_algo requires a non-empty "
-                "'quantized_layers' mapping in the quantization config."
+                "'quantized_layers' or 'kv_cache_quantized_layers' mapping in "
+                "the quantization config."
             )
 
         # Determine group_size from the first NVFP4-family entry if not
@@ -1621,6 +1671,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
             quantized_layers=quantized_layers,
+            kv_cache_quantized_layers=kv_cache_quantized_layers,
+            kv_cache_schema_version=kv_cache_schema_version,
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
             w4a16_nvfp4_config=w4a16_nvfp4_config,
@@ -1705,6 +1757,33 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        if self.kv_cache_quant_method != "MIXED_PRECISION":
+            return None
+        for candidate in self._kv_cache_layer_prefix_candidates(prefix):
+            layer_info = self.kv_cache_quantized_layers.get(candidate)
+            if layer_info is not None:
+                return cast(
+                    "CacheDType",
+                    MODELOPT_MIXED_KV_CACHE_DTYPES[layer_info["quant_algo"]],
+                )
+        return None
+
+    def has_layerwise_kv_cache(self) -> bool:
+        # This intentionally remains true for homogeneous per-layer recipes:
+        # layout selection runs before the resolved layer specs are available.
+        return self.kv_cache_quant_method == "MIXED_PRECISION"
+
+    def _kv_cache_layer_prefix_candidates(self, prefix: str) -> tuple[str, ...]:
+        prefixes = [prefix]
+        if prefix.endswith(".attn"):
+            prefixes.append(prefix.removesuffix(".attn"))
+
+        candidates: list[str] = []
+        for layer_prefix in prefixes:
+            candidates.extend(self._quantized_layer_prefix_candidates(layer_prefix))
+        return tuple(dict.fromkeys(candidates))
+
     @staticmethod
     def _quantized_layer_prefix_candidates(prefix: str) -> tuple[str, ...]:
         candidates = [prefix]
@@ -1729,7 +1808,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         """Return quantize-method based on layer."""
         # KV-cache quantization
         if isinstance(layer, Attention):
-            if self.kv_cache_quant_method:
+            if self.kv_cache_quant_method == "MIXED_PRECISION":
+                if self.get_kv_cache_dtype(prefix) is not None:
+                    return ModelOptKVCacheMethod(self)
+            elif self.kv_cache_quant_method:
                 return ModelOptKVCacheMethod(self)
             return None
 
@@ -1783,6 +1865,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)
+        if self.kv_cache_quantized_layers:
+            self.kv_cache_quantized_layers = hf_to_vllm_mapper.apply_dict(
+                self.kv_cache_quantized_layers
+            )
 
 
 # ===========================================================================
