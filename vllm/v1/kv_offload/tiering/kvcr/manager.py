@@ -198,8 +198,8 @@ class _FrameworkPinAdapter:
 
             job = parent.create_store_job(hit_keys, req_context)
             job_keys = tuple(job.keys)
-            block_ids = tuple(int(block_id) for block_id in job.block_ids)
-            if len(job_keys) != len(block_ids) or set(job_keys) != set(hit_keys):
+            chunk_ids = tuple(int(chunk_id) for chunk_id in job.chunk_ids)
+            if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
                 return None
 
             descriptors: dict[BlockKey, list[MemDescriptor] | None] = {
@@ -208,9 +208,9 @@ class _FrameworkPinAdapter:
             descriptors.update(
                 (
                     BlockKey(bytes(key)),
-                    [self._tier._make_descriptor(block_id)],
+                    [self._tier._make_descriptor(chunk_id)],
                 )
-                for key, block_id in zip(job_keys, block_ids)
+                for key, chunk_id in zip(job_keys, chunk_ids)
             )
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
@@ -463,9 +463,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(block_id))]
-            for key, block_id in zip(
-                job_metadata.keys, job_metadata.block_ids, strict=True
+            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            for key, chunk_id in zip(
+                job_metadata.keys, job_metadata.chunk_ids, strict=True
             )
         }
         if not blocks:
@@ -487,9 +487,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_adapter.encode(key): [self._make_descriptor(int(block_id))]
-            for key, block_id in zip(
-                job_metadata.keys, job_metadata.block_ids, strict=True
+            self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
+            for key, chunk_id in zip(
+                job_metadata.keys, job_metadata.chunk_ids, strict=True
             )
         }
         if not blocks:
@@ -622,11 +622,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         )
 
-    def _make_descriptor(self, block_id: int) -> MemDescriptor:
+    def _make_descriptor(self, chunk_id: int) -> MemDescriptor:
         return MemDescriptor(
             end_point_name=self._kvcr.config.nixl_agent_name,
             mem_type="DRAM",
-            addr=self._primary_base_addr + block_id * self._primary_row_stride,
+            addr=self._primary_base_addr + chunk_id * self._primary_row_stride,
             size=self._primary_row_stride,
             device_Id=0,
             info="",

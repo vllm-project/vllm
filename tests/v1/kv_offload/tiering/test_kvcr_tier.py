@@ -155,12 +155,12 @@ def _job(
     job_id: int,
     req_context: ReqContext,
     key: OffloadKey | None = None,
-    block_id: int = 0,
+    chunk_id: int = 0,
 ) -> TransferJob:
     return TransferJob(
         job_id=job_id,
         keys=[key if key is not None else OffloadKey(b"k0")],
-        block_ids=np.array([block_id], dtype=np.int64),
+        chunk_ids=np.array([chunk_id], dtype=np.int64),
         is_promotion=True,
         req_context=req_context,
     )
@@ -298,7 +298,7 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
     assert decode(BlockKey(bytes(same_hash_other_group))) == hash_123
     assert decode(BlockKey(bytes(other_key))) == (124).to_bytes(8, "big")
 
-    tier.submit_load(_job(7, ctx, key=key, block_id=2))
+    tier.submit_load(_job(7, ctx, key=key, chunk_id=2))
 
     # Here we verify that submitting a load for a hinted key asks KVCR to
     # deliver that key into the expected primary memory slot and completes the
@@ -353,7 +353,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
-    block_ids = {keys[0]: 1, keys[2]: 5}
+    chunk_ids = {keys[0]: 1, keys[2]: 5}
     lifecycle: list[str] = []
 
     class Parent:
@@ -368,7 +368,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
             return TransferJob(
                 job_id=11,
                 keys=requested_keys,
-                block_ids=np.array([block_ids[key] for key in requested_keys]),
+                chunk_ids=np.array([chunk_ids[key] for key in requested_keys]),
                 is_promotion=True,
                 req_context=req_context,
             )
@@ -488,7 +488,7 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     ]
 
     key = OffloadKey(b"k0")
-    tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, block_id=2))
+    tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, chunk_id=2))
 
     _, blocks = kvcr.deposit_calls[0]
     assert blocks[key][0].addr == tier._primary_base_addr + 2 * 16
@@ -556,7 +556,7 @@ def test_kvcr_tier_waits_for_all_completions_and_drains(monkeypatch):
         TransferJob(
             job_id=13,
             keys=keys,
-            block_ids=np.array([0, 1], dtype=np.int64),
+            chunk_ids=np.array([0, 1], dtype=np.int64),
             is_promotion=True,
             req_context=ReqContext(req_id="req"),
         )
