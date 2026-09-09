@@ -1840,6 +1840,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output,
                 input_batch.idx_mapping,
                 input_batch.req_ids,
+                attn_metadata,
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -34,6 +34,7 @@ class KVConnector:
         scheduler_output: "SchedulerOutput",
         batch_request_indices: torch.Tensor | None = None,
         batch_request_ids: list[str] | None = None,
+        attn_metadata: dict[str, Any] | None = None,
     ) -> None:
         pass
 
@@ -75,6 +76,7 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_start = False
         self._pending_request_state_indices: torch.Tensor | None = None
         self._pending_request_ids: list[str] | None = None
+        self._pending_attn_metadata: dict[str, Any] | None = None
         self._disabled = False
 
     def pre_forward(
@@ -82,6 +84,7 @@ class ActiveKVConnector(KVConnector):
         scheduler_output: "SchedulerOutput",
         batch_request_indices: torch.Tensor | None = None,
         batch_request_ids: list[str] | None = None,
+        attn_metadata: dict[str, Any] | None = None,
     ) -> None:
         if self._disabled:
             return
@@ -95,30 +98,36 @@ class ActiveKVConnector(KVConnector):
             or self.kv_connector.requires_pre_forward_start
         ):
             # Sync loads need to run before this step's forward.
-            self._start_load_kv(batch_request_indices, batch_request_ids)
+            self._start_load_kv(batch_request_indices, batch_request_ids, attn_metadata)
         else:
             # Start any async loads in post-forward instead, keeping
             # their host-side submission cost off the critical path.
             self._pending_load_start = True
             self._pending_request_state_indices = batch_request_indices
             self._pending_request_ids = batch_request_ids
+            self._pending_attn_metadata = attn_metadata
 
     def _start_load_kv(
         self,
         batch_request_indices: torch.Tensor | None = None,
         batch_request_ids: list[str] | None = None,
+        attn_metadata: dict[str, Any] | None = None,
     ) -> None:
         self._pending_load_start = False
         if batch_request_indices is None:
             batch_request_indices = self._pending_request_state_indices
         if batch_request_ids is None:
             batch_request_ids = self._pending_request_ids
+        if attn_metadata is None:
+            attn_metadata = self._pending_attn_metadata
         self._pending_request_state_indices = None
         self._pending_request_ids = None
+        self._pending_attn_metadata = None
         # TODO: sort out KV Connectors' use of forward_context
         worker_kwargs = {
             "request_state_indices": batch_request_indices,
             "request_ids": batch_request_ids,
+            "attn_metadata": attn_metadata,
         }
         if is_forward_context_available():
             self.kv_connector.start_load_kv(

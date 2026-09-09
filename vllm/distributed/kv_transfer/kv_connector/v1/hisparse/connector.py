@@ -243,11 +243,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         )
         request_ids = kwargs.get("request_ids")
         assert request_ids is None or isinstance(request_ids, list)
+        attn_metadata = kwargs.get("attn_metadata")
+        assert attn_metadata is None or isinstance(attn_metadata, dict)
         self.connector_worker.start_step(
             metadata,
             request_state_indices,
             request_ids,
         )
+        self.connector_worker.prepare_forward(attn_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return

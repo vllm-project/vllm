@@ -84,7 +84,13 @@ def test_connector_can_require_pre_forward_start(monkeypatch: pytest.MonkeyPatch
     events: list[str] = []
     connector = _make_connector(monkeypatch, events)
     connector.kv_connector.requires_pre_forward_start = True
+    attn_metadata = {"layer": object()}
 
-    connector.pre_forward(_scheduler_output(False))  # type: ignore[arg-type]
+    connector.pre_forward(  # type: ignore[arg-type]
+        _scheduler_output(False), attn_metadata=attn_metadata
+    )
 
     assert events == ["handle", "bind", "start"]
+    assert connector.kv_connector.start_load_kv.call_args.kwargs["attn_metadata"] is (
+        attn_metadata
+    )
