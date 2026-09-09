@@ -9,6 +9,7 @@ from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
+from vllm.utils import random_uuid
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
@@ -208,7 +209,11 @@ class ServingScores(PoolingServing):
         n_docs = len(ctx.engine_inputs) - n_queries
         query_engine_inputs = ctx.engine_inputs[:n_queries]
 
-        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        query_namespace = random_uuid()
+        query_keys = [
+            f"late-interaction-{query_namespace}-query-{i}" for i in range(n_queries)
+        ]
+        ctx.late_interaction_query_keys = query_keys
         query_uses = [n_docs if n_queries == 1 else 1] * n_queries
 
         for i in range(n_queries):
@@ -249,7 +254,9 @@ class ServingScores(PoolingServing):
         n_docs = len(ctx.engine_inputs) - n_queries
         doc_engine_inputs = ctx.engine_inputs[n_queries:]
 
-        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        query_keys = ctx.late_interaction_query_keys
+        if query_keys is None:
+            raise RuntimeError("Late-interaction query keys were not initialized.")
         doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
 
         for i in range(n_docs):

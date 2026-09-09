@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_PLE_CPU_OFFLOAD: bool = False
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -261,6 +262,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_ENABLE_COHERE_API: bool = False
+    VLLM_ENABLE_SCALE_OUT_ENDPOINTS: bool | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -351,6 +353,15 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def maybe_convert_scale_out_endpoints(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized not in ("0", "1"):
+        raise ValueError("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1")
+    return maybe_convert_bool(normalized)
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -632,9 +643,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
-    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
-    # the worker's `execute_model` and `sample_tokens` calls. Valid values
-    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # If set, enable GPU<->CPU synchronization checking around the worker's
+    # `execute_model` and `sample_tokens` calls, via PyTorch's sync debug mode
+    # plus wrappers flagging `non_blocking` CPU<->CUDA copies that silently
+    # block the host (CPU tensors that are not pinned or not densely laid out).
+    # Valid values are "warn" (warn on each sync) or "error" (raise on sync).
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
@@ -1864,6 +1877,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
     ),
+    # If set to 1, expose the scale-out endpoints on `vllm serve`.
+    # The dedicated `vllm launch render` server exposes render and derender
+    # endpoints when this variable is unset or set to 1.
+    "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": lambda: maybe_convert_scale_out_endpoints(
+        os.getenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS") or None
+    ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
         int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
@@ -2059,6 +2078,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
+    # Keep Qwen4Exp PLE embedding tables in pinned CPU memory and gather their
+    # rows through UVA on a dedicated CUDA stream.
+    # Legacy fallback for EngramConfig.cpu_offload, which takes precedence.
+    # This environment variable may be removed in a future release.
+    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "0"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2291,6 +2315,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
+        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
