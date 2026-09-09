@@ -50,6 +50,11 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
+    chunk_gdn_hip_fwd,
+    is_hip_gdn_available,
+    is_hip_gdn_supported,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -128,9 +133,30 @@ def _aiter_flydsl_unsupported_reasons(
     return reasons
 
 
+def _hip_gdn_unsupported_reasons(
+    vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
+) -> list[str]:
+    """Every reason the HIP GDN prefill kernel cannot serve this model, or an
+    empty list if it can."""
+    reasons = []
+    if head_k_dim != 128 or head_v_dim != 128:
+        reasons.append(
+            f"linear head dims are K={head_k_dim} V={head_v_dim}; "
+            "the HIP kernel requires 128/128"
+        )
+    dtype = vllm_config.model_config.dtype
+    if dtype not in (torch.bfloat16, torch.float16):
+        reasons.append(
+            f"model dtype is {dtype}; the HIP kernel requires bfloat16 or float16"
+        )
+    return reasons
+
+
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"]]:
+) -> tuple[
+    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"]
+]:
     """Resolve GDN prefill backend.
 
     The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
@@ -154,6 +180,12 @@ def _resolve_gdn_prefill_backend(
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
+
+    The HIP GDN prefill kernel is chosen when:
+    * "hip" is requested on RDNA3.5 (gfx1150-gfx1153), or "auto" on gfx1151;
+    * the build includes ``_rocm_C.rdna35_gdn_chunked``;
+    * the model uses BF16 or FP16 activations with
+      ``head_k_dim == head_v_dim == 128``.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -204,8 +236,24 @@ def _resolve_gdn_prefill_backend(
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
+        if backend == "hip":
+            if not is_hip_gdn_available():
+                raise RuntimeError(
+                    "GDN prefill backend 'hip' was requested but "
+                    "_rocm_C.rdna35_gdn_chunked is unavailable. It is built "
+                    "and registered only for RDNA3.5 (gfx1150-gfx1153)."
+                )
+            reasons = _hip_gdn_unsupported_reasons(vllm_config, head_k_dim, head_v_dim)
+            if reasons:
+                logger.warning_once(
+                    "GDN prefill backend 'hip' was requested but %s. "
+                    "Falling back to Triton/FLA.",
+                    "; ".join(reasons),
+                )
+                return backend, "triton"
+            return backend, "hip"
         if backend == "auto":
-            from vllm.platforms.rocm import on_mi3xx
+            from vllm.platforms.rocm import on_gfx1151, on_mi3xx
 
             if (
                 on_mi3xx()
@@ -215,12 +263,20 @@ def _resolve_gdn_prefill_backend(
                 and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
             ):
                 return backend, "aiter_flydsl"
+            if (
+                on_gfx1151()
+                and not _hip_gdn_unsupported_reasons(
+                    vllm_config, head_k_dim, head_v_dim
+                )
+                and is_hip_gdn_available()
+            ):
+                return backend, "hip"
         return backend, "triton"
 
-    if backend == "aiter_flydsl":
+    if backend in ("aiter_flydsl", "hip"):
         raise RuntimeError(
-            "GDN prefill backend 'aiter_flydsl' was requested but it is a ROCm "
-            f"AITER backend and the current platform is {current_platform.device_name}."
+            f"GDN prefill backend '{backend}' was requested but it is a ROCm "
+            f"backend and the current platform is {current_platform.device_name}."
         )
 
     if not current_platform.is_cuda():
@@ -277,6 +333,7 @@ def _log_gdn_backend_decision(
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
         "aiter_flydsl": "AITER FlyDSL",
+        "hip": "HIP",
         "triton": "Triton/FLA",
         "sycl": "SYCL",
     }[active_backend]
@@ -378,6 +435,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cutedsl
         elif active_backend == "aiter_flydsl":
             self._forward_method = self.forward_aiter_flydsl
+        elif active_backend == "hip":
+            self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_native
 
@@ -520,6 +579,58 @@ class ChunkGatedDeltaRule(CustomOp):
         if core_attn_out is not None:
             o_flat = o.reshape(-1)
             core_attn_out.reshape(-1)[: o_flat.numel()].copy_(o_flat)
+        return o, final_state
+
+    def forward_hip(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
+    ):
+        if not is_hip_gdn_supported(q, v, cu_seqlens):
+            return self.forward_native(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                core_attn_out=core_attn_out,
+            )
+
+        if use_qk_l2norm_in_kernel:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+
+        assert cu_seqlens is not None
+        o, final_state = chunk_gdn_hip_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=k.shape[-1] ** -0.5,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            core_attn_out=core_attn_out,
+        )
+        if not output_final_state:
+            final_state = None
         return o, final_state
 
 
