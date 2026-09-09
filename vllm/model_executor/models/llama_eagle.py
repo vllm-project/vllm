@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -14,7 +15,10 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.model_executor.models.llama import (
+    LlamaDecoderLayer as BaseLlamaDecoderLayer,
+)
+from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import (
     AutoWeightsLoader,
@@ -27,7 +31,16 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class LlamaDecoderLayer(LlamaDecoderLayer):
+if TYPE_CHECKING:
+
+    class _EagleLlamaForCausalLMBase(nn.Module):
+        pass
+
+else:
+    _EagleLlamaForCausalLMBase = LlamaForCausalLM
+
+
+class LlamaDecoderLayer(BaseLlamaDecoderLayer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -69,7 +82,9 @@ class LlamaModel(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         # Get drafter's quantization config
@@ -128,10 +143,12 @@ class LlamaModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class EagleLlamaForCausalLM(LlamaForCausalLM):
+class EagleLlamaForCausalLM(_EagleLlamaForCausalLMBase):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
