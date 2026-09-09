@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
@@ -331,6 +332,8 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # Logical token ranges supported by the keys selected for this load.
+    load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -1000,52 +1003,37 @@ class OffloadingConnectorScheduler:
     ) -> list[tuple[CacheHitSource, int]]:
         """Return ordered token counts by the tier that supplied each hit.
 
-        Full-attention groups provide a direct token-to-offload-key mapping.
-        When several such groups back the same token range, disagreement is
-        reported as ``external`` instead of crediting one tier arbitrarily.
-        Models without a full-attention group retain the conservative
-        ``external`` fallback because a sliding-window state can represent
-        more tokens than the chunks physically loaded.
+        Full-attention keys support their own token ranges. Sparse groups
+        (sliding-window, chunked-local, or recurrent state) support the whole
+        reused prefix, including tokens whose KV is no longer retained.
+        Only keys selected for loading participate. Overlapping dependencies
+        from different sources are reported as ``external``.
         """
         if num_external_tokens == 0:
             return []
-        if not self._full_attention_groups:
-            return [(CacheHitSource.EXTERNAL, num_external_tokens)]
-
         req_status = self._req_status[request.request_id]
         start = req_status.num_locally_computed_tokens
         end = start + num_external_tokens
-        boundaries = {start, end}
-        for group_idx in self._full_attention_groups:
-            tokens_per_chunk = self.config.kv_group_configs[group_idx].tokens_per_chunk
-            boundary = ((start // tokens_per_chunk) + 1) * tokens_per_chunk
-            while boundary < end:
-                boundaries.add(boundary)
-                boundary += tokens_per_chunk
+        events: dict[int, Counter[CacheHitSource]] = {
+            start: Counter(),
+            end: Counter(),
+        }
+        for range_start, range_end, key in req_status.load_key_ranges:
+            range_start, range_end = max(start, range_start), min(end, range_end)
+            if range_start >= range_end:
+                continue
+            source = self.manager.get_load_source(key, req_status.req_context)
+            events.setdefault(range_start, Counter())[source] += 1
+            events.setdefault(range_end, Counter())[source] -= 1
 
-        ordered_boundaries = sorted(boundaries)
+        ordered_boundaries = sorted(events)
+        active_sources: Counter[CacheHitSource] = Counter()
         segments: list[tuple[CacheHitSource, int]] = []
         for segment_start, segment_end in zip(
             ordered_boundaries, ordered_boundaries[1:]
         ):
-            sources: set[CacheHitSource] = set()
-            for group_idx in self._full_attention_groups:
-                group_config = self.config.kv_group_configs[group_idx]
-                partial_boundary = req_status.partial_tail_boundary
-                if partial_boundary is not None and segment_start >= round_down(
-                    partial_boundary, group_config.tokens_per_chunk
-                ):
-                    key = self._make_boundary_key(request, group_idx, partial_boundary)
-                else:
-                    chunk_idx = segment_start // group_config.tokens_per_chunk
-                    group_keys = req_status.group_states[group_idx].offload_keys
-                    if chunk_idx >= len(group_keys):
-                        sources.add(CacheHitSource.EXTERNAL)
-                        continue
-                    key = group_keys[chunk_idx]
-
-                sources.add(self.manager.get_load_source(key, req_status.req_context))
-
+            active_sources.update(events[segment_start])
+            sources = {source for source, count in active_sources.items() if count > 0}
             source = (
                 next(iter(sources)) if len(sources) == 1 else CacheHitSource.EXTERNAL
             )
@@ -1072,6 +1060,7 @@ class OffloadingConnectorScheduler:
             assert partial_tail_boundary == num_cached_tokens
 
         keys_to_load: list[OffloadKey] = []
+        req_status.load_key_ranges.clear()
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1124,13 +1113,27 @@ class OffloadingConnectorScheduler:
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
                 assert len(offload_keys) >= end_chunk_idx
-                keys_to_load.extend(offload_keys[start_chunk_idx:end_chunk_idx])
+                group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
-                    keys_to_load.append(
+                    group_keys_to_load.append(
                         self._make_boundary_key(
                             request, group_config.group_idx, partial_tail_boundary
                         )
                     )
+                keys_to_load.extend(group_keys_to_load)
+                for chunk_idx, key in enumerate(group_keys_to_load, start_chunk_idx):
+                    if group_config.sliding_window_size_in_chunks is not None:
+                        range_start = num_locally_computed_tokens
+                        range_end = num_cached_tokens
+                    else:
+                        range_start = max(
+                            load_start_gpu_block_idx * tokens_per_block,
+                            chunk_idx * tokens_per_chunk,
+                        )
+                        range_end = min(
+                            num_cached_tokens, (chunk_idx + 1) * tokens_per_chunk
+                        )
+                    req_status.load_key_ranges.append((range_start, range_end, key))
 
             dst_block_ids.extend(
                 block.block_id

@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -838,7 +839,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
-                external_cached_token_sources: list[tuple[str, int]] | None = None
+                external_cached_token_sources: (
+                    list[tuple[CacheHitSource, int]] | None
+                ) = None
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
@@ -931,25 +934,6 @@ class Scheduler(SchedulerInterface):
                         step_skipped_waiting.prepend_request(request)
                         continue
 
-                    # Track first scheduled prefill, not post-preemption repeat prefills
-                    if request.prefill_stats and request.num_preemptions <= 0:
-                        assert num_computed_tokens <= request.num_prompt_tokens
-                        if num_external_computed_tokens and isinstance(
-                            self.connector, KVConnectorBase_V1
-                        ):
-                            external_cached_token_sources = (
-                                self.connector.get_external_cache_hit_sources(
-                                    request, num_external_computed_tokens
-                                )
-                            )
-                        request.prefill_stats.set(
-                            num_prompt_tokens=request.num_prompt_tokens,
-                            num_local_cached_tokens=num_new_local_computed_tokens,
-                            num_external_cached_tokens=num_external_computed_tokens,
-                            external_cached_token_sources=(
-                                external_cached_token_sources
-                            ),
-                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -1136,6 +1120,28 @@ class Scheduler(SchedulerInterface):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Attribute the first prefill after the connector builds its load plan.
+                if (
+                    did_prefix_cache_lookup
+                    and request.prefill_stats
+                    and request.num_preemptions <= 0
+                ):
+                    assert num_computed_tokens <= request.num_prompt_tokens
+                    if num_external_computed_tokens and isinstance(
+                        self.connector, KVConnectorBase_V1
+                    ):
+                        external_cached_token_sources = (
+                            self.connector.get_external_cache_hit_sources(
+                                request, num_external_computed_tokens
+                            )
+                        )
+                    request.prefill_stats.set(
+                        num_prompt_tokens=request.num_prompt_tokens,
+                        num_local_cached_tokens=num_new_local_computed_tokens,
+                        num_external_cached_tokens=num_external_computed_tokens,
+                        external_cached_token_sources=external_cached_token_sources,
+                    )
 
                 # Record at admission so unscheduled lookups are not counted.
                 if did_prefix_cache_lookup:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -2117,14 +2117,15 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
+@pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
     block_size = 16
     num_matched_tokens = 2 * block_size
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(
             matched_tokens=num_matched_tokens,
-            is_async=False,
+            is_async=is_async,
         ),
         block_size=block_size,
     )
@@ -2135,6 +2136,11 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
     )[0]
     assert scheduler.connector is not None
     get_sources = Mock(return_value=[("p2p", block_size), ("host", block_size)])
+    update_state = Mock(wraps=scheduler.connector.update_state_after_alloc)
+    calls = Mock()
+    calls.attach_mock(update_state, "allocated")
+    calls.attach_mock(get_sources, "sources")
+    monkeypatch.setattr(scheduler.connector, "update_state_after_alloc", update_state)
     monkeypatch.setattr(
         scheduler.connector,
         "get_external_cache_hit_sources",
@@ -2142,14 +2148,26 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
     )
 
     scheduler.add_request(request)
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        scheduler.schedule()
+    get_sources.assert_not_called()
+    update_state.assert_not_called()
     scheduler.schedule()
 
     get_sources.assert_called_once_with(request, num_matched_tokens)
+    assert [c[0] for c in calls.mock_calls] == ["allocated", "sources"]
     assert request.prefill_stats is not None
     assert request.prefill_stats.external_cached_token_sources == [
         ("p2p", block_size),
         ("host", block_size),
     ]
+    if is_async:
+        _step_until_kv_transfer_finished(scheduler, [request.request_id])
+        get_sources.assert_called_once()
+        assert request.prefill_stats.external_cached_token_sources == [
+            ("p2p", block_size),
+            ("host", block_size),
+        ]
 
 
 @pytest.mark.parametrize("is_async", [False, True])

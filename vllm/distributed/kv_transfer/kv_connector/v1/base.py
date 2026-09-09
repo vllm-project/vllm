@@ -493,10 +493,9 @@ class KVConnectorBase_V1(ABC):
 
         The returned segments must be in prompt-token order, contain canonical
         ``CacheHitSource`` values, and sum to ``num_external_tokens``. The
-        scheduler calls this only after accepting the external hit returned by
-        :meth:`get_num_new_matched_tokens`, so connectors should report the
-        source that actually supplied those tokens rather than a speculative
-        lookup result.
+        scheduler calls this after :meth:`update_state_after_alloc`, so
+        connectors can attribute the accepted hit using the actual load plan
+        rather than a speculative lookup result.
 
         Connectors that cannot provide finer attribution use the conservative
         ``external`` source supplied by this default implementation.
