@@ -62,6 +62,9 @@ class SharedExperts(torch.nn.Module):
         # alias the same inputs
         self._is_multistream_safe = is_multistream_safe
 
+        # Set per forward by MoERunner, where both inputs are in scope.
+        self._inputs_observed_disjoint = False
+
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
@@ -112,19 +115,15 @@ class SharedExperts(torch.nn.Module):
         if self._mk_can_overlap_shared_experts():
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
-        # On ROCm, empirically only DP-only deployments benefit from the overlap.
-        overlap_is_beneficial = not current_platform.is_rocm() or (
-            self._moe_config.moe_parallel_config.dp_size > 1
-            and self._moe_config.moe_parallel_config.tp_size == 1
-        )
-
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda_alike()
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            and overlap_is_beneficial
-            and self._is_multistream_safe()
+            # _is_multistream_safe infers disjoint inputs from quantization.
+            # Also accept observing it directly, which the proxy misses when the
+            # routed input is unquantized but distinct (Kimi-K3 latent MoE).
+            and (self._is_multistream_safe() or self._inputs_observed_disjoint)
         )
 
         if should_run_shared_in_aux_stream:

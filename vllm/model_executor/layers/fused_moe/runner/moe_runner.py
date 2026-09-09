@@ -887,6 +887,12 @@ class MoERunner(MoERunnerInterface):
         # before routed expert dispatch.
         shared_experts_overlapping = False
         if self._shared_experts is not None:
+            # Compare storage, so views over one buffer count as aliasing.
+            self._shared_experts._inputs_observed_disjoint = (
+                shared_experts_input is not None
+                and hidden_states.untyped_storage().data_ptr()
+                != shared_experts_input.untyped_storage().data_ptr()
+            )
             shared_experts_overlapping = self._shared_experts.maybe_forward_async(
                 shared_experts_input
             )
