@@ -10,6 +10,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
@@ -577,7 +578,7 @@ def causal_conv1d_fn(
     dim, cu_seqlen = x.shape
     _, width = weight.shape
     state_len = width - 1
-    np2_statelen = triton.next_power_of_2(state_len)
+    np2_statelen = next_power_of_2(state_len)
 
     padded_batch = query_start_loc.size(0) - 1
     stride_x_dim = x.stride(0)
@@ -756,7 +757,7 @@ def causal_conv1d_fn(
         num_stages=2,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
-    return out.to(original_x_dtype)
+    return out if out.dtype == original_x_dtype else out.to(original_x_dtype)
 
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
@@ -1157,7 +1158,9 @@ def causal_conv1d_update(
         assert activation in ["silu", "swish"]
 
     original_x_dtype = x.dtype
-    x = x.to(conv_state.dtype)
+    conv_state_dtype = conv_state.dtype
+    if original_x_dtype != conv_state_dtype:
+        x = x.to(conv_state_dtype)
     if out is None:
         out = x
     else:
@@ -1221,7 +1224,7 @@ def causal_conv1d_update(
         state_len = width - 1 + (seqlen - 1)  # effective state_len needed
     else:
         state_len = width - 1
-    np2_statelen = triton.next_power_of_2(state_len)
+    np2_statelen = next_power_of_2(state_len)
 
     def grid(META):
         return (
@@ -1276,7 +1279,7 @@ def causal_conv1d_update(
     )
     if unsqueeze:
         out = out.squeeze(-1)
-    return out.to(original_x_dtype)
+    return out if out.dtype == original_x_dtype else out.to(original_x_dtype)
 
 
 if current_platform.is_cpu():
