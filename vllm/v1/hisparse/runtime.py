@@ -997,6 +997,18 @@ class HiSparseCacheHandle:
         )
 
 
+def prepare_hisparse_for_graph_replay(
+    attn_metadata: dict[str, Any],
+    forward_context: dict[str, Any],
+) -> None:
+    """Refresh host-side mirror state skipped by FULL CUDA graph replay."""
+    for layer_name, metadata in attn_metadata.items():
+        layer = forward_context.get(layer_name)
+        cache = getattr(layer, "hisparse_cache", None)
+        if cache is not None and cache.runtime.is_group_leader:
+            cache.prepare_group_for_batch(metadata)
+
+
 def create_hisparse_cache_handle(
     vllm_config: VllmConfig,
     model_top_k: int,
