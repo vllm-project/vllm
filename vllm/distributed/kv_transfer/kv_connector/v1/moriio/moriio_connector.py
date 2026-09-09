@@ -505,7 +505,35 @@ class MoRIIOConnectorScheduler:
 
             return len(token_ids) - num_computed_tokens, True
 
-        return len(token_ids) - 1 - num_computed_tokens, False
+        # READ mode: pull all-but-one prompt token's KV from the remote prefill
+        # instance, computing the final token locally to sample the first
+        # decode token.
+        #
+        # Route this remote KV load through vLLM's ASYNC path
+        # (load_kv_async=True) instead of the synchronous one. On the async
+        # path the scheduler holds the request in WAITING_FOR_REMOTE_KVS and
+        # keeps it OUT of ``num_scheduled_tokens`` until the worker reports the
+        # load done via ``get_finished()`` -> ``finished_recving``. This is the
+        # same lifecycle WRITE mode already uses for its consumer leg.
+        #
+        # Doing so structurally removes the ``scheduler.update_from_output``
+        # ``req_id_to_index`` KeyError (PR #54301): with the synchronous path
+        # (load_kv_async=False) the decode request went straight to RUNNING and
+        # was placed in ``num_scheduled_tokens`` immediately, but for the step
+        # where the worker produced no output row for it, its compound PD
+        # req_id was absent from ``model_runner_output.req_id_to_index`` and the
+        # scheduler's unconditional index lookup raised ``KeyError`` ->
+        # ``EngineDeadError``. On the async path the request is never
+        # scheduled-but-unindexed, so the crash cannot occur -- and core
+        # ``scheduler.py`` stays upstream-clean (see PR #54301 review: "This
+        # should be fixed in the connector, not the scheduler.").
+        num_external_tokens = len(token_ids) - 1 - num_computed_tokens
+        if num_external_tokens > 0:
+            return num_external_tokens, True
+        # Nothing to load remotely (tiny prompt / full local hit): keep the
+        # synchronous path. The scheduler asserts num_external_computed_tokens
+        # > 0 for async loads, and there is no recv to await here.
+        return num_external_tokens, False
 
     def send_notify_block(
         self,
@@ -1943,14 +1971,21 @@ class MoRIIOConnectorWorker:
                 self._unmatched_write_completions |= fresh
                 done_recving = self._unmatched_write_completions
             else:
-                # READ mode: the scheduler treats KV loads as synchronous
-                # (load_kv_async=False), so requests go directly to RUNNING
-                # instead of WAITING_FOR_REMOTE_KVS. We still call
-                # _pop_done_transfers() to send the notify to the prefill
-                # side and clean up internal state, but we must NOT report
-                # these as done_recving because the scheduler doesn't
-                # expect a finished_recving signal for RUNNING requests.
-                self._pop_done_transfers()
+                # READ mode: the remote KV load now uses vLLM's ASYNC path
+                # (MoRIIOConnectorScheduler.get_num_new_matched_tokens returns
+                # load_kv_async=True), so the decode request waits in
+                # WAITING_FOR_REMOTE_KVS -- held OUT of num_scheduled_tokens --
+                # until we report it done here. _pop_done_transfers() returns
+                # the transfer_ids whose RDMA reads have fully landed (and, as
+                # before, sends the release notify to the prefill side and
+                # cleans up internal state). Surfacing them as done_recving
+                # makes the scheduler promote the request and schedule its
+                # forward, so it is NEVER scheduled-but-unindexed -- which is
+                # what previously raised the req_id_to_index KeyError in
+                # scheduler.update_from_output (PR #54301). Mirrors the
+                # WRITE-mode consumer's finished_recving handling above.
+                # transfer_ids are mapped to request_ids by the filter below.
+                done_recving = self._pop_done_transfers()
 
         done_recving = {
             self.transfer_id_to_request_id[id]
