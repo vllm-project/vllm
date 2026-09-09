@@ -119,6 +119,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
@@ -207,7 +208,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         Returns True if all beams are exhausted and search should stop.
         """
         all_beams: list[BeamSearchSequence] = list(
-            sum((instance.beams for instance in instances_batch), [])
+            itertools.chain.from_iterable(
+                instance.beams for instance in instances_batch
+            )
         )
         pos = [0] + list(
             itertools.accumulate(len(instance.beams) for instance in instances_batch)
@@ -441,6 +444,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
+                detokenize=False,
                 allowed_token_ids=(
                     allowed_ids
                     if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS

@@ -10,8 +10,8 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
-    maybe_remap_moe_expert_param_name,
     maybe_remap_kv_scale_name,
+    maybe_remap_moe_expert_param_name,
     remap_moe_expert_weights,
 )
 
@@ -235,6 +235,17 @@ class TestMaybeRemapMoeExpertParamName:
             "model.layers.0.mlp.experts.routed_experts.w2_weight"
         )
         assert mapped_weights[0][1] is weight
+
+
+def test_checkpoint_weight_mapper_discards_serialized_g_idx():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+
+    mapper = QuantizationConfig.get_checkpoint_weight_mapper()
+
+    assert mapper._map_name("model.layers.0.g_idx") is None
+    assert mapper._map_name("model.layers.0.qweight") == "model.layers.0.qweight"
 
 
 class TestKvCacheScaleMapper:

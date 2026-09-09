@@ -31,6 +31,7 @@ async def test_hf_resolver_with_direct_path():
     assert hf_resolver is not None
 
     lora_request = await hf_resolver.resolve_lora(LORA_REPO_MODEL_NAME, LORA_REPO)
+    assert lora_request is not None
     assert lora_request.lora_name == LORA_REPO
     assert REPO_DOWNLOAD_DIR in lora_request.lora_path
     assert "adapter_config.json" in os.listdir(lora_request.lora_path)

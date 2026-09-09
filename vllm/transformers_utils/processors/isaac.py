@@ -7,7 +7,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    ImageProcessingMixin,
+    ProcessorMixin,
+    TensorType,
+)
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
@@ -322,7 +327,7 @@ class IsaacProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-
     }
 
 
-class IsaacImageProcessor:
+class IsaacImageProcessor(ImageProcessingMixin):
     model_input_names = ["pixel_values", "image_grid_thw"]
 
     def __init__(

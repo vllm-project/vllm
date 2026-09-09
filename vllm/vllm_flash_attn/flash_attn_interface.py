@@ -210,7 +210,9 @@ def flash_attn_varlen_func(
     cp_tot_seqused_k=None,
     # FA4 only
     mask_mod=None,
+    block_sparse_tensors=None,
     aux_tensors=None,
+    aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
@@ -385,10 +387,24 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if block_sparse_tensors is not None:
+            assert block_sparse_tensors.full_block_cnt is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_cnt "
+                "instead of passing None"
+            )
+            assert block_sparse_tensors.full_block_idx is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_idx "
+                "instead of passing None"
+            )
+
+        # FA4 only accepts descales for FP8 inputs. The attention backends
+        # initialize these tensors even when the inputs are not quantized.
+        if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+            q_descale = k_descale = v_descale = None
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        out, softmax_lse = _flash_attn_fwd(
+        out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
@@ -409,7 +425,12 @@ def flash_attn_varlen_func(
             out=out,
             learnable_sink=s_aux,
             mask_mod=mask_mod,
+            block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
+            aux_tensor_leading_dims=aux_tensor_leading_dims,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             output_scale=output_scale,
         )
     else:

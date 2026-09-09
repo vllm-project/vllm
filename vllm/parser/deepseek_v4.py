@@ -47,12 +47,14 @@ DSML_TOOL_END = f"</{_DSML}tool_calls>"
 DSML_INVOKE_PREFIX = f'<{_DSML}invoke name="'
 DSML_INVOKE_NAME_END = '">'
 DSML_INVOKE_END = f"</{_DSML}invoke>"
+DSML_PARAM_START = f"<{_DSML}parameter"
 DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*?)</{_ESCAPED_DSML}parameter>",
+    rf"(.*?)"
+    rf"(?:</{_ESCAPED_DSML}parameter>|(?=<{_ESCAPED_DSML}parameter\s+name=))",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
@@ -134,6 +136,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
             "INVOKE_END": DSML_INVOKE_END,
+            "PARAM_START": DSML_PARAM_START,
             "PARAM_CLOSE": DSML_PARAM_CLOSE,
         },
         token_id_terminals={
@@ -174,6 +177,10 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
@@ -183,7 +190,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
             # Parallel tool calls
@@ -191,8 +198,14 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # A tool call ends the turn: stay in TOOL_BETWEEN so any text
+            # after the block is dropped.
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
+                (),
+            ),
+            (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
                 (),
             ),
         },
@@ -217,10 +230,12 @@ class DeepSeekV4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.pop("chat_template_kwargs", None) or {}
-        thinking = (
-            bool(chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking"))
-            and chat_kwargs.get("reasoning_effort") != "none"
+        thinking = bool(
+            chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking")
         )
+        if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
+            thinking = True
+        thinking = thinking and chat_kwargs.get("reasoning_effort") != "none"
         super().__init__(
             tokenizer,
             tools,

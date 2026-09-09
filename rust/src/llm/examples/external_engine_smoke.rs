@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -56,6 +59,7 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
+        session_id: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
     }

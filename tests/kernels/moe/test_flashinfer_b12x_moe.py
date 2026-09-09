@@ -41,6 +41,9 @@ from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    reorder_w1w3_to_w3w1,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 # Dimensions chosen to satisfy FP4 alignment requirements (k multiple of 256,
@@ -51,23 +54,6 @@ MNK_FACTORS = [
     (16, 128, 256),
     (64, 256, 512),
 ]
-
-
-def _reorder_gate_up_to_up_gate(
-    w: torch.Tensor,
-    w_s: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Swap gate and up-projection halves along dim=1 to [up, gate] order.
-
-    The B12x kernel expects weights in [up (w3), gate (w1)] order while the
-    BF16 reference uses [gate (w1), up (w3)].  This replicates the reordering
-    done at model-load time by ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``.
-    """
-    n = w.shape[1] // 2
-    return (
-        torch.cat([w[:, n:, :], w[:, :n, :]], dim=1),
-        torch.cat([w_s[:, n:, :], w_s[:, :n, :]], dim=1),
-    )
 
 
 def _process_b12x_weights(
@@ -142,9 +128,14 @@ def test_flashinfer_b12x_moe(
         sf_vec_size = 16
 
         # W1: reorder BF16 from [gate, up] → [up, gate], then quantise.
-        w1_reordered = torch.cat(
-            [w1_bf16[:, n:, :], w1_bf16[:, :n, :]], dim=1
-        )  # shape (e, 2n, k), [up, gate]
+        # Note: in reorder_w1w3_to_w3w1, "w1" refers to the gate projection
+        # and "w3" refers to the up projection.
+        # A dummy scale is passed and discarded; real scales come from
+        # fp4_quantize after reordering.
+        w1_reordered, _ = reorder_w1w3_to_w3w1(
+            w1_bf16.clone(),
+            torch.ones((e, 2 * n, 1), device="cuda", dtype=torch.float32),
+        )
         w1_flat = w1_reordered.reshape(e * 2 * n, k)
         w1_q_flat, w1_sf_flat = fp4_quantize(
             w1_flat,
@@ -190,6 +181,7 @@ def test_flashinfer_b12x_moe(
             moe_config=moe_config,
             quant_config=quant_config,
         )
+
         _process_b12x_weights(
             experts,
             w1_blockscale,
@@ -324,7 +316,6 @@ def test_flashinfer_b12x_moe_relu2(
                 use_monolithic=False,
             ),
             experts,
-            inplace=False,
         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)

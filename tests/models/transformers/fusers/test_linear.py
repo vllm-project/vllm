@@ -10,8 +10,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.model_executor.models.transformers.fuser import get_fuser
-from vllm.model_executor.models.transformers.fusers import GLUFuser, QKVFuser
+from vllm.model_executor.models.transformers.fuser import Fusers, get_fuser, get_fusers
+from vllm.model_executor.models.transformers.fusers import (
+    GLUFuser,
+    MergedColumnParallelFuser,
+    PackedQKVFuser,
+    QKVFuser,
+    packed_qkv,
+    qkv,
+)
+from vllm.model_executor.models.transformers.fx_utils import trace
 
 
 class SiluAndMulStub(nn.Module):
@@ -71,6 +79,26 @@ class NotAnActGLUMLP(GLUMLP):
     def __init__(self):
         super().__init__()
         self.act_fn = nn.Dropout()
+
+
+class BroadcastGLU(NoDownGLU):
+    """A broadcast multiply cannot use an equal-halves AndMul kernel."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = nn.Linear(16, 1, bias=False)
+
+
+class ExtraProjGLU(GLUMLP):
+    """A third linear on the same input (e.g. a router) -> gate/up still fuse."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = nn.Linear(16, 4, bias=False)
+
+    def forward(self, x):
+        gated = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return gated, self.router(x)
 
 
 class UntraceableMLP(GLUMLP):
@@ -160,6 +188,42 @@ class ReversedFakeAttention(FakeAttention):
         return self.o_proj(attn_output.reshape(*input_shape, -1)), None
 
 
+class FourParallelLinears(nn.Module):
+    """Four same-input projections of different widths -> one merged linear."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj_a = nn.Linear(8, 4)
+        self.proj_b = nn.Linear(8, 6)
+        self.proj_c = nn.Linear(8, 8)
+        self.proj_d = nn.Linear(8, 10)
+
+    def forward(self, x):
+        return self.proj_a(x), self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class MutatingParallelLinears(FourParallelLinears):
+    def forward(self, x):
+        a = self.proj_a(x)
+        x.add_(1)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
+class PlainQKV(nn.Module):
+    """q/k/v returned as a bare tuple: no reshape stands between the calls and
+    the return, so both QKVFuser and MergedColumnParallelFuser can rewrite it."""
+
+    def __init__(self, hidden: int = 32, heads: int = 4, head_dim: int = 8):
+        super().__init__()
+        self.q_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.k_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden, heads * head_dim, bias=False)
+        self.head_dim = head_dim
+
+    def forward(self, x):
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+
 class ExtraProjAttention(FakeAttention):
     """A second non-qkv linear of a different width -> `o_proj` still found."""
 
@@ -203,8 +267,105 @@ class PerHeadQKNormAttention(FakeAttention):
         return self.o_proj((q + k + v).flatten(-2)), None
 
 
+class ResidDropoutAttention(FakeAttention):
+    """GPT-style dropout after `o_proj` -> the output projection is still found."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.resid_dropout = nn.Dropout(0.0)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.resid_dropout(self.o_proj(attn_output)), None
+
+
+class PackedQKVAttention(nn.Module):
+    """GPTBigCode-style: one packed projection split into q/k/v in the forward."""
+
+    is_causal = True
+
+    def __init__(
+        self,
+        hidden: int = 32,
+        head_dim: int = 8,
+        heads: int = 4,
+        kv_heads: int = 1,
+        bias: bool = False,
+        layer_idx: int = 0,
+    ):
+        super().__init__()
+        self.config = SimpleNamespace(_attn_implementation="vllm")
+        self.layer_idx = layer_idx
+        self.head_dim = head_dim
+        self.scaling = head_dim**-0.5
+        self.embed_dim = heads * head_dim
+        self.kv_dim = kv_heads * head_dim
+        self.c_attn = nn.Linear(hidden, self.embed_dim + 2 * self.kv_dim, bias=bias)
+        self.c_proj = nn.Linear(self.embed_dim, hidden, bias=bias)
+        self.resid_dropout = nn.Dropout(0.0)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        q, k, v = (
+            self.c_attn(hidden_states)
+            .unsqueeze(1)
+            .split((self.embed_dim, self.kv_dim, self.kv_dim), dim=3)
+        )
+        q = q.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.resid_dropout(self.c_proj(attn_output)), attn_weights
+
+
+class PerHeadSplitAttention(nn.Module):
+    """A packed projection reshaped and split *per head* -> not a q/k/v split."""
+
+    def __init__(self, hidden: int = 32, head_dim: int = 8, heads: int = 4):
+        super().__init__()
+        self.head_dim = head_dim
+        self.heads = heads
+        self.c_attn = nn.Linear(hidden, 3 * heads * head_dim)
+        self.c_proj = nn.Linear(heads * head_dim, hidden)
+
+    def forward(self, hidden_states):
+        shape = (*hidden_states.shape[:2], self.heads, 3 * self.head_dim)
+        q, k, v = (
+            self.c_attn(hidden_states)
+            .view(shape)
+            .transpose(1, 2)
+            .split((self.head_dim, self.head_dim, self.head_dim), dim=3)
+        )
+        return self.c_proj((q + k + v).transpose(1, 2).flatten(-2))
+
+
 class FakeSelfAttn(nn.Module):
-    """Stand-in for the vLLM `Attention` looked up in `attention_instances`."""
+    """Stand-in for the vLLM `Attention` attached to the dispatching module."""
 
     def __init__(self):
         super().__init__()
@@ -215,11 +376,19 @@ class FakeSelfAttn(nn.Module):
         return q + 2 * k + 3 * v
 
 
+class FakeMQASelfAttn(FakeSelfAttn):
+    """Stand-in for grouped/multi-query layouts, where `k`/`v` are narrower."""
+
+    def forward(self, q, k, v):
+        groups = q.shape[-1] // k.shape[-1]
+        return q + (2 * k + 3 * v).repeat(1, groups)
+
+
 @pytest.fixture(autouse=True)
 def _clear_fuser_cache():
-    get_fuser.cache_clear()
+    get_fusers.cache_clear()
     yield
-    get_fuser.cache_clear()
+    get_fusers.cache_clear()
 
 
 def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
@@ -258,10 +427,20 @@ def _apply_qkv_fuser_with_stubs(module: nn.Module, fuser: QKVFuser):
         merged.weight.copy_(torch.cat([q.weight, k.weight, v.weight], dim=0))
         if q.bias is not None:
             merged.bias.copy_(torch.cat([q.bias, k.bias, v.bias], dim=0))
-    merged.split_sizes = [q.out_features, k.out_features, v.out_features]
+    merged.output_sizes = [q.out_features, k.out_features, v.out_features]
+    merged.tp_size = 1
     setattr(module, fuser.merged_name, merged)
     for name in (fuser.q_name, fuser.k_name, fuser.v_name):
         delattr(module, name)
+    module.forward = MethodType(fuser.fused_forward, module)
+    return module
+
+
+def _apply_packed_qkv_fuser_with_stubs(module: nn.Module, fuser: PackedQKVFuser):
+    """Apply a fuser at `tp_size == 1`, where the rewritten split is unchanged."""
+    qkv = module.get_submodule(fuser.qkv_name)
+    qkv.output_sizes = [fuser.q_size, fuser.kv_size, fuser.kv_size]
+    qkv.tp_size = 1
     module.forward = MethodType(fuser.fused_forward, module)
     return module
 
@@ -271,7 +450,7 @@ def _apply_qkv_fuser_with_stubs(module: nn.Module, fuser: QKVFuser):
 def test_detects_and_rewrites_glu(mlp_cls, bias):
     with torch.device("meta"):
         meta = mlp_cls(bias=bias)
-    fuser = get_fuser(meta)
+    fuser = get_fuser(meta, GLUFuser)
     assert isinstance(fuser, GLUFuser)
     assert (
         fuser.gate_name,
@@ -299,6 +478,19 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     torch.testing.assert_close(fused(x), expected, atol=1e-5, rtol=1e-5)
 
 
+def test_glu_fuses_alongside_unrelated_projections():
+    """Sibling linears the GLU does not consume must not block the fusion."""
+    with torch.device("meta"):
+        fuser = get_fuser(ExtraProjGLU(), GLUFuser)
+    assert fuser is not None
+    assert (fuser.gate_name, fuser.up_name) == ("gate_proj", "up_proj")
+    real = ExtraProjGLU()
+    x = torch.randn(4, 16)
+    expected = real(x)
+    fused = _apply_glu_fuser_with_stubs(real, fuser)
+    torch.testing.assert_close(fused(x), expected)
+
+
 def test_glu_identifies_down_projection():
     """The row projection consuming `act(gate(x)) * up(x)` is identified.
 
@@ -306,9 +498,9 @@ def test_glu_identifies_down_projection():
     matches the column-parallel merged gate/up; `None` when there is no such
     projection to force (fusion of gate/up still applies)."""
     with torch.device("meta"):
-        assert get_fuser(GLUMLP()).down_name == "down_proj"
-        assert get_fuser(ReversedGLUMLP()).down_name == "down_proj"
-        assert get_fuser(NoDownGLU()).down_name is None
+        assert get_fuser(GLUMLP(), GLUFuser).down_name == "down_proj"
+        assert get_fuser(ReversedGLUMLP(), GLUFuser).down_name == "down_proj"
+        assert get_fuser(NoDownGLU(), GLUFuser).down_name is None
 
 
 @pytest.mark.parametrize("attn_cls", [FakeAttention, ReversedFakeAttention])
@@ -318,7 +510,7 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
         pytest.skip("MHA q/k/v assignment is order-based by design")
     with torch.device("meta"):
         meta = attn_cls(kv_heads=kv_heads)
-    fuser = get_fuser(meta)
+    fuser = get_fuser(meta, QKVFuser)
     assert isinstance(fuser, QKVFuser)
     # q (sharded differently under TP) must be identified exactly; k/v may be
     # swapped for non-canonical compute order, which is numerically consistent
@@ -332,7 +524,8 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
     # original semantics (branches, kwargs, attribute reads)
     code = fuser.fused_forward.__code__
     names = code.co_names
-    assert "qkv_proj" in names and "split_sizes" in names and "o_proj" in names
+    assert "qkv_proj" in names and "output_sizes" in names and "o_proj" in names
+    assert "tp_size" in names
     assert not {"q_proj", "k_proj", "v_proj"} & set(names)
     if attn_cls is FakeAttention:
         assert "update" in names  # the cache branch survives
@@ -345,46 +538,180 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
     for p in real.parameters():
         nn.init.normal_(p, std=0.05)
     x = torch.randn(1, 5, 32)
-    attention_instances = {3: FakeSelfAttn()}
-    expected, _ = real(x, attention_instances=attention_instances)
+    real.attn = FakeSelfAttn()
+    expected, _ = real(x)
     fused = _apply_qkv_fuser_with_stubs(real, fuser)
 
     # Fusion is in place: the module keeps its class and other attributes
     assert fused is real and type(fused) is attn_cls
     assert fused.layer_idx == 3 and fused.is_causal and fused.config is not None
-    out, _ = fused(x, attention_instances=attention_instances)
+    out, _ = fused(x)
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
 
 
 def test_qkv_identifies_output_projection():
     with torch.device("meta"):
-        assert get_fuser(FakeAttention()).o_name == "o_proj"
-        assert get_fuser(ReversedFakeAttention()).o_name == "o_proj"
-        assert get_fuser(ExtraProjAttention()).o_name == "o_proj"
+        assert get_fuser(FakeAttention(), QKVFuser).o_name == "o_proj"
+        assert get_fuser(ReversedFakeAttention(), QKVFuser).o_name == "o_proj"
+        assert get_fuser(ExtraProjAttention(), QKVFuser).o_name == "o_proj"
         # Norm children (q_norm/k_norm) must not disturb o_proj identification.
-        assert get_fuser(QKNormAttention()).o_name == "o_proj"
-        assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
+        assert get_fuser(QKNormAttention(), QKVFuser).o_name == "o_proj"
+        assert get_fuser(PerHeadQKNormAttention(), QKVFuser).o_name == "o_proj"
+        # A module between o_proj and the return is transparent.
+        assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
 
 
-def test_fuser_is_cached_per_class():
+def test_merged_column_fuser_rejects_input_mutation():
+    """The later projections must not be moved ahead of an input mutation."""
     with torch.device("meta"):
-        fuser_a = get_fuser(GLUMLP())
-        fuser_b = get_fuser(GLUMLP())
+        module = MutatingParallelLinears()
+    fuser = MergedColumnParallelFuser.match(trace(module), module)
+    assert fuser is not None
+    with pytest.raises(ValueError, match="cross other operations"):
+        fuser.update_forward(module)
+
+
+def test_merged_column_fuser_supports_any_number_of_linears(
+    default_vllm_config, monkeypatch
+):
+    from vllm.model_executor import parameter
+    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+    from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+
+    monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
+    with torch.device("meta"):
+        meta = FourParallelLinears()
+    fuser = MergedColumnParallelFuser.match(trace(meta), meta)
+    assert fuser is not None
+    assert fuser.linear_names == ("proj_a", "proj_b", "proj_c", "proj_d")
+    assert fuser.shards == [
+        ("proj_a", 0),
+        ("proj_b", 1),
+        ("proj_c", 2),
+        ("proj_d", 3),
+    ]
+    fuser.update_forward(meta)
+
+    real = FourParallelLinears()
+    x = torch.randn(2, 8)
+    expected = real(x)
+    weights = [
+        (name, weight.detach().clone()) for name, weight in real.named_parameters()
+    ]
+    fused = fuser.fuse(real, "parallel", default_vllm_config)
+    root = nn.Module()
+    root.parallel = fused
+    mapper = WeightsMapper(orig_to_new_stacked=fuser.orig_to_new_stacked("parallel"))
+    AutoWeightsLoader(root).load_weights(
+        ((f"parallel.{name}", weight) for name, weight in weights), mapper=mapper
+    )
+
+    merged = getattr(fused, fuser.merged_name)
+    assert isinstance(merged, MergedColumnParallelLinear)
+    dispatch_cpu_unquantized_gemm(merged, remove_weight=False)
+    for actual, reference in zip(fused(x), expected):
+        torch.testing.assert_close(actual, reference)
+
+
+def test_merged_name_is_unique_per_linear_names():
+    """The computed name must not collide across different projections, so
+    stacking two unrelated fusions can never clobber packed_modules_mapping."""
+    ab_c = MergedColumnParallelFuser(source_cls="M", linear_names=("a_b", "c"))
+    a_bc = MergedColumnParallelFuser(source_cls="M", linear_names=("a", "b_c"))
+    assert ab_c.merged_name != a_bc.merged_name
+    # Same names -> same (and therefore safely re-mergeable) name.
+    dup = MergedColumnParallelFuser(source_cls="M", linear_names=("a_b", "c"))
+    assert ab_c.merged_name == dup.merged_name
+
+
+def test_heterogeneous_instances_fall_back_to_merged_column_fuser(
+    default_vllm_config,
+):
+    """Same class and structure -> both fusers are cached as candidates. A
+    layer whose out_features aren't a multiple of its own head_dim (as a
+    misconfigured or heterogeneous checkpoint might have) fails QKVFuser's
+    validation and must still fuse via the generic fallback, while a
+    well-formed sibling of the same class keeps using QKVFuser."""
+    with torch.device("meta"):
+        container = nn.Module()
+        container.compatible = PlainQKV(head_dim=8)
+        container.incompatible = PlainQKV(head_dim=8)
+    container.incompatible.head_dim = 5  # 32 % 5 != 0, unlike q_proj's 32 % 8
+
+    candidates = get_fusers(container.compatible)
+    assert any(isinstance(f, QKVFuser) for f in candidates)
+    assert any(isinstance(f, MergedColumnParallelFuser) for f in candidates)
+
+    fusers = Fusers(container, default_vllm_config)
+    assert isinstance(fusers[container.compatible][0], QKVFuser)
+    assert isinstance(fusers[container.incompatible][0], MergedColumnParallelFuser)
+
+
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_detects_and_rewrites_packed_qkv(kv_heads):
+    """A single projection split into q/k/v must be re-sharded, not merged.
+
+    Only the split sizes change: `QKVParallelLinear` loads the packed
+    checkpoint weight as-is, and shards q by heads while replicating k/v."""
+    with torch.device("meta"):
+        meta = PackedQKVAttention(kv_heads=kv_heads)
+    fuser = get_fuser(meta, PackedQKVFuser)
+    assert isinstance(fuser, PackedQKVFuser)
+    assert (fuser.qkv_name, fuser.o_name) == ("c_attn", "c_proj")
+    assert (fuser.q_size, fuser.kv_size) == (32, 8 * kv_heads)
+
+    # The hard-coded widths become the per-rank widths of the sharded linear
+    names = fuser.fused_forward.__code__.co_names
+    assert "output_sizes" in names and "tp_size" in names
+    assert "kv_dim" not in names and "embed_dim" not in names
+
+    # Numerics: the rewritten forward must match the original on a real instance
+    real = PackedQKVAttention(kv_heads=kv_heads, layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    real.attn = FakeMQASelfAttn()
+    expected, _ = real(x)
+    fused = _apply_packed_qkv_fuser_with_stubs(real, fuser)
+
+    # Fusion is in place: the module keeps its class and other attributes
+    assert fused is real and type(fused) is PackedQKVAttention
+    assert fused.layer_idx == 3 and fused.is_causal
+    out, _ = fused(x)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_per_head_split_is_not_packed_qkv():
+    """The split must consume the whole projection, else its sizes are head
+    widths and re-sharding by them would be wrong."""
+    with torch.device("meta"):
+        assert get_fuser(PerHeadSplitAttention(), PackedQKVFuser) is None
+
+
+def test_fuser_is_cached_per_class_and_structure():
+    with torch.device("meta"):
+        fuser_a = get_fuser(GLUMLP(), GLUFuser)
+        fuser_b = get_fuser(GLUMLP(), GLUFuser)
     assert fuser_a is fuser_b
-    assert GLUMLP in get_fuser.cache
+    assert any(key[0] is GLUMLP for key in get_fusers.cache)
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
 def test_non_matching_modules_return_none(cls):
     with torch.device("meta"):
         module = cls()
-    assert get_fuser(module) is None
+    assert get_fuser(module, GLUFuser) is None
 
 
 def test_untraceable_tail_still_fuses():
     with torch.device("meta"):
         meta = UntraceableTailGLUMLP()
-    fuser = get_fuser(meta)
+    fuser = get_fuser(meta, GLUFuser)
     assert isinstance(fuser, GLUFuser)
 
     # Numerics: the live tail must survive the rewrite
@@ -401,8 +728,8 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
     from vllm.model_executor.models.utils import WeightsMapper
 
     with torch.device("meta"):
-        glu_fuser = get_fuser(GLUMLP())
-        qkv_fuser = get_fuser(FakeAttention())
+        glu_fuser = get_fuser(GLUMLP(), GLUFuser)
+        qkv_fuser = get_fuser(FakeAttention(), QKVFuser)
 
     mapper = WeightsMapper()
     for prefix in ("model.layers.0.mlp", "model.layers.1.mlp"):
@@ -451,15 +778,14 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
     }
 
 
-@pytest.mark.parametrize("cls", [NotAnMLP, NotAnActGLUMLP])
+@pytest.mark.parametrize("cls", [NotAnMLP, NotAnActGLUMLP, BroadcastGLU])
 def test_unfusable_modules_are_not_fused(cls, default_vllm_config):
     with torch.device("meta"):
         module = cls()
-    fuser = get_fuser(module)
+    fuser = get_fuser(module, GLUFuser)
     # Either no pattern matches the class, or this instance fails validation
     # (`recursive_replace` gates fusion and its weight mappings on `validate`)
-    model_config = default_vllm_config.model_config
-    assert fuser is None or not fuser.validate(module, model_config)
+    assert fuser is None or not fuser.validate(module, default_vllm_config)
 
 
 def test_act_and_mul_derived_from_module(default_vllm_config):
@@ -478,3 +804,69 @@ def test_act_and_mul_derived_from_module(default_vllm_config):
     assert GLUFuser._get_act_and_mul_name(nn.LayerNorm(8)) is None
     with pytest.raises(ValueError, match="No AndMul equivalent"):
         GLUFuser._get_act_and_mul(nn.Dropout())
+
+
+def _wider_model_config(head_dim: int) -> SimpleNamespace:
+    """A model whose global head size is twice `head_dim`, as a wider layer
+    elsewhere in a heterogeneous checkpoint would make it."""
+    return SimpleNamespace(
+        model_config=SimpleNamespace(get_head_size=lambda: 2 * head_dim),
+        quant_config=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "cls, fuser_module, fuser_cls",
+    [
+        (FakeAttention, qkv, QKVFuser),
+        (PackedQKVAttention, packed_qkv, PackedQKVFuser),
+    ],
+)
+def test_head_counts_come_from_the_module_not_the_model(
+    cls, fuser_module, fuser_cls, monkeypatch
+):
+    """A layer narrower than the model-wide head size must not be miscounted.
+
+    On a heterogeneous checkpoint (Gemma 4) the model-wide head size is the
+    largest across layers, so deriving `total_num_heads = out_features //
+    head_size` from it undercounts heads on a narrower layer. The widths still
+    add up, so nothing raises below TP=4: the layer is just sharded wrong.
+    """
+    head_dim, heads, kv_heads = 8, 8, 4
+    vllm_config = _wider_model_config(head_dim)
+    with torch.device("meta"):
+        module = cls(hidden=32, head_dim=head_dim, heads=heads, kv_heads=kv_heads)
+
+    # Both replacements shard, so they need a TP group; only the head counts
+    # the fuser derives are under test here.
+    captured = {}
+    monkeypatch.setattr(
+        fuser_module,
+        "QKVParallelLinear",
+        lambda **kwargs: captured.update(kwargs) or nn.Identity(),
+    )
+    monkeypatch.setattr(
+        fuser_module, "replace_linear_class", lambda *a, **kw: nn.Identity()
+    )
+    fuser = get_fuser(module, fuser_cls)
+    assert fuser is not None and fuser.validate(module, vllm_config)
+    fuser.update_attrs(module, "model.layers.0.self_attn", vllm_config)
+
+    assert captured["head_size"] == head_dim
+    assert captured["total_num_heads"] == heads
+    assert captured["total_num_kv_heads"] == kv_heads
+
+
+def test_validate_accepts_a_layer_the_model_wide_head_size_would_reject():
+    """`validate` gates fusion, so a wrong head size silently disables it."""
+    head_dim, heads, kv_heads = 8, 8, 3
+    vllm_config = _wider_model_config(head_dim)
+    with torch.device("meta"):
+        module = FakeAttention(
+            hidden=32, head_dim=head_dim, heads=heads, kv_heads=kv_heads
+        )
+
+    # kv width is 24, not a multiple of the model-wide 16, but is of this
+    # layer's 8.
+    fuser = get_fuser(module, QKVFuser)
+    assert fuser is not None and fuser.validate(module, vllm_config)

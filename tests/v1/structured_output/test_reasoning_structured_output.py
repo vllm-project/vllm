@@ -3,6 +3,7 @@
 
 """Unit tests for reasoning-aware structured output functionality (PR #25515)."""
 
+from collections.abc import Sequence
 from unittest.mock import Mock
 
 import pytest
@@ -11,6 +12,33 @@ from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+
+
+class UntouchableTokenIds(Sequence[int]):
+    """A token history that fails the test if anything reads it."""
+
+    def __init__(self, length: int) -> None:
+        self._length = length
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, item):
+        raise AssertionError("token history must not be read")
+
+    def __iter__(self):
+        raise AssertionError("token history must not be iterated")
+
+
+def make_qwen3_reasoner():
+    """A real engine-based reasoning adapter over a tiny mock vocabulary."""
+    from tests.parser.engine.conftest import make_mock_tokenizer
+    from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
+
+    tokenizer = make_mock_tokenizer(
+        {"<think>": 200, "</think>": 201, "<tool_call>": 202, "</tool_call>": 203}
+    )
+    return Qwen3ParserReasoningAdapter(tokenizer)
 
 
 class MockReasoner:
@@ -73,6 +101,7 @@ class TestReasoningStructuredOutput:
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         request.num_computed_tokens = 5
         request.num_output_placeholders = 0
+        request.request_id = "mock_req"
         return request
 
     @pytest.fixture
@@ -83,17 +112,62 @@ class TestReasoningStructuredOutput:
         return manager
 
     def test_should_fill_bitmask_with_enable_in_reasoning(
-        self, mock_vllm_config, mock_request_with_structured_output
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_fill_bitmask when enable_in_reasoning is True."""
-        # Enable enable_in_reasoning
-        mock_vllm_config.structured_outputs_config.enable_in_reasoning = True
-
-        manager = StructuredOutputManager(mock_vllm_config)
+        manager_with_reasoner.enable_in_reasoning = True
 
         # Should always return True when enable_in_reasoning is enabled
-        result = manager.should_fill_bitmask(mock_request_with_structured_output)
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
+
+    def test_should_fill_bitmask_reasoning_already_ended(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """An active grammar does not need a request-local reasoner."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
+
+        assert result is True
+        assert structured_req.reasoner is None
+
+    def test_grammar_bitmask_skips_reasoner_when_already_active(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Bitmask generation skips reasoning-boundary detection."""
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 1
+        manager_with_reasoner._grammar_bitmask = Mock()
+        manager_with_reasoner._grammar_bitmask.shape = (1, 1)
+        expected_bitmask = Mock()
+        manager_with_reasoner._grammar_bitmask.numpy.return_value = expected_bitmask
+        manager_with_reasoner._fill_bitmasks = Mock()
+
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = True
+        request_id = mock_request_with_structured_output.request_id
+
+        bitmask = manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={},
+        )
+
+        assert bitmask is expected_bitmask
+        assert structured_req.reasoner is None
 
     def test_should_fill_bitmask_without_enable_in_reasoning(
         self,
@@ -170,6 +244,10 @@ class TestReasoningStructuredOutput:
             mock_request_with_structured_output
         )
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
 
     def test_should_advance_reasoning_not_ended(
         self,
@@ -208,37 +286,11 @@ class TestReasoningStructuredOutput:
             mock_request_with_structured_output
         )
 
-        # Should set reasoning_ended to True but return False for this step
+        # The scheduler trims the reasoning prefix before advancing the grammar.
         assert (
             mock_request_with_structured_output.structured_output_request.reasoning_ended
             is True
         )
-        assert result is False
-
-    def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
-    ):
-        """When reasoning ends this step, advance immediately for structural
-        tags with speculative decoding."""
-        structured_req = mock_request_with_structured_output.structured_output_request
-        structured_req.reasoning_ended = False
-        structured_req.structured_output_key = (
-            StructuredOutputOptions.STRUCTURAL_TAG,
-            "{}",
-        )
-        reasoner = MockReasoner(tokenizer=Mock())
-        reasoner.is_reasoning_end_streaming.return_value = True
-        structured_req.reasoner = reasoner
-
-        manager_with_reasoner.vllm_config.speculative_config = Mock()
-
-        result = manager_with_reasoner.should_advance(
-            mock_request_with_structured_output
-        )
-
-        assert structured_req.reasoning_ended is True
         assert result is True
 
     def test_should_advance_reasoning_already_ended(
@@ -258,3 +310,248 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoner
+            is None
+        )
+
+    def test_should_advance_uses_new_token_ids_when_provided(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Regression for #43388: when caller passes new_token_ids, the
+        reasoner sees the exact multi-token delta rather than the
+        placeholder-derived window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        end_token_id = 248069
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        # Detection mirrors the real Qwen3 parser: end token in the delta.
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda input_ids, delta_ids: end_token_id in list(delta_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
+        # but only 1 placeholder remains (some drafts were rejected).
+        # The placeholder math would yield delta=[271] and miss </think>.
+        # Passing new_token_ids must override that.
+        new_token_ids = [9, 198, end_token_id, 271]
+        mock_request_with_structured_output.all_token_ids = [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ] + new_token_ids
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 1
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        # First call to is_reasoning_end_streaming was with the full
+        # new_token_ids (not the truncated placeholder window).
+        first_call = reasoner.is_reasoning_end_streaming.call_args_list[0]
+        _, called_delta = first_call.args
+        assert list(called_delta) == new_token_ids
+
+        assert structured_req.reasoning_ended is True
+        assert result is True
+
+    def test_should_advance_without_new_token_ids_falls_back(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Backward compat: callers that don't pass new_token_ids keep
+        the original placeholder-derived delta window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = False
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
+        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.num_output_placeholders = 2
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        # placeholder window: start = 5 - 2 = 3, delta = [4, 5]
+        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
+        assert list(called_delta) == [4, 5]
+        assert result is False
+
+    def test_should_advance_whole_delta_fallback_pins_last_sequence_index(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When only the whole-delta predicate fires, the boundary is the
+        last index of the sequence, even if the placeholder window
+        overshoots it and the delta is empty.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        # Base-default shape: rescans the whole sequence, ignores the delta.
+        reasoner.is_reasoning_end_streaming.return_value = True
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
+        # placeholder window: start = 9 - 1 = 8, past the end -> delta = []
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 1
+
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+        assert structured_req.reasoning_ended is True
+        assert structured_req.reasoning_end_token_index == 4
+
+    def test_should_advance_trims_reasoning_prefix_for_json(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """JSON uses the common trim-then-advance path at the boundary."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON_OBJECT,
+            "{}",
+        )
+
+        marker = 248069
+
+        class MarkerReasoner:
+            def __init__(self, *_, **__):
+                pass
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return marker in list(delta_ids)
+
+        structured_req.reasoner = MarkerReasoner()
+
+        new_token_ids = [9, 198, marker, 271, 5005]
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        structured_req.grammar.accept_tokens.assert_not_called()
+        assert structured_req.reasoning_ended is True
+        assert result is True
+        assert structured_req.reasoning_end_token_index == 5
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            mock_request_with_structured_output, new_token_ids
+        ) == [271, 5005]
+
+    def test_should_advance_engine_adapter_scans_only_the_delta(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Engine-based parsers locate the boundary from the delta alone."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = make_qwen3_reasoner()
+        assert reasoner.reasoning_end_token_ids == {201, 202}
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=AssertionError("engine path must not rescan the prefix")
+        )
+        structured_req.reasoner = reasoner
+
+        new_token_ids = [9, 198, 201, 271]
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=new_token_ids
+        )
+        assert structured_req.reasoning_ended is True
+        assert structured_req.reasoning_end_token_index == 5
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            mock_request_with_structured_output, new_token_ids
+        ) == [271]
+
+    def test_should_advance_engine_adapter_tool_start_ends_reasoning(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = make_qwen3_reasoner()
+
+        new_token_ids = [9, 202, 271]
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=new_token_ids
+        )
+        assert structured_req.reasoning_end_token_index == 4
+
+    def test_should_advance_engine_adapter_no_boundary(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = make_qwen3_reasoner()
+
+        new_token_ids = [9, 198, 271]
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
+
+        assert not manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=new_token_ids
+        )
+        assert structured_req.reasoning_ended is False
+
+    def test_should_advance_engine_adapter_never_reads_history(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Per-step cost must not depend on how much has been generated."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = make_qwen3_reasoner()
+
+        new_token_ids = [9, 201]
+        total = (1 << 20) + len(new_token_ids)
+        mock_request_with_structured_output.all_token_ids = UntouchableTokenIds(total)
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=new_token_ids
+        )
+        assert structured_req.reasoning_end_token_index == total - 1
+
+    def test_should_advance_engine_adapter_without_new_tokens_persists(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Draft-validation callers persist the boundary like the legacy path."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = make_qwen3_reasoner()
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5, 201, 7]
+        # placeholder window: start = 7 - 2 = 5, delta = [201, 7]
+        mock_request_with_structured_output.num_computed_tokens = 7
+        mock_request_with_structured_output.num_output_placeholders = 2
+
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+        assert structured_req.reasoning_ended is True
+        assert structured_req.reasoning_end_token_index == 5

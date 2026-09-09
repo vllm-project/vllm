@@ -8,13 +8,13 @@ actual NCCL communication.
 """
 
 import os
+import weakref
 from dataclasses import dataclass
 from unittest.mock import patch
 
 import pytest
 import torch
 
-from vllm import LLM
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -92,11 +92,6 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
 
-    @staticmethod
-    def trainer_send_weights(*args, **kwargs):
-        """Mock method to simulate trainer sending weights."""
-        pass
-
 
 def mock_create_engine(config, vllm_config, device, model):
     """Mock factory function that returns our mock engine."""
@@ -107,25 +102,24 @@ def mock_create_engine(config, vllm_config, device, model):
 
 
 @create_new_process_for_each_test()
-def test_get_world_size_tp1():
+def test_get_world_size_tp1(vllm_runner):
     """Test world_size is correctly configured for TP=1."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
-    llm = LLM(
-        model=MODEL_NAME,
+    with vllm_runner(
+        MODEL_NAME,
         enforce_eager=True,
         load_format="dummy",
         tensor_parallel_size=1,
         weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    )
-
-    world_size = llm.llm_engine.vllm_config.parallel_config.world_size
-    assert world_size == 1
+    ) as runner:
+        world_size = runner.llm.llm_engine.vllm_config.parallel_config.world_size
+        assert world_size == 1
 
 
 @create_new_process_for_each_test()
-def test_init_weight_transfer_engine_calls_engine():
+def test_init_weight_transfer_engine_calls_engine(vllm_runner):
     """Test that init_weight_transfer_engine calls the engine's
     init_transfer_engine method."""
     if torch.accelerator.device_count() < 1:
@@ -136,17 +130,20 @@ def test_init_weight_transfer_engine_calls_engine():
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-    with patch(
-        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
-        mock_create_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            mock_create_engine,
+        ),
+        vllm_runner(
+            MODEL_NAME,
             enforce_eager=True,
             load_format="dummy",
             tensor_parallel_size=1,
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
 
         # Verify engine was created
         def check_engine_exists(self):
@@ -175,7 +172,7 @@ def test_init_weight_transfer_engine_calls_engine():
 
 
 @create_new_process_for_each_test()
-def test_update_weights_calls_engine():
+def test_update_weights_calls_engine(vllm_runner):
     """Test that update_weights calls the engine's receive_weights method."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
@@ -185,17 +182,20 @@ def test_update_weights_calls_engine():
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-    with patch(
-        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
-        mock_create_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            mock_create_engine,
+        ),
+        vllm_runner(
+            MODEL_NAME,
             enforce_eager=True,
             load_format="dummy",
             tensor_parallel_size=1,
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
 
         # First init the weight transfer
         llm.init_weight_transfer_engine(
@@ -234,10 +234,11 @@ def test_update_weights_calls_engine():
             assert shapes == test_shapes
 
         llm.finish_weight_update()
+        assert llm.get_weight_version() == "default"
 
 
 @create_new_process_for_each_test()
-def test_full_weight_transfer_flow():
+def test_full_weight_transfer_flow(vllm_runner):
     """Test the complete weight transfer flow: init -> start -> update -> finish."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
@@ -247,17 +248,22 @@ def test_full_weight_transfer_flow():
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-    with patch(
-        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
-        mock_create_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            mock_create_engine,
+        ),
+        vllm_runner(
+            MODEL_NAME,
             enforce_eager=True,
             load_format="dummy",
             tensor_parallel_size=1,
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
+
+        assert llm.get_weight_version() == "default"
 
         # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
@@ -278,8 +284,15 @@ def test_full_weight_transfer_flow():
             )
         )
 
+        assert llm.get_weight_version() == "default"
+
         # Step 4: Finish weight update
-        llm.finish_weight_update()
+        llm.finish_weight_update("step-42")
+
+        assert llm.get_weight_version() == "step-42"
+
+        llm.update_weight_version("manual-version")
+        assert llm.get_weight_version() == "manual-version"
 
         # Verify the full flow completed
         def check_flow(self):
@@ -304,19 +317,19 @@ def test_full_weight_transfer_flow():
 
 
 @create_new_process_for_each_test()
-def test_weight_transfer_config_backend():
+def test_weight_transfer_config_backend(vllm_runner):
     """Test that WeightTransferConfig backend is properly configured."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     # Test with nccl backend
-    llm = LLM(
-        model=MODEL_NAME,
+    with vllm_runner(
+        MODEL_NAME,
         enforce_eager=True,
         load_format="dummy",
         tensor_parallel_size=1,
         weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    )
-
-    config = llm.llm_engine.vllm_config.weight_transfer_config
-    assert config.backend == "nccl"
+    ) as runner:
+        config = runner.llm.llm_engine.vllm_config.weight_transfer_config
+        assert config is not None
+        assert config.backend == "nccl"

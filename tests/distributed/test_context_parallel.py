@@ -33,6 +33,7 @@ CP_TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen3.5-0.8B",  # hybrid attention model
 ]
 
 # GSM8K eval configuration
@@ -46,6 +47,7 @@ MIN_ACCURACY = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 
@@ -149,6 +151,12 @@ else:
             ),
             CPTestSettings.detailed(
                 cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+            ),
+        ],
+        "Qwen/Qwen3.5-0.8B": [
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16,
+                attn_backend="FLASH_ATTN",
             ),
         ],
     }
