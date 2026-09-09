@@ -40,7 +40,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.attention.backends.triton_attn import (
+    TritonAttentionBackend,
+    TritonAttentionMetadata,
+    TritonAttentionMetadataBuilder,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -153,6 +157,7 @@ class SpecDecodeBaseProposer:
         )
 
         self.draft_attn_groups: list[AttentionGroup] = []
+        self._draft_query_start_loc_cpu_cache: dict[int, torch.Tensor] = {}
         self.kv_cache_gid: int = -1
         self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
@@ -659,9 +664,9 @@ class SpecDecodeBaseProposer:
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
         common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
-        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
-            self.token_arange_np[: batch_size + 1]
-        ).clone()
+        common_attn_metadata.query_start_loc_cpu = self._get_draft_query_start_loc_cpu(
+            batch_size
+        )
 
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
@@ -990,6 +995,26 @@ class SpecDecodeBaseProposer:
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_group_attn_metadata, per_layer_attn_metadata
+
+    def _get_draft_query_start_loc_cpu(self, batch_size: int) -> torch.Tensor:
+        # Triton does not mutate CPU query offsets. Other builders keep receiving
+        # private storage, including extensions with their own metadata handling.
+        can_reuse = (
+            self.method == "eagle3"
+            and not self.uses_mrope
+            and len(self.draft_attn_groups) == 1
+            and self.draft_attn_groups[0].backend is TritonAttentionBackend
+            and type(self.draft_attn_groups[0].get_metadata_builder())
+            is TritonAttentionMetadataBuilder
+        )
+        if can_reuse:
+            cached = self._draft_query_start_loc_cpu_cache.get(batch_size)
+            if cached is not None:
+                return cached
+        offsets = torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
+        if can_reuse:
+            self._draft_query_start_loc_cpu_cache[batch_size] = offsets
+        return offsets
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
@@ -1721,6 +1746,7 @@ class SpecDecodeBaseProposer:
         Initialize AttentionGroups for draft layers using kv_cache_config.
         Called from the model runner's initialize_metadata_builders.
         """
+        self._draft_query_start_loc_cpu_cache = {}
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
