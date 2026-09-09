@@ -769,9 +769,28 @@ def test_batch_sharded_sampling_rejects_return_sampling_mask():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
         speculative_config=None,
+        lora_config=None,
     )
 
     with pytest.raises(ValueError, match="sampling masks"):
+        VllmConfig._validate_batch_sharded_sampling(config)
+
+
+def test_batch_sharded_sampling_rejects_lora():
+    """compute_logits_local() skips the TP logits gather, which cannot apply
+    the lm_head LoRA delta; the combination must fail at startup instead of
+    raising NotImplementedError at the first sampling step."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="LoRA"):
         VllmConfig._validate_batch_sharded_sampling(config)
 
 
