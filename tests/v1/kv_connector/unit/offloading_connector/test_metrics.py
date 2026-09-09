@@ -7,12 +7,14 @@ from unittest.mock import patch
 import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    MetricType,
+    StatsKey,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
     _ConnectorMetricName,
-    _MetricType,
-    _StatsKey,
     _TransferMetricName,
     get_connector_metric_definitions,
 )
@@ -189,16 +191,16 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
     correct data."""
     serialized_data = {
-        _StatsKey.TYPES: {
-            LOAD_BYTES: _MetricType.COUNTER,
-            LOAD_TIME: _MetricType.COUNTER,
-            LOAD_SIZE: _MetricType.HISTOGRAM,
-            STORE_BYTES: _MetricType.COUNTER,
-            STORE_TIME: _MetricType.COUNTER,
-            STORE_SIZE: _MetricType.HISTOGRAM,
-            STORES_SKIPPED: _MetricType.COUNTER,
+        StatsKey.TYPES: {
+            LOAD_BYTES: MetricType.COUNTER,
+            LOAD_TIME: MetricType.COUNTER,
+            LOAD_SIZE: MetricType.HISTOGRAM,
+            STORE_BYTES: MetricType.COUNTER,
+            STORE_TIME: MetricType.COUNTER,
+            STORE_SIZE: MetricType.HISTOGRAM,
+            STORES_SKIPPED: MetricType.COUNTER,
         },
-        _StatsKey.DATA: {
+        StatsKey.DATA: {
             LOAD_BYTES: {(): 24},
             LOAD_TIME: {(): 1.5},
             LOAD_SIZE: {(): [16, 8]},
@@ -212,7 +214,7 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
 
     assert isinstance(stats, OffloadingConnectorStats)
-    values = stats.data[_StatsKey.DATA]
+    values = stats.data[StatsKey.DATA]
     assert _unlabeled(values, LOAD_BYTES) == 24
     assert _unlabeled(values, LOAD_TIME) == 1.5
     assert _unlabeled(values, LOAD_SIZE) == [16, 8]
@@ -237,15 +239,15 @@ def _make_stats_data(
     for key, value in metric_data.items():
         md = metric_metadata[key]
         if isinstance(md, OffloadingCounterMetadata):
-            metric_types[key] = _MetricType.COUNTER
+            metric_types[key] = MetricType.COUNTER
         elif isinstance(md, OffloadingGaugeMetadata):
-            metric_types[key] = _MetricType.GAUGE
+            metric_types[key] = MetricType.GAUGE
         elif isinstance(md, OffloadingHistogramMetadata):
-            metric_types[key] = _MetricType.HISTOGRAM
+            metric_types[key] = MetricType.HISTOGRAM
         data[key] = value if md.labelnames else {(): value}
     return {
-        _StatsKey.TYPES: metric_types,
-        _StatsKey.DATA: data,
+        StatsKey.TYPES: metric_types,
+        StatsKey.DATA: data,
     }
 
 
@@ -289,7 +291,7 @@ def test_aggregate_same_connector():
     result = stats1.aggregate(stats2)
 
     assert result is stats1  # Should return self
-    values = result.data[_StatsKey.DATA]
+    values = result.data[StatsKey.DATA]
     assert _unlabeled(values, LOAD_BYTES) == 34
     assert _unlabeled(values, LOAD_TIME) == 2.6
     assert _unlabeled(values, LOAD_SIZE) == [16, 8, 3, 7]
@@ -328,7 +330,7 @@ def test_aggregate_labeled_metrics():
 
     stats1.aggregate(stats2)
 
-    values = stats1.data[_StatsKey.DATA][MY_COUNTER]
+    values = stats1.data[StatsKey.DATA][MY_COUNTER]
     assert values[("a",)] == 17
     assert values[("b",)] == 3
     assert values[("c",)] == 5
@@ -352,10 +354,10 @@ def test_aggregate_labeled_metric_missing_from_self():
 
     stats1.aggregate(stats2)
 
-    values = stats1.data[_StatsKey.DATA][MY_COUNTER]
+    values = stats1.data[StatsKey.DATA][MY_COUNTER]
     assert values[("a",)] == 7
     assert values[("b",)] == 5
-    assert stats1.data[_StatsKey.TYPES][MY_COUNTER] == _MetricType.COUNTER
+    assert stats1.data[StatsKey.TYPES][MY_COUNTER] == MetricType.COUNTER
 
 
 def test_helper_methods_accept_labeled_metrics():
@@ -367,7 +369,7 @@ def test_helper_methods_accept_labeled_metrics():
     stats.observe_histogram(LOOKUP_LATENCY, 0.1, ("b",))
     stats.observe_histogram(LOOKUP_LATENCY, 0.2, ("b",))
 
-    values = stats.data[_StatsKey.DATA]
+    values = stats.data[StatsKey.DATA]
     assert values[MY_COUNTER][("a",)] == 7
     assert values[PENDING_STORES][("b",)] == 2
     assert values[LOOKUP_LATENCY][("b",)] == [0.1, 0.2]
@@ -376,21 +378,21 @@ def test_helper_methods_accept_labeled_metrics():
 def test_aggregate_merges_types():
     stats1 = OffloadingConnectorStats(
         data={
-            _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
-            _StatsKey.DATA: {LOAD_BYTES: {(): 1}},
+            StatsKey.TYPES: {LOAD_BYTES: MetricType.COUNTER},
+            StatsKey.DATA: {LOAD_BYTES: {(): 1}},
         },
     )
     stats2 = OffloadingConnectorStats(
         data={
-            _StatsKey.TYPES: {PENDING_STORES: _MetricType.GAUGE},
-            _StatsKey.DATA: {PENDING_STORES: {(): 2}},
+            StatsKey.TYPES: {PENDING_STORES: MetricType.GAUGE},
+            StatsKey.DATA: {PENDING_STORES: {(): 2}},
         },
     )
 
     result = stats1.aggregate(stats2)
 
-    assert _unlabeled(result.data[_StatsKey.DATA], PENDING_STORES) == 2
-    assert result.data[_StatsKey.TYPES][PENDING_STORES] == _MetricType.GAUGE
+    assert _unlabeled(result.data[StatsKey.DATA], PENDING_STORES) == 2
+    assert result.data[StatsKey.TYPES][PENDING_STORES] == MetricType.GAUGE
 
 
 def test_reduce():
@@ -492,14 +494,14 @@ def test_prom_metrics_observes_manager_counter():
 
     prom_metrics.observe(
         {
-            _StatsKey.TYPES: {STORES_SKIPPED: _MetricType.COUNTER},
-            _StatsKey.DATA: {STORES_SKIPPED: {(): 7}},
+            StatsKey.TYPES: {STORES_SKIPPED: MetricType.COUNTER},
+            StatsKey.DATA: {STORES_SKIPPED: {(): 7}},
         }
     )
 
-    counter = prom_metrics.offloading_metrics[(0, STORES_SKIPPED, ())]
+    counter = prom_metrics.metrics[(0, STORES_SKIPPED, ())]
     assert counter.increments == [7]
-    counter_def = prom_metrics._offloading_metric_defs[STORES_SKIPPED]
+    counter_def = prom_metrics._metric_defs[STORES_SKIPPED]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
     assert counter.labelvalues == ("model", "0")
 
@@ -518,15 +520,15 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
 
     prom_metrics.observe(
         {
-            _StatsKey.TYPES: {
-                LOAD_BYTES: _MetricType.COUNTER,
-                LOAD_TIME: _MetricType.COUNTER,
-                LOAD_SIZE: _MetricType.HISTOGRAM,
-                STORE_BYTES: _MetricType.COUNTER,
-                STORE_TIME: _MetricType.COUNTER,
-                STORE_SIZE: _MetricType.HISTOGRAM,
+            StatsKey.TYPES: {
+                LOAD_BYTES: MetricType.COUNTER,
+                LOAD_TIME: MetricType.COUNTER,
+                LOAD_SIZE: MetricType.HISTOGRAM,
+                STORE_BYTES: MetricType.COUNTER,
+                STORE_TIME: MetricType.COUNTER,
+                STORE_SIZE: MetricType.HISTOGRAM,
             },
-            _StatsKey.DATA: {
+            StatsKey.DATA: {
                 LOAD_BYTES: {(): 24},
                 LOAD_TIME: {(): 1.5},
                 LOAD_SIZE: {(): [16, 8]},
@@ -537,12 +539,12 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
         }
     )
 
-    assert prom_metrics.offloading_metrics[(0, LOAD_BYTES, ())].increments == [24]
-    assert prom_metrics.offloading_metrics[(0, LOAD_TIME, ())].increments == [1.5]
-    assert prom_metrics.offloading_metrics[(0, LOAD_SIZE, ())].observed == [16, 8]
-    assert prom_metrics.offloading_metrics[(0, STORE_BYTES, ())].increments == [3]
-    assert prom_metrics.offloading_metrics[(0, STORE_TIME, ())].increments == [0.3]
-    assert prom_metrics.offloading_metrics[(0, STORE_SIZE, ())].observed == [1, 2]
+    assert prom_metrics.metrics[(0, LOAD_BYTES, ())].increments == [24]
+    assert prom_metrics.metrics[(0, LOAD_TIME, ())].increments == [1.5]
+    assert prom_metrics.metrics[(0, LOAD_SIZE, ())].observed == [16, 8]
+    assert prom_metrics.metrics[(0, STORE_BYTES, ())].increments == [3]
+    assert prom_metrics.metrics[(0, STORE_TIME, ())].increments == [0.3]
+    assert prom_metrics.metrics[(0, STORE_SIZE, ())].observed == [1, 2]
 
     assert prom_metrics.counter_kv_bytes[(0, "CPU_to_GPU")].increments == [24]
     assert prom_metrics.counter_kv_transfer_time[(0, "CPU_to_GPU")].increments == [1.5]
@@ -580,22 +582,22 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
 
     prom_metrics.observe(
         {
-            _StatsKey.TYPES: {
-                PENDING_STORES: _MetricType.GAUGE,
-                LOOKUP_LATENCY: _MetricType.HISTOGRAM,
+            StatsKey.TYPES: {
+                PENDING_STORES: MetricType.GAUGE,
+                LOOKUP_LATENCY: MetricType.HISTOGRAM,
             },
-            _StatsKey.DATA: {
+            StatsKey.DATA: {
                 PENDING_STORES: {(): 5},
                 LOOKUP_LATENCY: {(): [0.2, 0.4]},
             },
         }
     )
 
-    gauge = prom_metrics.offloading_metrics[(0, PENDING_STORES, ())]
-    histogram = prom_metrics.offloading_metrics[(0, LOOKUP_LATENCY, ())]
+    gauge = prom_metrics.metrics[(0, PENDING_STORES, ())]
+    histogram = prom_metrics.metrics[(0, LOOKUP_LATENCY, ())]
     assert gauge.set_values == [5]
     assert histogram.observed == [0.2, 0.4]
-    histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
+    histogram_def = prom_metrics._metric_defs[LOOKUP_LATENCY]
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
 
 
@@ -622,19 +624,19 @@ def test_prom_metrics_lazily_observes_labeled_metric():
             per_engine_labelvalues={0: ["model", "0"]},
         )
 
-    assert (0, MY_COUNTER, ("a",)) not in prom_metrics.offloading_metrics
+    assert (0, MY_COUNTER, ("a",)) not in prom_metrics.metrics
 
     prom_metrics.observe(
         {
-            _StatsKey.TYPES: {MY_COUNTER: _MetricType.COUNTER},
-            _StatsKey.DATA: {MY_COUNTER: {("a",): 7}},
+            StatsKey.TYPES: {MY_COUNTER: MetricType.COUNTER},
+            StatsKey.DATA: {MY_COUNTER: {("a",): 7}},
         }
     )
 
-    counter = prom_metrics.offloading_metrics[(0, MY_COUNTER, ("a",))]
+    counter = prom_metrics.metrics[(0, MY_COUNTER, ("a",))]
     assert counter.increments == [7]
     assert counter.labelvalues == ("model", "0", "a")
-    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    counter_def = prom_metrics._metric_defs[MY_COUNTER]
     assert counter_def.kwargs["labelnames"] == ["model_name", "engine", MY_LABEL]
 
 
@@ -664,8 +666,8 @@ def test_prom_metrics_rejects_wrong_label_count():
     with pytest.raises(AssertionError, match="expects 1 labels"):
         prom_metrics.observe(
             {
-                _StatsKey.TYPES: {MY_COUNTER: _MetricType.COUNTER},
-                _StatsKey.DATA: {MY_COUNTER: {("a", "extra"): 7}},
+                StatsKey.TYPES: {MY_COUNTER: MetricType.COUNTER},
+                StatsKey.DATA: {MY_COUNTER: {("a", "extra"): 7}},
             }
         )
 
@@ -682,7 +684,7 @@ def test_prom_metrics_uses_configured_manager_metrics():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    assert STORES_SKIPPED not in prom_metrics._offloading_metric_metadata
+    assert STORES_SKIPPED not in prom_metrics.metric_definitions
 
 
 def test_prom_metrics_registers_tiering_metrics_from_spec():
@@ -703,9 +705,7 @@ def test_prom_metrics_registers_tiering_metrics_from_spec():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    metric = prom_metrics._offloading_metric_defs[
-        TieringOffloadingMetrics.BLOCK_QUERIES
-    ]
+    metric = prom_metrics._metric_defs[TieringOffloadingMetrics.BLOCK_QUERIES]
     assert metric.kwargs["labelnames"] == ["model_name", "engine", "tier"]
 
 
@@ -716,12 +716,12 @@ def test_aggregate_into_empty_stats():
 
     non_empty = OffloadingConnectorStats(
         data={
-            _StatsKey.TYPES: {
-                LOAD_BYTES: _MetricType.COUNTER,
-                LOAD_SIZE: _MetricType.HISTOGRAM,
-                PENDING_STORES: _MetricType.GAUGE,
+            StatsKey.TYPES: {
+                LOAD_BYTES: MetricType.COUNTER,
+                LOAD_SIZE: MetricType.HISTOGRAM,
+                PENDING_STORES: MetricType.GAUGE,
             },
-            _StatsKey.DATA: {
+            StatsKey.DATA: {
                 LOAD_BYTES: {(): 42},
                 LOAD_SIZE: {(): [10, 20]},
                 PENDING_STORES: {(): 3},
@@ -732,7 +732,7 @@ def test_aggregate_into_empty_stats():
     result = empty.aggregate(non_empty)
 
     assert result is empty
-    values = result.data[_StatsKey.DATA]
+    values = result.data[StatsKey.DATA]
     assert _unlabeled(values, LOAD_BYTES) == 42
     assert _unlabeled(values, LOAD_SIZE) == [10, 20]
     assert _unlabeled(values, PENDING_STORES) == 3
@@ -753,14 +753,14 @@ def test_prom_metrics_multi_engine_routing():
 
     prom_metrics.observe(
         {
-            _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
-            _StatsKey.DATA: {LOAD_BYTES: {(): 100}},
+            StatsKey.TYPES: {LOAD_BYTES: MetricType.COUNTER},
+            StatsKey.DATA: {LOAD_BYTES: {(): 100}},
         },
         engine_idx=1,
     )
 
-    assert (0, LOAD_BYTES, ()) not in prom_metrics.offloading_metrics
-    engine1 = prom_metrics.offloading_metrics[(1, LOAD_BYTES, ())]
+    assert (0, LOAD_BYTES, ()) not in prom_metrics.metrics
+    engine1 = prom_metrics.metrics[(1, LOAD_BYTES, ())]
     assert engine1.increments == [100]
 
 
@@ -780,7 +780,7 @@ def test_prom_metrics_rejects_undeclared_metric():
     with pytest.raises(AssertionError):
         prom_metrics.observe(
             {
-                _StatsKey.TYPES: {"unknown:metric": _MetricType.COUNTER},
-                _StatsKey.DATA: {"unknown:metric": {(): 1}},
+                StatsKey.TYPES: {"unknown:metric": MetricType.COUNTER},
+                StatsKey.DATA: {"unknown:metric": {(): 1}},
             }
         )
