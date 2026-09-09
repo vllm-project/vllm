@@ -390,6 +390,20 @@ def test_prefill_split_across_ubatches(
     # Second ubatch: first request (continuation) seq_len should be full
     #  original
     assert int(second_meta.seq_lens[0]) == seq_lens[split_req_idx]
+
+    # Tokens processed for the first chunk become computed context for the
+    # continuation. The original metadata must remain unchanged.
+    assert first_meta._num_computed_tokens_cpu is not None
+    assert second_meta._num_computed_tokens_cpu is not None
+    assert common._num_computed_tokens_cpu is not None
+    assert int(first_meta._num_computed_tokens_cpu[-1]) == context_lens[split_req_idx]
+    assert int(second_meta._num_computed_tokens_cpu[0]) == (
+        context_lens[split_req_idx] + tokens_in_first_chunk
+    )
+    assert int(common._num_computed_tokens_cpu[split_req_idx]) == context_lens[
+        split_req_idx
+    ]
+
     # Any following full requests in second ubatch should match originals
     for j in range(1, second_meta.num_reqs):
         # Map to original request index

@@ -296,6 +296,11 @@ def _make_metadata_with_slice(
         if attn_metadata._num_computed_tokens_cpu is not None
         else None
     )
+    if splits_first_request and num_computed_tokens_cpu is not None:
+        # Tokens from the preceding microbatch are now part of this request's
+        # computed context. Clone to avoid mutating the parent metadata.
+        num_computed_tokens_cpu = num_computed_tokens_cpu.clone()
+        num_computed_tokens_cpu[0] += first_tok - start_locs[first_req]
 
     if splits_last_request:
         # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
