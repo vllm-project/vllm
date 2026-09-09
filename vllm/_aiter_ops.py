@@ -1964,7 +1964,6 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    @functools.cache
     def mla_decode_supports_non_causal(cls) -> bool:
         """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
 

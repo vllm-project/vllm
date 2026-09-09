@@ -27,7 +27,6 @@ def reset_aiter_mla_support_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     import vllm._aiter_ops as aiter_ops
 
     monkeypatch.setattr(aiter_ops, "_AITER_MLA_SUPPORTS_FP8", None)
-    aiter_ops.rocm_aiter_ops.mla_decode_supports_non_causal.__wrapped__.cache_clear()
 
 
 def _install_fake_aiter_modules(
