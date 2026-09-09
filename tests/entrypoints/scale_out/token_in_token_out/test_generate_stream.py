@@ -360,7 +360,8 @@ async def test_stream_error_with_empty_delta():
 
 
 @pytest.mark.asyncio
-async def test_stream_skips_empty_token_output():
+@pytest.mark.parametrize("terminal_empty", [False, True])
+async def test_stream_skips_empty_token_output(terminal_empty):
     """Outputs with empty token_ids are skipped (no chunk emitted)."""
     engine = _mock_engine()
 
@@ -368,7 +369,10 @@ async def test_stream_skips_empty_token_output():
         yield _make_request_output("req-1", token_ids=[10])
         yield _make_request_output("req-1", token_ids=[])
         yield _make_request_output(
-            "req-1", token_ids=[20], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[] if terminal_empty else [20],
+            finish_reason="stop",
+            finished=True,
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -393,7 +397,8 @@ async def test_stream_skips_empty_token_output():
     # Only 2 data chunks — the empty one is skipped
     assert len(data_chunks) == 2
     assert data_chunks[0]["choices"][0]["token_ids"] == [10]
-    assert data_chunks[1]["choices"][0]["token_ids"] == [20]
+    assert data_chunks[1]["choices"][0]["token_ids"] == ([] if terminal_empty else [20])
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
