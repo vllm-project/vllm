@@ -28,7 +28,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
-    has_flashinfer_cutedsl_moe_nvfp4_per_token,
 )
 
 
@@ -109,27 +108,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             (kNvfp4Static, kNvfp4DynamicToken),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
-    def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        if (weight_key, activation_key) == (
-            kNvfp4Static,
-            kNvfp4DynamicToken,
-        ) and not has_flashinfer_cutedsl_moe_nvfp4_per_token():
-            return False, "installed FlashInfer lacks per-token CuTe-DSL NVFP4 MoE"
-        return mk.FusedMoEExperts.is_supported_config(
-            cls,
-            moe_config,
-            weight_key,
-            activation_key,
-            activation_format,
-        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
