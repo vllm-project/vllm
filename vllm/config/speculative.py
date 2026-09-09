@@ -1905,4 +1905,10 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+        schedule = self.num_speculative_tokens_per_batch_size
+        if schedule is None:
+            return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+        return (
+            f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=}, "
+            f"num_speculative_tokens_per_batch_size={schedule})"
+        )
