@@ -681,7 +681,6 @@ class SpecGroup(NamedTuple):
     group_ids: list[int]
     manager_cls: type[SingleTypeKVCacheManager]
     use_eagle: bool
-    block_pool: BlockPool
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
@@ -823,7 +822,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for idx, group in enumerate(self.attention_groups):
                 if (
                     group.spec == spec
-                    and group.block_pool is self.single_type_managers[i].block_pool
+                    and self.single_type_managers[group.group_ids[0]].block_pool
+                    is self.single_type_managers[i].block_pool
                 ):
                     assert manager_cls is group.manager_cls, (
                         "Expected same manager class for identical KV cache specs."
@@ -834,13 +834,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     break
             else:
                 self.attention_groups.append(
-                    SpecGroup(
-                        spec,
-                        [i],
-                        manager_cls,
-                        use_eagle,
-                        self.single_type_managers[i].block_pool,
-                    )
+                    SpecGroup(spec, [i], manager_cls, use_eagle)
                 )
 
         assert self.attention_groups, (
@@ -972,13 +966,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         while True:
             curr_hit_length = hit_length
 
-            for idx, (
-                spec,
-                group_ids,
-                manager_cls,
-                use_eagle,
-                block_pool,
-            ) in enumerate(self.attention_groups):
+            for idx, (spec, group_ids, manager_cls, use_eagle) in enumerate(
+                self.attention_groups
+            ):
                 first_group_id = group_ids[0]
                 # DCP/PCP shard each block's KV across ranks, so the manager's
                 # effective block size may exceed the spec's.
@@ -1016,7 +1006,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_hashes=block_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=block_pool,
+                    block_pool=self.single_type_managers[first_group_id].block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
@@ -1081,19 +1071,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
 
-        for (
-            spec,
-            group_ids,
-            manager_cls,
-            use_eagle,
-            block_pool,
-        ) in self.attention_groups:
+        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
-                block_pool=block_pool,
+                block_pool=manager.block_pool,
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
