@@ -113,6 +113,7 @@ class XPUPlatform(Platform):
     supported_quantization: list[str] = [
         "awq",
         "gptq",
+        "moe_wna16",
         "auto_awq",
         "auto_gptq",
         "inc",
@@ -133,6 +134,10 @@ class XPUPlatform(Platform):
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def get_attn_backend_cls(

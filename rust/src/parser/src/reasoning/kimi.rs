@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
@@ -14,7 +14,7 @@ impl KimiReasoningParser {
     /// Create a Kimi parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "◁think▷", "◁/think▷", false)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "◁think▷", "◁/think▷")?,
         })
     }
 }
@@ -32,7 +32,7 @@ impl ReasoningParser for KimiReasoningParser {
         Ok(())
     }
 
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
 

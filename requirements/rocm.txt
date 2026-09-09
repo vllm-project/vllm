@@ -27,3 +27,5 @@ tilelang==0.1.10
 apache-tvm-ffi==0.1.10 
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.3
+# Mooncake transfer engine for KV cache offloading/transfer (ROCm build, published on PyPI)
+mooncake-transfer-engine-rocm >= 0.3.13

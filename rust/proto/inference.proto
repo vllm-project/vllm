@@ -50,6 +50,9 @@ message GenerateRequest {
 
   // Multimodal inputs aligned with placeholder markers in token_ids.
   repeated MediaItem media = 14;
+
+  // Loaded LoRA name; empty selects the base model.
+  string lora_name = 15;
 }
 
 message RandomSampling {
@@ -107,6 +110,8 @@ message ResponseOptions {
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
+  // Defaults to true when omitted.
+  optional bool skip_special_tokens = 8;
 }
 
 message KVCacheParameters {

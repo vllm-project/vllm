@@ -51,9 +51,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.deepseek_v4.common.ops import (
-    fused_mtp_input_rmsnorm,
-    mtp_shared_head_rmsnorm,
+from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
+    _FUSED_MTP_INPUT_RMSNORM_KERNEL,
+    _MTP_SHARED_HEAD_RMSNORM_KERNEL,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -141,6 +141,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             aux_stream_list=aux_stream_list,
         )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
+            _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -157,7 +161,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             -1, self.hc_mult, self.config.hidden_size
         )
         # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
-        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+        inputs_embeds, previous_hidden_states = _FUSED_MTP_INPUT_RMSNORM_KERNEL(
             inputs_embeds,
             positions,
             previous_hidden_states,
@@ -178,7 +182,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            positions=positions, x=hidden_states, input_ids=input_ids
         )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         if self.mtp_block.use_sequence_parallel:
@@ -270,7 +274,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        hidden_states = mtp_shared_head_rmsnorm(
+        hidden_states = _MTP_SHARED_HEAD_RMSNORM_KERNEL(
             hidden_states,
             mtp_layer.shared_head.norm.weight.data,
             mtp_layer.shared_head.norm.variance_epsilon,
@@ -502,13 +506,16 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
+        self.process_weights_after_loading()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
+
+    def process_weights_after_loading(self) -> None:
+        self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
