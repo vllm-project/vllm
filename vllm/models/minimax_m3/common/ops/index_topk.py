@@ -104,6 +104,7 @@ def _index_block_score_kernel(
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
+    pid_k = tl.program_id(2)
     pid_b = pid_bh // num_idx_heads
     pid_h = pid_bh % num_idx_heads
 
@@ -132,8 +133,14 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     # Causal window: only blocks up to the last query token's position.
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
-        blk = i // BLOCK_SIZE_K
+    num_blocks = tl.cdiv(hi, BLOCK_SIZE_K)
+    blocks_per_split = tl.cdiv(num_blocks, tl.num_programs(2))
+    block_start = pid_k * blocks_per_split
+    block_end = tl.minimum(block_start + blocks_per_split, num_blocks)
+    if block_start >= block_end:
+        return
+    for blk in tl.range(block_start, block_end):
+        i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
@@ -676,7 +683,13 @@ def minimax_m3_index_score(
         device=idx_q.device,
     )
     BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
+    n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
+    SCORE_TARGET_GRID = 48
+    split_k = max(
+        1,
+        min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
+    )
+    grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,
