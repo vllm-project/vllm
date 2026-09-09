@@ -274,6 +274,11 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             kv_cache_dtype = "auto"
 
+        if quant_config is not None and kv_cache_dtype == "auto":
+            checkpoint_kv_cache_dtype = quant_config.get_kv_cache_dtype(prefix)
+            if checkpoint_kv_cache_dtype is not None:
+                kv_cache_dtype = checkpoint_kv_cache_dtype
+
         # llm-compressor models declare an FP8 KV-cache scheme in their
         # checkpoint config. Honor it only when the user did not explicitly
         # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
@@ -639,6 +644,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     head_size=self.head_size,
                     head_size_v=self.head_size_v,
                     dtype=self.kv_cache_torch_dtype,
+                    cache_dtype=self.kv_cache_dtype,
                     kv_quant_mode=quant_mode,
                     sliding_window=self.sliding_window,
                 )
@@ -653,6 +659,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
+                cache_dtype=self.kv_cache_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
@@ -664,6 +671,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
+                cache_dtype=self.kv_cache_dtype,
                 kv_quant_mode=quant_mode,
             )
 
