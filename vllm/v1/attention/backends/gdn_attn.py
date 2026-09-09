@@ -39,6 +39,13 @@ class GDNAttentionBackend(AttentionBackend):
 
 
 @dataclass
+class CausalConv1dMetadata:
+    nums_dict: dict
+    batch_ptr: torch.Tensor
+    token_chunk_offset_ptr: torch.Tensor
+
+
+@dataclass
 class GDNAttentionMetadata:
     num_prefills: int
     num_prefill_tokens: int
@@ -73,6 +80,22 @@ class GDNAttentionMetadata:
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
 
+    # Explicit grouped-prefill prototype. Ranges are [start, end) in the
+    # original packed prefill token stream; state values are cache-row IDs.
+    prefix_producer_ranges: torch.Tensor | None = None
+    producer_token_indices: torch.Tensor | None = None
+    producer_query_start_loc: torch.Tensor | None = None
+    producer_conv_metadata: CausalConv1dMetadata | None = None
+    consumer_ranges: torch.Tensor | None = None
+    consumer_token_indices: torch.Tensor | None = None
+    consumer_query_start_loc: torch.Tensor | None = None
+    consumer_conv_metadata: CausalConv1dMetadata | None = None
+    shared_initial_state_source: torch.Tensor | None = None
+    shared_state_destinations: torch.Tensor | None = None
+    consumer_shared_state_sources: torch.Tensor | None = None
+    private_final_state_destination: torch.Tensor | None = None
+    checkpoint_source_block_ids: torch.Tensor | None = None
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
@@ -92,9 +115,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self.kv_cache_spec = kv_cache_spec
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
         )
@@ -415,6 +439,165 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
+        prefix_producer_ranges = None
+        producer_token_indices = None
+        producer_query_start_loc = None
+        producer_conv_metadata = None
+        consumer_ranges = None
+        consumer_token_indices = None
+        consumer_query_start_loc = None
+        consumer_conv_metadata = None
+        shared_initial_state_source = None
+        shared_state_destinations = None
+        consumer_shared_state_sources = None
+        private_final_state_destination = None
+        producer_indices = m.mamba_prefix_producer_indices
+        source_block_ids = m.mamba_checkpoint_source_block_ids
+        has_producers = producer_indices is not None and bool(
+            torch.any(producer_indices >= 0).item()
+        )
+        has_consumers = source_block_ids is not None and bool(
+            torch.any(source_block_ids >= 0).item()
+        )
+        is_pure_prefill = (
+            spec_sequence_masks is None
+            and (m.is_prefilling is None or torch.all(m.is_prefilling).item())
+        )
+        if (has_producers or has_consumers) and is_pure_prefill:
+            producer_indices_cpu = (
+                producer_indices.cpu().tolist()
+                if producer_indices is not None
+                else [-1] * m.num_reqs
+            )
+            source_block_ids_cpu = (
+                source_block_ids.cpu().tolist()
+                if source_block_ids is not None
+                else [-1] * m.num_reqs
+            )
+            checkpoint_positions = m.mamba_checkpoint_positions
+            assert checkpoint_positions is not None
+            checkpoint_positions_cpu = checkpoint_positions.cpu().tolist()
+            query_starts = query_start_loc_cpu.tolist()
+            producer_ranges_list = []
+            consumer_ranges_list = []
+            initial_sources_list = []
+            shared_destinations_list = []
+            consumer_sources_list = []
+            private_destinations_list = []
+            producer_to_index = {}
+            producer_rows = set()
+            consumer_rows = set()
+            for consumer_idx, producer_idx in enumerate(producer_indices_cpu):
+                source_block_id = source_block_ids_cpu[consumer_idx]
+                if producer_idx < 0 and source_block_id < 0:
+                    continue
+                checkpoint_position = checkpoint_positions_cpu[consumer_idx]
+                if checkpoint_position <= 0:
+                    raise ValueError("grouped GDN checkpoint position must be positive")
+                if producer_idx >= 0:
+                    producer_rows.add(producer_idx)
+                    if producer_idx not in producer_to_index:
+                        producer_to_index[producer_idx] = len(producer_ranges_list)
+                        producer_ranges_list.append(
+                            [
+                                query_starts[producer_idx],
+                                query_starts[producer_idx + 1],
+                            ]
+                        )
+                        initial_sources_list.append(NULL_BLOCK_ID)
+                        block_idx = (
+                            checkpoint_position - 1
+                        ) // self.kv_cache_spec.block_size
+                        shared_destinations_list.append(
+                            int(block_table_tensor[producer_idx, block_idx].item())
+                        )
+                consumer_rows.add(consumer_idx)
+                consumer_ranges_list.append(
+                    [query_starts[consumer_idx], query_starts[consumer_idx + 1]]
+                )
+                if source_block_id < 0:
+                    assert producer_idx >= 0
+                    source_block_id = shared_destinations_list[
+                        producer_to_index[producer_idx]
+                    ]
+                consumer_sources_list.append(source_block_id)
+                private_destinations_list.append(
+                    int(block_table_tensor[consumer_idx, 0].item())
+                )
+            for request_idx in range(m.num_reqs):
+                if request_idx in producer_rows or request_idx in consumer_rows:
+                    continue
+                start, end = query_starts[request_idx : request_idx + 2]
+                if start == end:
+                    continue
+                destination = int(block_table_tensor[request_idx, 0].item())
+                consumer_ranges_list.append([start, end])
+                consumer_sources_list.append(destination)
+                private_destinations_list.append(destination)
+            device = query_start_loc.device
+
+            def build_packed_phase(
+                ranges: list[list[int]],
+            ) -> tuple[
+                torch.Tensor,
+                torch.Tensor,
+                CausalConv1dMetadata | None,
+            ]:
+                token_indices = [
+                    token for start, end in ranges for token in range(start, end)
+                ]
+                query_start_loc = [0]
+                for start, end in ranges:
+                    query_start_loc.append(query_start_loc[-1] + end - start)
+                query_start_loc_cpu = torch.tensor(query_start_loc, dtype=torch.int32)
+                conv_metadata = None
+                if ranges:
+                    nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                        compute_causal_conv1d_metadata(
+                            query_start_loc_cpu,
+                            device=device,
+                        )
+                    )
+                    conv_metadata = CausalConv1dMetadata(
+                        nums_dict,
+                        batch_ptr,
+                        token_chunk_offset_ptr,
+                    )
+                return (
+                    async_tensor_h2d(token_indices, device, torch.long),
+                    async_tensor_h2d(query_start_loc_cpu, device),
+                    conv_metadata,
+                )
+
+            (
+                producer_token_indices,
+                producer_query_start_loc,
+                producer_conv_metadata,
+            ) = build_packed_phase(producer_ranges_list)
+            (
+                consumer_token_indices,
+                consumer_query_start_loc,
+                consumer_conv_metadata,
+            ) = build_packed_phase(consumer_ranges_list)
+            prefix_producer_ranges = torch.tensor(
+                producer_ranges_list, dtype=torch.int32, device=device
+            ).reshape(-1, 2)
+            consumer_ranges = torch.tensor(
+                consumer_ranges_list, dtype=torch.int32, device=device
+            ).reshape(-1, 2)
+            shared_initial_state_source = torch.tensor(
+                initial_sources_list, dtype=torch.int32, device=device
+            )
+            shared_state_destinations = torch.tensor(
+                shared_destinations_list, dtype=torch.int32, device=device
+            )
+            consumer_shared_state_sources = torch.tensor(
+                consumer_sources_list, dtype=torch.int32, device=device
+            )
+            private_final_state_destination = torch.tensor(
+                private_destinations_list, dtype=torch.int32, device=device
+            )
+
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
@@ -507,6 +690,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            prefix_producer_ranges=prefix_producer_ranges,
+            producer_token_indices=producer_token_indices,
+            producer_query_start_loc=producer_query_start_loc,
+            producer_conv_metadata=producer_conv_metadata,
+            consumer_ranges=consumer_ranges,
+            consumer_token_indices=consumer_token_indices,
+            consumer_query_start_loc=consumer_query_start_loc,
+            consumer_conv_metadata=consumer_conv_metadata,
+            shared_initial_state_source=shared_initial_state_source,
+            shared_state_destinations=shared_state_destinations,
+            consumer_shared_state_sources=consumer_shared_state_sources,
+            private_final_state_destination=private_final_state_destination,
+            checkpoint_source_block_ids=m.mamba_checkpoint_source_block_ids,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,

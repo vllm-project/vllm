@@ -109,6 +109,9 @@ class InputBatch:
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
 
+    # Mapping of consumer req_id -> producer req_id for mamba checkpoint same-step prefill
+    mamba_prefix_producer_ids: dict[str, str] | None = None
+
     @classmethod
     def make_dummy(
         cls,
@@ -200,6 +203,7 @@ class InputBatch:
             has_structured_output_reqs=False,
             prompt_lens=None,
             max_query_len=max_query_len,
+            mamba_prefix_producer_ids=None,
         )
 
 
