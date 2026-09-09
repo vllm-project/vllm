@@ -128,8 +128,11 @@ class SiluAndMul(CustomOp):
         super().__init__(compile_native=compile_native)
         if (
             current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
             or current_platform.is_xpu()
+            or (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+            )
         ):
             self.op = torch.ops._C.silu_and_mul
 
@@ -436,8 +439,11 @@ class GeluAndMul(CustomOp):
             raise ValueError(f"Unknown approximate mode: {approximate}")
         if (
             current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
             or current_platform.is_xpu()
+            or (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+            )
         ):
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul

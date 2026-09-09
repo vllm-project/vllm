@@ -241,7 +241,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="nccl",
+                backend="gloo" if current_platform.is_cpu() else "nccl",
             )
             initialize_model_parallel(1, 1)
             yield

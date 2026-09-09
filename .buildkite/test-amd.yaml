@@ -114,6 +114,7 @@ steps:
 - label: ":computer: (CPU) Basic Models Other" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -130,6 +131,7 @@ steps:
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   parallelism: 6
@@ -145,6 +147,7 @@ steps:
 - label: ":computer: (CPU) V1 Others" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -165,6 +168,7 @@ steps:
 - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
   timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -204,6 +208,7 @@ steps:
 - label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -219,6 +224,7 @@ steps:
 - label: ":computer: (CPU) Rust Frontend Cargo" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -234,6 +240,7 @@ steps:
 - label: ":computer: (CPU) Docker Build Metadata" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   no_gpu: true
   optional: true
@@ -264,6 +271,7 @@ steps:
 - label: ":amd: (MI250) PyTorch Fullgraph Smoke" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -283,6 +291,7 @@ steps:
 - label: ":amd: (MI250) Pipeline + Context Parallelism" # TBD
   timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -306,6 +315,7 @@ steps:
 - label: ":amd: (MI250) Helion Kernels" # TBD
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -323,6 +333,7 @@ steps:
 - label: ":amd: (MI250) Language Models (PPL)" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -336,6 +347,7 @@ steps:
 - label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -351,6 +363,7 @@ steps:
 - label: ":amd: (MI250) Batch Invariance" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -369,6 +382,7 @@ steps:
 - label: ":amd: (MI250) CUDAGraph" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -385,6 +399,7 @@ steps:
 - label: ":amd: (MI250) E2E Core" # TBD
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -398,6 +413,7 @@ steps:
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -411,6 +427,7 @@ steps:
 - label: ":amd: (MI250) V1 Engine" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -432,6 +449,7 @@ steps:
 - label: ":amd: (MI250) Spec Decode Draft Model" # TBD
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -449,6 +467,7 @@ steps:
 - label: ":amd: (MI250) Spec Decode Speculators + MTP" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
