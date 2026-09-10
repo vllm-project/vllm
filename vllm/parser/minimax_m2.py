@@ -95,6 +95,7 @@ def minimax_m2_config() -> ParserEngineConfig:
     return ParserEngineConfig(
         name="minimax_m2",
         initial_state=ParserState.REASONING,
+        wait_for_reasoning=True,
         terminals={
             "THINK_START": THINK_START,
             "THINK_END": THINK_END,
