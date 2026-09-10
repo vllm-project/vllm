@@ -1543,8 +1543,6 @@ def maybe_remap_moe_expert_param_name(
         "w2_bias",
         "w13_scale",
         "w2_scale",
-        "w13_g_idx",
-        "w2_g_idx",
         "w13_qweight",
         "w2_qweight",
         "w13_qzeros",
