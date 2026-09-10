@@ -127,6 +127,7 @@
 /tests/models/transformers @hmellor
 
 # Docs
+/docs/features/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /docs/mkdocs @hmellor
 /docs/**/*.yml @hmellor
 /requirements/docs.txt @hmellor
@@ -216,6 +217,19 @@ mkdocs.yaml @hmellor
 /tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/model_executor/layers/pooler @noooop
+
+# Reinforcement learning
+/vllm/distributed/weight_transfer @aoshen02
+/vllm/entrypoints/serve/dev/rlhf @njhill @aoshen02
+/tests/distributed/test_weight_transfer.py @aoshen02
+/tests/entrypoints/weight_transfer @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/entrypoints/serve/dev/rlhf @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
+/examples/rl @aoshen02
+/examples/features/pause_resume @aoshen02
+/docs/training/rlhf.md @aoshen02
+/docs/training/async_rl.md @aoshen02
+/docs/training/weight_transfer @aoshen02
 
 # Security guide and policies
 /docs/usage/security.md @russellb @jperezdealgaba

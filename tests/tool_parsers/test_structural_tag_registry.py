@@ -80,6 +80,67 @@ def test_supported_structural_tag_models_include_vllm_builtins():
     assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 
 
+@pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
+def test_deepseek_v41_format_constraints_ignore_parameter_schema(
+    choice,
+    sample_tools_strict,
+):
+    tool_choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=choice)
+        )
+        if choice == "get_weather"
+        else choice
+    )
+    tag = get_model_structural_tag(
+        "deepseek_v41", sample_tools_strict, tool_choice, reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
+    end = "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    parameter = (
+        '<｜DSML｜ parameter name="undeclared" string="false">'
+        '{"nested": [true, null, 1.5]}</｜DSML｜ parameter>\n'
+    )
+    # Required city is omitted; extra and repeated fields remain unconstrained.
+    assert _is_grammar_accept_string(grammar, begin + end)
+    assert _is_grammar_accept_string(grammar, begin + parameter * 2 + end)
+    assert not _is_grammar_accept_string(
+        grammar,
+        begin + parameter.replace('{"nested": [true, null, 1.5]}', "invalid") + end,
+    )
+    assert not _is_grammar_accept_string(
+        grammar, (begin + end).replace('name="get_weather"', 'name="unknown"')
+    )
+    assert not _is_grammar_accept_string(
+        grammar, begin + parameter.replace("｜ parameter", "｜parameter") + end
+    )
+    assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
+    tag = get_model_structural_tag(
+        "deepseek_v41",
+        sample_tools,
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = '<｜DSML｜ invoke name="get_weather">\n</｜DSML｜ invoke>\n'
+    assert _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call + "</｜DSML｜ calls>"
+    )
+    assert not _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
+    )
+    assert (
+        get_model_structural_tag("deepseek_v41", sample_tools, "auto", reasoning=False)
+        is None
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     model: str,
