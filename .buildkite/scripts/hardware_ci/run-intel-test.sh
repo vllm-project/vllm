@@ -56,6 +56,14 @@ cleanup_docker() {
   fi
   echo "Old CI image cleanup completed."
 
+  # Let containerd GC settle before releasing the lock, so the next pull
+  # doesn't race the async GC triggered by prune/rm above.
+  local gc_settle_secs="${DOCKER_GC_SETTLE_SECS:-5}"
+  if (( gc_settle_secs > 0 )); then
+    echo "Waiting ${gc_settle_secs}s for containerd GC to settle before pull..."
+    sleep "${gc_settle_secs}"
+  fi
+
   flock -u 9
 }
 
@@ -221,6 +229,36 @@ apply_intel_test_overrides() {
   echo "$cmds"
 }
 
+# Pull with retry to survive transient containerd ingest races
+# ('failed commit on ref ... no such file or directory').
+pull_image_with_retry() {
+  local image="$1"
+  local max_attempts="${DOCKER_PULL_MAX_ATTEMPTS:-5}"
+  local attempt=1
+  local delay="${DOCKER_PULL_RETRY_DELAY:-10}"
+
+  while (( attempt <= max_attempts )); do
+    echo "Pulling image (attempt ${attempt}/${max_attempts}): ${image}"
+    if timeout 900 docker pull "${image}"; then
+      echo "Pull succeeded on attempt ${attempt}"
+      return 0
+    fi
+
+    echo "Pull attempt ${attempt}/${max_attempts} failed for ${image}." >&2
+    if (( attempt < max_attempts )); then
+      # Drop partial layers before retrying.
+      docker image prune -f >/dev/null 2>&1 || true
+      echo "Retrying in ${delay}s..." >&2
+      sleep "${delay}"
+      delay=$(( delay * 2 ))
+    fi
+    (( attempt++ ))
+  done
+
+  echo "ERROR: Failed to pull ${image} after ${max_attempts} attempts." >&2
+  return 1
+}
+
 is_yaml_file() {
   local p="$1"
   [[ -f "$p" && "$p" == *.yaml ]]
@@ -357,7 +395,10 @@ export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
     echo "Image already exists locally, skipping pull"
   else
     echo "Image not found locally, pulling image..."
-    timeout 900 docker pull "${IMAGE}"
+    if ! pull_image_with_retry "${IMAGE}"; then
+      echo "Fatal: unable to pull ${IMAGE}, aborting." >&2
+      exit 1
+    fi
     echo "Pull step completed"
   fi
 
