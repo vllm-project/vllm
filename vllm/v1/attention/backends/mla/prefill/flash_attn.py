@@ -365,6 +365,12 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
             )
 
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.vllm_flash_attn_version == 4
+        ):
+            _FA4_MLA_PREFILL_KERNEL.register_warmup()
+
         # Determine if we need to pad V
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim for attention backends that do
@@ -422,7 +428,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
-        attn_out = FA4_MLA_PREFILL_KERNEL(
+        attn_out = _FA4_MLA_PREFILL_KERNEL(
             q=q,
             k=k,
             v=maybe_padded_v,
@@ -494,4 +500,4 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
 
 
-FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
+_FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
