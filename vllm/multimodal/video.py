@@ -911,12 +911,13 @@ class Molmo2VideoBackend(VideoLoader):
             ValueError: sampling_fps=2 must divide video_fps=5 to produce
                 consistent frame steps.
         """
+        if sampling_fps is None:
+            raise ValueError("sampling_fps must be provided")
+
         video_fps = int(video_fps)
         sampling_fps = int(sampling_fps)
         max_fps = int(max_fps)
 
-        if sampling_fps is None:
-            raise ValueError("sampling_fps must be provided")
         if video_fps <= 0 or sampling_fps <= 0:
             raise ValueError(
                 "video_fps and sampling_fps must be positive "
