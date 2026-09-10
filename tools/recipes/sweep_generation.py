@@ -343,6 +343,19 @@ ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
 
 source "${{ENV_PATH}}"
 
+# recipe tools may be newer than the installed vLLM package. Only pass the
+# resilience flag when this vLLM CLI actually supports it.
+CONTINUE_ON_ERROR_ARG=""
+if vllm bench sweep serve --help 2>&1 | grep -q -- "--continue-on-error"; then
+  CONTINUE_ON_ERROR_ARG="--continue-on-error"
+fi
+
+# On older vLLM versions, a failed benchmark aborts the sweep process. Retry the
+# interrupted sweep with --resume so one transient run failure does not discard
+# completed work or force a manual restart.
+SWEEP_RETRY_COUNT="${{VLLM_RECIPE_SWEEP_RETRY_COUNT:-0}}"
+MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
+
 {prepare_config}vllm bench sweep serve \
   --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
   --bench-cmd "{bench_cmd}" \
@@ -351,7 +364,16 @@ source "${{ENV_PATH}}"
   --output-dir "${{SCRIPT_DIR}}/results" \
   --experiment-name {experiment_name} \
   --warmup-num-prompts {workload.concurrency} \
-  "$@"
+  ${{CONTINUE_ON_ERROR_ARG}} \
+  "$@" || {{
+    if [[ "${{SWEEP_RETRY_COUNT}}" -ge "${{MAX_SWEEP_RETRIES}}" ]]; then
+      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic resume retries." >&2
+      exit 1
+    fi
+    NEXT_RETRY=$((SWEEP_RETRY_COUNT + 1))
+    echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" --resume "$@"
+  }}
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | 0o111)
@@ -566,23 +588,19 @@ def write_parallel_layout_sweep_files(
     workload: WorkloadHints,
     numa_node_count: int,
 ) -> list[Path]:
-    """Write a TP/DP scan followed by the scheduler sweep package."""
+    """Write a standalone NUMA-aware TP/DP sweep package."""
     validate_sweep_workload(workload)
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
     parallel_params = directory / "parallel_layout_serve_params.json"
-    scheduler_params = directory / "serve_params.json"
     bench_params = directory / "bench_params.json"
     run_parallel = directory / "run_parallel_layout_sweep.sh"
     recommend_parallel = directory / "recommend_parallel_layout.py"
-    run_scheduler = directory / "run_sweep.sh"
-    recommend_scheduler = directory / "recommend.py"
     guide = directory / "SWEEP.md"
 
     initial_config_rel = _relative_to(directory, config_path)
     selected_config_rel = "parallel-layout-config.yml"
-    scheduler_config_rel = "parallel-layout-sweep-config.yml"
     env_rel = _relative_to(directory, env_path)
     request_model, tokenizer = _benchmark_models(config)
 
@@ -590,7 +608,6 @@ def write_parallel_layout_sweep_files(
         parallel_params,
         build_parallel_layout_params(config, workload, numa_node_count),
     )
-    _write_json(scheduler_params, build_serve_params(config))
     _write_json(bench_params, build_bench_params(workload))
     _write_run_script(
         run_parallel,
@@ -611,73 +628,371 @@ def write_parallel_layout_sweep_files(
         output_config=selected_config_rel,
         output_json="parallel-layout-recommendation.json",
     )
-    _write_run_script(
-        run_scheduler,
-        config_rel=scheduler_config_rel,
-        env_rel=env_rel,
-        request_model=request_model,
-        tokenizer=tokenizer,
-        workload=workload,
-        prepare_config_rel=selected_config_rel,
-    )
-    _write_recommend_script(
-        recommend_scheduler,
-        config_rel=selected_config_rel,
-        env_rel=env_rel,
-        workload=workload,
-    )
 
     guide.write_text(
-        f"""# Staged Parallel-Layout and Scheduler Sweep
+        f"""# Parallel-Layout Sweep
 
-Primary parallel-layout candidates use every effective NUMA node:
+This package tunes only the NUMA-aware TP/DP layout.
+
+Primary candidates use every effective NUMA node:
 
 ```text
 tensor_parallel_size * data_parallel_size = {numa_node_count}
 ```
 
-Tensor parallelism is restricted to `1`, `2`, `4`, or `8`.
-The largest supported TP not exceeding the NUMA-node count is also included,
-even when it leaves some NUMA nodes idle.
+Tensor parallelism is restricted to `1`, `2`, `4`, or `8`. The largest
+supported TP not exceeding the NUMA-node count is also included, even when it
+leaves some NUMA nodes idle.
 
-Run the TP/DP scan first:
+Run:
 
 ```bash
 ./run_parallel_layout_sweep.sh --dry-run
 ./run_parallel_layout_sweep.sh
-./recommend_parallel_layout.py --results-dir results/parallel-layout
+./recommend_parallel_layout.py
 ```
 
-Each server layout receives an unmeasured {workload.concurrency}-prompt warmup
-before its three measured runs. The warmup is saved as `warmup.json` and is not
-included in recommendation statistics.
+The recommender writes:
 
-The recommender writes `parallel-layout-config.yml`. Before Stage 2 starts,
-`run_sweep.sh` copies that selected TP/DP configuration to
-`parallel-layout-sweep-config.yml` while removing the scheduler keys. This
-preserves the vLLM-default reference behavior from `recipe_improve`. Then tune
-`max-num-seqs` and `max-num-batched-tokens` around the selected layout:
-
-```bash
-./run_sweep.sh --dry-run
-./run_sweep.sh
-./recommend.py
+```text
+parallel-layout-config.yml
+parallel-layout-recommendation.json
 ```
 
-Both recommenders require the supplied P99 objectives and combined compliance
-when latency objectives are present, then maximize aggregate output throughput.
+This mode stops after TP/DP selection. Use `--generate-full-sweep` when
+concurrency and scheduler tuning should follow automatically.
 """,
         encoding="utf-8",
     )
 
     return [
         parallel_params,
-        scheduler_params,
         bench_params,
         run_parallel,
         recommend_parallel,
-        run_scheduler,
-        recommend_scheduler,
         guide,
+    ]
+
+def build_concurrency_bench_params(workload: WorkloadHints) -> list[dict[str, Any]]:
+    """Build one workload shape while leaving max_concurrency to Workload Explorer."""
+    validate_sweep_workload(workload)
+    assert workload.input_tokens is not None
+    assert workload.output_tokens is not None
+    assert workload.concurrency is not None
+    return [
+        {
+            "_benchmark_name": "user_workload",
+            "random_input_len": workload.input_tokens,
+            "random_output_len": workload.output_tokens,
+            "num_prompts": _num_prompts_for_concurrency(workload.concurrency),
+        }
+    ]
+
+
+def _write_concurrency_run_script(
+    path: Path,
+    *,
+    config_rel: str,
+    env_rel: str,
+    request_model: str,
+    tokenizer: str,
+    workload: WorkloadHints,
+) -> None:
+    bench_parts = [
+        "vllm bench serve",
+        "--backend vllm",
+        f"--model {shlex.quote(request_model)}",
+        f"--tokenizer {shlex.quote(tokenizer)}",
+        "--dataset-name random",
+        "--request-rate inf",
+        "--ignore-eos",
+        "--metric-percentiles 99",
+    ]
+    goodput_pairs: list[str] = []
+    if workload.ttft_sla_ms is not None:
+        goodput_pairs.append(f"ttft:{workload.ttft_sla_ms:g}")
+    if workload.tpot_sla_ms is not None:
+        goodput_pairs.append(f"tpot:{workload.tpot_sla_ms:g}")
+    if goodput_pairs:
+        bench_parts.append(
+            "--goodput " + " ".join(shlex.quote(pair) for pair in goodput_pairs)
+        )
+
+    bench_cmd = " ".join(bench_parts)
+    script = f"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
+CONFIG_PATH="${{SCRIPT_DIR}}/{config_rel}"
+ENV_PATH="${{SCRIPT_DIR}}/{env_rel}"
+
+source "${{ENV_PATH}}"
+
+# recipe tools may be newer than the installed vLLM package. Only pass the
+# resilience flag when this vLLM CLI actually supports it.
+CONTINUE_ON_ERROR_ARG=""
+if vllm bench sweep serve_workload --help 2>&1 | grep -q -- "--continue-on-error"; then
+  CONTINUE_ON_ERROR_ARG="--continue-on-error"
+fi
+
+# On older vLLM versions, a failed benchmark aborts the sweep process. Retry the
+# interrupted sweep with --resume so one transient run failure does not discard
+# completed work or force a manual restart.
+SWEEP_RETRY_COUNT="${{VLLM_RECIPE_SWEEP_RETRY_COUNT:-0}}"
+MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
+
+vllm bench sweep serve_workload \
+  --serve-cmd "vllm serve --config '${{CONFIG_PATH}}'" \
+  --bench-cmd "{bench_cmd}" \
+  --bench-params "${{SCRIPT_DIR}}/concurrency_bench_params.json" \
+  --output-dir "${{SCRIPT_DIR}}/results" \
+  --experiment-name concurrency-tuning \
+  --workload-var max_concurrency \
+  --workload-iters 10 \
+  --warmup-num-prompts {workload.concurrency} \
+  ${{CONTINUE_ON_ERROR_ARG}} \
+  "$@" || {{
+    if [[ "${{SWEEP_RETRY_COUNT}}" -ge "${{MAX_SWEEP_RETRIES}}" ]]; then
+      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic resume retries." >&2
+      exit 1
+    fi
+    NEXT_RETRY=$((SWEEP_RETRY_COUNT + 1))
+    echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" --resume "$@"
+  }}
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_concurrency_recommend_script(path: Path, *, workload: WorkloadHints) -> None:
+    template_path = Path(__file__).with_name("concurrency_recommendation.py")
+    source = template_path.read_text(encoding="utf-8")
+    replacements = {
+        "DEFAULT_TTFT_SLA_MS: float | None = None": (
+            f"DEFAULT_TTFT_SLA_MS: float | None = {workload.ttft_sla_ms!r}"
+        ),
+        "DEFAULT_TPOT_SLA_MS: float | None = None": (
+            f"DEFAULT_TPOT_SLA_MS: float | None = {workload.tpot_sla_ms!r}"
+        ),
+        "DEFAULT_SEED_CONCURRENCY: int | None = None": (
+            f"DEFAULT_SEED_CONCURRENCY: int | None = {workload.concurrency!r}"
+        ),
+    }
+    for marker, replacement in replacements.items():
+        if marker not in source:
+            raise ValueError(f"Concurrency recommender marker not found: {marker}")
+        source = source.replace(marker, replacement, 1)
+    path.write_text(source, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_scheduler_prepare_script(path: Path) -> None:
+    template_path = Path(__file__).with_name("scheduler_sweep_prepare.py")
+    path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_scheduler_wrapper(path: Path, *, workload: WorkloadHints) -> None:
+    assert workload.input_tokens is not None
+    assert workload.output_tokens is not None
+    args = [
+        'python3 "${SCRIPT_DIR}/prepare_scheduler.py"',
+        '--config "${SCRIPT_DIR}/parallel-layout-config.yml"',
+        '--concurrency-recommendation "${SCRIPT_DIR}/concurrency-recommendation.json"',
+        f"--input-tokens {workload.input_tokens}",
+        f"--output-tokens {workload.output_tokens}",
+    ]
+    if workload.tpot_sla_ms is not None:
+        args.append(f"--tpot-sla-ms {workload.tpot_sla_ms:g}")
+    if workload.target_qps is not None:
+        args.append(f"--target-qps {workload.target_qps:g}")
+    args.extend(
+        [
+            '--output-config "${SCRIPT_DIR}/parallel-layout-sweep-config.yml"',
+            '--serve-params "${SCRIPT_DIR}/serve_params.json"',
+            '--bench-params "${SCRIPT_DIR}/bench_params.json"',
+        ]
+    )
+    prepare_cmd = " \\\n  ".join(args)
+    script = f"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
+
+{prepare_cmd}
+
+exec "${{SCRIPT_DIR}}/run_sweep.sh" "$@"
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_full_run_script(path: Path) -> None:
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RUN_ARGS=("$@")
+
+"${SCRIPT_DIR}/run_parallel_layout_sweep.sh" "${RUN_ARGS[@]}"
+"${SCRIPT_DIR}/recommend_parallel_layout.py"
+"${SCRIPT_DIR}/run_concurrency_sweep.sh" "${RUN_ARGS[@]}"
+"${SCRIPT_DIR}/recommend_concurrency.py"
+"${SCRIPT_DIR}/run_scheduler_sweep.sh" "${RUN_ARGS[@]}"
+"${SCRIPT_DIR}/recommend.py"
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_full_guide(path: Path, workload: WorkloadHints) -> None:
+    content = f"""# End-to-End Runtime Tuning
+
+This package keeps one fixed workload shape and tunes in dependency order:
+
+```text
+TP/DP -> max_concurrency -> scheduler
+```
+
+The supplied `--concurrency={workload.concurrency}` is the representative load
+used for TP/DP selection and to size the Workload Explorer dataset. Stage 2
+selects the measured SLA-feasible `max_concurrency`. Stage 3 recalculates its
+scheduler baseline from that concurrency and the selected DP layout.
+
+Run all stages:
+
+```bash
+./run_full_sweep.sh
+```
+
+Or run each stage explicitly:
+
+```bash
+./run_parallel_layout_sweep.sh
+./recommend_parallel_layout.py
+./run_concurrency_sweep.sh
+./recommend_concurrency.py
+./run_scheduler_sweep.sh
+./recommend.py
+```
+
+Generated recipe sweeps use `--continue-on-error`. An isolated warmup or
+benchmark invocation failure is recorded and skipped. A combination with no
+successful measured runs remains retryable with `--resume`.
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def write_concurrency_sweep_files(
+    output_dir: str,
+    *,
+    config_path: str,
+    env_path: str,
+    config: dict[str, Any],
+    workload: WorkloadHints,
+) -> list[Path]:
+    """Write a standalone max_concurrency Workload Explorer package."""
+    validate_sweep_workload(workload)
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    bench_params = directory / "concurrency_bench_params.json"
+    run_script = directory / "run_concurrency_sweep.sh"
+    recommend_script = directory / "recommend_concurrency.py"
+
+    config_rel = _relative_to(directory, config_path)
+    env_rel = _relative_to(directory, env_path)
+    request_model, tokenizer = _benchmark_models(config)
+
+    _write_json(bench_params, build_concurrency_bench_params(workload))
+    _write_concurrency_run_script(
+        run_script,
+        config_rel=config_rel,
+        env_rel=env_rel,
+        request_model=request_model,
+        tokenizer=tokenizer,
+        workload=workload,
+    )
+    _write_concurrency_recommend_script(recommend_script, workload=workload)
+    return [bench_params, run_script, recommend_script]
+
+
+def write_full_sweep_files(
+    output_dir: str,
+    *,
+    config_path: str,
+    env_path: str,
+    config: dict[str, Any],
+    workload: WorkloadHints,
+    numa_node_count: int,
+) -> list[Path]:
+    """Write TP/DP -> concurrency -> scheduler end-to-end tuning artifacts."""
+    files = write_parallel_layout_sweep_files(
+        output_dir,
+        config_path=config_path,
+        env_path=env_path,
+        config=config,
+        workload=workload,
+        numa_node_count=numa_node_count,
+    )
+
+    directory = Path(output_dir)
+    concurrency_bench = directory / "concurrency_bench_params.json"
+    run_concurrency = directory / "run_concurrency_sweep.sh"
+    recommend_concurrency = directory / "recommend_concurrency.py"
+    prepare_scheduler = directory / "prepare_scheduler.py"
+    scheduler_runner = directory / "run_sweep.sh"
+    recommend_scheduler = directory / "recommend.py"
+    run_scheduler = directory / "run_scheduler_sweep.sh"
+    run_full = directory / "run_full_sweep.sh"
+    guide = directory / "SWEEP.md"
+
+    env_rel = _relative_to(directory, env_path)
+    request_model, tokenizer = _benchmark_models(config)
+
+    _write_json(concurrency_bench, build_concurrency_bench_params(workload))
+    _write_concurrency_run_script(
+        run_concurrency,
+        config_rel="parallel-layout-config.yml",
+        env_rel=env_rel,
+        request_model=request_model,
+        tokenizer=tokenizer,
+        workload=workload,
+    )
+    _write_concurrency_recommend_script(recommend_concurrency, workload=workload)
+
+    # Full tuning owns the scheduler stage. The standalone parallel-layout mode
+    # intentionally stops after TP/DP selection.
+    _write_scheduler_prepare_script(prepare_scheduler)
+    _write_run_script(
+        scheduler_runner,
+        config_rel="parallel-layout-sweep-config.yml",
+        env_rel=env_rel,
+        request_model=request_model,
+        tokenizer=tokenizer,
+        workload=workload,
+    )
+    _write_recommend_script(
+        recommend_scheduler,
+        config_rel="parallel-layout-config.yml",
+        env_rel=env_rel,
+        workload=workload,
+    )
+    _write_scheduler_wrapper(run_scheduler, workload=workload)
+
+    _write_full_run_script(run_full)
+    _write_full_guide(guide, workload)
+
+    return [
+        *files,
+        concurrency_bench,
+        run_concurrency,
+        recommend_concurrency,
+        prepare_scheduler,
+        scheduler_runner,
+        recommend_scheduler,
+        run_scheduler,
+        run_full,
     ]
 
