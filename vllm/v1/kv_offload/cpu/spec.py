@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -9,6 +10,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingConfigInfo,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
@@ -90,6 +92,17 @@ class CPUOffloadingSpec(OffloadingSpec):
                 )
             )
         return definitions
+
+    @classmethod
+    @override
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return ()
+
+    @override
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return ()
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
