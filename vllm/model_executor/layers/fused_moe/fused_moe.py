@@ -31,16 +31,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
 )
-from vllm.model_executor.warmup.jit_warmup import (
-    WarmupChoices,
-    WarmupIntRange,
-    _when,
-)
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    DispatchSpec,
-    TritonWarmupTensor,
-    triton_kernel_dispatcher_with_warmup,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -620,180 +610,6 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def _resolve_wna16_config(
-    config: dict[str, int],
-    *,
-    num_valid_tokens: int,
-    size_k: int,
-    size_n: int,
-    group_size: int,
-    real_top_k: int,
-) -> dict[str, int]:
-    config = config.copy()
-    config.update(
-        get_moe_wna16_block_config(
-            config=config,
-            use_moe_wna16_cuda=False,
-            num_valid_tokens=num_valid_tokens,
-            size_k=size_k,
-            size_n=size_n,
-            num_experts=size_n,
-            group_size=group_size,
-            real_top_k=real_top_k,
-            block_size_m=config["BLOCK_SIZE_M"],
-        )
-    )
-    return config
-
-
-def _wna16_warmup_inputs(
-    *,
-    layer: Any,
-    experts: Any,
-) -> dict[str, Any]:
-    dtype = layer.moe_config.in_dtype
-    top_k = layer.top_k
-    pack_factor = 2 if experts.quant_config.use_int4_w4a16 else 1
-    group_size = experts.block_shape[1]
-    compute_type = (
-        tl.float16
-        if dtype == torch.float16
-        else tl.float32
-        if dtype == torch.float32
-        else tl.bfloat16
-    )
-    num_tokens: Any = WarmupIntRange(1, layer.moe_config.max_num_tokens + 1)
-    second_gemm: Any = WarmupChoices(False, True)
-    em: Any = WarmupChoices(1, 2, 16)
-    has_topk_weights: Any = WarmupChoices(False, True)
-    _when(not second_gemm or has_topk_weights)
-    base_config = try_get_optimal_moe_config(
-        layer.w13_weight.size(),
-        layer.w2_weight.size(),
-        top_k,
-        experts.quant_config.config_name(dtype),
-        num_tokens,
-        block_shape=experts.block_shape,
-    )
-    weight = layer.w2_weight if second_gemm else layer.w13_weight
-    scale = experts.w2_scale if second_gemm else experts.w1_scale
-    zero_point = (
-        experts.quant_config.w2_zp if second_gemm else experts.quant_config.w1_zp
-    )
-    input_size = weight.size(2) * pack_factor
-    config = _resolve_wna16_config(
-        base_config,
-        num_valid_tokens=num_tokens * top_k,
-        size_k=input_size,
-        size_n=weight.size(1),
-        group_size=group_size,
-        real_top_k=1 if second_gemm else top_k,
-    )
-    return dict(
-        a=TritonWarmupTensor(
-            dtype,
-            shape=(1, input_size),
-            strides=(input_size, 1),
-        ),
-        b=TritonWarmupTensor(
-            weight.dtype,
-            shape=(1, weight.size(1), 1),
-            strides=weight.stride(),
-        ),
-        c=TritonWarmupTensor(
-            dtype,
-            shape=(1, 1, weight.size(1)),
-            strides=(1, weight.size(1), 1),
-        ),
-        b_scale=TritonWarmupTensor(
-            scale.dtype,
-            shape=(1, 1, 1),
-            strides=scale.stride(),
-        ),
-        b_zp=(
-            None
-            if zero_point is None
-            else TritonWarmupTensor(
-                zero_point.dtype,
-                shape=(1, 1, 1),
-                strides=zero_point.stride(),
-            )
-        ),
-        topk_weights=(TritonWarmupTensor(torch.float32) if has_topk_weights else None),
-        sorted_token_ids=TritonWarmupTensor(torch.int32),
-        expert_ids=TritonWarmupTensor(torch.int32),
-        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
-        EM=em,
-        num_valid_tokens=num_tokens * top_k,
-        config=config,
-        group_size=group_size,
-        mul_routed_weight=(second_gemm and not layer.apply_router_weight_on_input),
-        top_k=1 if second_gemm else top_k,
-        compute_type=compute_type,
-        use_int4_w4a16=experts.quant_config.use_int4_w4a16,
-        use_int8_w8a16=experts.quant_config.use_int8_w8a16,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=fused_moe_kernel_gptq_awq,
-    warmup_inputs=_wna16_warmup_inputs,
-)
-def _wna16(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    b_scale: torch.Tensor,
-    b_zp: torch.Tensor | None,
-    topk_weights: torch.Tensor | None,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    *,
-    EM: int,
-    num_valid_tokens: int,
-    config: dict[str, int],
-    group_size: int,
-    mul_routed_weight: bool,
-    top_k: int,
-    compute_type: tl.dtype,
-    use_int4_w4a16: bool,
-    use_int8_w8a16: bool,
-) -> DispatchSpec:
-    N = b.shape[1]
-    K = a.shape[1]
-    grid = (
-        triton.cdiv(EM, config["BLOCK_SIZE_M"])
-        * triton.cdiv(N, config["BLOCK_SIZE_N"]),
-    )
-    return grid, dict(
-        N=N,
-        K=K,
-        stride_am=a.stride(0),
-        stride_ak=a.stride(1),
-        stride_be=b.stride(0),
-        stride_bk=b.stride(2),
-        stride_bn=b.stride(1),
-        stride_cm=c.stride(1),
-        stride_cn=c.stride(2),
-        stride_bse=b_scale.stride(0),
-        stride_bsk=b_scale.stride(2),
-        stride_bsn=b_scale.stride(1),
-        stride_bze=b_zp.stride(0) if b_zp is not None else 0,
-        stride_bzk=b_zp.stride(2) if b_zp is not None else 0,
-        stride_bzn=b_zp.stride(1) if b_zp is not None else 0,
-        block_k_diviable=K % config["BLOCK_SIZE_K"] == 0,
-        BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
-        BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
-        BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
-        GROUP_SIZE_M=config["GROUP_SIZE_M"],
-        SPLIT_K=config["SPLIT_K"],
-        has_zp=b_zp is not None,
-        num_warps=config.get("num_warps", 4),
-        num_stages=config.get("num_stages", 3),
-    )
-
-
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
 def invoke_fused_moe_wna16_cuda_kernel(
@@ -886,6 +702,10 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
+    grid = lambda META: (
+        triton.cdiv(EM, META["BLOCK_SIZE_M"])
+        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+    )
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -901,7 +721,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         )
     )
 
-    _wna16(
+    fused_moe_kernel_gptq_awq[grid](
         A,
         B,
         C,
@@ -911,15 +731,32 @@ def invoke_fused_moe_wna16_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        EM=EM,
-        num_valid_tokens=num_tokens,
-        config=config,
+        B.size(1),
+        A.size(1),
+        EM,
+        num_tokens,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(2),
+        B.stride(1),
+        C.stride(1),
+        C.stride(2),
+        B_scale.stride(0),
+        B_scale.stride(2),
+        B_scale.stride(1),
+        B_zp.stride(0) if B_zp is not None else 0,
+        B_zp.stride(2) if B_zp is not None else 0,
+        B_zp.stride(1) if B_zp is not None else 0,
+        block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
         group_size=block_shape[1],
-        mul_routed_weight=mul_routed_weight,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
+        has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
+        **config,
     )
 
 
