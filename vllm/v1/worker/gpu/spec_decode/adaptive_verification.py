@@ -165,6 +165,10 @@ class AdaptiveVerificationManager:
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
 
+    def max_draft_tokens(self, num_reqs: int) -> int:
+        """Maximum draft budget that fits in one rejection-sampler chunk."""
+        return max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens)
+
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
         self._pending_resets.append(req_idx)
@@ -300,8 +304,7 @@ class AdaptiveVerificationManager:
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+            int(scheduled_drafts.sum()), self.max_draft_tokens(num_reqs)
         )
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables

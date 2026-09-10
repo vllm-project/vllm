@@ -201,7 +201,13 @@ class RejectionSampler:
             # guarantees the compacted batch always lands here.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
         else:
-            assert not self.enable_adaptive_verification
+            # Adaptive verification changes the logits layout only for batches
+            # containing draft tokens. Prefill and ordinary decode batches
+            # retain the scheduled layout and can use the regular chunked path.
+            assert (
+                not self.enable_adaptive_verification
+                or input_batch.num_draft_tokens == 0
+            )
             request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
 
         sampled_chunks: list[torch.Tensor] = []

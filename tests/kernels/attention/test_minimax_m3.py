@@ -288,6 +288,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
             deployed_score,
             block_table,
             seq_lens,
+            seq_lens,
             num_idx_heads,
             head_dim,
             init_blocks,
@@ -307,6 +308,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
             BLOCK_SIZE_Q=block_size_q,
             num_kv_chunks=deployed_chunks,
             USE_PDL=False,
+            VARLEN=False,
         )
 
     def launch_optimized() -> None:
@@ -316,6 +318,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
                 index_kv_cache,
                 optimized_score,
                 block_table,
+                seq_lens,
                 seq_lens,
                 num_idx_heads,
                 head_dim,
@@ -336,6 +339,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
                 block_table.stride(0),
                 BLOCK_SIZE_K=BLOCK_SIZE,
                 BLOCK_SIZE_Q=block_size_q,
+                VARLEN=False,
                 num_warps=2,
                 num_stages=1,
             )
@@ -346,6 +350,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
                 index_kv_cache,
                 optimized_score,
                 block_table,
+                seq_lens,
                 seq_lens,
                 num_idx_heads,
                 head_dim,
@@ -366,6 +371,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
                 BLOCK_SIZE_Q=block_size_q,
                 num_kv_chunks=optimized_chunks,
                 USE_PDL=False,
+                VARLEN=False,
                 num_warps=2,
                 num_stages=1,
             )
@@ -1178,6 +1184,9 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             dummy_block_table,
             actual,
             seq_lens,
+            seq_lens,
+            seq_lens,
+            batch,
             1,
             score.stride(0),
             score.stride(1),
@@ -1203,6 +1212,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             EMIT_SPARSE_TABLE=False,
             SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
             ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
+            VARLEN=False,
             num_warps=4 if adaptive_final_merge else 8,
             num_stages=2,
         )
@@ -1345,6 +1355,102 @@ def test_amd_decode_index_topk_end_to_end(
 
     _assert_topk_indices_equal_unordered(actual, expected)
     assert torch.count_nonzero(completion_counter).item() == 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax M3 varlen index decode is ROCm-only",
+)
+@pytest.mark.parametrize(
+    ("head_dim", "dtype"),
+    [(16, torch.float32), (128, torch.bfloat16)],
+)
+def test_decode_index_topk_varlen_with_padded_rows(
+    head_dim: int,
+    dtype: torch.dtype,
+):
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode as minimax_m3_index_decode_varlen,
+    )
+
+    topk = 6
+    init_blocks = 0
+    local_blocks = 1
+    num_idx_heads = 2
+    active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
+    active_q_lens = torch.tensor((1, 4, 2), device="cuda", dtype=torch.int32)
+    prefix_lens = active_seq_lens - active_q_lens
+    num_padded_reqs = 2
+    num_padding_tokens = 2
+    batch = active_seq_lens.numel() + num_padded_reqs
+    seq_lens = torch.cat(
+        [
+            active_seq_lens,
+            torch.zeros(num_padded_reqs, device="cuda", dtype=torch.int32),
+        ]
+    )
+    query_start_loc = torch.zeros(batch + 1, device="cuda", dtype=torch.int32)
+    query_start_loc[1:] = torch.cumsum(
+        torch.cat(
+            [
+                active_q_lens,
+                torch.zeros(num_padded_reqs, device="cuda", dtype=torch.int32),
+            ]
+        ),
+        dim=0,
+    )
+    num_active_tokens = int(active_q_lens.sum())
+    total_q = num_active_tokens + num_padding_tokens
+    token_to_req = torch.cat(
+        [
+            torch.repeat_interleave(
+                torch.arange(3, device="cuda", dtype=torch.int32),
+                active_q_lens,
+            ),
+            torch.zeros(num_padding_tokens, device="cuda", dtype=torch.int32),
+        ]
+    )
+
+    max_seq_len = int(active_seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = active_seq_lens.numel() * max_blocks
+    block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
+    block_table[:3] = torch.randperm(
+        num_pages, device="cuda", dtype=torch.int32
+    ).reshape(3, max_blocks)
+    idx_q = torch.randn(total_q, num_idx_heads, head_dim, device="cuda", dtype=dtype)
+    index_kv_cache = torch.randn(
+        num_pages, BLOCK_SIZE, head_dim, device="cuda", dtype=dtype
+    )
+
+    actual = minimax_m3_index_decode_varlen(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        decode_query_len=0,
+        max_decode_query_len=int(active_q_lens.max()),
+        query_start_loc=query_start_loc,
+        token_to_req_indices=token_to_req,
+    )
+    expected = torch.full_like(actual, -1)
+    expected[:, :num_active_tokens] = _reference_index_topk(
+        idx_q[:num_active_tokens],
+        index_kv_cache,
+        block_table[:3],
+        active_q_lens,
+        active_seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+    )
+    _assert_topk_indices_equal_unordered(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -2146,6 +2252,117 @@ def test_decode_sparse_attention_correctness(
     torch.accelerator.synchronize()
 
     error = (actual[:active_tokens].float() - expected.float()).abs()
+    assert error.mean().item() < 2.5e-4
+    assert error.max().item() < 1.7e-2
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+def test_decode_sparse_attention_varlen_with_padded_rows(
+    kv_layout: KVCacheLayout,
+):
+    torch.manual_seed(0)
+    active_seq_lens = torch.tensor((130, 257, 384), device="cuda", dtype=torch.int32)
+    active_q_lens = torch.tensor((1, 4, 2), device="cuda", dtype=torch.int32)
+    prefix_lens = active_seq_lens - active_q_lens
+    num_active_reqs = active_seq_lens.numel()
+    num_padded_reqs = 2
+    num_padding_tokens = 2
+    batch = num_active_reqs + num_padded_reqs
+
+    pages_per_req = [
+        (int(seq_len) + BLOCK_SIZE - 1) // BLOCK_SIZE for seq_len in active_seq_lens
+    ]
+    max_blocks = max(pages_per_req)
+    num_pages = sum(pages_per_req)
+    physical_pages = torch.randperm(num_pages, device="cuda", dtype=torch.int32)
+    block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
+    base_page = 0
+    for req_id, num_req_pages in enumerate(pages_per_req):
+        block_table[req_id, :num_req_pages] = physical_pages[
+            base_page : base_page + num_req_pages
+        ]
+        base_page += num_req_pages
+
+    seq_lens = torch.cat(
+        [
+            active_seq_lens,
+            torch.zeros(num_padded_reqs, device="cuda", dtype=torch.int32),
+        ]
+    )
+    query_start_loc = torch.zeros(batch + 1, device="cuda", dtype=torch.int32)
+    query_start_loc[1:] = torch.cumsum(
+        torch.cat(
+            [
+                active_q_lens,
+                torch.zeros(num_padded_reqs, device="cuda", dtype=torch.int32),
+            ]
+        ),
+        dim=0,
+    )
+    num_active_tokens = int(active_q_lens.sum())
+    total_q = num_active_tokens + num_padding_tokens
+    token_to_req = torch.cat(
+        [
+            torch.repeat_interleave(
+                torch.arange(num_active_reqs, device="cuda", dtype=torch.int32),
+                active_q_lens,
+            ),
+            torch.zeros(num_padding_tokens, device="cuda", dtype=torch.int32),
+        ]
+    )
+    q = torch.randn(total_q, NUM_Q_HEADS, HEAD_DIM, device="cuda", dtype=DTYPE)
+    topk_idx = torch.full(
+        (NUM_KV_HEADS, total_q, TOPK),
+        -1,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    token_id = 0
+    for req_id, (seq_len, query_len) in enumerate(
+        zip(active_seq_lens.tolist(), active_q_lens.tolist())
+    ):
+        for local_q in range(query_len):
+            query_pos = seq_len - query_len + local_q
+            current_block = query_pos // BLOCK_SIZE
+            older_blocks = torch.randperm(
+                current_block, device="cuda", dtype=torch.int32
+            )
+            selected = torch.cat(
+                [
+                    torch.tensor([current_block], device="cuda", dtype=torch.int32),
+                    older_blocks[: TOPK - 1],
+                ]
+            )
+            topk_idx[:, token_id, : selected.numel()] = selected
+            token_id += 1
+
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
+    actual = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        actual,
+        decode_query_len=0,
+        query_start_loc=query_start_loc,
+        token_to_req_indices=token_to_req,
+    )
+    expected = _reference_sparse_attn(
+        q[:num_active_tokens],
+        kv_cache,
+        topk_idx[:, :num_active_tokens],
+        block_table[:num_active_reqs],
+        active_q_lens,
+        active_seq_lens,
+        prefix_lens,
+    )
+    torch.accelerator.synchronize()
+
+    error = (actual[:num_active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2
 

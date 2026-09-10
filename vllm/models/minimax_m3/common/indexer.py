@@ -35,12 +35,16 @@ if current_platform.is_rocm():
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
+
+    _INDEX_DECODE_SUPPORTS_VARLEN = True
 else:
     from vllm.models.minimax_m3.common.ops.index_topk import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
+
+    _INDEX_DECODE_SUPPORTS_VARLEN = False
 
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -88,6 +92,10 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return cls.get_builder_cls().supports_varlen_decode()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -171,13 +179,16 @@ class MiniMaxM3IndexerPrefillMetadata:
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
     """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens)."""
+    per-request query length (1, or 1 + num_speculative_tokens); it is 0 for
+    a ragged batch, whose query lengths come from ``query_start_loc``."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
     max_decode_query_len: int
+    query_start_loc: torch.Tensor | None = None
+    token_to_req_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -211,6 +222,25 @@ class MiniMaxM3IndexerMetadataBuilder(
     # Raised to 1 + num_speculative_tokens by _init_reorder_batch_threshold when
     # spec decode is on; matches the main builder so the splits agree.
     reorder_batch_threshold: int = 1
+
+    @classmethod
+    def supports_varlen_decode(cls) -> bool:
+        return _INDEX_DECODE_SUPPORTS_VARLEN
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if (
+            cls.supports_varlen_decode()
+            and spec_config is not None
+            and spec_config.enable_adaptive_verification
+        ):
+            return AttentionCGSupport.ALWAYS
+        return cls._cudagraph_support
 
     def __init__(
         self,
@@ -248,6 +278,21 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        spec_config = vllm_config.speculative_config
+        self.varlen_decode = (
+            self.supports_varlen_decode()
+            and spec_config is not None
+            and spec_config.enable_adaptive_verification
+        )
+        self.token_to_req_buffer = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=torch.int32,
+                device=device,
+            )
+            if self.varlen_decode
+            else None
+        )
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -269,7 +314,7 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
+                require_uniform=not self.varlen_decode,
             )
         )
         assert num_decodes + num_prefills == num_reqs
@@ -296,20 +341,32 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         decode_metadata: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
-            decode_query_len = int(query_lens_cpu[0].item())
-            assert decode_query_len > 0
-            assert torch.all(
-                (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
-            )
-            assert num_decode_tokens == num_decodes * decode_query_len
+            decode_qsl = None
+            token_to_req = None
+            decode_query_len = 0
+            if self.varlen_decode:
+                assert self.token_to_req_buffer is not None
+                decode_qsl = query_start_loc[: num_decodes + 1]
+                token_to_req = common_attn_metadata.token_to_req_indices(
+                    self.token_to_req_buffer
+                )[:num_decode_tokens]
+            else:
+                qsl_cpu = common_attn_metadata.query_start_loc_cpu
+                query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
+                decode_query_len = int(query_lens_cpu[0].item())
+                assert decode_query_len > 0
+                assert torch.all(
+                    (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
+                )
+                assert num_decode_tokens == num_decodes * decode_query_len
             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
+                query_start_loc=decode_qsl,
+                token_to_req_indices=token_to_req,
             )
 
         return MiniMaxM3IndexerMetadata(
@@ -462,6 +519,14 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 out=buf_htk,
                 **fused_sparse_kwargs,
                 **decode_backend_kwargs,
+                **(
+                    {}
+                    if d.query_start_loc is None
+                    else {
+                        "query_start_loc": d.query_start_loc,
+                        "token_to_req_indices": d.token_to_req_indices,
+                    }
+                ),
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill

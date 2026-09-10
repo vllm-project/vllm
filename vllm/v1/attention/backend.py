@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.v1.attention.ops.token_to_req import scatter_token_to_req_indices
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -515,22 +516,15 @@ class CommonAttentionMetadata:
             assert self._token_to_req_indices_cache.shape[0] >= num_tokens
             return self._token_to_req_indices_cache[:num_tokens]
 
-        # Built from the device query_start_loc: adaptive verification decides the
-        # per-request draft split on device, so the CPU copy carries the right total
-        # but not the right per-request boundaries. Padding requests have a query
-        # length of zero and drop out of the repeat.
-        num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-        assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        token_to_req_indices = torch.repeat_interleave(
-            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
-            query_lens,
-            output_size=num_mapped_tokens,
+        assert buffer.shape[0] >= num_tokens
+        scatter_token_to_req_indices(
+            self.query_start_loc,
+            buffer,
+            num_reqs=self.num_reqs,
+            num_tokens=num_tokens,
+            max_query_len=self.max_query_len,
         )
-        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
-        if num_mapped_tokens < num_tokens:
-            buffer[num_mapped_tokens:num_tokens].zero_()
-        self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
+        self._token_to_req_indices_cache = buffer[:num_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support

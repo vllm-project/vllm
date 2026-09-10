@@ -147,8 +147,9 @@ def test_contexted_kv_attention(
     cache_size = 640
     max_block_per_request = 64
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
-    # ensure one sequence in batch is a decode
-    query_lens[-1] = 1
+    # Exercise both a decode row and a trailing zero-length FULL-graph row.
+    query_lens[-2] = 1
+    query_lens[-1] = 0
 
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
