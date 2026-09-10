@@ -598,6 +598,7 @@ def _chunk_kda_fwd_with_cumulative_g(
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     safe_gate: bool = False,
+    out: torch.Tensor | None = None,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
     # RCP_LN2 (so the downstream exp2-based kernels reproduce exp(g)).
@@ -642,7 +643,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         g=g,
         A=Aqk,
         h=h,
-        o=v,
+        o=v if out is None else out,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -706,6 +707,7 @@ def chunk_kda_with_fused_gate_fwd(
     output_final_state: bool,
     lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices = (
@@ -736,6 +738,7 @@ def chunk_kda_with_fused_gate_fwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
         safe_gate=lower_bound is not None,
+        out=out,
     )
 
 
@@ -787,6 +790,7 @@ def chunk_kda_with_fused_gate(
     lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate and beta projections."""
@@ -810,6 +814,7 @@ def chunk_kda_with_fused_gate(
         output_final_state=output_final_state,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
+        out=out,
     )
     return o, final_state
 

@@ -330,6 +330,7 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
         cu_seqlens=cu_seqlens_t,
         use_qk_l2norm_in_kernel=True,
     )
+    output = torch.empty_like(v)
     new_o, new_ht = chunk_kda_with_fused_gate(
         q=q.clone(),
         k=k.clone(),
@@ -343,8 +344,10 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,
         use_qk_l2norm_in_kernel=True,
+        out=output,
     )
 
+    assert new_o.data_ptr() == output.data_ptr()
     assert_close("o", old_o, new_o, 1e-3, err_atol=1e-3)
     assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)
 
@@ -442,6 +445,7 @@ def test_packed_kda_decode_correctness(
         use_qk_l2norm_in_kernel=True,
     )
     packed_state = state
+    packed_output = torch.empty_like(dense_out)
     packed_out, _ = PACKED_DECODE_IMPLS[impl](
         mixed_qkv=mixed_qkv,
         raw_g=raw_g,
@@ -451,8 +455,11 @@ def test_packed_kda_decode_correctness(
         lower_bound=lower_bound,
         initial_state=packed_state,
         state_indices=state_indices,
+        **({"out": packed_output} if impl == "nvidia" else {}),
     )
 
+    if impl == "nvidia":
+        assert packed_out.data_ptr() == packed_output.data_ptr()
     assert_close("o", dense_out, packed_out, 1e-3, err_atol=1e-3)
     assert_close("ht", dense_state, packed_state, 1e-3, err_atol=1e-3)
 
