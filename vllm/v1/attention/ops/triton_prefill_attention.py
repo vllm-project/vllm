@@ -32,6 +32,11 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX115X
+else:
+    _ON_GFX115X = False
+
 
 @triton.jit
 def _fwd_kernel(
@@ -54,6 +59,7 @@ def _fwd_kernel(
     kv_group_num: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DMODEL_TAIL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
@@ -96,6 +102,34 @@ def _fwd_kernel(
     k_ptrs = K + off_k
     v_ptrs = V + off_v
 
+    # Split-D path: a non-power-of-2 head_dim (e.g. 72) would otherwise force
+    # BLOCK_DMODEL = next_pow2(Lk) = 128, so the qk/pv dots run 8 K-passes when
+    # only ceil(Lk / 16) are needed. Covering D as a power-of-2 main block plus
+    # a power-of-2 tail block (72 -> 64 + 16 = 80) drops that to 5. Constexpr
+    # guarded: BLOCK_DMODEL_TAIL == 0 is dead code, so every power-of-2 head_dim
+    # compiles to the single-block kernel exactly as before.
+    if BLOCK_DMODEL_TAIL > 0:
+        offs_dt = BLOCK_DMODEL + tl.arange(0, BLOCK_DMODEL_TAIL)
+        mask_dt = offs_dt < Lk
+        off_qt = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
+            + cur_head * stride_qh
+            + offs_dt[None, :]
+        )
+        off_kt = (
+            offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_dt[:, None]
+        )
+        off_vt = (
+            offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_dt[None, :]
+        )
+        qt = tl.load(
+            Q + off_qt,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+            other=0.0,
+        )
+        kt_ptrs = K + off_kt
+        vt_ptrs = V + off_vt
+
     # initialize pointer to m and l
     if USE_SINKS:
         sink = tl.load(Sinks + cur_head) * 1.4426950408889634
@@ -112,6 +146,8 @@ def _fwd_kernel(
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = tl.zeros([BLOCK_M, BLOCK_DMODEL_TAIL], dtype=tl.float32)
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
 
@@ -167,6 +203,13 @@ def _fwd_kernel(
         )
 
         qk = tl.dot(q, k)
+        if BLOCK_DMODEL_TAIL > 0:
+            kt = tl.load(
+                kt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                mask=(pos_k < cur_batch_seq_len) & (mask_dt[:, None]),
+                other=0.0,
+            )
+            qk = tl.dot(qt, kt, qk)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         if USE_SINKS and SINKS_BIAS_KEY0:
             qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
@@ -180,6 +223,8 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         # -- update output accumulator --
         acc = acc * alpha[:, None]
+        if BLOCK_DMODEL_TAIL > 0:
+            acc_t = acc_t * alpha[:, None]
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
@@ -188,6 +233,14 @@ def _fwd_kernel(
         )
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
+        if BLOCK_DMODEL_TAIL > 0:
+            vt = tl.load(
+                vt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=((start_n + offs_n[:, None]) < cur_batch_seq_len)
+                & (mask_dt[None, :]),
+                other=0.0,
+            )
+            acc_t = tl.dot(p, vt, acc_t)
         # update m_i
         m_i = m_ij
 
@@ -201,6 +254,66 @@ def _fwd_kernel(
     tl.store(
         out_ptrs, acc, mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_d[None, :])
     )
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = acc_t / l_i[:, None]
+        off_o_tail = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
+            + cur_head * stride_oh
+            + offs_dt[None, :]
+        )
+        tl.store(
+            Out + off_o_tail,
+            acc_t,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+        )
+
+
+def _split_head_dim(Lk: int) -> tuple[int, int]:
+    """Pick ``(BLOCK_DMODEL, BLOCK_DMODEL_TAIL)`` covering head_dim ``Lk``.
+
+    A power-of-2 ``Lk`` returns ``(Lk, 0)``, the single-block kernel. Otherwise
+    ``Lk`` is covered by the largest power-of-2 block below it plus a power-of-2
+    tail block, so the dot extent rounds up near ``Lk`` (72 -> 64 + 16 = 80)
+    instead of to ``next_power_of_2(Lk)`` = 128.
+
+    The tail pass only earns its extra dot, loads and accumulator when it
+    actually narrows that extent, which is not true for every ``Lk``: 112 would
+    split into 64 + 64, covering the same 128 lanes for 12% more time. Those
+    keep the single block.
+
+    Args:
+        Lk: Head dimension.
+
+    Returns:
+        The main and tail block sizes; a tail of 0 means no tail pass.
+    """
+    npo2 = triton.next_power_of_2(Lk)
+    if npo2 == Lk:
+        return npo2, 0
+    main = npo2 // 2
+    tail = max(16, triton.next_power_of_2(Lk - main))
+    if main + tail >= npo2:
+        return npo2, 0
+    return main, tail
+
+
+def _get_head_dim_blocks(Lk: int) -> tuple[int, int]:
+    """Pick the head-dim blocking for this architecture.
+
+    The split is only taken where it has been measured. It is a strict
+    reduction in dot extent, so it should carry over, but the extra dot and
+    loads it costs have only been shown to pay for themselves on gfx115x.
+    Everywhere else keeps the single padded block this kernel has always used.
+
+    Args:
+        Lk: Head dimension.
+
+    Returns:
+        ``(BLOCK_DMODEL, BLOCK_DMODEL_TAIL)``.
+    """
+    if _ON_GFX115X:
+        return _split_head_dim(Lk)
+    return triton.next_power_of_2(Lk), 0
 
 
 def get_block_size(dtype: torch.dtype) -> int:
@@ -254,6 +367,8 @@ def context_attention_fwd(
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
 
+    block_dmodel, block_dmodel_tail = _get_head_dim_blocks(Lk)
+
     _fwd_kernel[grid](
         q,
         k,
@@ -273,7 +388,8 @@ def context_attention_fwd(
         o.stride(1),
         kv_group_num=kv_group_num,
         BLOCK_M=BLOCK,
-        BLOCK_DMODEL=triton.next_power_of_2(Lk),
+        BLOCK_DMODEL=block_dmodel,
+        BLOCK_DMODEL_TAIL=block_dmodel_tail,
         BLOCK_N=BLOCK,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
