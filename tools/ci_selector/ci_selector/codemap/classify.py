@@ -1049,6 +1049,23 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     return Claim("fail-open", detail, run_all={c.name for c in configs})
 
 
+def _run_all_escalation(path: str, configs: list[PipelineConfig]) -> set[str]:
+    """Pipelines whose generator escalates to a full run on `path`.
+
+    The one sanctioned read of the hand-maintained list, and read only to
+    escalate, never to route or drop. Any leg that claims the file more
+    narrowly has to carry this too, or it proposes less than CI will run.
+    """
+    return {
+        config.name
+        for config in configs
+        if any(matches_source_dependency(p, path) for p in config.run_all_patterns)
+        and not any(
+            matches_source_dependency(p, path) for p in config.run_all_exclude_patterns
+        )
+    }
+
+
 def _classify_buildkite(
     state: RepoState, path: str, configs: list[PipelineConfig]
 ) -> Claim:
@@ -1062,11 +1079,31 @@ def _classify_buildkite(
                 f"{path} is {config.name}'s generator config",
                 run_all={config.name},
             )
-    step_ids = {
+    defining = {
         s.step_id for p in state.pipelines for s in p.steps if s.source_file == path
     }
-    if step_ids:
-        return Claim("buildkite", f"{path} defines these steps", step_ids=step_ids)
+    if defining:
+        # The generator reads a step yaml on the agent before any container
+        # starts, so no job in an image it is copied into can execute it. The
+        # targeting leg below is unreachable once this returns, so union it in.
+        targeted = _steps_targeting(state, path) - defining
+        # This leg returns before the escalation branch far below can run, so
+        # a yaml on its own pipeline's run_all list would silently propose
+        # only the steps it defines, all of which may be always-run.
+        escalates = _run_all_escalation(path, configs)
+        detail = f"{path} defines these steps"
+        if escalates:
+            detail += f"; the generator also escalates {sorted(escalates)} on it"
+        return Claim(
+            "buildkite",
+            detail,
+            step_ids=defining | targeted,
+            run_all=escalates,
+            image_union_exempt=True,
+            step_detail={
+                sid: f"{path} is used by this step's command" for sid in targeted
+            },
+        )
     # `_steps_targeting`, not a scripts_seen/data_files check: this leg used to
     # miss a file that is a step's pytest TARGET, reached through its
     # `working_dir`, and everything it missed fell to the terminal run-all. The
@@ -1113,18 +1150,9 @@ def _classify_buildkite(
             "step file the base did not load escalates the pipelines it joins",
             run_all=job_dir_configs,
         )
-    # The generator's own escalation trigger for a pipeline. Read only to
-    # escalate, never to route or drop, so the hand list stays out of both.
     # Before the docker floor: if the generator runs everything on this file,
     # the always-run builds are not its whole test.
-    pattern_configs = {
-        config.name
-        for config in configs
-        if any(matches_source_dependency(p, path) for p in config.run_all_patterns)
-        and not any(
-            matches_source_dependency(p, path) for p in config.run_all_exclude_patterns
-        )
-    }
+    pattern_configs = _run_all_escalation(path, configs)
     if pattern_configs:
         return Claim(
             "buildkite",

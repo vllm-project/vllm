@@ -1211,6 +1211,75 @@ def test_inert_tree_referenced_by_live_step_claims_steps(state):
     assert sid in claim.step_ids
 
 
+def test_a_step_yaml_selects_only_the_steps_it_defines(state):
+    """A step yaml selects the steps it defines and nothing else: the generator
+    reads it on the agent before any container starts, so no job in an image it
+    is copied into can execute it."""
+    path = ".buildkite/test_areas/lora.yaml"
+    defined = {
+        s.step_id for p in state.pipelines for s in p.steps if s.source_file == path
+    }
+    assert defined, "no step names lora.yaml as its source_file"
+    sel = select(state, [path])
+    # Every pipeline, not `_non_always`, which sees vllm_ci only: the image
+    # union added rocm and intel steps too, so a vllm_ci-shaped assertion
+    # would go blind on two thirds of what this removes.
+    always = {s.step_id for p in state.pipelines for s in p.steps if s.always_runs}
+    # Not "no CPU steps": vllm_ci:image-build-cpu always runs and stays.
+    assert set(sel.selected) - always == defined
+
+
+def test_a_step_yaml_on_its_run_all_list_still_escalates(state, vllm_repo):
+    """A step yaml can also be a generator escalation trigger. This leg returns
+    long before the escalation branch, so it has to carry it: amd.yaml defines
+    6 steps and all 6 are always-run, which would leave an edit to it proposing
+    nothing at all while real CI runs the whole ROCm pipeline."""
+    from ci_selector.codemap.classify import _classify
+
+    path = ".buildkite/hardware_tests/amd.yaml"
+    listed = [p for p in state.pipelines if path in (p.config.run_all_patterns or ())]
+    assert listed, f"{path} left the run_all_patterns lists; re-point this test"
+    claim = _classify(state, path, None)
+    assert claim.run_all == {p.config.name for p in listed}
+    # The sibling on the adjacent config line, which reaches the escalation
+    # branch the ordinary way. Both are the same trigger, so both must agree.
+    sibling = _classify(state, ".buildkite/scripts/hardware_ci/run-amd-test.sh", None)
+    assert claim.run_all == sibling.run_all
+
+
+def test_a_step_yaml_named_by_another_step_s_command_keeps_both_legs(state):
+    """Both legs fire for a yaml that defines steps and is also named by another
+    step's command. No file in the tree is both, so this builds a fixture."""
+    import dataclasses
+
+    from ci_selector.codemap.classify import _classify_buildkite
+    from ci_selector.codemap.pipeline.targets import StepTargets
+    from ci_selector.codemap.state import PipelineData
+
+    path = ".buildkite/test_areas/zzz_synthetic.yaml"
+    p0 = state.pipelines[0]
+    definer = dataclasses.replace(
+        p0.steps[0],
+        key="zzz-definer",
+        label="Definer",
+        source_file=path,
+        mirror_hw=None,
+    )
+    caller = p0.steps[1]
+    st = StepTargets(step_id=caller.step_id)
+    st.scripts_seen.append(path)
+    targets = dict(p0.targets)
+    targets[caller.step_id] = st
+    p0b = PipelineData(p0.config, p0.steps + [definer], targets)
+    st2 = dataclasses.replace(state, pipelines=[p0b] + state.pipelines[1:])
+
+    claim = _classify_buildkite(st2, path, [p.config for p in st2.pipelines])
+    assert claim.image_union_exempt
+    assert definer.step_id in claim.step_ids
+    assert caller.step_id in claim.step_ids, "the targeting leg was not unioned in"
+    assert claim.step_detail[caller.step_id] == f"{path} is used by this step's command"
+
+
 def test_class_table_module_inherits_the_table_coverage(state):
     """medusa.py is claimed by the class-table parser but its consumers are HF
     checkpoints, so no test names MedusaConfig and its own closure is empty.
@@ -2933,7 +3002,7 @@ def test_rust_file_keeps_env_keyed_steps(state):
     assert gate_steps & state.auto_step_ids <= set(sel.selected)
 
 
-def test_image_union_exempt_membership():
+def test_image_union_exempt_membership(state):
     """Every entry is a decision that a rule's own answer beats the build
     graph's, so force a re-read on any change. "inert" is here so the image
     COPY does not borrow consumer steps back onto a file proved unreferenced,
@@ -2955,6 +3024,17 @@ def test_image_union_exempt_membership():
         == _IMAGE_UNION_EXEMPT
     )
     assert "inert" not in _DEP_UNION_EXEMPT
+    # "buildkite" must stay out: step yamls opt out per path, via
+    # Claim.image_union_exempt. Exempting the rule would take the union off
+    # every other file the rule claims, which the membership diff alone reads
+    # as a one-line edit rather than as lost tests.
+    from ci_selector.codemap.classify import _classify
+
+    claim = _classify(state, ".buildkite/image_build/image_build.sh", None)
+    assert {s for s, rule in claim.step_rule.items() if rule == "image-copy"}, (
+        "a non-defining buildkite file lost its image-copied steps; the "
+        "exemption is per path, not per rule"
+    )
 
 
 def test_rust_reaches_hardware_image_consumers(state):
@@ -3093,23 +3173,29 @@ def test_reasons_are_attributed_per_step(state):
     """Each step is told why it was selected, not why the claim exists."""
     from ci_selector.codemap.classify import _classify
 
-    path = ".buildkite/test_areas/lora.yaml"
+    # Not a step yaml: those are image-union exempt, so the split this test
+    # checks cannot arise there.
+    path = "csrc/attention/attention_dtypes.h"
     claim = _classify(state, path, None)
-    defined = {
-        s.step_id for p in state.pipelines for s in p.steps if s.source_file == path
-    }
-    assert defined, "no step names lora.yaml as its source_file"
-    copied = claim.step_ids - defined
+    copied = {s for s, rule in claim.step_rule.items() if rule == "image-copy"}
+    # Every override, not just the image ones: under DECLARED_DEPS=on the
+    # declarer union pins its own reasons here too, and those are not "own".
+    own = claim.step_ids - set(claim.step_rule)
     assert copied, "the image copy added nothing; this specimen no longer bites"
+    assert own, "every step was image-copied; nothing left to contrast against"
     assert set(claim.step_detail) == claim.step_ids, "a step has no reason of its own"
 
     for sid in copied:
-        assert claim.step_rule[sid] == "image-copy"
         assert "runs on that image" in claim.step_detail[sid]
-        assert "defines these steps" not in claim.step_detail[sid]
+        assert claim.detail != claim.step_detail[sid]
 
-    for sid in defined:
-        assert claim.step_detail[sid] == f"{path} defines these steps"
+    # The claim's own steps share the reason frozen before the unions appended
+    # their sentences, so they never inherit a summary of steps they are not.
+    pinned = {claim.step_detail[sid] for sid in own}
+    assert len(pinned) == 1, pinned
+    frozen = pinned.pop()
+    assert claim.detail.startswith(frozen) and claim.detail != frozen
+    for sid in own:
         assert "runs on that image" not in claim.step_detail[sid]
         # No override: the claim's own rule stands for these.
         assert sid not in claim.step_rule
