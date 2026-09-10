@@ -281,6 +281,14 @@ class SimpleCPUOffloadScheduler:
         Called by Scheduler after kv_cache_manager is ready."""
         self._gpu_block_pool = gpu_block_pool
 
+    def bypass_external_lookup(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        """Release an unconsumed hit pin without starting another CPU lookup."""
+        if stale := self._pending_cpu_hits.pop(request.request_id, None):
+            self._free_pending_cpu_hit(stale)
+        return 0, False
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

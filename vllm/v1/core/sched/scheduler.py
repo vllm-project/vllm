@@ -392,6 +392,11 @@ class Scheduler(SchedulerInterface):
         self.enable_omit_prefix_routed_experts = (
             vllm_config.model_config.enable_omit_prefix_routed_experts
         )
+        self._routed_expert_offload = (
+            self.enable_return_routed_experts
+            and self.enable_omit_prefix_routed_experts
+            and self.connector is not None
+        )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         if self.enable_return_routed_experts:
@@ -533,6 +538,13 @@ class Scheduler(SchedulerInterface):
     def _get_local_prefix_cache_hit(
         self, request: Request
     ) -> tuple[KVCacheBlocks, int, int, bool]:
+        if self._bypass_routed_expert_lookup(request):
+            blocks, num_local, boundary = (
+                self.kv_cache_manager.get_computed_blocks_up_to(
+                    request, max_cache_hit_length=request.num_cached_tokens
+                )
+            )
+            return blocks, num_local, boundary, False
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
@@ -541,6 +553,14 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.get_computed_blocks(request)
         )
         return blocks, num_local, shared_prefix_boundary, False
+
+    def _bypass_routed_expert_lookup(self, request: Request) -> bool:
+        return (
+            self._routed_expert_offload
+            and request.num_cached_tokens >= 0
+            and request.num_computed_tokens == 0
+            and request.num_output_tokens == 0
+        )
 
     def _reserve_prefill_lookahead(
         self,
@@ -929,11 +949,12 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
-                            )
+                        lookup = (
+                            self.connector.bypass_external_lookup
+                            if self._bypass_routed_expert_lookup(request)
+                            else self.connector.get_num_new_matched_tokens
                         )
+                        ext_tokens, load_kv_async = lookup(request, block_aligned_local)
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because

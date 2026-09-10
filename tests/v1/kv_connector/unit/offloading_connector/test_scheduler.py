@@ -78,6 +78,32 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_bypass_external_lookup_preserves_zero_hit_lifecycle(in_flight):
+    scheduler = OffloadingConnectorScheduler.__new__(OffloadingConnectorScheduler)
+    state = MagicMock()
+    state.transfer_jobs = [object()] if in_flight else []
+    state.partial_tail_boundary = 64
+    state.deferred_lookup_start_time = 1.0
+    scheduler._req_status = {"r": state}
+    scheduler._lookup = MagicMock()
+    scheduler._touch = MagicMock()
+    request = SimpleNamespace(request_id="r", skip_reading_prefix_cache=False)
+    assert scheduler.bypass_external_lookup(request, 32) == (
+        None if in_flight else 0,
+        False,
+    )
+    scheduler._lookup.assert_not_called()
+    if in_flight:
+        scheduler._touch.assert_not_called()
+    else:
+        assert state.partial_tail_boundary is None
+        assert state.deferred_lookup_start_time is None
+        assert state.num_locally_computed_tokens == 32
+        state.update_num_hit_chunks.assert_called_once_with(32)
+        scheduler._touch.assert_called_once_with(state)
+
+
 @pytest.mark.parametrize("boundary", [3840, 3904])
 @pytest.mark.parametrize("eagle", [False, True])
 @pytest.mark.parametrize("left_state", ["present", "missing", "pending", "loading"])

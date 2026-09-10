@@ -53,7 +53,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import KVTransferConfig, VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -445,6 +445,22 @@ class KVConnectorBase_V1(ABC):
             gpu_block_pool: the GPU block pool.
         """
         return
+
+    @classmethod
+    def supports_external_lookup_bypass(cls, config: "KVTransferConfig") -> bool:
+        """Whether this configuration supports zero-hit recovery without lookup."""
+        return False
+
+    def bypass_external_lookup(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        """Run zero-hit initialization/cleanup without new lookup or load plans.
+
+        Must be idempotent across allocation failures. Return (None, False) to
+        wait for previous work, otherwise (0, False). Allocation and store hooks
+        still run after successful admission.
+        """
+        raise NotImplementedError("External lookup bypass is not supported")
 
     @abstractmethod
     def get_num_new_matched_tokens(

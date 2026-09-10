@@ -1008,6 +1008,32 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _verify_routed_expert_offloading(self) -> None:
+        config = self.kv_transfer_config
+        if (
+            self.model_config is None
+            or not self.model_config.enable_return_routed_experts
+            or config is None
+        ):
+            return
+        if not self.model_config.enable_omit_prefix_routed_experts:
+            raise ValueError(
+                "Routed-expert return with KV offload requires prefix omit."
+            )
+        if self.max_concurrent_batches > 2:
+            raise ValueError("Routed-expert KV offload supports at most two batches.")
+        from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+        connector_cls = KVConnectorFactory.get_connector_class(config)
+        if not issubclass(
+            connector_cls, KVConnectorBase_V1
+        ) or not connector_cls.supports_external_lookup_bypass(config):
+            raise ValueError(
+                "Routed-expert KV offload requires same-engine store/load with "
+                "external-lookup bypass support; PD is unsupported."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -1132,20 +1158,6 @@ class VllmConfig:
                 raise ValueError(
                     "--enable-return-routed-experts is incompatible with context "
                     "parallelism (DCP > 1 or PCP > 1)."
-                )
-
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ) or self.cache_config.kv_offloading_size is not None:
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
                 )
 
         if (
@@ -1785,6 +1797,7 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        self._verify_routed_expert_offloading()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language

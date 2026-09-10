@@ -430,7 +430,8 @@ def test_eager_store_and_load_roundtrip() -> None:
     assert len(meta2.load_cpu_blocks) == len(meta2.load_gpu_blocks)
 
 
-def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
+@pytest.mark.parametrize("bypass", [False, True])
+def test_prompt_logprobs_skip_cpu_cache_lookup(bypass: bool) -> None:
     """Prompt logprobs require every prompt token to be recomputed."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
@@ -476,9 +477,13 @@ def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
     )
     assert prompt_logprobs_request.skip_reading_prefix_cache
 
-    assert sched.get_num_new_matched_tokens(
-        prompt_logprobs_request, num_computed_tokens=0
-    ) == (0, False)
+    if bypass:
+        for _ in range(2):
+            assert sched.bypass_external_lookup(cached_request, 0) == (0, False)
+    else:
+        assert sched.get_num_new_matched_tokens(
+            prompt_logprobs_request, num_computed_tokens=0
+        ) == (0, False)
     assert retry_request_id not in sched._pending_cpu_hits
     assert all(block.ref_cnt == 0 for block in pinned_blocks)
 

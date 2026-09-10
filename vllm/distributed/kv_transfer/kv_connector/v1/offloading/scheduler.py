@@ -1046,6 +1046,27 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens, bool(num_hit_tokens)
 
+    def bypass_external_lookup(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        """Keep local-hit bookkeeping, but submit no external lookup or load."""
+        req_status = self._req_status[request.request_id]
+        for group_state in req_status.group_states:
+            group_state.block_ids.clear()
+        if req_status.transfer_jobs:
+            logger.debug(
+                "Delaying request %s since it still has in-flight transfers",
+                request.request_id,
+            )
+            return None, False
+        req_status.update_offload_keys()
+        req_status.num_locally_computed_tokens = num_computed_tokens
+        req_status.partial_tail_boundary = None
+        req_status.deferred_lookup_start_time = None
+        req_status.update_num_hit_chunks(num_computed_tokens)
+        self._touch(req_status)
+        return 0, False
+
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):

@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -208,6 +208,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # ============================================================
     # Scheduler-side methods
     # ============================================================
+
+    @classmethod
+    def supports_external_lookup_bypass(cls, config: KVTransferConfig) -> bool:
+        return config.kv_role == "kv_both"
+
+    def bypass_external_lookup(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.bypass_external_lookup(
+            request, num_computed_tokens
+        )
 
     def get_num_new_matched_tokens(
         self,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -53,6 +54,43 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "enabled,cached,computed,output,bypass",
+    [
+        (False, 32, 0, 0, False),
+        (True, -1, 0, 0, False),
+        (True, 32, 0, 0, True),
+        (True, 32, 16, 0, False),
+        (True, 32, 0, 1, False),
+        (True, 0, 0, 0, True),
+    ],
+)
+def test_routed_expert_recovery_lookup(enabled, cached, computed, output, bypass):
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._routed_expert_offload = enabled
+    scheduler.connector = None
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.get_computed_blocks.return_value = ("blocks", 16, 0)
+    scheduler.kv_cache_manager.get_computed_blocks_up_to.return_value = (
+        "blocks",
+        16,
+        0,
+    )
+    request = SimpleNamespace(
+        num_cached_tokens=cached,
+        num_computed_tokens=computed,
+        num_output_tokens=output,
+    )
+    assert scheduler._bypass_routed_expert_lookup(request) is bypass
+    scheduler._get_local_prefix_cache_hit(request)
+    if bypass:
+        scheduler.kv_cache_manager.get_computed_blocks_up_to.assert_called_once_with(
+            request, max_cache_hit_length=cached
+        )
+    else:
+        scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
