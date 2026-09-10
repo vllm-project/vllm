@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <utility>  // std::in_range
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
@@ -109,6 +110,8 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 // GROUP_SIZE: 0 = per-channel scale [M], >0 = per-group scale [M,
 // K/GROUP_SIZE].
 //   Requires GROUP_SIZE % A_CHUNK == 0 when GROUP_SIZE > 0.
+// B_row_stride_bytes is the per-row byte stride of the packed weights.  It is
+// >= K/2; the layer pads it to dodge a memory-subsystem cliff.
 #if defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
@@ -118,9 +121,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const scalar_t* __restrict__ A, const scalar_t* scale,
                           const scalar_t* zero_points,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
-                          const int _WvPrGrp, const int CuCount) {
+                          const int _WvPrGrp, const int CuCount,
+                          const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  const int K_packed = K / 2;
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -169,9 +172,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+        const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
         for (int y = 0; y < YTILE; y++) {
-          const float* src = (const float*)(&B_[y * K_packed]);
+          const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
           for (int i = 0; i < A_CHUNK / 8; i++)
             bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -331,14 +334,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx,
-                                      const int By, const uint8_t* B_packed,
-                                      const scalar_t* __restrict__ A,
-                                      const scalar_t* scale,
-                                      const scalar_t* zero_points,
-                                      const scalar_t* __restrict__ BIAS,
-                                      scalar_t* C, const int _WvPrGrp,
-                                      const int CuCount) {
+__global__ void wvSplitK_int4_hf_sml_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const scalar_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -354,9 +355,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       const uint8_t* B_packed, const scalar_t* __restrict__ A,
                       const scalar_t* scale, const scalar_t* zero_points,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
-                      const int _WvPrGrp, const int CuCount) {
+                      const int _WvPrGrp, const int CuCount,
+                      const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  const int K_packed = K / 2;
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -417,9 +418,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
 
-        const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+        const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
         for (int y = 0; y < YTILE; y++) {
-          const float* src = (const float*)(&B_[y * K_packed]);
+          const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
           for (int i = 0; i < A_CHUNK / 8; i++)
             bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -592,14 +593,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_(const int K, const int M, const int Bx,
-                                  const int By, const uint8_t* B_packed,
-                                  const scalar_t* __restrict__ A,
-                                  const scalar_t* scale,
-                                  const scalar_t* zero_points,
-                                  const scalar_t* __restrict__ BIAS,
-                                  scalar_t* C, const int _WvPrGrp,
-                                  const int CuCount) {
+__global__ void wvSplitK_int4_hf_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const scalar_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX1X__)
@@ -625,6 +624,9 @@ static int mindiv_int4(int N, int div1, int div2) {
 //   If provided, kernel dequants as (nibble - zp_raw) * scale (asymmetric).
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
 // group_size: 32, 64, or 128
+//
+// in_a rows may be padded, i.e. in_a.stride(0) may exceed K/2; the stride is
+// read off the tensor and passed to the kernel.
 
 torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                               const at::Tensor& in_scale,
@@ -643,10 +645,13 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "Weight row stride (",
+              b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "Weight row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
   TORCH_CHECK(
       in_b.dtype() == torch::kFloat16 || in_b.dtype() == torch::kBFloat16,
       "Activation must be float16 or bfloat16");
@@ -699,12 +704,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
                             _HAS_ZP><<<grid, block, 0, stream>>>(           \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
     else                                                                    \
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,     \
                         _HAS_ZP><<<grid, block, 0, stream>>>(               \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                      \
   }
 
 #define WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP) \
