@@ -10,6 +10,7 @@ from torch._higher_order_ops.auto_functionalize import (
     get_mutable_args,
 )
 from torch._inductor.fx_passes.control_dependencies import control_deps
+from torch.utils._pytree import tree_leaves
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -367,15 +368,14 @@ class FixFunctionalizationPass(VllmInductorPass):
                     fn_node,
                     *(node.kwargs[name] for name in mutable_args),
                 )
-                user.update_arg(
-                    0,
-                    torch.fx.map_arg(
-                        user.args[0],
-                        lambda dep, replacement=dependencies: (
-                            replacement if dep is node else dep
-                        ),
+                dependencies = torch.fx.map_arg(
+                    user.args[0],
+                    lambda dep, replacement=dependencies: (
+                        replacement if dep is node else dep
                     ),
                 )
+                # Older PyTorch lowerings only recognize flat dependency lists.
+                user.update_arg(0, tuple(tree_leaves(dependencies)))
 
         # If the function returns a value as well as mutating args inplace,
         # the functionalized node will have a getitem[0] user that holds this value

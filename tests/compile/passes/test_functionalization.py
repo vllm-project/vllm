@@ -273,6 +273,7 @@ def test_defunctionalize_preserves_control_dependencies(use_return_value):
         target = torch.ops.vllm.function_with_mutated_args_without_return.default
     graph = torch.fx.Graph()
     arg = graph.placeholder("arg")
+    independent = graph.placeholder("independent")
     functionalized = graph.call_function(
         auto_functionalized, args=(target,), kwargs={"x": arg}
     )
@@ -285,10 +286,10 @@ def test_defunctionalize_preserves_control_dependencies(use_return_value):
     output = graph.call_function(torch.ops.aten.add.Tensor, args=(returned, mutated))
     graph.output(output)
     module = torch.fx.GraphModule(torch.nn.Module(), graph)
-    preserve_node_ordering(graph, {output: OrderedSet([functionalized])})
+    preserve_node_ordering(graph, {output: OrderedSet([independent, functionalized])})
     module.recompile()
     x = torch.arange(4, dtype=torch.float32, device="cpu")
-    expected = module(x.clone())
+    expected = module(x.clone(), x.clone())
 
     func_pass = FixFunctionalizationPass(VllmConfig())
     func_pass.nodes_to_remove = []
@@ -300,9 +301,9 @@ def test_defunctionalize_preserves_control_dependencies(use_return_value):
 
     mutation = next(node for node in graph.nodes if is_func(node, target))
     ordered = next(node for node in graph.nodes if is_func(node, control_deps))
-    assert ordered.args[0] == ((mutation, arg),)
+    assert ordered.args[0] == (independent, mutation, arg)
     assert find_auto_fn_maybe(graph.nodes, target) is None
-    torch.testing.assert_close(module(x.clone()), expected)
+    torch.testing.assert_close(module(x.clone(), x.clone()), expected)
 
 
 MODELS_AND_DO_FUSION = {
