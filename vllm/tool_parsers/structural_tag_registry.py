@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
@@ -50,6 +51,7 @@ StructuralTagBuilder: TypeAlias = Callable[
         SimplifiedToolChoice,
         bool,
         str,
+        bool,
     ],
     StructuralTag,
 ]
@@ -110,13 +112,14 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
 
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    if tool_choice == "auto" and not _any_tool_strict(tools) and not non_strict:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
@@ -133,6 +136,13 @@ def get_model_structural_tag(
             simplified_tool_choice,
             reasoning,
             token_suffix,
+            non_strict,
+        )
+
+    if non_strict:
+        raise ValueError(
+            f"Structural tag model {model!r} does not support non-strict "
+            "tool calling constraints"
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
@@ -240,9 +250,10 @@ def get_deepseek_v41_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
     # Serving enables this visible-text grammar after the reasoning boundary.
-    del builtin_tools, reasoning, token_suffix
+    del builtin_tools, reasoning, token_suffix, non_strict
 
     # TODO: lower parameter schemas into DSML constraints. This builder constrains
     # tool names and DSML/value syntax only. Parameter names, presence, uniqueness
@@ -351,8 +362,9 @@ def get_hermes_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix
+    del builtin_tools, reasoning, token_suffix, non_strict
 
     tool_call_trigger = "<tool_call>"
 
@@ -401,8 +413,9 @@ def get_minimax_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix
+    del builtin_tools, reasoning, token_suffix, non_strict
 
     tool_call_begin = "<minimax:tool_call>\n"
     tool_call_end = "</minimax:tool_call>"
@@ -698,8 +711,9 @@ def get_kimi_k3_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix
+    del builtin_tools, reasoning, token_suffix, non_strict
 
     trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
 
@@ -759,6 +773,7 @@ def get_hy_v4_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
     """Build HYV4 <tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tags.
 
@@ -771,8 +786,9 @@ def get_hy_v4_structural_tag(
             leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
             tokenizer vocab and passes it to ``get_model_structural_tag``.
+        non_strict: Unused; HYV4 always applies shallow constraints.
     """
-    del builtin_tools
+    del builtin_tools, non_strict
 
     think_end = f"</think{token_suffix}>"
     tool_calls_begin = f"<tool_calls{token_suffix}>"
@@ -859,3 +875,149 @@ def get_hy_v4_structural_tag(
     # the ``<think>...</think:SUF>`` prefix.
     prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_end)
     return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
+
+
+# ---------------------------------------------------------------------------
+# GLM-4.7 tool calls (<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>)
+# ---------------------------------------------------------------------------
+# Assistant output after the reasoning gate (``</think>``):
+#   [<text>]
+#   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...</tool_call>
+# Values are raw JSON scalars: strings verbatim (unquoted), other types as
+# bare JSON, matching how the chat template serializes tool-call history.
+
+_GLM_4_7_VALUE_EXCLUDES = [
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+]
+
+
+def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
+    if "enum" in prop:
+        values = [
+            ConstStringFormat(value=v if isinstance(v, str) else json.dumps(v))
+            for v in prop["enum"]
+        ]
+        return values[0] if len(values) == 1 else OrFormat(elements=values)
+    prop_type = prop.get("type")
+    if isinstance(prop_type, list):
+        formats = [
+            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
+        ]
+        if "string" in prop_type:
+            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
+        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
+    if prop_type in (None, "string"):
+        return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
+    return JSONSchemaFormat(json_schema={"type": prop_type})
+
+
+def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
+    properties = (tool.function.parameters or {}).get("properties", {})
+    pairs: list[Any] = [
+        SequenceFormat(
+            elements=[
+                ConstStringFormat(value=f"<arg_key>{key}</arg_key><arg_value>"),
+                _glm_4_7_value_format(prop),
+                ConstStringFormat(value="</arg_value>"),
+            ]
+        )
+        for key, prop in properties.items()
+    ]
+    content: Any = (
+        StarFormat(content=pairs[0] if len(pairs) == 1 else OrFormat(elements=pairs))
+        if pairs
+        else ConstStringFormat(value="")
+    )
+    return TagFormat(
+        begin=f"<tool_call>{tool.function.name}",
+        content=content,
+        end="</tool_call>",
+    )
+
+
+@register_vllm_structural_tag("glm_4_7")
+def get_glm_4_7_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+    non_strict: bool = False,
+) -> StructuralTag:
+    """Build GLM-4.7 structural tags for strict and non-strict tool calling.
+
+    Args:
+        tools: Normalized function tools the model may call.
+        builtin_tools: Unused; GLM-4.7 has no builtin tools.
+        tool_choice: Simplified tool choice.
+        reasoning: Whether the grammar also covers the reasoning phase.
+        token_suffix: Unused; GLM-4.7 structural tokens are fixed.
+        non_strict: When True, apply shallow constraints: argument keys may
+            be omitted, repeated, and emitted in any order, and values are
+            typed shallowly from the schema. When False, delegate to the
+            xgrammar ``glm_4_7`` builtin for schema-exact constraints.
+    """
+    del builtin_tools, token_suffix
+
+    if non_strict:
+        tags = [_glm_4_7_tool_tag(tool) for tool in tools]
+        if tool_choice == "auto":
+            suffix_tag: Any = TriggeredTagsFormat(
+                triggers=["<tool_call>"],
+                tags=tags,
+                excludes=[
+                    "<think>",
+                    "</think>",
+                    "</tool_call>",
+                    "<arg_key>",
+                    "</arg_key>",
+                    "<arg_value>",
+                    "</arg_value>",
+                ],
+            )
+        else:
+            suffix_tag = TagsWithSeparatorFormat(
+                tags=tags,
+                separator="",
+                at_least_one=True,
+                stop_after_first=tool_choice == "forced",
+            )
+        if reasoning:
+            prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end="</think>")
+            return StructuralTag(
+                format=SequenceFormat(elements=[prefix_tag, suffix_tag])
+            )
+        return StructuralTag(format=suffix_tag)
+
+    # Schema-exact mode must stay byte-identical to the xgrammar builtin, so
+    # rebuild its input protocol from the normalized tools: normalize is
+    # idempotent and has already filtered "forced" down to the named tool.
+    dumped_tools: list[Any] = []
+    for tool in tools:
+        function: dict[str, Any] = {"name": tool.function.name}
+        if tool.function.description is not None:
+            function["description"] = tool.function.description
+        if tool.function.parameters is not None:
+            function["parameters"] = tool.function.parameters
+        if getattr(tool.function, "strict", None) is not None:
+            function["strict"] = tool.function.strict
+        dumped_tools.append({"type": "function", "function": function})
+    dumped_tool_choice: Any = tool_choice
+    if tool_choice == "forced":
+        dumped_tool_choice = {
+            "type": "function",
+            "function": {"name": tools[0].function.name},
+        }
+    return get_xgrammar_model_structural_tag(
+        model="glm_4_7",
+        tools=dumped_tools,
+        tool_choice=dumped_tool_choice,
+        reasoning=reasoning,
+    )
