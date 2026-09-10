@@ -32,7 +32,7 @@ def _lora_logger(registry: CollectorRegistry, engine_indexes=(0,)):
     logger.gauge_lora_adapter_loaded = Gauge(
         "vllm:lora_adapter_loaded",
         "",
-        LABELNAMES + ["adapter_name", "level", "pinned"],
+        LABELNAMES + ["adapter_name", "level", "pinned", "rank"],
         registry=registry,
     )
     logger._lora_loaded_series = {}
@@ -242,3 +242,24 @@ def test_load_timings_land_in_the_histogram_per_engine_and_transition():
     assert observed[("1", "activate")] == (0.0, 0.0)
     # A timing-only event leaves the residency series alone.
     assert _loaded_series(registry) == {("alpha", "gpu", "false"): 1.0}
+
+
+def test_rank_label_comes_from_the_event_and_defaults_to_zero():
+    registry = CollectorRegistry()
+    logger = _lora_logger(registry)
+    logger.record_engine_notifications(
+        [
+            LoRALoadEvent(
+                gpu_adapters=["alpha"],
+                cpu_adapters=["alpha", "beta"],
+                ranks={"alpha": 64},
+            )
+        ]
+    )
+    ranks = {
+        s.labels["adapter_name"]: s.labels["rank"]
+        for metric in registry.collect()
+        if metric.name == "vllm:lora_adapter_loaded"
+        for s in metric.samples
+    }
+    assert ranks == {"alpha": "64", "beta": "0"}

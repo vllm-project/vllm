@@ -80,6 +80,9 @@ class LoRALoadEvent(
     pinned_adapters: list[str] = []
     """Adapters pinned in the caches (sorted)."""
 
+    ranks: dict[str, int] = {}
+    """LoRA rank of each resident adapter, keyed by name."""
+
     loads: list[LoRALoadTiming] = []
     """Adapter transitions completed since the previous event, in order."""
 
