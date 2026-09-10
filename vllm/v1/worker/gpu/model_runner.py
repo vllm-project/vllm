@@ -78,6 +78,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -97,7 +99,7 @@ from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
 )
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
@@ -452,21 +454,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            self.sampler = Sampler(
-                max_num_reqs=self.max_num_reqs,
-                vocab_size=self.vocab_size,
-                device=self.device,
-                req_states=self.req_states,
-                logprobs_mode=self.model_config.logprobs_mode,
-                num_speculative_tokens=self.decode_query_len,
-                use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-                enable_trace_replay=self.model_config.enable_trace_replay,
-                reasoning_config=self.vllm_config.reasoning_config,
-                return_sampling_mask=self.model_config.return_sampling_mask,
-            )
+            sampler_kwargs: dict[str, Any] = {
+                "max_num_reqs": self.max_num_reqs,
+                "vocab_size": self.vocab_size,
+                "device": self.device,
+                "req_states": self.req_states,
+                "logprobs_mode": self.model_config.logprobs_mode,
+                "num_speculative_tokens": self.decode_query_len,
+                "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
+                "enable_trace_replay": self.model_config.enable_trace_replay,
+                "reasoning_config": self.vllm_config.reasoning_config,
+                "return_sampling_mask": self.model_config.return_sampling_mask,
+            }
+            if self.vllm_config.watermark_config is None:
+                self.sampler = Sampler(**sampler_kwargs)
+            else:
+                watermarker = create_watermarker(self.vllm_config.watermark_config)
+                self.sampler = GPUWatermarkSampler(watermarker, **sampler_kwargs)
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
+                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
@@ -1316,19 +1324,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
-        dcp_local_seq_lens = None
-        if self.use_dcp:
-            # Prepare dcp local seq_lens.
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.dcp_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
-
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
@@ -1376,7 +1371,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=batch_req_state.prefill_len_np,
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
@@ -1396,11 +1391,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
-        return pcp.maybe_partition_pcp_batch(
+        input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
             padded_num_tokens=batch_desc.num_tokens,
         )
+        return input_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -1706,6 +1702,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata = None
         slot_mappings_by_layer = None
+        if not (dummy_run and skip_attn_for_dummy_run):
+            input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+                (
+                    self.pcp_manager.input_buffers
+                    if self.pcp_manager is not None
+                    else self.input_buffers
+                ).dcp_local_seq_lens,
+                input_batch.seq_lens,
+                input_batch.num_reqs,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
+            )
         ubatch_state: UBatchState | None = None
         if batch_desc.num_ubatches > 1:
             assert self.ubatch_runner is not None

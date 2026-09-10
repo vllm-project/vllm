@@ -30,6 +30,13 @@ elif current_platform.is_xpu():
     from .xpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+elif current_platform.is_cpu():
+    from .cpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .cpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .cpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+    from .vl_stub import (  # type: ignore[assignment]
+        DeepseekV4ForConditionalGeneration,
+    )
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,
