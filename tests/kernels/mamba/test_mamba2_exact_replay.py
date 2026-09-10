@@ -16,12 +16,10 @@ its own slots.
 import pytest
 import torch
 
+from tests.kernels.mamba.utils import carve_paged_states, single_shot_scan
 from vllm.model_executor.layers.mamba.exact_replay import (
     ExactReplayBuffers,
     exact_replay_ssd,
-)
-from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined_varlen,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mamba2_attn import build_exact_replay_metadata
@@ -32,56 +30,6 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Mamba2 SSD Triton kernels require a CUDA-alike device.",
 )
-
-
-def _single_shot(x, dt, A, B, C, D, dt_bias, chunk_size):
-    """Reference: the whole sequence in one chunked-scan call from position 0."""
-    seqlen = x.shape[0]
-    cu_chunk = list(range(0, seqlen, chunk_size)) + [seqlen]
-    n_chunks = len(cu_chunk) - 1
-    i32 = lambda v: torch.tensor(v, dtype=torch.int32, device=x.device)  # noqa: E731
-    out = torch.empty_like(x)
-    mamba_chunk_scan_combined_varlen(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size=chunk_size,
-        cu_seqlens=i32([0, seqlen]),
-        cu_chunk_seqlens=i32(cu_chunk),
-        last_chunk_indices=i32([n_chunks - 1]),
-        seq_idx=i32([0] * n_chunks),
-        out=out,
-        D=D,
-        z=None,
-        dt_bias=dt_bias,
-        initial_states=None,
-        dt_softplus=True,
-        dt_limit=(0.0, float("inf")),
-        state_dtype=torch.float32,
-    )
-    return out
-
-
-def _carve_states(num_slots, shapes, dtypes, device, pad_bytes=4096):
-    """Carve state tensors out of one paged buffer the way MambaBase does.
-
-    Every slot is one page; the per-state views are therefore strided in the
-    slot dimension, which is the layout the production code sees.
-    """
-    sizes = [
-        int(torch.empty(shape, dtype=dtype).numel() * dtype.itemsize)
-        for shape, dtype in zip(shapes, dtypes)
-    ]
-    page_bytes = sum(sizes) + pad_bytes
-    pages = torch.zeros(num_slots, page_bytes, dtype=torch.uint8, device=device)
-    states, offset = [], 0
-    for shape, dtype, nbytes in zip(shapes, dtypes, sizes):
-        state = pages[:, offset : offset + nbytes].view(dtype)
-        states.append(state.view(-1, *shape))
-        offset += nbytes
-    return states
 
 
 def test_exact_replay_matches_single_shot_prefill():
@@ -124,7 +72,7 @@ def test_exact_replay_matches_single_shot_prefill():
             torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens
         ]
         refs = [
-            _single_shot(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)
+            single_shot_scan(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)[0]
             for i in range(n)
         ]
         return xs, dts, Bs, Cs, refs, [torch.empty_like(x) for x in xs]
@@ -133,7 +81,7 @@ def test_exact_replay_matches_single_shot_prefill():
 
     # Engine-side state carved out of pages: slot 0 is the null block, layer l
     # owns slots l*n+1 .. l*n+n.
-    states = _carve_states(
+    states = carve_paged_states(
         num_layers * n + 1,
         [
             (nheads, head_dim, dstate),

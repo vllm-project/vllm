@@ -196,7 +196,6 @@ def exact_replay_emit(
     assert slots.dtype == torch.int32 and pos.dtype == torch.int32
     assert slots.shape == (num_rows,) and pos.shape == (num_rows,)
 
-    rows = torch.arange(num_rows, dtype=torch.int32, device=device)
     dt_out = torch.empty(
         nheads, num_rows, chunk_size, dtype=torch.float32, device=device
     )
@@ -213,9 +212,7 @@ def exact_replay_emit(
         dt_out=dt_out,
         dA_cumsum=dA_cumsum,
     )
-    _bmm_chunk_workspace_range_fwd(
-        C, buffers.B, chunk_size, slots, pos, rows, pos, out=cb, current_b=B
-    )
+    _bmm_chunk_workspace_range_fwd(C, buffers.B, chunk_size, slots, pos, cb, B)
     _chunk_scan_workspace_range_fwd(
         cb,
         buffers.x,
@@ -224,11 +221,7 @@ def exact_replay_emit(
         C,
         ssm_state,
         slots,
-        slots,
         pos,
-        rows,
-        pos,
-        rows,
         out,
         D=D,
         current_x=x,

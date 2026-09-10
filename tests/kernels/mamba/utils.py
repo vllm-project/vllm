@@ -236,3 +236,57 @@ def allocate_update_caches(
     )
     write_pos = torch.zeros(batch, dtype=torch.int32, device=device)
     return x_cache, dt_cache, B_cache, write_pos
+
+
+def single_shot_scan(x, dt, A, B, C, D, dt_bias, chunk_size, z=None):
+    """Reference for the exact-replay tests: the whole sequence in one chunked
+    scan from position 0. Returns the output rows and the fp32 state after every
+    chunk. With ``z`` the gate is applied inside the kernel."""
+    from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+        mamba_chunk_scan_combined_varlen,
+    )
+
+    seqlen = x.shape[0]
+    cu_chunk = list(range(0, seqlen, chunk_size)) + [seqlen]
+    n_chunks = len(cu_chunk) - 1
+    i32 = lambda v: torch.tensor(v, dtype=torch.int32, device=x.device)  # noqa: E731
+    out = torch.empty_like(x)
+    states = mamba_chunk_scan_combined_varlen(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size=chunk_size,
+        cu_seqlens=i32([0, seqlen]),
+        cu_chunk_seqlens=i32(cu_chunk),
+        last_chunk_indices=i32([n_chunks - 1]),
+        seq_idx=i32([0] * n_chunks),
+        out=out,
+        D=D,
+        z=z,
+        dt_bias=dt_bias,
+        initial_states=None,
+        return_intermediate_states=True,
+        dt_softplus=True,
+        dt_limit=(0.0, float("inf")),
+        state_dtype=torch.float32,
+    )
+    return out, states
+
+
+def carve_paged_states(num_slots, shapes, dtypes, device, pad_bytes=4096):
+    """Carve per-slot state tensors out of one padded page per slot, the way the
+    Mamba KV cache does: the views are strided in the slot dimension."""
+    sizes = [
+        int(torch.empty(shape, dtype=dtype).numel() * dtype.itemsize)
+        for shape, dtype in zip(shapes, dtypes)
+    ]
+    pages = torch.zeros(
+        num_slots, sum(sizes) + pad_bytes, dtype=torch.uint8, device=device
+    )
+    states, offset = [], 0
+    for shape, dtype, nbytes in zip(shapes, dtypes, sizes):
+        states.append(pages[:, offset : offset + nbytes].view(dtype).view(-1, *shape))
+        offset += nbytes
+    return states
