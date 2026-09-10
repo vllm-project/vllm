@@ -1351,11 +1351,10 @@ def test_unfusable_modules_are_not_fused(cls, default_vllm_config):
     assert fuser is None or not fuser.validate(module, default_vllm_config)
 
 
-def test_act_and_mul_derived_from_module(default_vllm_config, monkeypatch):
+def test_act_and_mul_derived_from_module(default_vllm_config):
     from transformers.activations import GELUTanh, SiLUActivation
 
     from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
-    from vllm.platforms import CpuArchEnum, current_platform
 
     assert isinstance(GLUFuser._get_act_and_mul(nn.SiLU()), SiluAndMul)
     assert isinstance(GLUFuser._get_act_and_mul(SiLUActivation()), SiluAndMul)
@@ -1363,21 +1362,6 @@ def test_act_and_mul_derived_from_module(default_vllm_config, monkeypatch):
     assert isinstance(gelu_tanh, GeluAndMul) and gelu_tanh.approximate == "tanh"
     gelu = GLUFuser._get_act_and_mul(nn.GELU())
     assert isinstance(gelu, GeluAndMul) and gelu.approximate == "none"
-    if (
-        current_platform.is_cpu()
-        and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
-    ):
-        # Native CPU activations must also work with an accelerator wheel.
-        default_vllm_config.compilation_config.custom_ops = ["all"]
-        with monkeypatch.context() as m:
-            m.setattr(torch.ops, "_C", object())
-            x = torch.tensor([[-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]])
-            for layer, reference in (
-                (SiluAndMul(), nn.SiLU()),
-                (GeluAndMul(), nn.GELU()),
-                (GeluAndMul(approximate="tanh"), nn.GELU(approximate="tanh")),
-            ):
-                torch.testing.assert_close(layer(x), reference(x[:, :4]) * x[:, 4:])
     # Not activations at all -> no fusion
     assert GLUFuser._get_act_and_mul_name(nn.Dropout()) is None
     assert GLUFuser._get_act_and_mul_name(nn.LayerNorm(8)) is None

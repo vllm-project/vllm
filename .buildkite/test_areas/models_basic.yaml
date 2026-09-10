@@ -136,9 +136,10 @@ steps:
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
   - tests/models/transformers/fusers/
+  - tests/model_executor/layers/test_activation.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py
   mirror:
     amd:
       label: ":amd: (MI250) Basic Models Other"
