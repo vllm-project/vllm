@@ -1943,7 +1943,7 @@ class FlashInferImpl(AttentionImpl):
             and vllm_config is not None
             and current_platform.is_device_capability_family(100)
         ):
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device(current_platform.device_type)
             max_runtime_heads = (
                 num_heads * vllm_config.parallel_config.decode_context_parallel_size
             )

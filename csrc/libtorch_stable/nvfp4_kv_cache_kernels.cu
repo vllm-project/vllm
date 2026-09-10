@@ -310,8 +310,8 @@ struct FP8KCopyWithScaleOp {
 
   __device__ __forceinline__ void operator()(uint8_t& dst,
                                              const scalar_t src) const {
-    dst = fp8::scaled_convert<uint8_t, scalar_t,
-                              Fp8KVCacheDataType::kFp8E4M3>(src, scale);
+    dst = fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
+        src, scale);
   }
 };
 
@@ -354,8 +354,8 @@ __global__ void reshape_and_cache_fp8_k_nvfp4_v_kernel(
   FP8KCopyWithScaleOp<CudaType> k_op{k_scale};
   for (int head = warp_id; head < num_heads; head += warps_per_block) {
     const CudaType* src = key_src + head * head_size;
-    uint8_t* dst = key_block + head * key_head_stride +
-                   token_offset * key_token_stride;
+    uint8_t* dst =
+        key_block + head * key_head_stride + token_offset * key_token_stride;
     vectorize_with_alignment<K_VEC_SIZE>(src, dst, head_size, lane, 32, k_op);
   }
 
