@@ -422,10 +422,10 @@ class MoeWNA16Method(FusedMoEMethodBase):
         )
         if self.wna16_backend == WNA16MoEBackend.TRITON:
             from vllm.model_executor.layers.fused_moe.fused_moe import (
-                _dispatch_wna16,
+                _wna16,
             )
 
-            _dispatch_wna16.register_warmup(
+            _wna16.register_warmup(
                 layer=layer,
                 experts=self.moe_kernel.fused_experts,
             )

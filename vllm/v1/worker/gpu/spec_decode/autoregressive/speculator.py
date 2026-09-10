@@ -52,10 +52,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
 
-        _dispatch_prepare_prefill_inputs.register_warmup(speculator=self)
+        _prepare_prefill_inputs.register_warmup(speculator=self)
         if self.num_speculative_steps > 1:
-            _dispatch_prepare_decode_inputs.register_warmup(speculator=self)
-            _dispatch_update_draft_inputs.register_warmup(speculator=self)
+            _prepare_decode_inputs.register_warmup(speculator=self)
+            _update_draft_inputs.register_warmup(speculator=self)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -806,7 +806,7 @@ def prepare_prefill_inputs(
     max_num_reqs,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
-    _dispatch_prepare_prefill_inputs(
+    _prepare_prefill_inputs(
         last_token_indices,
         current_draft_step,
         input_buffers.input_ids,
@@ -894,7 +894,7 @@ def prepare_decode_inputs(
     advance_draft_positions: bool = True,
 ):
     num_reqs = draft_tokens.shape[0]
-    _dispatch_prepare_decode_inputs(
+    _prepare_decode_inputs(
         draft_tokens,
         target_seq_lens,
         num_rejected,
@@ -995,7 +995,7 @@ def update_draft_inputs(
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ):
-    _dispatch_update_draft_inputs(
+    _update_draft_inputs(
         output_draft_tokens,
         next_input_hidden_states,
         input_buffers.input_ids,
@@ -1040,7 +1040,7 @@ def _prepare_prefill_inputs_warmup_inputs(
     kernel=_prepare_prefill_inputs_kernel,
     warmup_inputs=_prepare_prefill_inputs_warmup_inputs,
 )
-def _dispatch_prepare_prefill_inputs(
+def _prepare_prefill_inputs(
     last_token_indices: torch.Tensor,
     current_draft_step: torch.Tensor,
     draft_input_ids: torch.Tensor,
@@ -1090,7 +1090,7 @@ def _prepare_decode_inputs_warmup_inputs(
     kernel=_prepare_decode_inputs_kernel,
     warmup_inputs=_prepare_decode_inputs_warmup_inputs,
 )
-def _dispatch_prepare_decode_inputs(
+def _prepare_decode_inputs(
     draft_tokens: torch.Tensor,
     target_seq_lens: torch.Tensor,
     num_rejected: torch.Tensor,
@@ -1106,7 +1106,6 @@ def _dispatch_prepare_decode_inputs(
 ) -> DispatchSpec:
     return (num_reqs + 1,), dict(
         BLOCK_SIZE=1024,
-        ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
 
 
@@ -1142,7 +1141,7 @@ def _update_draft_inputs_warmup_inputs(
     kernel=_update_draft_inputs_kernel,
     warmup_inputs=_update_draft_inputs_warmup_inputs,
 )
-def _dispatch_update_draft_inputs(
+def _update_draft_inputs(
     output_draft_tokens: torch.Tensor,
     next_input_hidden_states: torch.Tensor,
     input_ids: torch.Tensor,
@@ -1161,5 +1160,4 @@ def _dispatch_update_draft_inputs(
     return (num_reqs,), dict(
         hidden_size=hidden_size,
         BLOCK_SIZE=1024,
-        ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )

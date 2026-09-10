@@ -836,9 +836,6 @@ def _PREPARE_DFLASH_INPUTS_KERNEL(
         idx_mapping_ptr=input_batch.idx_mapping,
         temperature_ptr=input_temperature,
         seeds_ptr=input_seeds,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
-        CP_SIZE=cp_size,
-        CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=block,
     )

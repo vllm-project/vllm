@@ -1361,7 +1361,7 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel(kernel=_topk_topp_kernel, warmup_inputs=_topk_topp_warmup_inputs)
-def _dispatch_topk_topp(
+def _topk_topp(
     logits: torch.Tensor,
     buffer: torch.Tensor,
     percentile_to_std_table: torch.Tensor,
@@ -1387,14 +1387,9 @@ def _dispatch_topk_topp(
         current_platform.is_cuda() and topp_enabled and batch_size <= _SPLIT_MAX_BATCH
     )
     return (num_programs,), dict(
-        LOGITS=logits,
-        BUFFER=buffer,
-        PERCENTILE_TO_STD_TABLE=percentile_to_std_table,
-        NORMAL_CDF_TO_SIGMA_TABLE=normal_cdf_to_sigma_table,
         K=k_ptr,
         P=p_ptr,
         BATCH_SIZE=batch_size,
-        MASK_VALUE=mask_value,
         VOCAB_SIZE=vocab_size,
         BLOCK_SIZE=block_size,
         BLOCK_SIZE_TRUNC=block_size_trunc,
@@ -1430,7 +1425,7 @@ def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     kernel=_topp_sb_stats_kernel,
     warmup_inputs=_topp_split_stats_warmup_inputs,
 )
-def _dispatch_topp_split_stats(
+def _topp_split_stats(
     logits: torch.Tensor,
     stats: torch.Tensor,
     k: torch.Tensor | None,
@@ -1440,10 +1435,7 @@ def _dispatch_topp_split_stats(
     batch_size, vocab_size = logits.shape
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
-        LOGITS=logits,
-        STATS=stats,
         K=k if k is not None else logits,
-        P=p,
         HAS_K=k is not None,
         VOCAB_SIZE=vocab_size,
         S=splits,
@@ -1480,7 +1472,7 @@ def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     kernel=_topp_sb_step_kernel,
     warmup_inputs=_topp_split_step_warmup_inputs,
 )
-def _dispatch_topp_split_step(
+def _topp_split_step(
     logits: torch.Tensor,
     stats: torch.Tensor,
     parts: torch.Tensor,
@@ -1492,12 +1484,7 @@ def _dispatch_topp_split_step(
     batch_size, vocab_size = logits.shape
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
-        LOGITS=logits,
-        STATS=stats,
-        PARTS=parts,
         K=k if k is not None else logits,
-        P=p,
-        ROUND=round,
         HAS_K=k is not None,
         S=splits,
         F=_SPLIT_FANOUT,
@@ -1535,7 +1522,7 @@ def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     kernel=_topp_sb_mask_kernel,
     warmup_inputs=_topp_split_mask_warmup_inputs,
 )
-def _dispatch_topp_split_mask(
+def _topp_split_mask(
     logits: torch.Tensor,
     stats: torch.Tensor,
     parts: torch.Tensor,
@@ -1547,13 +1534,8 @@ def _dispatch_topp_split_mask(
     batch_size, vocab_size = logits.shape
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
-        LOGITS=logits,
-        STATS=stats,
-        PARTS=parts,
         K=k if k is not None else logits,
-        P=p,
         HAS_K=k is not None,
-        MASK_VALUE=mask_value,
         S=splits,
         F=_SPLIT_FANOUT,
         NUM_ROUNDS=_SPLIT_ROUNDS,
@@ -1581,7 +1563,7 @@ def _apply_topp_split(
         }
         _TRITON_SPLIT_CACHE[logits.device] = ws
 
-    _dispatch_topp_split_stats(
+    _topp_split_stats(
         logits,
         ws["stats"],
         k,
@@ -1589,7 +1571,7 @@ def _apply_topp_split(
         num_sm,
     )
     for round_i in range(_SPLIT_ROUNDS):
-        _dispatch_topp_split_step(
+        _topp_split_step(
             logits,
             ws["stats"],
             ws["parts"],
@@ -1598,7 +1580,7 @@ def _apply_topp_split(
             round_i,
             num_sm,
         )
-    _dispatch_topp_split_mask(
+    _topp_split_mask(
         logits,
         ws["stats"],
         ws["parts"],
@@ -1700,7 +1682,7 @@ def apply_top_k_top_p_triton(
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
-    _dispatch_topk_topp(
+    _topk_topp(
         logits,
         buffer,
         percentile_to_std_table,
