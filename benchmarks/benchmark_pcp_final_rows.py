@@ -15,6 +15,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--batch-submission", choices=("queued", "immediate"), default="queued"
+    )
     args = parser.parse_args()
     llm = LLM(
         model=args.model,
@@ -55,20 +58,32 @@ def main():
     )
     trials = []
     for iteration in range(5):
+        # Queue the entire batch before scheduling so submission races do not
+        # change the prefill/decode step mix between benchmark arms.
+        if args.batch_submission == "queued":
+            llm.sleep(level=0, mode="keep")
         start = time.perf_counter()
-        outputs = llm.generate(prompts, sampling, use_tqdm=False)
+        if args.batch_submission == "queued":
+            llm.enqueue(prompts, sampling, use_tqdm=False)
+            llm.wake_up(tags=["scheduling"])
+            outputs = llm.wait_for_completion(use_tqdm=False)
+        else:
+            outputs = llm.generate(prompts, sampling, use_tqdm=False)
         elapsed = time.perf_counter() - start
         ttfts = []
+        tpots = []
         for output in outputs:
             metrics = output.metrics
             assert metrics is not None and metrics.first_token_latency > 0
             assert not metrics.is_corrupted
             ttfts.append(metrics.first_token_latency)
+            tpots.append((metrics.last_token_ts - metrics.first_token_ts) / 31)
         if iteration >= 2:
             trials.append(
                 {
                     "elapsed_s": elapsed,
                     "ttft_ms": [value * 1000 for value in ttfts],
+                    "tpot_ms": [value * 1000 for value in tpots],
                     "output_tokens_per_s": sum(
                         len(o.outputs[0].token_ids) for o in outputs
                     )
@@ -86,6 +101,7 @@ def main():
             "warmups": 2,
             "trials": 3,
             "eager": True,
+            "batch_submission": args.batch_submission,
         },
         "trials": trials,
         "median_ttft_ms": statistics.median(
@@ -93,6 +109,9 @@ def main():
         ),
         "median_output_tokens_per_s": statistics.median(
             t["output_tokens_per_s"] for t in trials
+        ),
+        "median_tpot_ms": statistics.median(
+            statistics.mean(t["tpot_ms"]) for t in trials
         ),
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
