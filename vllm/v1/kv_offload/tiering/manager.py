@@ -226,10 +226,8 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
-        # Per-request origin retained while a secondary-tier promotion lands
-        # in the host-memory primary tier. This is separate from _req_state because
-        # lookup() is also a valid standalone manager operation in which
-        # on_new_request() has not established lifecycle state.
+        # Preserve the original tier for this request's cache-hit metrics,
+        # even after its KV blocks are promoted into host memory.
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
