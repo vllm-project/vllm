@@ -2601,12 +2601,11 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
-            if (
-                self.kda_prefill_backend == "flashkda"
-                and not current_platform.is_cuda()
+            if self.kda_prefill_backend == "flashkda" and not (
+                current_platform.is_cuda() or current_platform.is_rocm()
             ):
                 raise ValueError(
-                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                    "--kda-prefill-backend=flashkda is only available on CUDA or ROCm."
                 )
             if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
                 raise ValueError(
