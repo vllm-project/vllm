@@ -48,9 +48,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_all2all=use_all2all,
         )
         # Match the group name exactly so ETP does not enable TP-only backends.
-        if unique_name.split(":")[0] not in ("tp", "pcp", "dcp"):
-            # custom allreduce or torch symm mem can be used only by tp, pcp
-            # and dcp.
+        if unique_name.split(":")[0] != "tp":
+            # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
@@ -311,18 +310,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and not fi_ar_comm.disabled
             and fi_ar_comm.should_use_fi_ar(input_)
         )
-        # FlashInfer's fused all-reduce only accepts 2-D tensors. Flattening to
-        # [-1, last_dim].
-        if (
-            not use_fi_ar
-            and fi_ar_comm is not None
-            and not fi_ar_comm.disabled
-            and input_.dim() > 2
-            and input_.is_contiguous()
-        ):
-            flat = input_.view(-1, input_.shape[-1])
-            if fi_ar_comm.should_use_fi_ar(flat):
-                return fi_ar_comm.all_reduce(flat).view_as(input_)
 
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
