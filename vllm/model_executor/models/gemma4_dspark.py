@@ -89,7 +89,11 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         k, _ = self.k_proj(hidden_states)
         k_normed = self.k_norm(k.unflatten(-1, (self.num_kv_heads, self.head_dim)))
-        v_src = k if self.use_k_eq_v else self.v_proj(hidden_states)[0]
+        if self.use_k_eq_v:
+            v_src = k
+        else:
+            assert self.v_proj is not None
+            v_src = self.v_proj(hidden_states)[0]
         v_normed = self.v_norm(v_src.unflatten(-1, (self.num_kv_heads, self.head_dim)))
         return k_normed.flatten(-2, -1), v_normed.flatten(-2, -1)
 

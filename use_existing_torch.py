@@ -11,10 +11,12 @@ TORCH_LIB_PREFIXES = (
     "torch=",
     "torchvision=",
     "torchaudio=",
+    "torchcodec=",
     # pyproject.toml
     '"torch =',
     '"torchvision =',
     '"torchaudio =',
+    '"torchcodec =',
 )
 
 

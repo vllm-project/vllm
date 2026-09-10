@@ -547,6 +547,9 @@ class MultiModalDataParser:
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
+        audio_resample_method (str): Backend used for the resampling above.
+            Defaults to torchaudio; models with specific needs may override
+            (e.g. phi4mm uses scipy).
         target_channels (int, optional): Target number of audio channels.
             If provided, normalizes audio to this many channels (e.g., 1 for mono).
             If None, audio channels are passed through unchanged.
@@ -602,7 +605,9 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] = (
+            "torchaudio"
+        ),
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
         allow_missing_mm_embeddings: bool = False,
@@ -756,9 +761,16 @@ class MultiModalDataParser:
             np.ndarray
             | MediaWithBytes[np.ndarray]
             | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+            | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
+            # Allow None video items, valid requests can contain empty URLs
+            # if they use multi-modal uuids.
+            if data_item is None:
+                new_videos.append(None)
+                metadata_lst.append(None)
+                continue
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
                 if metadata is None:
