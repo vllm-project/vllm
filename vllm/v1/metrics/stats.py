@@ -464,10 +464,13 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
-        if is_prefilling:
-            if output.prefill_stats is not None:
-                self.prompt_token_stats.update_from_output(output.prefill_stats)
+        if is_prefilling and output.prefill_stats is not None:
+            self.prompt_token_stats.update_from_output(output.prefill_stats)
 
+        # Latency samples are only meaningful when the request actually
+        # produced tokens: zero-token finish outputs (client aborts, errors,
+        # stopped encoder-only inputs) must not pollute TTFT/ITL.
+        if num_new_generation_tokens > 0 and is_prefilling:
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
             req_stats.first_token_latency = first_token_latency
@@ -495,13 +498,14 @@ class IterationStats:
             )
 
         # Process the batch-level "new tokens" engine core event
-        if is_prefilling:
-            req_stats.first_token_ts = engine_core_timestamp
-        else:
-            itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+        if num_new_generation_tokens > 0:
+            if is_prefilling:
+                req_stats.first_token_ts = engine_core_timestamp
+            else:
+                itl = engine_core_timestamp - req_stats.last_token_ts
+                self.inter_token_latencies_iter.append(itl)
 
-        req_stats.last_token_ts = engine_core_timestamp
+            req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(
         self,
