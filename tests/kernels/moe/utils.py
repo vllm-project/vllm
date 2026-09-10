@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant,
 )
@@ -271,11 +272,10 @@ def moe_quantize_weights_2d(
     per_token_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    assert (
-        quant_dtype == torch.float8_e4m3fn
-        or quant_dtype == torch.int8
-        or quant_dtype == "nvfp4"
-    ), "only fp8/int8/nvfp4 supported"
+    is_fp8_dtype = is_fp8(quant_dtype)
+    assert is_fp8_dtype or quant_dtype == torch.int8 or quant_dtype == "nvfp4", (
+        "only fp8/int8/nvfp4 supported"
+    )
 
     w_gs = None
 
@@ -283,7 +283,7 @@ def moe_quantize_weights_2d(
         assert not per_token_quant
         if quant_dtype == torch.int8:
             w, w_s = per_block_cast_to_int8(w, block_shape)
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = per_block_cast_to_fp8(w, block_shape)
         elif quant_dtype == "nvfp4":
             raise RuntimeError("blocked quantization not supported for nvfp4")
@@ -294,7 +294,7 @@ def moe_quantize_weights_2d(
             w, w_s = ops.scaled_int8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = ops.scaled_fp8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
