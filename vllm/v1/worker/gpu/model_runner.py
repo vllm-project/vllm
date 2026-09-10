@@ -469,13 +469,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
             else:
-                watermark_config = self.vllm_config.watermark_config
-                watermarker = create_watermarker(watermark_config)
+                wm_config = self.vllm_config.watermark_config
+                watermarker = create_watermarker(wm_config)
                 self.sampler = GPUWatermarkSampler(
                     watermarker,
-                    deduplicate_contexts=watermark_config.deduplicate_contexts,
+                    deduplicate_contexts=wm_config.deduplicate_contexts,
                     deduplicate_contexts_max_history=(
-                        watermark_config.deduplicate_contexts_max_history
+                        wm_config.deduplicate_contexts_max_history
                     ),
                     **sampler_kwargs,
                 )

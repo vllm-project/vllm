@@ -56,6 +56,7 @@ def _repeated_context_mask_kernel(
     CONTEXT_WIDTH: tl.constexpr,
     CONTEXT_BLOCK: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
+    INCLUDE_PROMPT: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -64,7 +65,8 @@ def _repeated_context_mask_kernel(
     safe_req_idx = tl.maximum(req_idx, 0)
     prompt_len = tl.load(prompt_lens_ptr + safe_req_idx, mask=valid_req, other=0)
     total_len = tl.load(total_lens_ptr + safe_req_idx, mask=valid_req, other=0)
-    output_len = total_len - prompt_len
+    sequence_start = 0 if INCLUDE_PROMPT else prompt_len
+    history_len = total_len - sequence_start
 
     offsets = tl.arange(0, BLOCK)
     context_offsets = tl.arange(0, CONTEXT_BLOCK)
@@ -74,21 +76,21 @@ def _repeated_context_mask_kernel(
         other=-1,
     )
     repeated = tl.full((), 0, tl.int32)
-    history_start = 0
+    scan_start = 0
     if MAX_HISTORY > 0:
-        history_start = tl.maximum(output_len - MAX_HISTORY, 0)
-    for block_start in tl.range(history_start, output_len, BLOCK):
-        previous_output_pos = block_start + offsets
-        matches = valid_req & (previous_output_pos < output_len)
+        scan_start = tl.maximum(history_len - MAX_HISTORY, 0)
+    for block_start in tl.range(scan_start, history_len, BLOCK):
+        previous_pos = block_start + offsets
+        matches = valid_req & (previous_pos < history_len)
         for offset in range(CONTEXT_WIDTH):
             context_token = tl.sum(
                 tl.where(context_offsets == offset, context_tokens, 0), axis=0
             )
-            historical_pos = previous_output_pos + offset - CONTEXT_WIDTH
+            historical_pos = previous_pos + offset - CONTEXT_WIDTH
             historical_token = tl.load(
                 all_token_ids_ptr
                 + safe_req_idx * all_token_ids_stride
-                + prompt_len
+                + sequence_start
                 + tl.maximum(historical_pos, 0),
                 mask=valid_req & (historical_pos >= 0),
                 other=-1,
@@ -105,6 +107,7 @@ def _repeated_context_mask_cpu(
     total_lens: torch.Tensor,
     contexts: torch.Tensor,
     max_history: int | None = None,
+    include_prompt: bool = False,
 ) -> torch.Tensor:
     repeated = torch.zeros(len(req_indices), dtype=torch.bool)
     for row, req_idx_tensor in enumerate(req_indices):
@@ -113,14 +116,15 @@ def _repeated_context_mask_cpu(
             continue
         prompt_len = int(prompt_lens[req_idx])
         total_len = int(total_lens[req_idx])
-        output_tokens = all_token_ids[req_idx, prompt_len:total_len].tolist()
+        sequence_start = 0 if include_prompt else prompt_len
+        history_tokens = all_token_ids[req_idx, sequence_start:total_len].tolist()
         prefix = [-1] * contexts.shape[-1]
         current_context = tuple(contexts[row].tolist())
         history_start = (
-            max(0, len(output_tokens) - max_history) if max_history is not None else 0
+            max(0, len(history_tokens) - max_history) if max_history is not None else 0
         )
-        for output_pos, token_id in enumerate(output_tokens):
-            if output_pos >= history_start and (
+        for history_pos, token_id in enumerate(history_tokens):
+            if history_pos >= history_start and (
                 tuple(prefix[-contexts.shape[-1] :]) == current_context
             ):
                 repeated[row] = True
@@ -136,6 +140,7 @@ def repeated_context_mask(
     total_lens: torch.Tensor,
     contexts: torch.Tensor,
     max_history: int | None = None,
+    include_prompt: bool = False,
 ) -> torch.Tensor:
     if all_token_ids.device.type == "cpu":
         return _repeated_context_mask_cpu(
@@ -145,6 +150,7 @@ def repeated_context_mask(
             total_lens,
             contexts,
             max_history,
+            include_prompt,
         )
 
     if contexts.stride(-1) != 1:
@@ -162,6 +168,7 @@ def repeated_context_mask(
         CONTEXT_WIDTH=contexts.shape[-1],
         CONTEXT_BLOCK=triton.next_power_of_2(contexts.shape[-1]),
         MAX_HISTORY=0 if max_history is None else max_history,
+        INCLUDE_PROMPT=include_prompt,
         BLOCK=512,
     )
     return repeated
