@@ -51,9 +51,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 @pytest.mark.parametrize("head_size", [128, 256])
 def test_fp8_k_nvfp4_v_page_size_is_between_fp8_and_nvfp4(head_size: int) -> None:
-    common = dict(
-        block_size=64, num_kv_heads=8, head_size=head_size, dtype=torch.uint8
-    )
+    common = dict(block_size=64, num_kv_heads=8, head_size=head_size, dtype=torch.uint8)
     fp8 = FlashInferBackend.customize_spec(
         FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.FP8_PER_TENSOR)
     )
@@ -64,9 +62,7 @@ def test_fp8_k_nvfp4_v_page_size_is_between_fp8_and_nvfp4(head_size: int) -> Non
         FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.NVFP4)
     )
 
-    expected_mixed_page_size = 64 * 8 * (
-        head_size + head_size // 2 + head_size // 16
-    )
+    expected_mixed_page_size = 64 * 8 * (head_size + head_size // 2 + head_size // 16)
     assert mixed.page_size_bytes == expected_mixed_page_size
     assert nvfp4.page_size_bytes < mixed.page_size_bytes < fp8.page_size_bytes
 
