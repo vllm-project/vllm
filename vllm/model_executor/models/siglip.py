@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
@@ -1010,7 +1011,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         flip_indices_cpu = (
             starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
         ) - (1 + current_positions_cpu)
-        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
+        flip_indices = async_tensor_h2d(flip_indices_cpu, features.device)
 
         return features[flip_indices]
 

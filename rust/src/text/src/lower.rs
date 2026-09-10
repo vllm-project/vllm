@@ -435,6 +435,20 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_preserves_zero_min_tokens() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                min_tokens: Some(0),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect("lower zero min_tokens");
+
+        assert_eq!(params.min_tokens, 0);
+    }
+
+    #[test]
     fn lower_sampling_params_validates_repetition_detection() {
         let lower = |repetition_detection| {
             lower_sampling_params_with_limits(

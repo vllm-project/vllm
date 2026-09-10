@@ -87,6 +87,7 @@ fn inline_prompt_logprobs_value() -> Value {
         ndarray_value("float32", &[2, 3], probs),
         ndarray_value("int64", &[2], ranks),
         Value::Nil,
+        Value::Nil,
     ])
 }
 
@@ -238,6 +239,29 @@ fn decodes_inline_prompt_logprobs() {
         .into_direct()
         .unwrap();
     assert_eq!(logprobs, expected_prompt_logprobs());
+}
+
+#[test]
+fn rejects_non_none_cu_num_generated_tokens_tensor() {
+    let Value::Array(mut fields) = inline_prompt_logprobs_value() else {
+        panic!("inline_prompt_logprobs_value must be an array");
+    };
+    fields[4] = Value::from(42);
+
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        None,
+        Some(Value::Array(fields)),
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ValueDecodeExt");
+    };
+    assert_eq!(
+        message,
+        "new_prompt_logprobs_tensors.cu_num_generated_tokens_tensor: \
+         expected None for per-request engine-core logprobs payload"
+    );
 }
 
 #[test]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug IMA"
+  short_description: "Debug CUDA illegal memory access errors in vLLM."
+  default_prompt: "Use the vLLM CUDA core-dump guide to debug this illegal memory access error."

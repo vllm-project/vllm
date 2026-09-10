@@ -3,10 +3,31 @@
 from enum import Enum
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E2M3Static,
+    kMxfp6E3M2Dynamic,
+    kMxfp6E3M2Static,
+)
 
 logger = init_logger(__name__)
 
 OCP_MX_BLOCK_SIZE = 32
+
+_WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
+    "mxfp4": kMxfp4Static,
+    "mxfp6_e3m2": kMxfp6E3M2Static,
+    "mxfp6_e2m3": kMxfp6E2M3Static,
+}
+
+_ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
+    "mxfp4": kMxfp4Dynamic,
+    "mxfp6_e3m2": kMxfp6E3M2Dynamic,
+    "mxfp6_e2m3": kMxfp6E2M3Dynamic,
+}
 
 OCP_MX_DTYPES = {
     "mxfp4",
