@@ -682,13 +682,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
-            self.speculator.set_attn(
-                self.model_state,
-                self.kv_cache_config,
-                self.block_tables,
-                self.input_buffers,
-                self.attn_groups,
-            )
+            with use_workspace_lane(self._draft_workspace_lane):
+                self.speculator.set_attn(
+                    self.model_state,
+                    self.kv_cache_config,
+                    self.block_tables,
+                    self.input_buffers,
+                    self.attn_groups,
+                )
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.

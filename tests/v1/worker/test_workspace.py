@@ -106,6 +106,38 @@ def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     assert grown.numel() == 512
 
 
+def test_reserve_simultaneous_sizes_every_ubatch_in_current_lane(
+    monkeypatch,
+) -> None:
+    active_ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch[0])
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+
+    manager._reserve_simultaneous(
+        ((64,), torch.float32),
+        ((16,), torch.float32),
+    )
+    assert manager._current_workspaces[0] is not None
+    assert manager._current_workspaces[2] is not None
+    assert manager._current_workspaces[1] is None
+    assert manager._current_workspaces[3] is None
+
+    manager.lock()
+    for ubatch_id in range(2):
+        active_ubatch[0] = ubatch_id
+        first, second = manager.get_simultaneous(
+            ((64,), torch.float32),
+            ((16,), torch.float32),
+        )
+        assert first.numel() == 64
+        assert second.numel() == 16
+
+    with pytest.raises(RuntimeError, match="initialization-only"):
+        manager._reserve_simultaneous(((64,), torch.float32))
+
+
 def test_workspace_lane_validation(monkeypatch) -> None:
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
