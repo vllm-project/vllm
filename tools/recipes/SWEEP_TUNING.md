@@ -445,7 +445,33 @@ If no configuration is SLA-feasible, the recommendation JSON records a
 best-effort candidate. A deployable final configuration is produced only when
 the required recommendation stages succeed.
 
-## 7. Deploy the Tuned Configuration
+## 7. Post-Benchmark Visualization
+
+Every generated sweep package includes a standalone analysis helper. It is not
+called by `run_full_sweep.sh` or any stage runner, so figure generation cannot
+start, resume, or alter a sweep.
+
+After one or more benchmark stages finish, install the plotting dependencies:
+
+```bash
+cd /output/sweep
+python3 -m pip install -r requirements.txt
+```
+
+Preview the planned figures, then generate them from the completed
+`summary.json` files:
+
+```bash
+./visualize.py --dry-run
+./visualize.py
+```
+
+Use `--stage parallel-layout`, `--stage concurrency-tuning`, or
+`--stage runtime-tuning` to analyze selected stages. The helper writes PNG files
+under each stage's `figures/` directory. See the generated `VISUALIZATION.md`
+for the figure set and additional examples.
+
+## 8. Deploy the Tuned Configuration
 
 After Tune All completes:
 

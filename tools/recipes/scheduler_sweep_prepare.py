@@ -203,7 +203,6 @@ def main() -> int:
         json.dumps(
             [
                 {
-                    "_benchmark_name": "selected_concurrency",
                     "random_input_len": args.input_tokens,
                     "random_output_len": args.output_tokens,
                     "max_concurrency": concurrency,

@@ -202,7 +202,6 @@ def build_bench_params(workload: WorkloadHints) -> list[dict[str, Any]]:
 
     return [
         {
-            "_benchmark_name": "user_workload",
             "random_input_len": workload.input_tokens,
             "random_output_len": workload.output_tokens,
             "max_concurrency": workload.concurrency,
@@ -537,6 +536,24 @@ the corresponding key is removed from `recommended-config.yml`, allowing
     path.write_text(content, encoding="utf-8")
 
 
+def _write_post_benchmark_analysis_files(directory: Path) -> list[Path]:
+    """Copy standalone visualization helpers into a generated sweep package."""
+    source_dir = Path(__file__).resolve().parent
+    generated: list[Path] = []
+    for source_name, target_name, executable in (
+        ("sweep_visualization.py", "visualize.py", True),
+        ("requirements.txt", "requirements.txt", False),
+        ("VISUALIZATION.md", "VISUALIZATION.md", False),
+    ):
+        source = source_dir / source_name
+        target = directory / target_name
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        if executable:
+            target.chmod(target.stat().st_mode | 0o111)
+        generated.append(target)
+    return generated
+
+
 def write_sweep_files(
     output_dir: str,
     *,
@@ -581,6 +598,7 @@ def write_sweep_files(
         workload=workload,
     )
     _write_guide(guide, workload)
+    analysis_files = _write_post_benchmark_analysis_files(directory)
 
     return [
         sweep_config,
@@ -589,7 +607,9 @@ def write_sweep_files(
         run_script,
         recommend_script,
         guide,
+        *analysis_files,
     ]
+
 
 def write_parallel_layout_sweep_files(
     output_dir: str,
@@ -676,6 +696,7 @@ concurrency and scheduler tuning should follow automatically.
 """,
         encoding="utf-8",
     )
+    analysis_files = _write_post_benchmark_analysis_files(directory)
 
     return [
         parallel_params,
@@ -683,7 +704,9 @@ concurrency and scheduler tuning should follow automatically.
         run_parallel,
         recommend_parallel,
         guide,
+        *analysis_files,
     ]
+
 
 def build_concurrency_bench_params(workload: WorkloadHints) -> list[dict[str, Any]]:
     """Build one workload shape while leaving max_concurrency to Workload Explorer."""
@@ -941,7 +964,8 @@ def write_concurrency_sweep_files(
         workload=workload,
     )
     _write_concurrency_recommend_script(recommend_script, workload=workload)
-    return [bench_params, run_script, recommend_script]
+    analysis_files = _write_post_benchmark_analysis_files(directory)
+    return [bench_params, run_script, recommend_script, *analysis_files]
 
 
 def write_full_sweep_files(
