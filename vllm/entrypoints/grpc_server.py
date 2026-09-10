@@ -20,6 +20,7 @@ Example:
 
 import argparse
 import asyncio
+import hmac
 import signal
 import sys
 import time
@@ -51,6 +52,53 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+# Services exempt from API key authentication: health probes and reflection
+_UNAUTHENTICATED_SERVICES = frozenset(
+    {
+        "grpc.health.v1.Health",
+        "grpc.reflection.v1alpha.ServerReflection",
+    }
+)
+
+
+class _APIKeyAuthInterceptor(grpc.aio.ServerInterceptor):
+    """gRPC interceptor that enforces API key authentication.
+
+    If no API keys are configured, all requests are allowed (backward
+    compatible). If one or more keys are set, every RPC must carry an
+    ``authorization`` metadata header whose value matches one of the keys.
+    Health/reflection services are always allowed without authentication
+    so that Kubernetes probes and debugging tools continue to work.
+    """
+
+    def __init__(self, api_keys: list[str]) -> None:
+        self._api_keys = api_keys
+
+    async def intercept_service(self, continuation, handler_call_details):
+        method = handler_call_details.method
+        # Strip leading '/' from fully-qualified method name
+        service_name = method.lstrip("/").rsplit("/", 1)[0]
+        if service_name in _UNAUTHENTICATED_SERVICES:
+            return await continuation(handler_call_details)
+
+        if not self._api_keys:
+            return await continuation(handler_call_details)
+
+        metadata = dict(handler_call_details.invocation_metadata or {})
+        auth_header = metadata.get("authorization", "")
+
+        if not any(
+            hmac.compare_digest(auth_header, key) for key in self._api_keys
+        ):
+            await handler_call_details.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "Invalid or missing API key",
+            )
+            # Return a no-op handler; abort() terminates the call.
+            # We still need to return something for the protocol.
+
+        return await continuation(handler_call_details)
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -84,8 +132,32 @@ async def serve_grpc(args: argparse.Namespace):
     # Create servicer
     servicer = VllmEngineServicer(async_llm, start_time)
 
+    # Bind address
+    host = args.host or "0.0.0.0"
+    address = f"{host}:{args.port}"
+
+    # Get API keys before building server (interceptors must be set at creation)
+    api_keys = [k for k in (args.api_key or [envs.VLLM_API_KEY]) if k]
+
+    interceptors: list[grpc.aio.ServerInterceptor] = []
+    if api_keys:
+        interceptors.append(_APIKeyAuthInterceptor(api_keys))
+        logger.info(
+            "gRPC API key authentication enabled (%d key%s configured)",
+            len(api_keys),
+            "s" if len(api_keys) != 1 else "",
+        )
+    else:
+        logger.warning(
+            "No --api-key set or VLLM_API_KEY env var found. gRPC server is "
+            "running without authentication. Anyone who can reach this "
+            "port (%s) has full access to the vLLM engine.",
+            address,
+        )
+
     # Create gRPC server
     server = grpc.aio.server(
+        interceptors=interceptors,
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
@@ -112,9 +184,6 @@ async def serve_grpc(args: argparse.Namespace):
     )
     reflection.enable_server_reflection(service_names, server)
 
-    # Bind to address
-    host = args.host or "0.0.0.0"
-    address = f"{host}:{args.port}"
     server.add_insecure_port(address)
 
     try:
@@ -183,6 +252,15 @@ def main():
         type=int,
         default=50051,
         help="Port to bind gRPC server to",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        action="append",
+        help="API key(s) for authenticating gRPC requests. "
+        "If provided, clients must include a valid "
+        "'authorization' metadata header.",
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
 
