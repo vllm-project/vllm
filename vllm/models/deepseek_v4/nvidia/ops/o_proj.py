@@ -28,7 +28,7 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
 def deep_gemm_fp8_o_proj(
     o: torch.Tensor,
     positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
+    rotary_emb: nn.Module,
     wo_a: nn.Module,
     wo_b: nn.Module,
     *,
@@ -45,10 +45,17 @@ def deep_gemm_fp8_o_proj(
     Shared by the FlashMLA and FlashInfer CUDA backends. ``einsum_recipe`` /
     ``tma_aligned_scales`` come from ``compute_fp8_einsum_recipe``.
     """
+    if not hasattr(wo_a, "weight_scale") and not hasattr(wo_a, "weight_scale_inv"):
+        o_bf16, _ = rotary_emb.forward_native(positions, o, None, inverse=True)
+        o_bf16 = o_bf16.view(o.shape[0], n_groups, -1)
+        wo_a_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
+        z = torch.einsum("tgd,grd->tgr", o_bf16, wo_a_weight)
+        return wo_b(z.flatten(1))
+
     o_fp8, o_scale = fused_inv_rope_fp8_quant(
         o,
         positions,
-        cos_sin_cache,
+        rotary_emb.cos_sin_cache,
         n_groups=n_groups,
         heads_per_group=heads_per_group,
         nope_dim=nope_dim,
