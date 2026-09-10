@@ -17,6 +17,7 @@ harness records which kind it is, and the expected failures follow from it.
 
 import tempfile
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -61,8 +62,18 @@ def _init_hash():
 class ConnectorHarness:
     """Store a request's KV through a connector, then look another one up."""
 
+    #: Registry key, and the connector name the coverage gate matches on.
     name: str
+    #: Whether the connector keys external storage from ``request.block_hashes``
+    #: rather than re-deriving from raw tokens. Drives the expected failures:
+    #: a re-deriver drops every partitioning dimension by construction.
     keys_from_block_hashes: bool
+
+    @classmethod
+    @contextmanager
+    def create(cls) -> Iterator["ConnectorHarness"]:
+        """Yield a ready harness, owning any scratch resources for its scope."""
+        raise NotImplementedError
 
     def store(self, request: Request) -> None:
         raise NotImplementedError
@@ -74,6 +85,12 @@ class ConnectorHarness:
 class ExampleConnectorHarness(ConnectorHarness):
     name = "ExampleConnector"
     keys_from_block_hashes = False
+
+    @classmethod
+    @contextmanager
+    def create(cls) -> Iterator["ExampleConnectorHarness"]:
+        with tempfile.TemporaryDirectory() as path:
+            yield cls(path)
 
     def __init__(self, storage_path: str):
         vllm_config = create_vllm_config(
@@ -131,6 +148,11 @@ class SimpleCPUOffloadHarness(ConnectorHarness):
     name = "SimpleCPUOffloadConnector"
     keys_from_block_hashes = True
 
+    @classmethod
+    @contextmanager
+    def create(cls) -> Iterator["SimpleCPUOffloadHarness"]:
+        yield cls()
+
     def __init__(self):
         self.fixture = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16)
 
@@ -151,37 +173,65 @@ class SimpleCPUOffloadHarness(ConnectorHarness):
         return matched
 
 
-HARNESSES = ["ExampleConnector", "SimpleCPUOffloadConnector"]
+#: The single name-to-harness manifest. The coverage gate reads this, so a
+#: connector counts as covered only when there is a harness that actually runs
+#: it: "covered" is executable by construction rather than by assertion.
+HARNESS_CLASSES: dict[str, type[ConnectorHarness]] = {
+    ExampleConnectorHarness.name: ExampleConnectorHarness,
+    SimpleCPUOffloadHarness.name: SimpleCPUOffloadHarness,
+}
+
+HARNESSES = list(HARNESS_CLASSES)
 
 
 @pytest.fixture
 def harness(request) -> Iterator[ConnectorHarness]:
-    if request.param == "ExampleConnector":
-        with tempfile.TemporaryDirectory() as path:
-            yield ExampleConnectorHarness(path)
-    else:
-        yield SimpleCPUOffloadHarness()
+    harness_cls = HARNESS_CLASSES.get(request.param)
+    # Without this, an unknown name would silently fall through to whichever
+    # harness the else-arm happened to name, and its cases would pass while
+    # testing a different connector entirely.
+    assert harness_cls is not None, (
+        f"no harness registered for {request.param!r}; "
+        f"known harnesses: {sorted(HARNESS_CLASSES)}"
+    )
+    with harness_cls.create() as ready:
+        yield ready
+
+
+def test_harness_manifest_keys_match_harness_names():
+    """The manifest key is what the gate matches against the connector
+    registry, so it has to be the connector's registered name."""
+    for name, harness_cls in HARNESS_CLASSES.items():
+        assert harness_cls.name == name
+
+
+#: Why a re-deriving connector fails an arm, and the fix that will flip it.
+#: Cited on the mark so whoever hits the XPASS knows which marks to delete,
+#: the same standard the coverage gate holds exempt re-derivers to.
+REDERIVATION_REASON = (
+    "#53496: ExampleConnector keys storage on raw prompt tokens, so it drops "
+    "every partitioning dimension and keys prompt_embeds requests on an empty "
+    "prompt."
+)
 
 
 def _cases(negative: bool) -> list:
     """Cross harnesses with dimensions, marking the known re-derivation bugs."""
     cases = []
-    for name in HARNESSES:
+    for name, harness_cls in HARNESS_CLASSES.items():
         for dim in DIMENSIONS:
             marks = []
-            if negative and dim.negative_bug:
-                marks.append(pytest.mark.xfail(strict=True, reason=dim.negative_bug))
-            elif name == "ExampleConnector" and (
+            # Re-derivation is checked first and deliberately: a re-deriver
+            # drops the dimension on its own, independently of any open bug in
+            # the engine's key. Marking such an arm with the engine bug would
+            # leave it xfailing against a reason that no longer holds once that
+            # bug is fixed, hiding the durable failure behind a stale one.
+            if not harness_cls.keys_from_block_hashes and (
                 negative or dim.name == "prompt_embeds"
             ):
-                marks.append(
-                    pytest.mark.xfail(
-                        strict=True,
-                        reason="ExampleConnector keys storage on raw prompt "
-                        "tokens, so it drops every partitioning dimension and "
-                        "keys prompt_embeds requests on an empty prompt.",
-                    )
-                )
+                marks.append(pytest.mark.xfail(strict=True, reason=REDERIVATION_REASON))
+            elif negative and dim.negative_bug:
+                marks.append(pytest.mark.xfail(strict=True, reason=dim.negative_bug))
             cases.append(pytest.param(name, dim, id=f"{name}-{dim.name}", marks=marks))
     return cases
 

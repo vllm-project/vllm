@@ -22,10 +22,16 @@ The shapes are the same two the connector tier already distinguishes via
 """
 
 import inspect
+import os.path
 from dataclasses import dataclass
 from enum import Enum
 
+import regex as re
+
+from vllm.distributed.kv_transfer import kv_connector
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+from .test_connector_tier import HARNESS_CLASSES
 
 
 class Keying(Enum):
@@ -70,10 +76,13 @@ class Exemption:
     bug: str | None = None
 
 
-# Connectors exercised by the connector tier, mapped to the harness that does it.
+# Connectors exercised by the connector tier, derived from the harness manifest
+# rather than restated. A hand-written list here could name a harness that does
+# not exist, or miss one that does, and the gate would still pass; deriving it
+# makes "covered" mean "a harness runs this connector" by construction.
 COVERED: dict[str, str] = {
-    "ExampleConnector": "test_connector_tier.ExampleConnectorHarness",
-    "SimpleCPUOffloadConnector": "test_connector_tier.SimpleCPUOffloadHarness",
+    name: f"test_connector_tier.{harness_cls.__name__}"
+    for name, harness_cls in HARNESS_CLASSES.items()
 }
 
 EXEMPT: dict[str, Exemption] = {
@@ -100,8 +109,10 @@ EXEMPT: dict[str, Exemption] = {
         "needs the hf3fs client",
         "v1/hf3fs/hf3fs_connector.py:1014 chains "
         "md5(f'{previous_hash}_{token_ids}') over request.prompt_token_ids; "
-        "the package contains no reference to cache_salt or lora at all",
-        bug="#53194",
+        "the connector directory contains no reference to cache_salt or lora "
+        "at all, so LoRA identity is dropped too, which is wider than the "
+        "cache_salt scope #51748 tracks",
+        bug="#51748",
     ),
     "LMCacheConnectorV1": Exemption(
         Keying.REDERIVES,
@@ -180,7 +191,21 @@ def _builtin_connectors() -> set[str]:
     """
     builtin = set()
     for name, loader in KVConnectorFactory._registry.items():
-        module_path = inspect.getclosurevars(loader).nonlocals["module_path"]
+        try:
+            module_path = inspect.getclosurevars(loader).nonlocals["module_path"]
+        except (TypeError, KeyError) as exc:
+            # Reading the loader closure couples this gate to how
+            # KVConnectorFactory.register_connector builds its registry
+            # entries. If that changes (a functools.partial, a renamed local),
+            # say so here rather than surfacing a bare KeyError that reads as
+            # "the conformance gate is broken".
+            raise AssertionError(
+                "cannot classify registered connector "
+                f"{name!r}: this gate reads the module path out of "
+                "KVConnectorFactory.register_connector's loader closure, and "
+                f"that closure no longer exposes it ({exc!r}). Update this "
+                "helper, or expose the module path on the factory."
+            ) from exc
         if not module_path.startswith("tests."):
             builtin.add(name)
     return builtin
@@ -198,6 +223,14 @@ def test_every_registered_connector_declares_partitioning():
     assert not COVERED.keys() & EXEMPT.keys()
 
 
+#: Root the evidence pointers are relative to, resolved from the package
+#: itself so the check does not depend on the working directory.
+CONNECTOR_ROOT = os.path.dirname(kv_connector.__file__)
+
+#: Leading token of an evidence string: ``path/to/file.py:123``.
+EVIDENCE_POINTER = re.compile(r"^(?P<path>[\w./-]+\.py):(?P<line>\d+)\b")
+
+
 def test_every_exemption_declares_a_keying_shape():
     """An exemption records why CI cannot run the connector; the shape claim
     is the part that survives the exemption and can be argued with."""
@@ -205,6 +238,27 @@ def test_every_exemption_declares_a_keying_shape():
         assert isinstance(exemption.keying, Keying), name
         assert exemption.blocked_by.strip(), f"{name} exempted with no reason"
         assert exemption.evidence.strip(), f"{name} declares a shape with no evidence"
+
+
+def test_exemption_evidence_points_at_a_file_that_still_exists():
+    """A shape claim is only reviewable if the reader can find what it was read
+    from, and this tree moves: the nixl split and the mooncake restructure are
+    both recent. So the leading ``path:line`` token must name a file that is
+    still there. Line numbers and wording are deliberately NOT checked --
+    pinning those would drag this file into every unrelated refactor -- but a
+    file that moves should fail here the day it moves."""
+    for name, exemption in EXEMPT.items():
+        match = EVIDENCE_POINTER.match(exemption.evidence)
+        assert match is not None, (
+            f"{name}: evidence must lead with a path:line pointer relative to "
+            f"{CONNECTOR_ROOT}, got {exemption.evidence[:60]!r}"
+        )
+        path = os.path.join(CONNECTOR_ROOT, match["path"])
+        assert os.path.exists(path), (
+            f"{name}: evidence points at {match['path']}, which no longer "
+            "exists. The connector moved, so re-read it and update both the "
+            "pointer and the shape claim it supports."
+        )
 
 
 def test_rederiving_connectors_are_not_silently_exempted():
