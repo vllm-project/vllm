@@ -57,20 +57,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _neutralize_rows_without_local_kv(
-    out: torch.Tensor,
-    lse: torch.Tensor,
-    topk_indices: torch.Tensor,
-) -> None:
-    """Rows where this rank owns none of the selected tokens (all indices
-    -1) have undefined out/lse; (0, -inf) is the identity element of the
-    cross-rank LSE merge, so it drops this rank from those rows.
-    """
-    empty_rows = (topk_indices == -1).all(dim=-1)
-    out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-    lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
-
-
 # For FP8 sparse attention we have two implementations:
 # 1. Mixed batch mode: use the FP8 decode kernel for both prefill and decode this is
 #    done by treating all tokens as single batch.
@@ -1225,7 +1211,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         # Kernel LSE is (1, H, T); the DCP merge consumes (T, H).
         lse = _lse.squeeze(0).transpose(0, 1)
-        _neutralize_rows_without_local_kv(out, lse, topk_indices)
+        # Rows where this rank owns none of the selected tokens (all indices
+        # -1) have undefined out/lse; (0, -inf) is the identity element of the
+        # cross-rank LSE merge, so it drops this rank from those rows.
+        empty_rows = (topk_indices == -1).all(dim=-1)
+        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         # The head-padding slice above can leave `out` non-contiguous, and the
         # merge feeds it to reduce_scatter.
         return out.contiguous(), lse
