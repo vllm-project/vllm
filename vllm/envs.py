@@ -298,7 +298,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
-    VLLM_ROCM_DSV4_CSA_MULTI_STREAM: bool = False
+    VLLM_ROCM_DSV4_CSA_MULTI_STREAM: bool = True
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -2061,7 +2061,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     "VLLM_ROCM_DSV4_CSA_MULTI_STREAM": lambda: (
-        os.getenv("VLLM_ROCM_DSV4_CSA_MULTI_STREAM", "0").lower() in ("1", "true")
+        os.getenv("VLLM_ROCM_DSV4_CSA_MULTI_STREAM", "1").lower() in ("1", "true")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file

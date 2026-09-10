@@ -7,6 +7,7 @@ from typing import cast
 
 import torch
 
+from vllm import envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -544,6 +545,29 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         finally:
             self.aux_stream_list = aux_streams
 
+    def _enable_csa_multi_stream(self) -> bool:
+        """All CSA multi-stream gates: env var, streams, and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks. CUDA needs no such gate: its events behave in
+        eager and capture regions alike, so its multi-stream calls need no
+        region restriction.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        return (
+            self.aux_stream_list is not None
+            and envs.VLLM_ROCM_DSV4_CSA_MULTI_STREAM
+            and (
+                torch.cuda.is_current_stream_capturing()
+                or not isinstance(attn_metadata, dict)
+            )
+        )
+
     def _attn_pipeline(
         self,
         hidden_states: torch.Tensor,
@@ -551,11 +575,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         o_padded: torch.Tensor,
     ) -> None:
         """Move ROCm stream fan-out ahead of all CSA input projections."""
-        attn_metadata = get_forward_context().attn_metadata
-        if self.aux_stream_list is None or (
-            isinstance(attn_metadata, dict)
-            and not torch.cuda.is_current_stream_capturing()
-        ):
+        if not self._enable_csa_multi_stream():
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
@@ -605,15 +625,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.aux_stream_list = saved_streams
             return
 
-        attn_metadata = get_forward_context().attn_metadata
-        if (
-            isinstance(attn_metadata, dict)
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            # Piecewise eager regions must rebuild inputs on their owning stream.
+        if not self._enable_csa_multi_stream():
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
+        attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
         assert indexer is not None and compressor is not None

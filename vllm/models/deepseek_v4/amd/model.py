@@ -934,13 +934,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Keep the shared three-slot layout. ROCm CSA uses the first two
-        # streams for its compressor chains and joins before indexer query work.
-        aux_stream_list = (
-            [torch.cuda.Stream() for _ in range(3)]
-            if envs.VLLM_ROCM_DSV4_CSA_MULTI_STREAM
-            else None
-        )
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
