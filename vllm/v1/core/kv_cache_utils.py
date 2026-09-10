@@ -2376,9 +2376,8 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
-    hisparse_gpu_bytes = get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
-    if hisparse_gpu_bytes is not None:
-        return hisparse_gpu_bytes
+    if vllm_config.attention_config.hisparse_config is not None:
+        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (

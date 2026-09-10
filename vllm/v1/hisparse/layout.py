@@ -110,10 +110,7 @@ def _partition_hisparse_specs(
 def get_hisparse_gpu_memory_usage(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    if vllm_config.attention_config.hisparse_config is None or not kv_cache_groups:
-        return None
-
+) -> int:
     _, indexer_specs = _partition_hisparse_specs(kv_cache_groups)
     return sum(
         spec.max_memory_usage_bytes(vllm_config) for spec in indexer_specs.values()
