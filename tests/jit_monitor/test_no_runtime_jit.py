@@ -18,12 +18,6 @@ from vllm.inputs import TokensPrompt
 from ..models.utils import dummy_hf_overrides
 from ..utils import create_new_process_for_each_test
 
-# Warmup coverage is still incomplete for these backends, so the monitor fires
-# during inference. Tracked in https://github.com/vllm-project/vllm/issues/49349;
-# drop this once the warmup contract migrations land.
-pytestmark = pytest.mark.skip(reason="Kernel warmup coverage is still incomplete")
-
-
 @dataclass(frozen=True)
 class JitModel:
     model: str
@@ -32,18 +26,10 @@ class JitModel:
 
 
 JIT_MONITOR_MODELS = [
-    JitModel("Qwen/Qwen3-0.6B"),
-    JitModel("deepseek-ai/DeepSeek-V2-Lite-Chat", trust_remote_code=True),
-    JitModel("deepseek-ai/DeepSeek-V3", trust_remote_code=True),
-    JitModel("ibm-granite/granite-4.0-tiny-preview"),
+    JitModel("deepseek-ai/DeepSeek-V4-Flash", trust_remote_code=True),
     JitModel(
-        "luccafong/deepseek_mtp_main_random",
-        draft="luccafong/deepseek_mtp_draft_random",
-        trust_remote_code=True,
-    ),
-    JitModel(
-        "eagle618/deepseek-v3-random",
-        draft="eagle618/eagle-deepseek-v3-random",
+        "deepseek-ai/DeepSeek-V4-Flash",
+        draft="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
     ),
 ]
@@ -132,7 +118,11 @@ def can_run_without_jit(spec: JitModel):
         raise
 
 
-@pytest.mark.parametrize("spec", JIT_MONITOR_MODELS, ids=lambda s: s.model)
+@pytest.mark.parametrize(
+    "spec",
+    JIT_MONITOR_MODELS,
+    ids=lambda s: f"{s.model}-{'mtp' if s.draft else 'base'}",
+)
 def test_no_runtime_jit(spec: JitModel, monkeypatch: pytest.MonkeyPatch):
     """Assert JIT-heavy backends do not JIT-compile during inference."""
     # Set here rather than in the child so the spawned process inherits it:
