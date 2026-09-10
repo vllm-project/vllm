@@ -79,6 +79,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
+    "uno",
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -461,6 +462,15 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    uno_lora_path: str | None = None
+    """Uno adapter directory in PEFT format, or its Hugging Face repository ID.
+    The adapter is active only on the noisy draft rows."""
+    uno_mask_token_id: int | None = Field(default=None, gt=1)
+    """Exclusive upper bound of Uno's uniform noise range [1, mask_token_id).
+    Defaults to the target vocabulary size. Match the adapter's training range."""
+    uno_noise_seed: int = 0
+    """Seed for Uno's deterministic draft-noise generator."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
@@ -1150,6 +1160,8 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "uno":
+                self.model = "uno"
             elif self.method == "custom_class":
                 # method was set explicitly, but model should already contain the
                 # custom module path. If not, this is a configuration error.
@@ -1201,6 +1213,16 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "uno":
+            self._validate_uno()
+            self.model = "uno"
+            self.prompt_lookup_min = 0
+            self.prompt_lookup_max = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+            self.parallel_drafting = True
+            self.enforce_eager = True
+            self.draft_sample_method = "probabilistic"
         elif self.method == "custom_class":
             # Custom class proposer does not need a draft model.
             # It will dynamically load the user-provided class at runtime.
@@ -1534,6 +1556,59 @@ class SpeculativeConfig:
 
         return self
 
+    def _validate_uno(self) -> None:
+        if not self.uno_lora_path or not self.uno_lora_path.strip():
+            raise ValueError("method='uno' requires uno_lora_path")
+        model_config = self.target_model_config
+        parallel_config = self.target_parallel_config
+        if model_config is None or parallel_config is None:
+            raise ValueError("Uno requires target model and parallel configurations")
+        if self.model not in (None, "uno"):
+            raise ValueError(
+                "Uno shares the target model; do not specify a draft model"
+            )
+        if self.num_speculative_tokens is None:
+            raise ValueError("Uno requires num_speculative_tokens")
+        from vllm.v1.sample.rejection_sampler import MAX_SPEC_LEN
+
+        if self.num_speculative_tokens > MAX_SPEC_LEN:
+            raise ValueError(f"Uno requires num_speculative_tokens <= {MAX_SPEC_LEN}")
+        if self.num_speculative_tokens_per_batch_size is not None:
+            raise ValueError("Uno requires a fixed num_speculative_tokens")
+        if self.rejection_sample_method != "standard":
+            raise ValueError("Uno requires rejection_sample_method='standard'")
+        if self.enforce_eager is False:
+            raise ValueError("Uno requires eager draft execution")
+        if self.draft_tensor_parallel_size not in (None, 1) or any(
+            getattr(parallel_config, name) != 1
+            for name in (
+                "tensor_parallel_size",
+                "pipeline_parallel_size",
+                "data_parallel_size",
+                "prefill_context_parallel_size",
+                "decode_context_parallel_size",
+            )
+        ):
+            raise ValueError("Uno currently supports only single-GPU execution")
+        if (
+            model_config.runner_type != "generate"
+            or model_config.is_diffusion
+            or model_config.is_multimodal_model
+            or model_config.is_encoder_decoder
+        ):
+            raise ValueError("Uno requires a text-only decoder model")
+        if (
+            model_config.is_hybrid
+            or model_config.is_attention_free
+            or model_config.get_sliding_window() is not None
+        ):
+            raise ValueError("Uno requires a model with full attention in every layer")
+        vocab_size = model_config.get_vocab_size()
+        if self.uno_mask_token_id is None:
+            self.uno_mask_token_id = vocab_size
+        if not 1 < self.uno_mask_token_id <= vocab_size:
+            raise ValueError("uno_mask_token_id must be in (1, target vocabulary size]")
+
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
             raise ImportError(
@@ -1822,6 +1897,7 @@ class SpeculativeConfig:
         P-EAGLE              eagle3        Yes      K - 1
         DFlash               dflash        Yes      K
         DSpark               dspark        Yes      K - 1
+        Uno                  uno           Yes      K - 1
         MTP                  mtp           No       0
         N-gram               ngram         No       0
         Draft model          draft_model   No       1
@@ -1829,6 +1905,10 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         """
         num_draft_tokens = self.num_speculative_tokens
+
+        if self.use_uno():
+            # The K-row draft contains one seed and K-1 noisy queries.
+            return num_draft_tokens - 1
 
         if self.use_dflash():
             # DFlash uses one bonus query followed by K mask queries.
@@ -1880,6 +1960,9 @@ class SpeculativeConfig:
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"
+
+    def use_uno(self) -> bool:
+        return self.method == "uno"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None

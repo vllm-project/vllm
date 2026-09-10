@@ -910,6 +910,50 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
+def test_uno_adapter_reloads_after_profiling_and_restores_base_mapping():
+    runner = object.__new__(GPUModelRunner)
+    runner._ensure_lora_enabled = Mock()
+    runner._set_active_loras = Mock()
+    registered: set[int] = set()
+    runner.lora_manager = SimpleNamespace(
+        list_adapters=lambda: registered.copy(),
+        add_adapter=Mock(
+            side_effect=lambda request: registered.add(request.lora_int_id)
+        ),
+    )
+    request = LoRARequest("uno", 1000003, "test-adapter")
+    drafter = SimpleNamespace(
+        lora_request=request, uno_lora_id=request.lora_int_id, set_lora_hook=Mock()
+    )
+    runner._install_uno_lora(drafter)
+    hook = drafter.set_lora_hook.call_args.args[0]
+
+    # Warmup may evict the adapter. The first live draft must reload it.
+    registered.clear()
+    mapping = (0, request.lora_int_id, 0, request.lora_int_id)
+    hook(mapping)
+    assert registered == {request.lora_int_id}
+    assert runner.lora_manager.add_adapter.call_count == 2
+    runner._set_active_loras.assert_called_with(mapping, mapping, {request})
+
+    hook(None)
+    runner._set_active_loras.assert_called_with((0,) * 4, (0,) * 4, set())
+    hook(mapping)
+    assert runner.lora_manager.add_adapter.call_count == 2
+
+
+def test_uno_rejects_user_adapter_before_updating_request_state():
+    runner = object.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(use_uno=lambda: True)
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(lora_request=LoRARequest("user", 1, "test-adapter"))
+        ]
+    )
+    with pytest.raises(ValueError, match="request-specific LoRA"):
+        runner._update_states(scheduler_output)
+
+
 def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
@@ -1823,3 +1867,71 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_uno_dispatch_preserves_probabilities_through_reordered_verification():
+    """Native Uno dispatch must preserve q rows until their requests verify."""
+    runner = object.__new__(GPUModelRunner)
+    runner.speculative_config = SimpleNamespace(
+        method="uno",
+        use_ngram_gpu=lambda: False,
+        uses_extract_hidden_states=lambda: False,
+        use_eagle=lambda: False,
+        use_uno=lambda: True,
+        disable_padded_drafter_batch=True,
+    )
+    runner.use_async_scheduling = False
+    runner.use_aux_hidden_state_outputs = False
+    runner.supports_mm_inputs = False
+    runner.requests = {}
+    runner.input_batch = SimpleNamespace(
+        req_ids=["req_c", "req_a", "req_b"],
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+    )
+    runner.input_ids = SimpleNamespace(gpu=torch.tensor([10, 20, 30]))
+    runner._get_positions = Mock(return_value=torch.arange(3))
+    runner.get_model = Mock(return_value=SimpleNamespace())
+    runner.rejection_sampler = Mock(return_value="sampler_output")
+    runner.sampler = Mock()
+    drafter = object.__new__(gpu_model_runner_module.UnoProposer)
+    drafter.input_ids = torch.zeros(9, dtype=torch.int32)
+    draft_ids = torch.arange(9).reshape(3, 3)
+    draft_probs = torch.arange(1, 37, dtype=torch.float32).reshape(3, 3, 4)
+    draft_probs /= draft_probs.sum(dim=-1, keepdim=True)
+    drafter.propose = Mock(return_value=draft_ids)
+    drafter._last_draft_probs = draft_probs
+    runner.drafter = drafter
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=3,
+        num_spec_tokens_to_schedule=3,
+        num_scheduled_tokens=dict.fromkeys(runner.input_batch.req_ids, 1),
+    )
+    hidden_states = torch.zeros(3, 4)
+
+    output = runner.propose_draft_token_ids(
+        scheduler_output,
+        [[101], [102], [103]],
+        runner.input_batch.sampling_metadata,
+        hidden_states,
+        hidden_states,
+        aux_hidden_states=None,
+        spec_decode_metadata=None,
+        common_attn_metadata=Mock(),
+        slot_mappings=None,
+    )
+    assert output is draft_ids
+    assert runner._draft_probs is draft_probs
+    assert drafter.propose.call_args.kwargs["next_token_ids"].tolist() == [
+        101,
+        102,
+        103,
+    ]
+
+    # Reordering/removing draft rows must not change which q belongs to each token.
+    runner.input_batch.req_ids[:] = ["req_a", "req_b", "req_c"]
+    metadata = SpecDecodeMetadata.make_dummy([[1, 2], [], [3]], torch.device("cpu"))
+    runner._sample(torch.zeros(6, 4), metadata)
+    passed_probs = runner.rejection_sampler.call_args.args[1]
+    expected_probs = torch.cat([draft_probs[1, :2], draft_probs[0, :1]])
+    assert torch.equal(passed_probs, expected_probs)

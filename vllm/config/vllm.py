@@ -629,6 +629,10 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
+        if speculative_config.use_uno():
+            # After an all-accepted verification, the next draft writes one
+            # fresh seed plus K-1 noisy rows beyond the scheduled target rows.
+            return self.num_speculative_tokens
         if speculative_config.use_dflash():
             # DFlash requires an extra lookahead slot since it uses in-fill-style
             # decoding instead of standard next-token sampling, so it has a query
@@ -1095,6 +1099,37 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _validate_uno_config(self) -> None:
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_uno():
+            return
+        if envs.VLLM_USE_V2_MODEL_RUNNER:
+            raise ValueError(
+                "Uno requires Model Runner V1 (VLLM_USE_V2_MODEL_RUNNER=0)"
+            )
+        if self.scheduler_config.async_scheduling:
+            raise ValueError(
+                "Uno requires synchronous scheduling (--no-async-scheduling)"
+            )
+        if self.lora_config is None:
+            raise ValueError(
+                "Uno requires --enable-lora and --max-lora-rank large enough "
+                "for the Uno adapter"
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError("Uno does not support dual batch overlap")
+        if self.kv_transfer_config is not None:
+            raise ValueError("Uno does not support KV cache transfer")
+        required_tokens = (
+            self.scheduler_config.max_num_seqs
+            * speculative_config.num_speculative_tokens
+        )
+        if self.scheduler_config.max_num_batched_tokens < required_tokens:
+            raise ValueError(
+                "Uno requires max_num_batched_tokens >= max_num_seqs * "
+                f"num_speculative_tokens ({required_tokens}) for draft LoRA routing"
+            )
+
     def _verify_trace_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.enable_trace_replay:
@@ -1155,6 +1190,8 @@ class VllmConfig:
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
+
+        self._validate_uno_config()
 
         self.try_verify_and_update_config()
         self._resolve_and_verify_engram_config()
