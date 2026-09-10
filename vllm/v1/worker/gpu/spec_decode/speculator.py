@@ -133,10 +133,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
-            max_num_tokens=max(
-                self.max_num_tokens,
-                self.max_num_reqs * (self.num_speculative_steps + 1),
-            ),
+            max_num_tokens=self.max_num_tokens,
             device=device,
         )
         self.idx_mapping = torch.zeros(
@@ -333,11 +330,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=(
-                torch.zeros(num_reqs, dtype=torch.bool)
-                if getattr(self, "pcp_manager", None) is not None
-                else None
-            ),
+            is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
         )
         return attn_metadata
 
