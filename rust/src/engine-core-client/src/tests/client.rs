@@ -2769,6 +2769,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                                     "beta",
                                 ],
                                 pinned_adapters: [],
+                                ranks: {},
                                 loads: [],
                             },
                         ),

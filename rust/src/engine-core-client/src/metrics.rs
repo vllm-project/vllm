@@ -454,6 +454,7 @@ impl LoraLoadedExporter {
                     LoraLoadedLevel::Cpu
                 },
                 pinned: pinned.contains(adapter_name.as_str()),
+                rank: event.ranks.get(adapter_name).copied().unwrap_or(0),
             })
             .collect();
 
@@ -589,13 +590,14 @@ mod tests {
                 gpu_adapters: vec!["a".to_string()],
                 cpu_adapters: vec!["a".to_string(), "b".to_string()],
                 pinned_adapters: vec!["a".to_string()],
+                ranks: BTreeMap::from([("a".to_string(), 64)]),
                 ..Default::default()
             },
         );
         let rendered = metrics.render().unwrap();
         expect![[r#"
-            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="gpu",pinned="true"} 1
-            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="b",level="cpu",pinned="false"} 1"#]]
+            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="gpu",pinned="true",rank="64"} 1
+            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="b",level="cpu",pinned="false",rank="0"} 1"#]]
         .assert_eq(&loaded_series(&rendered));
         assert!(
             rendered
@@ -620,8 +622,7 @@ mod tests {
             },
         );
         let rendered = metrics.render().unwrap();
-        expect![[r#"
-            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="cpu",pinned="false"} 1"#]]
+        expect![[r#"vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="cpu",pinned="false",rank="0"} 1"#]]
         .assert_eq(&loaded_series(&rendered));
         assert!(
             rendered
