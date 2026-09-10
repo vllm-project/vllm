@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING
 
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
-    BlockRemoved,
-    BlockStored,
     KVCacheEvent,
 )
 from vllm.utils.math_utils import cdiv
@@ -32,13 +30,21 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
 
 
-class _HostBlockPool(BlockPool):
-    def take_events(self) -> list[KVCacheEvent]:
-        events = super().take_events()
-        for event in events:
-            if isinstance(event, (BlockStored, BlockRemoved)):
-                event.medium = MEDIUM_CPU
-        return events
+class _SharedEventQueueBlockPool(BlockPool):
+    """Publish host events through the device pool's current event queue."""
+
+    def __init__(self, *args, event_owner: BlockPool, **kwargs) -> None:
+        self._event_owner = event_owner
+        super().__init__(*args, **kwargs)
+
+    @property
+    def kv_event_queue(self) -> list[KVCacheEvent]:
+        return self._event_owner.kv_event_queue
+
+    @kv_event_queue.setter
+    def kv_event_queue(self, events: list[KVCacheEvent]) -> None:
+        # Initialization and drain assign an empty queue; only the owner resets it.
+        assert not events
 
 
 class HiSparseSourceManager(FullAttentionManager):
@@ -63,12 +69,14 @@ class HiSparseSourceManager(FullAttentionManager):
     def bind_host_pool(self, num_blocks: int) -> None:
         """Replace the device pool this group was built with by a host one."""
         device_pool = self.block_pool
-        self.block_pool = _HostBlockPool(
+        self.block_pool = _SharedEventQueueBlockPool(
             num_gpu_blocks=num_blocks,
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=device_pool.metrics_collector,
+            medium=MEDIUM_CPU,
+            event_owner=device_pool,
         )
         self._null_block = self.block_pool.null_block
 

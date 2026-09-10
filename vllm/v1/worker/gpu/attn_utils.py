@@ -18,7 +18,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
-from vllm.v1.hisparse.worker import HiSparseHostAllocator, bind_hisparse_kv_caches
+from vllm.v1.hisparse.binding import HiSparseHostAllocator, bind_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,

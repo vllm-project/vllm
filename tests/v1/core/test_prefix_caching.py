@@ -837,6 +837,22 @@ def test_host_receive_completion_without_spill_metadata(failed):
         assert state is not None and state.valid_pages == {0, 1}
 
 
+def test_hisparse_recomputation_does_not_complete_failed_host_import():
+    """Allocating recomputation is not evidence that imported host KV is valid."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    request = make_request(
+        "partial-failure", list(range(48)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, 32) is not None
+    # A partial load failure leaves only the first page computed. The next
+    # allocation reaches the original import boundary before the worker runs.
+    request.num_computed_tokens = 16
+    manager.cache_blocks(request, 16)
+    assert manager.allocate_slots(request, 16) is not None
+    state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
+    assert state is None or 1 not in state.valid_pages
+
+
 def test_hisparse_host_import_ignores_unsealed_tail():
     """A partial imported page must not become readable from stale host data."""
     manager = make_hisparse_kv_cache_manager(16, 16)

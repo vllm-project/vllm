@@ -292,19 +292,7 @@ class KVCacheManager:
             and self.enable_kv_cache_events
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):
-            for group_idx, group_blocks in enumerate(computed_blocks):
-                num_blocks = len(group_blocks)
-                if num_blocks > 0:
-                    group = self.kv_cache_config.kv_cache_groups[group_idx]
-                    block_size = group.kv_cache_spec.block_size
-                    self.coordinator.single_type_managers[
-                        group_idx
-                    ].block_pool.emit_cached_block_events(
-                        request,
-                        num_blocks,
-                        block_size,
-                        group_idx,
-                    )
+            self.coordinator.emit_cached_block_events(request, computed_blocks)
 
         # The junction to pin is where the lagging sparse-retention group stops
         # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
@@ -363,46 +351,6 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
-
-    def _ensure_capacity(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        num_encoder_tokens: int,
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        reserved_blocks: int,
-        apply_admission_cap: bool = False,
-    ) -> bool:
-        """Check that mandatory allocations fit in their pools."""
-        for i, manager in enumerate(self.coordinator.single_type_managers):
-            if manager.block_pool is self.block_pool:
-                continue
-            required = manager.get_num_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks[i],
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
-            )
-            if required > manager.block_pool.get_num_free_blocks():
-                return False
-
-        required = self.coordinator.get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            num_encoder_tokens,
-            total_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
-        )
-        return required + reserved_blocks <= self.block_pool.get_num_free_blocks()
 
     def allocate_slots(
         self,
@@ -546,7 +494,7 @@ class KVCacheManager:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
-            if not self._ensure_capacity(
+            if not self.coordinator.can_allocate(
                 request_id=request.request_id,
                 num_tokens=full_num_tokens,
                 new_computed_blocks=new_computed_block_list,
@@ -579,7 +527,7 @@ class KVCacheManager:
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
-        if not self._ensure_capacity(
+        if not self.coordinator.can_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -673,24 +621,8 @@ class KVCacheManager:
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
-        """Return deferred blocks to their owning pool."""
-        remaining = list(blocks)
-        for pool in dict.fromkeys(
-            manager.block_pool for manager in self.coordinator.single_type_managers
-        ):
-            if pool is self.block_pool:
-                continue
-            owned: list[KVCacheBlock] = []
-            other: list[KVCacheBlock] = []
-            for block in remaining:
-                belongs = (
-                    block.block_id < len(pool.blocks)
-                    and pool.blocks[block.block_id] is block
-                )
-                (owned if belongs else other).append(block)
-            pool.free_blocks(owned)
-            remaining = other
-        self.block_pool.free_blocks(remaining)
+        """Release blocks after their deferred-free fence has completed."""
+        self.coordinator.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -709,10 +641,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        pools = dict.fromkeys(
-            manager.block_pool for manager in self.coordinator.single_type_managers
-        )
-        if not all([pool.reset_prefix_cache() for pool in pools]):
+        if not self.coordinator.reset_prefix_cache():
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -759,10 +688,7 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        pools = dict.fromkeys(
-            manager.block_pool for manager in self.coordinator.single_type_managers
-        )
-        events = [event for pool in pools for event in pool.take_events()]
+        events = self.block_pool.take_events()
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
