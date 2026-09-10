@@ -13,10 +13,6 @@ REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv
 
 uv pip install --system -r "${REQUIREMENTS_FILE}"
 
-# TODO: Move nvidia-kvcr to kv_connectors.txt once its wheel is released.
-uv pip install --system \
-    "nvidia-kvcr @ git+https://github.com/ai-dynamo/kvcr.git@main"
-
 KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
 
