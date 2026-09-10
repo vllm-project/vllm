@@ -18,9 +18,12 @@ from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
+    _load_embeds_dict,
+    _parse_metadata_array,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
+    validate_chat_template,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -36,6 +39,45 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+
+@pytest.mark.parametrize("values", [[1, 32, 48], [0.0, 0.12345678912345678]])
+def test_json_metadata_preserves_numeric_precision(values):
+    tensor = _parse_metadata_array("grid", values, {"grid"})
+    assert tensor.tolist() == values
+    assert tensor.dtype == (
+        torch.float64 if isinstance(values[0], float) else torch.int64
+    )
+
+
+@pytest.mark.parametrize(
+    "key,values",
+    [
+        ("image_embeds", [1, 2]),
+        ("grid", [True]),
+        ("grid", [float("nan")]),
+        ("grid", [float("inf")]),
+        ("grid", [[1, 2]]),
+        ("grid", [2**64]),
+    ],
+)
+def test_json_arrays_are_only_valid_numeric_metadata(key, values):
+    with pytest.raises(VLLMValidationError):
+        _parse_metadata_array(key, values, {"grid"})
+
+
+@pytest.mark.asyncio
+async def test_json_metadata_bypasses_tensor_deserialization():
+    from unittest.mock import AsyncMock
+
+    tensor = torch.ones(2, 3)
+    fetch = AsyncMock(return_value=tensor)
+    result = await _load_embeds_dict(
+        {"image_embeds": "legacy-base64", "image_grid_thw": [1, 2, 2]}, fetch
+    )
+    fetch.assert_awaited_once_with("legacy-base64")
+    assert result["image_embeds"] is tensor
+    assert result["image_grid_thw"] == [1, 2, 2]
 
 
 @pytest.fixture(scope="function")
@@ -94,6 +136,16 @@ def qwen25omni_model_config_image_embeds():
         QWEN25OMNI_MODEL_ID,
         runner="generate",
         limit_mm_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25omni_model_config_video_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": 2},
         enable_mm_embeds=True,
     )
 
@@ -969,6 +1021,133 @@ async def test_parse_chat_messages_audio_embeds_async(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
+def test_parse_chat_messages_empty_video_embeds_with_uuid(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with UUID (no actual embeds data)."""
+    uuid = "test-video-uuid-123"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {"type": "video_embeds", "video_embeds": None, "uuid": uuid},
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video in mm_data as None (UUID provided)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], list)
+    assert len(mm_data["video"]) == 1
+    assert mm_data["video"][0] is None
+
+    # UUID should be recorded
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_video_embeds_with_string(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with base64 string embedding data."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_embeds_async(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with async futures."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+def test_parse_chat_messages_video_and_video_embeds_mixed(
+    qwen25omni_model_config_video_embeds,
+    video_url,
+):
+    """Test that mixing raw video and video_embeds is rejected."""
+    with pytest.raises(VLLMValidationError, match="Mixing raw video"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": video_url}},
+                        {"type": "video_embeds", "video_embeds": None, "uuid": "x"},
+                    ],
+                }
+            ],
+            qwen25omni_model_config_video_embeds,
+            content_format="string",
+        )
+
+
 def test_parse_chat_messages_multiple_image_embeds(
     phi3v_model_config_image_embeds,
 ):
@@ -1217,8 +1396,10 @@ def test_parse_chat_messages_empty_dict_image_embeds(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+@pytest.mark.parametrize("json_metadata", [False, True])
 def test_parse_chat_messages_multiple_dict_image_embeds(
     qwen25omni_model_config_image_embeds,
+    json_metadata,
 ):
     """Test that multiple dictionaries for image_embeds is handled without errors."""
     # Create two sample image embedding tensors
@@ -1236,7 +1417,9 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                         "type": "image_embeds",
                         "image_embeds": {
                             "image_embeds": tensor2base64(embeds),
-                            "image_grid_thw": tensor2base64(grid_thw),
+                            "image_grid_thw": grid_thw.tolist()
+                            if json_metadata
+                            else tensor2base64(grid_thw),
                         },
                     }
                     for embeds, grid_thw in zip(
@@ -2797,9 +2980,61 @@ def test_postprocess_messages_null_arguments_string():
 
 
 @pytest.mark.asyncio
+async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
+    """Media fetches overlap while modality and item order are preserved."""
+
+    active_fetches = 0
+    max_active_fetches = 0
+
+    async def _fetch(name: str, delay: float):
+        nonlocal active_fetches, max_active_fetches
+        active_fetches += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        try:
+            await asyncio.sleep(delay)
+            return name, f"{name}-uuid"
+        finally:
+            active_fetches -= 1
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["video"] = [
+        lambda: _fetch("video-0", 0.02),
+        lambda: _fetch("video-1", 0.01),
+    ]
+    tracker._items_by_modality["image"] = [
+        lambda: _fetch("image-0", 0.02),
+        lambda: _fetch("image-1", 0.01),
+    ]
+    tracker._items_by_modality["audio"] = [
+        lambda: _fetch("audio-0", 0.02),
+        lambda: _fetch("audio-1", 0.01),
+    ]
+
+    mm_data, mm_uuids = await tracker.resolve_items()
+
+    assert mm_data is not None
+    assert mm_uuids is not None
+    assert max_active_fetches == 6
+    assert list(mm_data) == ["image", "audio", "video"]
+    assert list(mm_uuids) == ["image", "audio", "video"]
+    assert mm_data == {
+        "image": ["image-0", "image-1"],
+        "audio": ["audio-0", "audio-1"],
+        "video": ["video-0", "video-1"],
+    }
+    assert mm_uuids == {
+        "image": ["image-0-uuid", "image-1-uuid"],
+        "audio": ["audio-0-uuid", "audio-1-uuid"],
+        "video": ["video-0-uuid", "video-1-uuid"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
     """Regression test: one failing media fetch must not abandon the other
-    still-in-flight fetches in the same modality batch.
+    still-in-flight fetches across modality batches.
 
     Before the fix, `resolve_items` gathered per-modality fetches with plain
     `asyncio.gather`, so the first exception propagated immediately while
@@ -2820,6 +3055,8 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         lambda: _fetch(False, 0.2),
         lambda: _fetch(False, 0.2),
     ]
+    tracker._items_by_modality["audio"] = [lambda: _fetch(False, 0.2)]
+    tracker._items_by_modality["video"] = [lambda: _fetch(False, 0.2)]
 
     tasks_before = asyncio.all_tasks()
     with pytest.raises(ValueError, match="simulated fetch failure"):
@@ -2947,3 +3184,12 @@ def test_tool_call_arguments_multiple_independent(caplog):
 
     assert len(caplog.records) == 1
     assert "bad" in caplog.records[0].message
+
+
+def test_validate_chat_template_rejects_invalid_type():
+    """A non-str/Path chat_template is invalid user input."""
+    with pytest.raises(
+        VLLMValidationError, match="not a valid chat template type"
+    ) as exc_info:
+        validate_chat_template(123)  # type: ignore[arg-type]
+    assert exc_info.value.parameter == "chat_template"

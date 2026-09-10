@@ -10,7 +10,7 @@
 //   - Q=res_weight*rms_weight remains in registers across persistent tokens.
 //   - V rows are converted once and cached as FP32 in TMEM between passes.
 //
-// Integration contract: Kimi K3 H=7168, 1<=num_blocks<=8, and token-major
+// Integration contract: Kimi K3 H=7168, 0<=num_blocks<=8, and token-major
 // block residual storage.
 
 #include "../torch_utils.h"
@@ -230,14 +230,15 @@ __device__ __forceinline__ void cp_async_bulk(void* smem_dst,
 }
 
 template <int H, int N, int NC = N_CHUNK_DEFAULT, int B = 1,
-          bool RELEASE_TMEM = false, bool HAS_DELTA = false,
-          bool HAS_OUTPUT_NORM = false, bool OUTPUT_NORM_IN_SMEM = false>
+          bool RELEASE_TMEM = false, bool STATIC_COMMON_PATH = false,
+          bool HAS_OUTPUT_NORM = false>
 __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
-    const bf16_t* __restrict__ block_res, bf16_t* __restrict__ layer_res,
+    bf16_t* __restrict__ block_res, bf16_t* __restrict__ layer_res,
     const bf16_t* __restrict__ delta, const bf16_t* __restrict__ res_w,
     const bf16_t* __restrict__ rms_w, bf16_t* __restrict__ output, int T,
     int block_stride_m, int block_stride_r, float rms_eps,
-    const bf16_t* __restrict__ output_norm_weight, float output_norm_eps) {
+    const bf16_t* __restrict__ output_norm_weight, float output_norm_eps,
+    int block_write_idx) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
   constexpr float LOG2_E = 1.4426950408889634f;
   constexpr int N_CHUNK = NC;
@@ -254,12 +255,15 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
   static_assert(TMEM_V_COLS_TOTAL <= TMEM_COLS_ALLOC);
   static_assert(H >= 4096 && H <= 8192);
   static_assert(H % K_TILE == 0);
+  static_assert(!STATIC_COMMON_PATH || HAS_OUTPUT_NORM);
 
   const int tid = threadIdx.x;
   const int wid = tid >> 5;
   const int lane = tid & 31;
   const int TB = T * B;
   const int num_ctas = gridDim.x;
+  const bool has_delta = STATIC_COMMON_PATH || delta != nullptr;
+  const int write_idx = STATIC_COMMON_PATH ? -1 : block_write_idx;
   constexpr int num_chunks = (N + N_CHUNK - 1) / N_CHUNK;
 
   const int comp_wid = wid - 1;
@@ -270,10 +274,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
   const int k_local = ct_in_group * VEC;
 
   constexpr size_t V_BYTES = (size_t)NUM_BUFS * H * sizeof(bf16_t);
-  constexpr size_t DELTA_BYTES =
-      HAS_DELTA ? (size_t)CHUNK_DEPTH * H * sizeof(bf16_t) : 0;
+  constexpr size_t DELTA_BYTES = (size_t)CHUNK_DEPTH * H * sizeof(bf16_t);
   constexpr size_t OUTPUT_NORM_BYTES =
-      OUTPUT_NORM_IN_SMEM ? (size_t)H * sizeof(bf16_t) : 0;
+      HAS_OUTPUT_NORM ? (size_t)H * sizeof(bf16_t) : 0;
   extern __shared__ __align__(16) char smem_raw[];
   bf16_t* v_bufs = reinterpret_cast<bf16_t*>(smem_raw);  // [NUM_BUFS][H]
   bf16_t* delta_bufs = reinterpret_cast<bf16_t*>(smem_raw + V_BYTES);
@@ -297,14 +300,11 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
       mbarrier_init(plan.bar_ready[i], 1);
       mbarrier_init(plan.bar_consumed[i], CONSUMER_WARPS);
     }
-    if constexpr (OUTPUT_NORM_IN_SMEM) {
+    if constexpr (HAS_OUTPUT_NORM) {
       mbarrier_init(plan.bar_output_norm_ready, 1);
     }
     fence_mbarrier_init();
   }
-
-  // gdc wait BEFORE tmem alloc
-  cudaGridDependencySynchronize();
 
   if (wid == 1) {
     tmem_allocate(TMEM_COLS_ALLOC, &plan.tmem_base);
@@ -314,7 +314,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
   }
   __syncthreads();
 
-  if constexpr (OUTPUT_NORM_IN_SMEM) {
+  if constexpr (HAS_OUTPUT_NORM) {
     if (wid == 0 && elect_one_sync()) {
       mbarrier_expect_tx(plan.bar_output_norm_ready, H * (int)sizeof(bf16_t));
       cp_async_bulk(output_norm_buf, output_norm_weight, H * sizeof(bf16_t),
@@ -365,6 +365,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
   if (wid == 0) {
     if (elect_one_sync()) {
       long long gci = 0;
+      bool pdl_waited = false;
       for (int tb = blockIdx.x; tb < TB; tb += num_ctas) {
         const int t = tb / B;
         for (int ci = 0; ci < num_chunks; ci++, gci++) {
@@ -374,7 +375,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
           int pc = phase_of(gci);
           mbarrier_wait(plan.bar_consumed[chunk_slot], pc ^ 1);
           int transaction_bytes = an * H * (int)sizeof(bf16_t);
-          if constexpr (HAS_DELTA) {
+          if (has_delta) {
             int prefix_n = N - 1 - ns;
             if (prefix_n >= 0 && prefix_n < an) {
               transaction_bytes += H * (int)sizeof(bf16_t);
@@ -388,12 +389,20 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
             const bf16_t* src =
                 residual_addr(block_res, layer_res, ns + n, N, t,
                               block_stride_m, block_stride_r, H);
+            if (!has_delta && ns + n == N - 1 && !pdl_waited) {
+              cudaGridDependencySynchronize();
+              pdl_waited = true;
+            }
             cp_async_bulk(buf_ptr(slot), src, H * sizeof(bf16_t),
                           plan.bar_ready[chunk_slot]);
           }
-          if constexpr (HAS_DELTA) {
+          if (has_delta) {
             int prefix_n = N - 1 - ns;
             if (prefix_n >= 0 && prefix_n < an) {
+              if (!pdl_waited) {
+                cudaGridDependencySynchronize();
+                pdl_waited = true;
+              }
               cp_async_bulk(delta_buf_ptr(chunk_slot),
                             delta + (long long)tb * H, H * sizeof(bf16_t),
                             plan.bar_ready[chunk_slot]);
@@ -401,6 +410,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
           }
         }
       }
+      cudaTriggerProgrammaticLaunchCompletion();
     }
   } else {
     float acc32[ACC_PER_THREAD] = {};
@@ -442,9 +452,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                   int2 vp =
                       *reinterpret_cast<const int2*>(buf_ptr(slot) + h_base);
                   auto* v2 = reinterpret_cast<__nv_bfloat162*>(&vp);
-                  if constexpr (HAS_DELTA) {
-                    int prefix_n = N - 1 - ns;
-                    if (n == prefix_n) {
+                  int prefix_n = N - 1 - ns;
+                  if (n == prefix_n && (has_delta || write_idx >= 0)) {
+                    if (has_delta) {
                       const bf16_t* delta_ptr =
                           delta_buf_ptr(chunk_slot) + h_base;
   #pragma unroll
@@ -455,6 +465,11 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                       }
                       *reinterpret_cast<int2*>(layer_res + (long long)tb * H +
                                                h_base) = vp;
+                    }
+                    if (write_idx >= 0) {
+                      *reinterpret_cast<int2*>(
+                          block_res + (long long)(tb / B) * block_stride_m +
+                          write_idx * block_stride_r + h_base) = vp;
                     }
                   }
                   float2 f[2] = {__bfloat1622float2(v2[0]),
@@ -480,9 +495,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
               int slot = slot_of(gci, n);
               int4 vp = *reinterpret_cast<const int4*>(buf_ptr(slot) + h_base);
               auto* v2 = reinterpret_cast<__nv_bfloat162*>(&vp);
-              if constexpr (HAS_DELTA) {
-                int prefix_n = N - 1 - ns;
-                if (n == prefix_n) {
+              int prefix_n = N - 1 - ns;
+              if (n == prefix_n && (has_delta || write_idx >= 0)) {
+                if (has_delta) {
                   const bf16_t* delta_ptr = delta_buf_ptr(chunk_slot) + h_base;
   #pragma unroll
                   for (int j = 0; j < VEC / 2; j++) {
@@ -492,6 +507,11 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                   }
                   *reinterpret_cast<int4*>(layer_res + (long long)tb * H +
                                            h_base) = vp;
+                }
+                if (write_idx >= 0) {
+                  *reinterpret_cast<int4*>(
+                      block_res + (long long)(tb / B) * block_stride_m +
+                      write_idx * block_stride_r + h_base) = vp;
                 }
               }
               float2 f[4] = {
@@ -791,11 +811,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
       }
 
       if constexpr (HAS_OUTPUT_NORM) {
-        if constexpr (OUTPUT_NORM_IN_SMEM) {
-          // The immutable weight copy is acquired once, at its first use.
-          if (tb == blockIdx.x) {
-            mbarrier_wait(plan.bar_output_norm_ready, 0);
-          }
+        // The immutable weight copy is acquired once, at its first use.
+        if (tb == blockIdx.x) {
+          mbarrier_wait(plan.bar_output_norm_ready, 0);
         }
         float output_sq = output_sq_pair.x + output_sq_pair.y;
   #pragma unroll
@@ -826,9 +844,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
               auto* values = reinterpret_cast<bf16_t*>(&packed);
   #pragma unroll
               for (int j = 0; j < 4; j++) {
-                const bf16_t* weight_ptr =
-                    OUTPUT_NORM_IN_SMEM ? output_norm_buf : output_norm_weight;
-                float weight = __bfloat162float(weight_ptr[h_base + j]);
+                float weight = __bfloat162float(output_norm_buf[h_base + j]);
                 values[j] = __float2bfloat16(acc32[si * VEC + j] *
                                              output_rsigma * weight);
               }
@@ -843,9 +859,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
           auto* values = reinterpret_cast<bf16_t*>(&packed);
   #pragma unroll
           for (int j = 0; j < VEC; j++) {
-            const bf16_t* weight_ptr =
-                OUTPUT_NORM_IN_SMEM ? output_norm_buf : output_norm_weight;
-            float weight = __bfloat162float(weight_ptr[h_base + j]);
+            float weight = __bfloat162float(output_norm_buf[h_base + j]);
             values[j] =
                 __float2bfloat16(acc32[si * VEC + j] * output_rsigma * weight);
           }
@@ -855,7 +869,6 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
     }
   }
 
-  cudaTriggerProgrammaticLaunchCompletion();
   __syncthreads();
   if (wid == 1) {
     tmem_free(plan.tmem_base, TMEM_COLS_ALLOC);
@@ -868,23 +881,22 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 }
 
 template <int H, int N, int NC = N_CHUNK_DEFAULT, bool RELEASE_TMEM = false,
-          bool HAS_DELTA = false, bool HAS_OUTPUT_NORM = false,
-          bool OUTPUT_NORM_IN_SMEM = false>
-static void launch_fwd(const bf16_t* block_residual, bf16_t* layer_residual,
+          bool STATIC_COMMON_PATH = false, bool HAS_OUTPUT_NORM = false>
+static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
                        const bf16_t* delta, const bf16_t* res_weight,
                        const bf16_t* rms_weight, bf16_t* output, int T,
                        float rms_eps, int num_sm, cudaStream_t stream,
                        const bf16_t* output_norm_weight = nullptr,
                        float output_norm_eps = 0.f, int block_stride_m = 0,
-                       int block_stride_r = 0) {
+                       int block_stride_r = 0, int block_write_idx = -1) {
   constexpr size_t smem_size =
-      ((size_t)CHUNK_DEPTH * (NC + (HAS_DELTA ? 1 : 0)) * H * sizeof(bf16_t) +
-       (OUTPUT_NORM_IN_SMEM ? (size_t)H * sizeof(bf16_t) : 0) +
+      ((size_t)(CHUNK_DEPTH * (NC + 1) + (HAS_OUTPUT_NORM ? 1 : 0)) * H *
+           sizeof(bf16_t) +
        sizeof(FwdSmemPlan<NC>) + 15) &
       ~size_t(15);
   auto kernel =
-      &attn_res_fwd_online_v2_kernel<H, N, NC, 1, RELEASE_TMEM, HAS_DELTA,
-                                     HAS_OUTPUT_NORM, OUTPUT_NORM_IN_SMEM>;
+      &attn_res_fwd_online_v2_kernel<H, N, NC, 1, RELEASE_TMEM,
+                                     STATIC_COMMON_PATH, HAS_OUTPUT_NORM>;
   static bool attrs_set = false;
   if (!attrs_set) {
     if (smem_size > 48 * 1024) {
@@ -907,20 +919,21 @@ static void launch_fwd(const bf16_t* block_residual, bf16_t* layer_residual,
   cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,
                      res_weight, rms_weight, output, T, block_stride_m,
                      block_stride_r, rms_eps, output_norm_weight,
-                     output_norm_eps);
+                     output_norm_eps, block_write_idx);
 }
 
 }  // namespace fwd_prod_v2
 }  // namespace sm100
 
 void kimi_k3_attn_res(torch::stable::Tensor& prefix,
-                      torch::stable::Tensor const& delta,
-                      torch::stable::Tensor const& blocks,
+                      std::optional<torch::stable::Tensor> delta,
+                      torch::stable::Tensor& blocks,
                       torch::stable::Tensor const& norm_weight,
                       torch::stable::Tensor const& qk_weight,
-                      torch::stable::Tensor const& output_norm_weight,
+                      std::optional<torch::stable::Tensor> output_norm_weight,
                       torch::stable::Tensor& output, int64_t num_blocks,
-                      double eps, double output_norm_eps) {
+                      int64_t block_write_idx, double eps,
+                      double output_norm_eps) {
   int const num_tokens = static_cast<int>(prefix.size(0));
   int const device = prefix.get_device_index();
   torch::stable::accelerator::DeviceGuard const device_guard(device);
@@ -928,49 +941,57 @@ void kimi_k3_attn_res(torch::stable::Tensor& prefix,
   STD_TORCH_CHECK(properties->major == 10,
                   "Kimi K3 AttnRes requires the SM100 family");
   int64_t const hidden_size = prefix.size(1);
+  STD_TORCH_CHECK(hidden_size == 7168,
+                  "Kimi K3 AttnRes requires hidden_size=7168, got ",
+                  hidden_size);
   STD_TORCH_CHECK(prefix.stride(0) == hidden_size &&
-                      delta.stride(0) == hidden_size &&
+                      (!delta.has_value() || delta->stride(0) == hidden_size) &&
                       output.stride(0) == hidden_size,
                   "Kimi K3 AttnRes requires densely packed rows; got strides ",
-                  prefix.stride(0), ", ", delta.stride(0), ", ",
+                  prefix.stride(0), ", ",
+                  delta.has_value() ? delta->stride(0) : 0, ", ",
                   output.stride(0), " for hidden_size ", hidden_size);
+  STD_TORCH_CHECK(
+      num_blocks >= 0 && num_blocks <= 8 && num_blocks <= blocks.size(1),
+      "Kimi K3 AttnRes: num_blocks must be 0..min(8, blocks.size(1))");
+  STD_TORCH_CHECK(block_write_idx >= -1 && block_write_idx < blocks.size(1),
+                  "Kimi K3 AttnRes: block_write_idx must be -1 or a valid "
+                  "block row, got ",
+                  block_write_idx);
+
+  if (num_tokens == 0) {
+    return;
+  }
 
   using namespace sm100::fwd_prod_v2;
-  // Two-source chunks and two resident CTAs are beneficial once setup is
-  // amortized by the long, full eight-block prefill workload.
-  if (num_blocks == 8 && num_tokens >= 4096) {
-    launch_fwd<7168, 9, 2, true, true, true, true>(
-        static_cast<bf16_t const*>(blocks.data_ptr()),
-        static_cast<bf16_t*>(prefix.data_ptr()),
-        static_cast<bf16_t const*>(delta.data_ptr()),
-        static_cast<bf16_t const*>(qk_weight.data_ptr()),
-        static_cast<bf16_t const*>(norm_weight.data_ptr()),
-        static_cast<bf16_t*>(output.data_ptr()), num_tokens,
-        static_cast<float>(eps), properties->multiProcessorCount,
-        get_current_cuda_stream(device),
-        static_cast<bf16_t const*>(output_norm_weight.data_ptr()),
-        static_cast<float>(output_norm_eps), static_cast<int>(blocks.stride(0)),
-        static_cast<int>(blocks.stride(1)));
-  } else {
-    auto dispatch = [&](auto nsrc_tok) {
-      constexpr int NSRC = decltype(nsrc_tok)::value;
-      launch_fwd<7168, NSRC, 3, false, true, true, true>(
-          static_cast<bf16_t const*>(blocks.data_ptr()),
+  cudaStream_t stream = get_current_cuda_stream(device);
+  auto dispatch_blocks = [&](auto static_common_path, auto has_output_norm) {
+    constexpr bool STATIC_COMMON_PATH = decltype(static_common_path)::value;
+    constexpr bool HAS_OUTPUT_NORM = decltype(has_output_norm)::value;
+    auto dispatch = [&](auto source_count) {
+      constexpr int NUM_SOURCES = decltype(source_count)::value;
+      launch_fwd<7168, NUM_SOURCES, 3, false, STATIC_COMMON_PATH,
+                 HAS_OUTPUT_NORM>(
+          static_cast<bf16_t*>(blocks.data_ptr()),
           static_cast<bf16_t*>(prefix.data_ptr()),
-          static_cast<bf16_t const*>(delta.data_ptr()),
+          delta.has_value() ? static_cast<bf16_t const*>(delta->data_ptr())
+                            : nullptr,
           static_cast<bf16_t const*>(qk_weight.data_ptr()),
           static_cast<bf16_t const*>(norm_weight.data_ptr()),
           static_cast<bf16_t*>(output.data_ptr()), num_tokens,
-          static_cast<float>(eps), properties->multiProcessorCount,
-          get_current_cuda_stream(device),
-          static_cast<bf16_t const*>(output_norm_weight.data_ptr()),
+          static_cast<float>(eps), properties->multiProcessorCount, stream,
+          output_norm_weight.has_value()
+              ? static_cast<bf16_t const*>(output_norm_weight->data_ptr())
+              : nullptr,
           static_cast<float>(output_norm_eps),
           static_cast<int>(blocks.stride(0)),
-          static_cast<int>(blocks.stride(1)));
+          static_cast<int>(blocks.stride(1)),
+          static_cast<int>(block_write_idx));
     };
-    // The source count is num_blocks + 1; specialising on it makes the chunk
-    // count, per-chunk source count and prefix-chunk test compile-time.
     switch (num_blocks) {
+      case 0:
+        dispatch(std::integral_constant<int, 1>{});
+        break;
       case 1:
         dispatch(std::integral_constant<int, 2>{});
         break;
@@ -995,9 +1016,15 @@ void kimi_k3_attn_res(torch::stable::Tensor& prefix,
       case 8:
         dispatch(std::integral_constant<int, 9>{});
         break;
-      default:
-        STD_TORCH_CHECK(false, "Kimi K3 AttnRes: num_blocks must be 1..8");
     }
+  };
+  if (delta.has_value() && output_norm_weight.has_value() &&
+      block_write_idx < 0) {
+    dispatch_blocks(std::true_type{}, std::true_type{});
+  } else if (output_norm_weight.has_value()) {
+    dispatch_blocks(std::false_type{}, std::true_type{});
+  } else {
+    dispatch_blocks(std::false_type{}, std::false_type{});
   }
   cudaError_t const error = cudaGetLastError();
   STD_TORCH_CHECK(
