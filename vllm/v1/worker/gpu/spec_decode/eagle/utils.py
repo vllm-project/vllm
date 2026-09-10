@@ -104,10 +104,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 backend=speculative_config.attention_backend,
             ),
         )
-    vllm_config = replace(
-        vllm_config,
-        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
-    )
+    draft_load_config = get_pp_safe_draft_load_config(vllm_config.load_config)
+    if draft_load_config is not vllm_config.load_config:
+        vllm_config = replace(vllm_config, load_config=draft_load_config)
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
