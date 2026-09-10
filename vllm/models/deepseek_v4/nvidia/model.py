@@ -874,7 +874,6 @@ class DeepseekV4MoE(nn.Module):
             image_sentinel_lo if getattr(config, "vision_n_layers", 0) > 0 else 0
         )
         is_hash_moe = extract_layer_index(prefix) < num_hash_layers
-        self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
             # Use randint instead of empty to avoid garbage values causing
@@ -884,7 +883,7 @@ class DeepseekV4MoE(nn.Module):
                     0,
                     self.n_routed_experts,
                     (config.vocab_size, self.n_activated_experts),
-                    dtype=self.hash_indices_dtype,
+                    dtype=torch.int64 if self.use_mega_moe else torch.int32,
                 ),
                 requires_grad=False,
             )

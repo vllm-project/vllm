@@ -221,7 +221,6 @@ def test_deepseek_v4_mega_gate_scopes_hash_metadata_to_hash_layers(monkeypatch):
         has_hash_routing=True,
         image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID,
     )
-    assert metadata is not None
     assert torch.equal(metadata.safe_hash_input_ids, torch.tensor([0, 0, 7]))
     assert torch.equal(metadata.image_token_mask, torch.tensor([False, True, False]))
     assert torch.equal(metadata.hash_token_mask, torch.tensor([True, False, True]))
