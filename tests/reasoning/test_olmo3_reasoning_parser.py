@@ -161,3 +161,28 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+def test_single_delta_preserves_content_after_end_marker():
+    """Regression test for #55195: when the whole output arrives in a single
+    delta, the text after the end marker must still be emitted instead of
+    being stranded in the buffer.
+
+    The parser is driven directly here rather than through
+    ``run_reasoning_extraction``: this transition delta legitimately carries
+    reasoning and content together, which ``StreamingReasoningReconstructor``
+    does not model.
+    """
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser: ReasoningParser = parser_cls(tokenizer)
+
+    output = SIMPLE_REASONING["output"]
+    token_ids = tokenizer.encode(output, add_special_tokens=False)
+
+    delta = parser.extract_reasoning_streaming(
+        "", output, output, [], token_ids, token_ids
+    )
+
+    assert delta is not None
+    assert delta.reasoning == SIMPLE_REASONING["reasoning"]
+    assert delta.content == SIMPLE_REASONING["content"]
