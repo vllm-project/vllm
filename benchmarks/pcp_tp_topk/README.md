@@ -67,7 +67,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 OMP_NUM_THREADS=1 PYTHONPATH="$PWD" \
 ## Validation limits
 
 96 CPU row-sharding tests and a four-GPU uneven-row, lane-isolation, repeated
-reuse and fused k-pool expansion test passed. Formatting/lint/mypy passed for
-the implementation. TP4PCP2 requires eight GPUs and was not run. CUDA-graph
-model execution and GLM k-pool model-level performance are not validated.
-K-pool expansion has GPU kernel correctness evidence only.
+reuse and fused k-pool expansion test passed. The GPU test also captures direct
+publication and fused expansion in CUDA graphs, replays each eight times with
+changing inputs, and checks the downstream output plus padding. The expanded
+test passes in 18.10 seconds on four GB200 GPUs with Torch 2.13.0+cu130.
+
+Formatting/lint/mypy passed for the implementation. TP4PCP2 requires eight GPUs
+and was not run. Graph-enabled engine execution is blocked by
+`PCPManager.validate_config`: sparse-MLA PCP explicitly rejects PIECEWISE,
+FULL_AND_PIECEWISE and FULL_DECODE_ONLY. The guard is also present on upstream
+main when checked on September 10, 2026. It was not bypassed. Component graph
+success must not be interpreted as engine graph support. GLM k-pool model-level
+performance remains unvalidated.

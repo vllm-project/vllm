@@ -100,6 +100,57 @@ def _direct_topk_worker(rank, port):
         expected = torch.cat((history.flatten(1), tail), dim=1).int()
         torch.testing.assert_close(buffer[5:35, :2051], expected)
         assert torch.all(buffer[:, 2051:] == -1)
+    # Capture fixed final addresses, then change inputs across repeated replays.
+    # This validates component graph safety, not the currently disabled sparse
+    # MLA PCP engine graph route.
+    static_rows = torch.empty_like(buffer[start:stop, :2051])
+    static_pools = pools[start - 5 : stop - 5].clone()
+    static_seq = seq_lens[start - 5 : stop - 5].clone()
+    for fused in (False, True):
+        torch.accelerator.synchronize()
+        dist.barrier()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            buffer.fill_(-1)
+            publisher.begin()
+            if fused:
+                expand_pools_and_append_tail(
+                    static_pools,
+                    static_seq,
+                    4,
+                    out=buffer[start:stop, :2051],
+                    peer_ptrs=publisher.peers,
+                    peer_rank=publisher.rank,
+                    peer_row_start=start,
+                )
+                publisher.finish()
+            else:
+                buffer[start:stop, :2051].copy_(static_rows)
+                publisher.publish(buffer, start, stop - start, 2051)
+            consumed = buffer.clone()
+        for epoch in range(8):
+            if fused:
+                static_pools.copy_(pools[start - 5 : stop - 5] + epoch)
+                shifted = pools + epoch
+                history = torch.where(
+                    shifted[..., None] >= 0, shifted[..., None] * 4 + offsets, -1
+                )
+                expected = torch.cat((history.flatten(1), tail), dim=1).int()
+            else:
+                expected = (
+                    torch.arange(
+                        30 * 2051, device=buffer.device, dtype=torch.int32
+                    ).reshape(30, 2051)
+                    + (rank // 2) * 1_000_000
+                    + epoch * 100_000
+                )
+                static_rows.copy_(expected[start - 5 : stop - 5])
+            graph.replay()
+            torch.testing.assert_close(consumed[5:35, :2051], expected)
+            assert torch.all(consumed[:5] == -1)
+            assert torch.all(consumed[35:] == -1)
+            assert torch.all(consumed[:, 2051:] == -1)
+        del graph, consumed
     torch.accelerator.synchronize()
     dist.barrier()
     del publisher, buffer
