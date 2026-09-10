@@ -4,16 +4,31 @@
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import DevicePointers
+from vllm.v1.kv_offload.base import DevicePointers, make_offload_key
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.fs.worker import FSOffloadingWorker
+
+
+def _keys(n: int):
+    return [make_offload_key(f"k{i}".encode().ljust(8, b"\0"), 0) for i in range(n)]
 
 
 class RecordingFSWorker(FSOffloadingWorker):
     """Concrete FSOffloadingWorker that records I/O ops instead of doing I/O."""
 
     def __init__(self, block_size_factor: int):
-        mapper = FileMapper("/tmp/test", ".bin")
+        mapper = FileMapper(
+            root_dir="/tmp/test",
+            model_name="test",
+            tokens_per_hash=16,
+            blocks_per_file=block_size_factor,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            rank=0,
+            dtype="float16",
+        )
         super().__init__(file_mapper=mapper, block_size_factor=block_size_factor)
         self.recorded: list[tuple[str, list[tuple[int, int, int]]]] = []
 
@@ -50,7 +65,7 @@ def test_offset_within_single_file():
     device_ptrs = _make_device_ptrs(
         n_blocks=2, n_data_refs=1, block_size=block_size, block_indices=(1,)
     )
-    keys = ["key0"]
+    keys = _keys(1)
 
     futures, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
     for f in futures:
@@ -75,7 +90,7 @@ def test_offset_spanning_two_files():
     device_ptrs = _make_device_ptrs(
         n_blocks=3, n_data_refs=1, block_size=block_size, block_indices=(2,)
     )
-    keys = ["key0", "key1"]
+    keys = _keys(2)
 
     futures, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
     for f in futures:
