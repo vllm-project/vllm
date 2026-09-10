@@ -2125,9 +2125,10 @@ def _qwen_tp_splitkv_cases():
 @pytest.mark.parametrize(
     "case,profile", [*_broad_splitkv_cases(), *_qwen_tp_splitkv_cases()]
 )
+@pytest.mark.parametrize("use_flydsl", [False, True], ids=["triton", "flydsl"])
 @torch.inference_mode()
 def test_rdna4_splitkv_dispatch_boundaries_match_torch(
-    monkeypatch, record_property, case: SplitKVCase, profile: int
+    monkeypatch, record_property, case: SplitKVCase, profile: int, use_flydsl: bool
 ) -> None:
     """Guard dispatch boundaries, masked NaN tails and nonuniform attention.
 
@@ -2158,7 +2159,15 @@ def test_rdna4_splitkv_dispatch_boundaries_match_torch(
         device=DEVICE,
     )
     lse = torch.empty(mid.shape[:-1], dtype=torch.float32, device=DEVICE)
-    monkeypatch.setattr(rdna4_ops.envs, "VLLM_ROCM_USE_RDNA4_SPLITKV_FLYDSL", True)
+    monkeypatch.setattr(
+        rdna4_ops.envs, "VLLM_ROCM_USE_RDNA4_SPLITKV_FLYDSL", use_flydsl
+    )
+    if not use_flydsl:
+
+        def unexpected_flydsl_load():
+            pytest.fail("Triton-only validation must not load FlyDSL kernels")
+
+        monkeypatch.setattr(rdna4_ops, "_load_flydsl_splitkv", unexpected_flydsl_load)
     kwargs = dict(
         query=query,
         key_cache=k,
@@ -2174,12 +2183,14 @@ def test_rdna4_splitkv_dispatch_boundaries_match_torch(
         max_seq_len=max(case.seq_lens),
         filter_by_query_len=True,
     )
-    config = rdna4_ops.get_rdna4_flydsl_splitkv_config(**kwargs)
+    config = rdna4_ops.get_rdna4_flydsl_splitkv_config(**kwargs) if use_flydsl else None
     used = rdna4_ops.try_rdna4_splitkv_paged_attention(
         **kwargs, mid_out=mid, mid_lse=lse
     )
     assert used == (config is not None)
     record_property("route", config.route.value if config else "triton_fallback")
+    record_property("kv_dtype", str(case.kv_dtype))
+    record_property("backend_requested", "flydsl" if use_flydsl else "triton")
     if not used:
         _paged_attention_2d_splitkv_decode(**kwargs, mid_out=mid, mid_lse=lse)
     reference = _torch_reference(
