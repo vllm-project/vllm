@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use tracing::Span;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::{EngineCoreClient, EngineId};
 
 mod error;
 mod inflight;
@@ -22,7 +22,7 @@ pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs
 
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
-use crate::request_metrics::RequestMetricsTracker;
+use crate::request_metrics::{RequestMetricsTracker, resolve_cache_source_metric_handles};
 
 /// Thin generate-and-abort facade over [`EngineCoreClient`].
 ///
@@ -42,6 +42,11 @@ impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        for identity in client.engine_identities() {
+            // Match the request stream's index fallback for opaque engine IDs.
+            let engine = EngineId::from(identity.to_vec()).engine_index().unwrap_or(0);
+            resolve_cache_source_metric_handles(client.model_name(), engine);
+        }
         Self {
             client,
             randomize_request_id: true,

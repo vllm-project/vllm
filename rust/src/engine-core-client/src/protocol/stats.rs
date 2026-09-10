@@ -76,6 +76,37 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }
 
+/// Canonical source of cached prompt tokens, matching Python's `CacheHitSource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHitSource {
+    Device,
+    Host,
+    Disk,
+    P2p,
+    External,
+}
+
+impl CacheHitSource {
+    pub const ALL: [Self; 5] = [
+        Self::Device,
+        Self::Host,
+        Self::Disk,
+        Self::P2p,
+        Self::External,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Host => "host",
+            Self::Disk => "disk",
+            Self::P2p => "p2p",
+            Self::External => "external",
+        }
+    }
+}
+
 /// Breakdown of a scheduled prefill computation.
 ///
 /// Python models this as a plain `@dataclass`, so it is serialized by msgspec
@@ -101,6 +132,9 @@ pub struct PrefillStats {
     /// Tokens to be prefilled from external KV transfer.
     #[serde(default)]
     pub num_external_cached_tokens: u32,
+    /// Ordered external token counts by the tier that supplied their KV.
+    #[serde(default)]
+    pub external_cached_token_sources: Vec<(CacheHitSource, u32)>,
     /// Prompt tokens newly admitted into the local prefix cache.
     #[serde(default)]
     pub num_cache_creation_tokens: u32,
@@ -303,4 +337,78 @@ pub struct SchedulerStats {
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheHitSource, PrefillStats};
+
+    #[test]
+    fn prefill_sources_decode_python_named_fields_and_legacy_payloads() {
+        let payload = serde_json::json!({
+            "num_prompt_tokens": 64,
+            "num_computed_tokens": 8,
+            "num_cached_tokens": 56,
+            "num_local_cached_tokens": 16,
+            "num_external_cached_tokens": 40,
+            "external_cached_token_sources": [["host", 8], ["disk", 12], ["p2p", 16], ["external", 4]]
+        });
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
+        expect_test::expect![[r#"
+            PrefillStats {
+                num_prompt_tokens: 64,
+                num_computed_tokens: 8,
+                num_cached_tokens: 56,
+                num_local_cached_tokens: 16,
+                num_external_cached_tokens: 40,
+                external_cached_token_sources: [
+                    (
+                        Host,
+                        8,
+                    ),
+                    (
+                        Disk,
+                        12,
+                    ),
+                    (
+                        P2p,
+                        16,
+                    ),
+                    (
+                        External,
+                        4,
+                    ),
+                ],
+                num_cache_creation_tokens: 0,
+            }
+        "#]]
+        .assert_debug_eq(&stats);
+
+        let legacy = serde_json::json!({"num_external_cached_tokens": 40});
+        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
+        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
+        assert!(stats.external_cached_token_sources.is_empty());
+        assert_eq!(stats.num_external_cached_tokens, 40);
+
+        for (index, source) in CacheHitSource::ALL.into_iter().enumerate() {
+            assert_eq!(source as usize, index);
+            assert_eq!(serde_json::to_value(source).unwrap(), source.as_str());
+        }
+    }
+
+    #[test]
+    fn prefill_sources_reject_noncanonical_labels_and_invalid_counts() {
+        for segment in [
+            serde_json::json!(["cpu", 1]),
+            serde_json::json!(["nvme", 0]),
+            serde_json::json!(["unknown", 1]),
+            serde_json::json!(["host", -1]),
+            serde_json::json!(["disk", 1.5]),
+        ] {
+            let payload = serde_json::json!({"external_cached_token_sources": [segment]});
+            let wire = rmp_serde::to_vec_named(&payload).unwrap();
+            assert!(rmp_serde::from_slice::<PrefillStats>(&wire).is_err());
+        }
+    }
 }
