@@ -503,6 +503,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -541,14 +542,33 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # takes True=keep).
                 image_mask = image_sentinel_mask(input_ids)
                 engram_mask = ~image_mask
+                if lookback_token_ids is None:
+                    if not self.engram_hash.use_slot_cache:
+                        raise NotImplementedError(
+                            "engram needs `lookback_token_ids` from the model "
+                            "runner (the DBO/ubatch wrapper drops model kwargs)"
+                        )
+                    num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
+                    lookback_token_ids = input_ids.new_full(
+                        (num_reqs, self.engram_hash.lookback_depth), -1
+                    )
                 engram_hashes = self.engram_hash(
                     input_ids,
                     positions,
-                    swa_metadata.slot_mapping,
-                    swa_metadata.block_table,
                     swa_metadata.query_start_loc,
                     image_mask,
+                    lookback_token_ids,
+                    image_sentinel_mask(lookback_token_ids),
+                    swa_metadata.slot_mapping,
+                    swa_metadata.block_table,
                 )
+                # Gather all Engram rows before entering the decoder layers.
+                for layer in islice(self.layers, self.start_layer, self.end_layer):
+                    engram = getattr(layer, "engram", None)
+                    if engram is not None:
+                        engram.prepare_embeddings(
+                            engram_hashes[:, engram.layer_hash_index]
+                        )
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -1017,15 +1037,33 @@ class DeepseekV41LLMForCausalLM(
     ) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
+    @staticmethod
+    def get_model_state_cls():
+        from ..nvidia.model_state import DeepseekV41ModelState
+
+        return DeepseekV41ModelState
+
+    @property
+    def token_lookback_depth(self) -> int:
+        """Tokens before a chunk start the engram hash needs; the model runner
+        passes them as `lookback_token_ids`."""
+        engram_hash = self.model.engram_hash
+        return engram_hash.lookback_depth if engram_hash is not None else 0
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            lookback_token_ids=lookback_token_ids,
         )
         return hidden_states
 

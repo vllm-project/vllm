@@ -42,7 +42,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph coverage")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="graph capture coverage"
+)
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("use_graph", [False, True])
 @pytest.mark.parametrize(

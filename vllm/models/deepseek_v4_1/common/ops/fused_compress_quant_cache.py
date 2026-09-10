@@ -12,6 +12,11 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
+# The ring and raw rows a ratio-2 request program pools are not adjacent, so
+# reading them as one tile means joining two pointers. ROCm's Triton fails to
+# legalize `tt.join` on pointers, so there the two rows are loaded separately.
+_JOIN_ROW_PTRS = not current_platform.is_rocm()
+
 
 def fused_save_compress_norm(
     kv_score: torch.Tensor,
@@ -101,6 +106,7 @@ def fused_save_compress_norm(
         STATE_BLOCK=state_block,
         COMPRESS_RATIO=compress_ratio,
         EPS=rms_norm_eps,
+        JOIN_ROW_PTRS=_JOIN_ROW_PTRS,
         num_warps=4,
         **({"launch_pdl": False} if current_platform.is_cuda() else {}),
     )
@@ -124,6 +130,7 @@ def _fused_save_compress_norm_kernel(
     STATE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     EPS: tl.constexpr,
+    JOIN_ROW_PTRS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     d = tl.arange(0, 512)
@@ -144,13 +151,29 @@ def _fused_save_compress_norm_kernel(
                 ring = state + (state_slot // STATE_BLOCK).to(tl.int64) * STATE_STRIDE
                 prev = ring + ((position - 1) % STATE_BLOCK) * STATE_ROW_STRIDE
                 current = raw + start.to(tl.int64) * RAW_STRIDE
-                # Joining pointers hides row alignment from Triton; restate it.
-                rows = tl.multiple_of(tl.join(prev, current)[:, None], (16, 16))
-                kv = tl.load(rows + d[None, :])
-                score = tl.load(rows + 512 + d[None, :])
-                # Every lane has read the ring before the tail store below writes it.
-                tl.debug_barrier()
-                pooled = tl.sum(kv * tl.softmax(score, 0), 0)
+                if JOIN_ROW_PTRS:
+                    # Joining pointers hides row alignment from Triton; restate it.
+                    rows = tl.multiple_of(tl.join(prev, current)[:, None], (16, 16))
+                    kv = tl.load(rows + d[None, :])
+                    score = tl.load(rows + 512 + d[None, :])
+                    # Every lane has read the ring before the tail store below
+                    # writes it.
+                    tl.debug_barrier()
+                    pooled = tl.sum(kv * tl.softmax(score, 0), 0)
+                else:
+                    kv_prev = tl.load(prev + d)
+                    score_prev = tl.load(prev + 512 + d)
+                    kv_current = tl.load(current + d)
+                    score_current = tl.load(current + 512 + d)
+                    # Every lane has read the ring before the tail store below
+                    # writes it.
+                    tl.debug_barrier()
+                    peak = tl.maximum(score_prev, score_current)
+                    weight_prev = tl.exp(score_prev - peak)
+                    weight_current = tl.exp(score_current - peak)
+                    pooled = (kv_prev * weight_prev + kv_current * weight_current) / (
+                        weight_prev + weight_current
+                    )
                 _store_latent(pooled, start, norm_weight, latent, EPS)
             num_rows = tl.minimum(end - start, STATE_BLOCK)
             for k in tl.range(0, num_rows):
