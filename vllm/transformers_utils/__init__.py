@@ -3,7 +3,7 @@
 
 from vllm import envs
 
-if envs.VLLM_USE_MODELSCOPE:
+if envs.VLLM_USE_MODELSCOPE and not envs.VLLM_USE_ATOMGIT:
     try:
         # Patch here, before each import happens
         import modelscope

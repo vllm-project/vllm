@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -50,7 +51,10 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 )
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    maybe_model_redirect,
+    normalize_atomgit_repo_id,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -554,16 +558,35 @@ class ModelConfig:
             self.model, self.served_model_name
         )
         requested_revision = self.revision
-        self.model = maybe_model_redirect(self.model)
+
+        def maybe_atomgit(value: str) -> str:
+            # normalize_atomgit_repo_id is idempotent, so re-normalizing a value
+            # seeded from an already-normalized field (e.g. the tokenizer
+            # defaulting to the model) is safe.
+            if envs.VLLM_USE_ATOMGIT and value and not Path(value).exists():
+                return normalize_atomgit_repo_id(value)
+            return value
+
+        if envs.VLLM_USE_ATOMGIT and envs.VLLM_USE_MODELSCOPE:
+            logger.warning_once(
+                "Both VLLM_USE_ATOMGIT and VLLM_USE_MODELSCOPE are set; "
+                "AtomGit takes precedence and ModelScope will not be used."
+            )
+
+        self.model = maybe_atomgit(maybe_model_redirect(self.model))
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
-        self.tokenizer = maybe_model_redirect(self.tokenizer)
+        self.tokenizer = maybe_atomgit(maybe_model_redirect(self.tokenizer))
 
         if isinstance(self.hf_config_path, str):
-            self.hf_config_path = maybe_model_redirect(self.hf_config_path)
+            self.hf_config_path = maybe_atomgit(
+                maybe_model_redirect(self.hf_config_path)
+            )
+
+        self.model_weights = maybe_atomgit(self.model_weights)
 
         if callable(self.hf_overrides):
             hf_overrides_kw: dict[str, Any] = {}
