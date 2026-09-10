@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,6 +9,7 @@ import pytest
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -33,6 +35,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
+    ToolChoice,
     get_function_parameters,
     get_model_structural_tag,
 )
@@ -755,3 +758,164 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+def _pins_argument_schema(tag: StructuralTag) -> bool:
+    return '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_off_is_the_default(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """auto + no strict tool still gets no tag unless the operator opts in."""
+    assert envs.VLLM_TOOL_STRICT_LEVEL == "off"
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_lifts_auto_gate(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False)
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_pins_envelope_only(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """xgrammar constrains arguments for tools whose ``strict`` is unset, so
+    the level must mark them non-strict explicitly or it would behave like
+    "parameter". The request's own tools stay untouched."""
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False)
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert not _pins_argument_schema(tag)
+    assert all(tool.function.strict is None for tool in sample_tools)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_parameter_pins_argument_schemas(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "parameter", raising=False)
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+def test_tool_strict_level_function_keeps_client_strict_tools_strict(
+    sample_tools_strict: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False)
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+    ],
+)
+def test_tool_strict_level_function_never_relaxes_forced_tool_choice(
+    tool_choice: ToolChoice,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The level is a floor: required / named calls keep their schema pinning."""
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False)
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+def test_tool_strict_level_parameter_overrides_client_strict_false(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "parameter", raising=False)
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": False,
+            },
+        )
+    ]
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert _pins_argument_schema(tag)
+
+
+def test_tool_strict_level_unknown_value_falls_back_to_off(
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "nonsense", raising=False)
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )

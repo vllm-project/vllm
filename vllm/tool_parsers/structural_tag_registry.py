@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
@@ -30,10 +31,14 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -93,15 +98,83 @@ def register_vllm_structural_tag(
     return decorator
 
 
+class ToolStrictLevel(enum.IntEnum):
+    """Server-side floor for tool-call structural tags (VLLM_TOOL_STRICT_LEVEL).
+
+    OFF:       only tools the client marked ``strict`` constrain an "auto"
+               request (default).
+    FUNCTION:  constrain the tool-call envelope for every request with tools.
+    PARAMETER: additionally pin argument schemas, as if every tool were
+               ``strict``.
+    """
+
+    OFF = 0
+    FUNCTION = 1
+    PARAMETER = 2
+
+
+def _tool_strict_level() -> ToolStrictLevel:
+    raw = envs.VLLM_TOOL_STRICT_LEVEL.strip().lower()
+    try:
+        return ToolStrictLevel[raw.upper()]
+    except KeyError:
+        logger.warning_once(
+            "Unknown VLLM_TOOL_STRICT_LEVEL %r; expected one of %s. Using 'off'.",
+            raw,
+            ", ".join(level.name.lower() for level in ToolStrictLevel),
+        )
+        return ToolStrictLevel.OFF
+
+
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
+
+
+def _with_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": strict})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": strict})}
+        )
+    return tool
+
+
+def _apply_tool_strict_level(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
+    """Apply VLLM_TOOL_STRICT_LEVEL; ``None`` means no structural tag."""
+    level = _tool_strict_level()
+
+    if tool_choice == "auto" and not _any_tool_strict(tools):
+        if level < ToolStrictLevel.FUNCTION:
+            return None
+        if level == ToolStrictLevel.FUNCTION:
+            # xgrammar pins argument schemas for tools whose ``strict`` is
+            # unset, so mark them non-strict to constrain the envelope only.
+            return [_with_tool_strict(tool, False) for tool in tools]
+
+    if level >= ToolStrictLevel.PARAMETER:
+        return [
+            tool if _tool_is_strict(tool) else _with_tool_strict(tool, True)
+            for tool in tools
+        ]
+    return tools
 
 
 def get_model_structural_tag(
@@ -116,7 +189,8 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    tools = _apply_tool_strict_level(tools, tool_choice)
+    if tools is None:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]

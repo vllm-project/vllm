@@ -115,7 +115,7 @@ Whether vLLM enforces the tool parameter schema during generation depends on the
 | --- | --- | --- |
 | Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
 | `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | Only when `strict: true` is set on at least one tool | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
+| `"auto"` | Only when `strict: true` is set on at least one tool (or the server raises the floor via `VLLM_TOOL_STRICT_LEVEL`) | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
 | `"none"` | N/A | No tool calls are produced. |
 
 ### Strict Mode
@@ -133,6 +133,22 @@ vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` en
 ```bash
 VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 ```
+
+### Server-Side Strictness Floor
+
+Most OpenAI-compatible clients and agent frameworks never set `strict` on their tools, so with `tool_choice="auto"` the model generates tool calls without any grammar and malformed markup can leak into the response. The `VLLM_TOOL_STRICT_LEVEL` environment variable lets the server operator raise the floor for every request that carries tools, independently of what the client declares (similar to SGLang's `SGLANG_TOOL_STRICT_LEVEL`):
+
+| Value | Behavior |
+| --- | --- |
+| `off` (default) | Unchanged: with `tool_choice="auto"`, structural tags apply only when a tool sets `strict: true`. |
+| `function` | Constrain the tool-call envelope (markup and the function name) for every request with tools, leaving argument contents free unless the client marked the tool `strict: true`. |
+| `parameter` | Additionally pin argument schemas for every tool, as if every tool had `strict: true`. |
+
+```bash
+VLLM_TOOL_STRICT_LEVEL=function vllm serve ...
+```
+
+The floor never relaxes a constraint the request would already receive: `tool_choice="required"` and named function calling keep their schema-derived constraints at every level, and tools the client marked `strict: true` keep their schemas. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this variable.
 
 ## Automatic Function Calling
 
@@ -152,7 +168,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
+    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `VLLM_TOOL_STRICT_LEVEL`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 

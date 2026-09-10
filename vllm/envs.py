@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_TOOL_STRICT_LEVEL: str = "off"
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -1780,6 +1781,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
     ),
+    # Server-side floor for structural-tag based tool calling, applied on top
+    # of the per-tool `strict` field: "off" (default) only constrains an
+    # "auto" request when a tool sets strict, "function" constrains the
+    # tool-call envelope for every request with tools, "parameter" also pins
+    # argument schemas. Mirrors SGLANG_TOOL_STRICT_LEVEL.
+    "VLLM_TOOL_STRICT_LEVEL": lambda: os.getenv("VLLM_TOOL_STRICT_LEVEL", "off"),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
