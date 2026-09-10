@@ -4,6 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
+from functools import lru_cache
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -70,6 +71,7 @@ from vllm.transformers_utils.processors.pixtral import (
 )
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
@@ -99,7 +101,6 @@ def _make_packed_sequence_metadata(
     hidden_size: int,
     tp_size: int,
     device: torch.device,
-    max_seqlen_override: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     lengths = np.array(sequence_lengths, dtype=np.int32)
     cu_seqlens = np.concatenate(
@@ -108,15 +109,7 @@ def _make_packed_sequence_metadata(
     sequence_lengths_tensor = MMEncoderAttention.maybe_compute_seq_lens(
         attn_backend, cu_seqlens, device
     )
-    if max_seqlen_override is None:
-        max_seqlen_value = MMEncoderAttention.compute_max_seqlen(
-            attn_backend, cu_seqlens
-        )
-    else:
-        override_cu_seqlens = np.array([0, max_seqlen_override], dtype=np.int32)
-        max_seqlen_value = MMEncoderAttention.compute_max_seqlen(
-            attn_backend, override_cu_seqlens
-        )
+    max_seqlen_value = MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens)
     # Attention wrappers call .item() on this value, which is baked into the
     # graph at capture time. Keep it on CPU to avoid a capture-unsafe D2H sync.
     max_seqlen = torch.tensor(max_seqlen_value, dtype=torch.int32)
@@ -130,32 +123,40 @@ def _make_packed_sequence_metadata(
     return cu_seqlens_tensor, max_seqlen, sequence_lengths_tensor
 
 
-def _pad_cumulative_seqlens_buffer(
+def _pad_pixtral_cumulative_seqlens(
     dst: torch.Tensor,
     src: torch.Tensor,
+    input_capacity: int,
 ) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
+    dst.fill_(src[-1])
+    dst[: src.shape[0]].copy_(src)
+    dst[-1] = input_capacity
 
 
-def _pad_flashinfer_cu_seqlens_buffer(
+def _pad_pixtral_flashinfer_cu_seqlens(
     dst: torch.Tensor,
     src: torch.Tensor,
+    input_capacity: int,
+    flashinfer_offset_scale: int,
 ) -> None:
-    src_mid = src.shape[0] // 2
-    dst_mid = dst.shape[0] // 2
-    assert src_mid <= dst_mid
+    dst_section_size = dst.shape[0] // 2
+    src_section_size = src.shape[0] // 2
+    for section, stride in ((0, 1), (1, 3)):
+        dst_offsets = dst[section * dst_section_size : (section + 1) * dst_section_size]
+        src_offsets = src[section * src_section_size : (section + 1) * src_section_size]
+        dst_offsets.fill_(src_offsets[-1])
+        dst_offsets[:src_section_size].copy_(src_offsets)
+        dst_offsets[-1] = input_capacity * flashinfer_offset_scale * stride
 
+
+def _pad_pixtral_sequence_lengths(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    input_capacity: int,
+) -> None:
     dst.zero_()
-    dst[:src_mid].copy_(src[:src_mid])
-    if src_mid < dst_mid:
-        dst[src_mid:dst_mid] = src[src_mid - 1]
-    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
-    if dst_mid + src_mid < dst.shape[0]:
-        dst[dst_mid + src_mid :] = src[-1]
+    dst[: src.shape[0]].copy_(src)
+    dst[-1] = input_capacity - src.sum()
 
 
 def _as_image_list(
@@ -198,47 +199,44 @@ def _pack_image_patches(
     return torch.cat(patches)
 
 
-def _make_encoder_cudagraph_capture_images(
+def _make_encoder_cudagraph_capture_patches(
     token_budget: int,
     max_batch_size: int,
     num_channels: int,
     patch_size: int,
-    max_patches_per_side: int,
     spatial_merge_size: int,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[list[torch.Tensor], int]:
-    max_side = max_patches_per_side
-    max_patches_per_image = max_side**2
-    total_patches = min(token_budget, max_batch_size * max_patches_per_image)
-    patches_per_item = (total_patches + max_batch_size - 1) // max_batch_size
+) -> tuple[torch.Tensor, int, int]:
+    output_capacity = (
+        (token_budget + max_batch_size - 1) // max_batch_size
+    ) * max_batch_size
+    input_capacity = output_capacity * spatial_merge_size**2
+    pixel_patches = torch.randn(
+        input_capacity,
+        num_channels,
+        patch_size,
+        patch_size,
+        device=device,
+        dtype=dtype,
+    )
+    return pixel_patches, output_capacity, input_capacity
 
-    grid_height = max(
-        spatial_merge_size,
-        math.ceil(math.sqrt(patches_per_item) / spatial_merge_size)
-        * spatial_merge_size,
-    )
-    grid_height = min(grid_height, max_side)
-    grid_width = max(
-        spatial_merge_size,
-        (patches_per_item + grid_height - 1) // grid_height,
-    )
-    grid_width = (
-        (grid_width + spatial_merge_size - 1) // spatial_merge_size * spatial_merge_size
-    )
-    grid_width = min(grid_width, max_side)
 
-    images = [
-        torch.randn(
-            num_channels,
-            grid_height * patch_size,
-            grid_width * patch_size,
-            device=device,
-            dtype=dtype,
-        )
-        for _ in range(max_batch_size)
-    ]
-    return images, min(token_budget, max_patches_per_image)
+@lru_cache(maxsize=1024)
+def _cached_position_ids(
+    height: int,
+    width: int,
+    max_width: int | None,
+) -> torch.Tensor:
+    h, w = torch.meshgrid(
+        torch.arange(height),
+        torch.arange(width),
+        indexing="ij",
+    )
+    if max_width is None:
+        return torch.stack((h, w), dim=-1).reshape(-1, 2)
+    return (h * max_width + w).reshape(-1)
 
 
 def _make_position_ids(
@@ -246,18 +244,21 @@ def _make_position_ids(
     device: torch.device,
     max_width: int | None = None,
 ) -> torch.Tensor:
-    positions = []
-    for height, width in grid_sizes:
-        h, w = torch.meshgrid(
-            torch.arange(height, device=device),
-            torch.arange(width, device=device),
-            indexing="ij",
-        )
-        if max_width is None:
-            positions.append(torch.stack((h, w), dim=-1).reshape(-1, 2))
-        else:
-            positions.append((h * max_width + w).reshape(-1))
-    return torch.cat(positions)
+    positions = [
+        _cached_position_ids(height, width, max_width) for height, width in grid_sizes
+    ]
+    trailing_shape = () if max_width is not None else (2,)
+    if not positions:
+        return torch.empty((0, *trailing_shape), dtype=torch.long, device=device)
+
+    pin_memory = PIN_MEMORY and device.type == "cuda"
+    combined = torch.empty(
+        (sum(position.shape[0] for position in positions), *trailing_shape),
+        dtype=positions[0].dtype,
+        pin_memory=pin_memory,
+    )
+    torch.cat(positions, dim=0, out=combined)
+    return combined.to(device, non_blocking=True)
 
 
 def _make_merge_indices(
@@ -543,6 +544,7 @@ class PixtralForConditionalGeneration(
         self.config = config
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
+        self._encoder_cudagraph_input_capacities: dict[int, int] = {}
 
         dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
         vision_args = {
@@ -636,30 +638,80 @@ class PixtralForConditionalGeneration(
             self.vision_args.spatial_merge_size if self.patch_merger is not None else 1
         )
 
+    def _get_encoder_cudagraph_input_capacity(self, dst: torch.Tensor) -> int:
+        try:
+            return self._encoder_cudagraph_input_capacities[dst.data_ptr()]
+        except KeyError as exc:
+            raise RuntimeError(
+                "Missing Pixtral encoder CUDA graph input capacity"
+            ) from exc
+
+    def _pad_encoder_cudagraph_cumulative_seqlens(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        _pad_pixtral_cumulative_seqlens(
+            dst, src, self._get_encoder_cudagraph_input_capacity(dst)
+        )
+
+    def _pad_encoder_cudagraph_flashinfer_cu_seqlens(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        tp_size = (
+            1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size()
+        )
+        _pad_pixtral_flashinfer_cu_seqlens(
+            dst,
+            src,
+            self._get_encoder_cudagraph_input_capacity(dst),
+            self.vision_args.hidden_size // tp_size,
+        )
+
+    def _pad_encoder_cudagraph_sequence_lengths(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        _pad_pixtral_sequence_lengths(
+            dst, src, self._get_encoder_cudagraph_input_capacity(dst)
+        )
+
+    def _register_encoder_cudagraph_input_capacity(
+        self,
+        values: dict[str, torch.Tensor],
+        input_capacity: int,
+    ) -> None:
+        for key in ("cu_seqlens", "sequence_lengths"):
+            if (buffer := values.get(key)) is not None:
+                self._encoder_cudagraph_input_capacities[buffer.data_ptr()] = (
+                    input_capacity
+                )
+
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
         attention = self._encoder_cudagraph_attention()
         graph_safe = attention.attn_backend != AttentionBackendEnum.TORCH_SDPA
         graph_safe &= not (attention.fp8_enabled and attention._fp8_dynamic_scale)
-        padding_logic = (
-            _pad_flashinfer_cu_seqlens_buffer
+        cu_seqlens_padding = (
+            self._pad_encoder_cudagraph_flashinfer_cu_seqlens
             if attention.attn_backend == AttentionBackendEnum.FLASHINFER
-            else _pad_cumulative_seqlens_buffer
+            else self._pad_encoder_cudagraph_cumulative_seqlens
         )
         buffer_keys = [
             "pixel_patches",
             "rotary_freqs",
             "cu_seqlens",
             "max_seqlen",
-            "merge_indices",
         ]
+        if self.patch_merger is not None:
+            buffer_keys.append("merge_indices")
         if attention.attn_backend == AttentionBackendEnum.FLASHINFER:
             buffer_keys.append("sequence_lengths")
         return EncoderCudaGraphConfig(
             modalities=["image"] if graph_safe else [],
             buffer_keys=buffer_keys,
-            padding_logics={"cu_seqlens": padding_logic},
+            padding_logics={
+                "cu_seqlens": cu_seqlens_padding,
+                "sequence_lengths": self._pad_encoder_cudagraph_sequence_lengths,
+            },
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -669,11 +721,16 @@ class PixtralForConditionalGeneration(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int]:
+        effective_patch_size = (
+            self.vision_args.patch_size * self._encoder_cudagraph_merge_size()
+        )
+        min_grid_size = math.ceil(224 / effective_patch_size)
+        min_budget = min_grid_size**2
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
         )
-        return min(64, max_budget), max_budget
+        return min(min_budget, max_budget), max_budget
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
@@ -685,7 +742,6 @@ class PixtralForConditionalGeneration(
             EncoderItemSpec(
                 input_size=height * width,
                 output_tokens=(height // merge_size) * (width // merge_size),
-                path_output_tokens={"default": height * width},
             )
             for height, width in grid_sizes
         ]
@@ -699,7 +755,6 @@ class PixtralForConditionalGeneration(
     def _prepare_encoder_cudagraph_values(
         self,
         images: torch.Tensor | list[torch.Tensor],
-        max_seqlen_override: int | None = None,
     ) -> dict[str, torch.Tensor | None]:
         patch_size = self.vision_args.patch_size
         grid_sizes = _get_patch_grid_sizes(images, patch_size)
@@ -712,7 +767,6 @@ class PixtralForConditionalGeneration(
             self.vision_args.hidden_size,
             1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size(),
             pixel_patches.device,
-            max_seqlen_override=max_seqlen_override,
         )
         positions = _make_position_ids(grid_sizes, pixel_patches.device)
         assert positions.ndim == 2
@@ -744,26 +798,47 @@ class PixtralForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
-        images, max_seqlen = _make_encoder_cudagraph_capture_images(
-            token_budget=token_budget,
-            max_batch_size=max_batch_size,
-            num_channels=self.vision_args.num_channels,
-            patch_size=self.vision_args.patch_size,
-            max_patches_per_side=self.vision_encoder.max_patches_per_side,
-            spatial_merge_size=self._encoder_cudagraph_merge_size(),
+        merge_size = self._encoder_cudagraph_merge_size()
+        pixel_patches, output_capacity, input_capacity = (
+            _make_encoder_cudagraph_capture_patches(
+                token_budget=token_budget,
+                max_batch_size=max_batch_size,
+                num_channels=self.vision_args.num_channels,
+                patch_size=self.vision_args.patch_size,
+                spatial_merge_size=merge_size,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        head_dim = self.vision_args.hidden_size // self.vision_args.num_attention_heads
+        rotary_freqs = torch.ones(
+            input_capacity,
+            head_dim // 2,
             device=device,
-            dtype=dtype,
+            dtype=torch.complex64,
         )
-        values = self._prepare_encoder_cudagraph_values(
-            images, max_seqlen_override=max_seqlen
+        attention = self._encoder_cudagraph_attention()
+        cu_seqlens, max_seqlen, sequence_lengths = _make_packed_sequence_metadata(
+            [input_capacity] + [0] * max_batch_size,
+            attention.attn_backend,
+            self.vision_args.hidden_size,
+            1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size(),
+            device,
         )
-        return EncoderCudaGraphCaptureInputs(
-            values={
-                key: value
-                for key, value in values.items()
-                if isinstance(value, torch.Tensor)
-            }
-        )
+        values = {
+            "pixel_patches": pixel_patches,
+            "rotary_freqs": rotary_freqs,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+        }
+        if sequence_lengths is not None:
+            values["sequence_lengths"] = sequence_lengths
+        if self.patch_merger is not None:
+            values["merge_indices"] = torch.arange(input_capacity, device=device).view(
+                output_capacity, merge_size**2
+            )
+        self._register_encoder_cudagraph_input_capacity(values, input_capacity)
+        return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -777,6 +852,7 @@ class PixtralForConditionalGeneration(
         )
 
         values = self._prepare_encoder_cudagraph_values(mm_kwargs["images"])
+        values.pop("max_seqlen")
         return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(

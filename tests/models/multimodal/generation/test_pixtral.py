@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,12 +17,18 @@ from transformers import AutoProcessor
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.inputs import MultiModalDataBuiltins
 from vllm.logprobs import Logprob, SampleLogprobs
+from vllm.model_executor.models.mistral3 import Mistral3ForConditionalGeneration
 from vllm.model_executor.models.pixtral import (
-    _make_encoder_cudagraph_capture_images,
+    PixtralForConditionalGeneration,
+    _make_encoder_cudagraph_capture_patches,
     _make_merge_indices,
     _make_packed_sequence_metadata,
+    _make_position_ids,
     _merge_features_by_index,
     _pack_image_patches,
+    _pad_pixtral_cumulative_seqlens,
+    _pad_pixtral_flashinfer_cu_seqlens,
+    _pad_pixtral_sequence_lengths,
     get_sub_grids,
 )
 from vllm.platforms import current_platform
@@ -222,20 +229,136 @@ def test_packed_image_patches_preserve_patch_projection() -> None:
     torch.testing.assert_close(packed, eager)
 
 
-def test_capture_images_respect_pixtral_size_limit() -> None:
-    images, max_seqlen = _make_encoder_cudagraph_capture_images(
-        token_budget=8192,
-        max_batch_size=1,
+def test_capture_patches_expand_post_merge_budget() -> None:
+    patches, output_capacity, input_capacity = _make_encoder_cudagraph_capture_patches(
+        token_budget=65,
+        max_batch_size=2,
         num_channels=3,
-        patch_size=16,
-        max_patches_per_side=64,
+        patch_size=14,
         spatial_merge_size=2,
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
 
-    assert images[0].shape == (3, 1024, 1024)
-    assert max_seqlen == 4096
+    assert output_capacity == 66
+    assert input_capacity == 264
+    assert patches.shape == (264, 3, 14, 14)
+
+
+def test_position_ids_match_uncached_meshgrid() -> None:
+    grid_sizes = [(2, 3), (1, 4)]
+    expected = torch.cat(
+        [
+            torch.stack(
+                torch.meshgrid(
+                    torch.arange(height),
+                    torch.arange(width),
+                    indexing="ij",
+                ),
+                dim=-1,
+            ).reshape(-1, 2)
+            for height, width in grid_sizes
+        ]
+    )
+
+    torch.testing.assert_close(
+        _make_position_ids(grid_sizes, torch.device("cpu")), expected
+    )
+    torch.testing.assert_close(
+        _make_position_ids(grid_sizes, torch.device("cpu"), max_width=8),
+        expected[:, 0] * 8 + expected[:, 1],
+    )
+
+
+def test_encoder_cudagraph_padding_covers_fixed_capacity() -> None:
+    src_cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+    dst_cu_seqlens = torch.empty(6, dtype=torch.int32)
+    _pad_pixtral_cumulative_seqlens(dst_cu_seqlens, src_cu_seqlens, input_capacity=8)
+    assert dst_cu_seqlens.tolist() == [0, 2, 5, 5, 5, 8]
+
+    src_sequence_lengths = torch.tensor([2, 3, 0, 0], dtype=torch.int32)
+    dst_sequence_lengths = torch.empty(8, dtype=torch.int32)
+    _pad_pixtral_sequence_lengths(
+        dst_sequence_lengths, src_sequence_lengths, input_capacity=8
+    )
+    assert dst_sequence_lengths.tolist() == [2, 3, 0, 0, 0, 0, 0, 3]
+
+
+def test_encoder_cudagraph_padding_covers_flashinfer_capacity() -> None:
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    dst_cu_seqlens = torch.empty(34, dtype=torch.int32)
+
+    _pad_pixtral_flashinfer_cu_seqlens(
+        dst_cu_seqlens,
+        torch.cat((src_qko, src_v)),
+        input_capacity=8,
+        flashinfer_offset_scale=4,
+    )
+
+    assert dst_cu_seqlens[:17].tolist() == [0, 8] + [20] * 14 + [32]
+    assert dst_cu_seqlens[17:].tolist() == [0, 24] + [60] * 14 + [96]
+
+
+def test_encoder_cudagraph_uses_post_merge_token_budget() -> None:
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_args = SimpleNamespace(patch_size=14, spatial_merge_size=2)
+    model.patch_merger = object()
+
+    specs = model.get_encoder_cudagraph_item_specs(
+        {"images": [torch.empty(3, 224, 224)]}
+    )
+
+    assert specs[0].input_size == 256
+    assert specs[0].output_tokens == 64
+    assert specs[0].path_output_tokens == {}
+
+    hf_model = Mistral3ForConditionalGeneration.__new__(
+        Mistral3ForConditionalGeneration
+    )
+    torch.nn.Module.__init__(hf_model)
+    hf_model.config = SimpleNamespace(
+        vision_config=SimpleNamespace(patch_size=14),
+        spatial_merge_size=2,
+    )
+    hf_specs = hf_model.get_encoder_cudagraph_item_specs(
+        {"pixel_values": [torch.empty(3, 224, 224)]}
+    )
+
+    assert hf_specs[0].input_size == 256
+    assert hf_specs[0].output_tokens == 64
+    assert hf_specs[0].path_output_tokens == {}
+
+
+@pytest.mark.parametrize(
+    "merge_size,scheduler_max,model_max,expected",
+    [
+        (1, 4096, 8192, (256, 4096)),
+        (2, 4096, 8192, (64, 4096)),
+        (1, 8192, 4096, (256, 4096)),
+        (2, 32, 64, (32, 32)),
+    ],
+)
+def test_encoder_cudagraph_budget_range_uses_post_merge_tokens(
+    merge_size: int,
+    scheduler_max: int,
+    model_max: int,
+    expected: tuple[int, int],
+) -> None:
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_args = SimpleNamespace(
+        patch_size=14,
+        spatial_merge_size=merge_size,
+    )
+    model.patch_merger = object() if merge_size > 1 else None
+    model.model_config = SimpleNamespace(max_model_len=model_max)
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_max)
+    )
+
+    assert model.get_encoder_cudagraph_budget_range(vllm_config) == expected
 
 
 def test_merge_indices_match_eager_patch_merger() -> None:

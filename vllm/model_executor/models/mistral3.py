@@ -54,14 +54,15 @@ from .pixtral import (
     PixtralHFVisionModel,
     _as_image_list,
     _get_patch_grid_sizes,
-    _make_encoder_cudagraph_capture_images,
+    _make_encoder_cudagraph_capture_patches,
     _make_merge_indices,
     _make_packed_sequence_metadata,
     _make_position_ids,
     _merge_features_by_index,
     _pack_image_patches,
-    _pad_cumulative_seqlens_buffer,
-    _pad_flashinfer_cu_seqlens_buffer,
+    _pad_pixtral_cumulative_seqlens,
+    _pad_pixtral_flashinfer_cu_seqlens,
+    _pad_pixtral_sequence_lengths,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -492,6 +493,7 @@ class Mistral3ForConditionalGeneration(
         self.config = config
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
+        self._encoder_cudagraph_input_capacities: dict[int, int] = {}
 
         # NOTE: This is a special case for Pixtral-12B in the HF-format
         # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
@@ -577,16 +579,60 @@ class Mistral3ForConditionalGeneration(
     def _encoder_cudagraph_attention(self):
         return self.vision_tower.transformer.layers[0].attention.attn
 
+    def _get_encoder_cudagraph_input_capacity(self, dst: torch.Tensor) -> int:
+        try:
+            return self._encoder_cudagraph_input_capacities[dst.data_ptr()]
+        except KeyError as exc:
+            raise RuntimeError(
+                "Missing Mistral3 encoder CUDA graph input capacity"
+            ) from exc
+
+    def _pad_encoder_cudagraph_cumulative_seqlens(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        _pad_pixtral_cumulative_seqlens(
+            dst, src, self._get_encoder_cudagraph_input_capacity(dst)
+        )
+
+    def _pad_encoder_cudagraph_flashinfer_cu_seqlens(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        tp_size = self.vision_tower.transformer.layers[0].attention.tp_size
+        _pad_pixtral_flashinfer_cu_seqlens(
+            dst,
+            src,
+            self._get_encoder_cudagraph_input_capacity(dst),
+            self.config.vision_config.hidden_size // tp_size,
+        )
+
+    def _pad_encoder_cudagraph_sequence_lengths(
+        self, dst: torch.Tensor, src: torch.Tensor
+    ) -> None:
+        _pad_pixtral_sequence_lengths(
+            dst, src, self._get_encoder_cudagraph_input_capacity(dst)
+        )
+
+    def _register_encoder_cudagraph_input_capacity(
+        self,
+        values: dict[str, torch.Tensor],
+        input_capacity: int,
+    ) -> None:
+        for key in ("cu_seqlens", "sequence_lengths"):
+            if (buffer := values.get(key)) is not None:
+                self._encoder_cudagraph_input_capacities[buffer.data_ptr()] = (
+                    input_capacity
+                )
+
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
         attention = self._encoder_cudagraph_attention()
         graph_safe = attention.attn_backend != AttentionBackendEnum.TORCH_SDPA
         graph_safe &= not (attention.fp8_enabled and attention._fp8_dynamic_scale)
-        padding_logic = (
-            _pad_flashinfer_cu_seqlens_buffer
+        cu_seqlens_padding = (
+            self._pad_encoder_cudagraph_flashinfer_cu_seqlens
             if attention.attn_backend == AttentionBackendEnum.FLASHINFER
-            else _pad_cumulative_seqlens_buffer
+            else self._pad_encoder_cudagraph_cumulative_seqlens
         )
         buffer_keys = [
             "pixel_patches",
@@ -601,7 +647,10 @@ class Mistral3ForConditionalGeneration(
         return EncoderCudaGraphConfig(
             modalities=["image"] if graph_safe else [],
             buffer_keys=buffer_keys,
-            padding_logics={"cu_seqlens": padding_logic},
+            padding_logics={
+                "cu_seqlens": cu_seqlens_padding,
+                "sequence_lengths": self._pad_encoder_cudagraph_sequence_lengths,
+            },
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -611,11 +660,16 @@ class Mistral3ForConditionalGeneration(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int]:
+        effective_patch_size = (
+            self.config.vision_config.patch_size * self.config.spatial_merge_size
+        )
+        min_grid_size = math.ceil(224 / effective_patch_size)
+        min_budget = min_grid_size**2
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
         )
-        return min(64, max_budget), max_budget
+        return min(min_budget, max_budget), max_budget
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
@@ -628,7 +682,6 @@ class Mistral3ForConditionalGeneration(
             EncoderItemSpec(
                 input_size=height * width,
                 output_tokens=(height // merge_size) * (width // merge_size),
-                path_output_tokens={"default": height * width},
             )
             for height, width in grid_sizes
         ]
@@ -642,7 +695,6 @@ class Mistral3ForConditionalGeneration(
     def _prepare_encoder_cudagraph_values(
         self,
         pixel_values: torch.Tensor | list[torch.Tensor],
-        max_seqlen_override: int | None = None,
     ) -> dict[str, torch.Tensor | None]:
         patch_size = self.config.vision_config.patch_size
         grid_sizes = _get_patch_grid_sizes(pixel_values, patch_size)
@@ -655,7 +707,6 @@ class Mistral3ForConditionalGeneration(
             self.config.vision_config.hidden_size,
             self.vision_tower.transformer.layers[0].attention.tp_size,
             pixel_patches.device,
-            max_seqlen_override=max_seqlen_override,
         )
         position_ids = _make_position_ids(
             grid_sizes,
@@ -701,27 +752,51 @@ class Mistral3ForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
-        patch_size = self.config.vision_config.patch_size
-        pixel_values, max_seqlen = _make_encoder_cudagraph_capture_images(
-            token_budget=token_budget,
-            max_batch_size=max_batch_size,
-            num_channels=self.config.vision_config.num_channels,
-            patch_size=patch_size,
-            max_patches_per_side=self.config.vision_config.image_size // patch_size,
-            spatial_merge_size=self.config.spatial_merge_size,
+        vision_config = self.config.vision_config
+        merge_size = self.config.spatial_merge_size
+        pixel_patches, output_capacity, input_capacity = (
+            _make_encoder_cudagraph_capture_patches(
+                token_budget=token_budget,
+                max_batch_size=max_batch_size,
+                num_channels=vision_config.num_channels,
+                patch_size=vision_config.patch_size,
+                spatial_merge_size=merge_size,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        attention = self._encoder_cudagraph_attention()
+        cu_seqlens, max_seqlen, sequence_lengths = _make_packed_sequence_metadata(
+            [input_capacity] + [0] * max_batch_size,
+            attention.attn_backend,
+            vision_config.hidden_size,
+            self.vision_tower.transformer.layers[0].attention.tp_size,
+            device,
+        )
+        max_position = (vision_config.image_size // vision_config.patch_size) ** 2
+        position_ids = torch.arange(input_capacity, device=device) % max_position
+        position_input = torch.empty(
+            (1, input_capacity, vision_config.hidden_size),
             device=device,
-            dtype=dtype,
+            dtype=self.vision_tower.dtype,
         )
-        values = self._prepare_encoder_cudagraph_values(
-            pixel_values, max_seqlen_override=max_seqlen
+        rotary_pos_emb_cos, rotary_pos_emb_sin = (
+            self.vision_tower.patch_positional_embedding(position_input, position_ids)
         )
-        return EncoderCudaGraphCaptureInputs(
-            values={
-                key: value
-                for key, value in values.items()
-                if isinstance(value, torch.Tensor)
-            }
-        )
+        values = {
+            "pixel_patches": pixel_patches,
+            "rotary_pos_emb_cos": rotary_pos_emb_cos,
+            "rotary_pos_emb_sin": rotary_pos_emb_sin,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+            "merge_indices": torch.arange(input_capacity, device=device).view(
+                output_capacity, merge_size**2
+            ),
+        }
+        if sequence_lengths is not None:
+            values["sequence_lengths"] = sequence_lengths
+        self._register_encoder_cudagraph_input_capacity(values, input_capacity)
+        return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -735,6 +810,7 @@ class Mistral3ForConditionalGeneration(
         )
 
         values = self._prepare_encoder_cudagraph_values(mm_kwargs["pixel_values"])
+        values.pop("max_seqlen")
         return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(

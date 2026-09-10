@@ -8,7 +8,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${MODEL:-mistralai/Ministral-3-3B-Instruct-2512}"
 IMAGE_URL="${IMAGE_URL:-}"
 IMAGE_SIZE="${IMAGE_SIZE:-448}"
-ENCODER_TOKEN_BUDGET="${ENCODER_TOKEN_BUDGET:-4096}"
+ENCODER_TOKEN_BUDGET="${ENCODER_TOKEN_BUDGET:-256}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
@@ -33,8 +33,8 @@ Common overrides are environment variables:
   MODEL, IMAGE_URL, IMAGE_SIZE, ENCODER_TOKEN_BUDGET, HOST, PORT,
   MAX_MODEL_LEN, OUTPUT_DIR, MM_ENCODER_ATTN_BACKEND, PYTHON_BIN, and VLLM_BIN.
 
-By default, the script generates a 448x448 image that fits the 4096-token
-encoder graph for both 14- and 16-pixel patch sizes. Set IMAGE_URL to profile a
+By default, the script generates a 448x448 image that fits the 256-token graph
+used by Mistral models with spatial merge size 2. Set IMAGE_URL to profile a
 specific image, and increase ENCODER_TOKEN_BUDGET if that image needs it.
 
 Example for two GPUs:
