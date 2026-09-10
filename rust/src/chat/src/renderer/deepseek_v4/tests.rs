@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
+use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
@@ -397,6 +398,59 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
     assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
     assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn non_json_tool_call_arguments_become_one_string_parameter() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                AssistantToolCall {
+                    id: "text".to_string(),
+                    name: "search".to_string(),
+                    arguments: "not json".to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("text result", "text"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    expect![[r#"
+        <｜begin▁of▁sentence｜>
+
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="search">
+        <｜DSML｜parameter name="arguments" string="true">not json</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>text result</tool_result><｜Assistant｜></think>"#]]
+    .assert_eq(&render_request(&request));
+}
+
+#[test]
+fn rejects_non_object_json_tool_call_arguments() {
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                AssistantToolCall {
+                    id: "array".to_string(),
+                    name: "search".to_string(),
+                    arguments: "[1, 2]".to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("array result", "array"),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    assert!(matches!(
+        DeepSeekV4ChatRenderer::new().render(&request),
+        Err(Error::ChatTemplate(message)) if message.contains("must be a JSON object")
+    ));
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_json_fmt::JsonFormat;
 
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
@@ -675,6 +675,41 @@ fn render_tool_call(
     Ok(())
 }
 
+/// Decode assistant tool-call arguments into the object the reference
+/// encoders iterate over.
+///
+/// Both references keep text that is not JSON as a single `arguments`
+/// parameter instead of failing the request. V4.1 additionally tolerates
+/// JSON strings, including double-encoded ones, and wraps any other
+/// non-object value the same way; V4 rejects non-object JSON.
+fn decode_arguments(raw: &str, dialect: DsDialect) -> Result<Map<String, Value>> {
+    let decoded = match dialect {
+        DsDialect::V4 => serde_json::from_str(raw).ok(),
+        DsDialect::V41 => {
+            let mut value = Value::String(raw.to_owned());
+            for _ in 0..2 {
+                let Value::String(text) = &value else { break };
+                match serde_json::from_str(text) {
+                    Ok(parsed) => value = parsed,
+                    Err(_) => break,
+                }
+            }
+            Some(value)
+        }
+    };
+
+    match (decoded, dialect) {
+        (Some(Value::Object(arguments)), _) => Ok(arguments),
+        (Some(_), DsDialect::V4) => Err(Error::ChatTemplate(
+            "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
+        )),
+        _ => Ok(Map::from_iter([(
+            "arguments".to_owned(),
+            Value::String(raw.to_owned()),
+        )])),
+    }
+}
+
 /// Convert one assistant tool-call arguments object into DSML parameter form.
 ///
 /// String values are emitted raw with `string="true"`, while all other JSON
@@ -685,19 +720,10 @@ fn encode_arguments_to_dsml(
     dialect: DsDialect,
 ) -> Result<()> {
     let parameter_tag = dialect.parameter_tag();
-    let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-        Error::ChatTemplate(format!(
-            "assistant tool call has invalid JSON arguments for DeepSeek: {error}"
-        ))
-    })?;
-    let Some(arguments) = arguments.as_object() else {
-        return Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
-        ));
-    };
+    let arguments = decode_arguments(&tool_call.arguments, dialect)?;
 
     let mut wrote_parameter = false;
-    for (key, value) in arguments {
+    for (key, value) in &arguments {
         if wrote_parameter {
             out.push('\n');
         }
