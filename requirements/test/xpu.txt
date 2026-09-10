@@ -94,6 +94,10 @@ click==8.4.2
     #   uvicorn
 cloudpickle==3.1.2
     # via -r requirements/test/../common.txt
+cohere==7.1.1
+    # via -r requirements/test/xpu.in
+cohere-melody==0.13.4
+    # via -r requirements/test/xpu.in
 colorama==0.4.6
     # via sacrebleu
 compressed-tensors==0.17.0
@@ -172,6 +176,8 @@ fastar==0.11.0
     # via
     #   fastapi
     #   fastapi-cloud-cli
+fastavro==1.12.2
+    # via cohere
 filelock==3.32.3
     # via
     #   -c requirements/common.txt
@@ -221,6 +227,7 @@ httptools==0.8.0
 httpx==0.28.1
     # via
     #   anthropic
+    #   cohere
     #   datasets
     #   fastapi
     #   fastapi-cloud-cli
@@ -634,6 +641,7 @@ pydantic==2.13.4
     #   -r requirements/test/../common.txt
     #   albumentations
     #   anthropic
+    #   cohere
     #   compressed-tensors
     #   fastapi
     #   fastapi-cloud-cli
@@ -650,7 +658,9 @@ pydantic==2.13.4
     #   pydantic-settings
     #   xgrammar
 pydantic-core==2.46.4
-    # via pydantic
+    # via
+    #   cohere
+    #   pydantic
 pydantic-extra-types==2.11.1
     # via
     #   fastapi
@@ -752,6 +762,7 @@ requests==2.34.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   cohere
     #   datasets
     #   docker
     #   evaluate
@@ -914,6 +925,7 @@ tokenizers==0.23.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   cohere
     #   sentence-transformers
     #   transformers
 torch==2.13.0+xpu
@@ -979,6 +991,8 @@ typer==0.27.1
     #   fastapi-cli
     #   fastapi-cloud-cli
     #   transformers
+types-requests==2.33.0.20260906
+    # via cohere
 typing-extensions==4.16.0
     # via
     #   -c requirements/common.txt
@@ -989,6 +1003,7 @@ typing-extensions==4.16.0
     #   anyio
     #   apache-tvm-ffi
     #   chz
+    #   cohere
     #   fastapi
     #   grpcio
     #   httpx2
@@ -1036,6 +1051,7 @@ urllib3==2.7.0
     #   modelscope
     #   requests
     #   sentry-sdk
+    #   types-requests
 uvicorn==0.52.3
     # via
     #   fastapi

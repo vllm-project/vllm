@@ -37,6 +37,8 @@ pystemmer
 mteb[bm25s]>=2, <3 # required for mteb test
 num2words
 pqdm
+cohere_melody>=0.11.1
+cohere>=7.0.0
 
 # --- Vision & Multimodal ---
 timm
