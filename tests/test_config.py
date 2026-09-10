@@ -500,51 +500,63 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
 
 
 @pytest.mark.parametrize(
-    ("mode", "piecewise_capture_available", "expected"),
+    ("mode", "piecewise_capture_available", "attention_support", "expected"),
     [
-        (CUDAGraphMode.PIECEWISE, False, CUDAGraphMode.NONE),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            False,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-        (CUDAGraphMode.FULL_DECODE_ONLY, False, CUDAGraphMode.FULL_DECODE_ONLY),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            True,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-        ),
+        ("PIECEWISE", False, "ALWAYS", "NONE"),
+        ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
     ],
 )
 def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(
-    mode, piecewise_capture_available, expected
+    mode, piecewise_capture_available, attention_support, expected
 ):
-    compilation_config = CompilationConfig(cudagraph_mode=mode)
-
-    resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
-        AttentionCGSupport.ALWAYS,
-        "FakeAttentionBackend",
-        piecewise_capture_available=piecewise_capture_available,
-    )
-
-    assert resolved == expected
-    assert compilation_config.cudagraph_mode == expected
-
-
-def test_resolve_cudagraph_mode_normalizes_attention_fallback():
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_mode=CUDAGraphMode[mode],
         use_inductor_graph_partition=True,
     )
 
     resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
-        AttentionCGSupport.NEVER,
+        AttentionCGSupport[attention_support],
         "FakeAttentionBackend",
-        piecewise_capture_available=False,
+        piecewise_capture_available=piecewise_capture_available,
     )
 
-    assert resolved == CUDAGraphMode.NONE
+    assert resolved.name == expected
+    assert compilation_config.cudagraph_mode == resolved
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA graph support"
+)
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        {"runner": "pooling", "convert": "embed"},
+        pytest.param(
+            {"prefill_context_parallel_size": 2, "tensor_parallel_size": 2},
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm PCP graph restriction"
+            ),
+        ),
+    ],
+)
+def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwargs):
+    """Late compatibility overrides must not restore unavailable piecewise graphs."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = EngineArgs(
+        model="facebook/opt-125m",
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        **engine_kwargs,
+    ).create_engine_config()
+
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config.compilation_config.cudagraph_capture_sizes == []
+    assert config.compilation_config.max_cudagraph_capture_size == 0
 
 
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():

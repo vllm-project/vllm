@@ -972,6 +972,28 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _normalize_piecewise_cudagraph_mode(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> None:
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            and compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not breakable_cudagraph_enabled
+        ):
+            fallback_mode = compilation_config.cudagraph_mode.without_piecewise()
+            logger.info_once(
+                "Cudagraph mode %s is not compatible with compilation mode %s. "
+                "Overriding to %s.",
+                compilation_config.cudagraph_mode,
+                compilation_config.mode,
+                fallback_mode,
+            )
+            compilation_config.cudagraph_mode = fallback_mode
+            if fallback_mode == CUDAGraphMode.NONE:
+                compilation_config.max_cudagraph_capture_size = 0
+                compilation_config.cudagraph_capture_sizes = []
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -1477,20 +1499,9 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
-        if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not breakable_cudagraph_enabled
-        ):
-            fallback_mode = self.compilation_config.cudagraph_mode.without_piecewise()
-            logger.info_once(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to %s.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-                fallback_mode,
-            )
-            self.compilation_config.cudagraph_mode = fallback_mode
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1658,6 +1669,10 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()

@@ -41,28 +41,19 @@ def make_manager(
 @pytest.mark.parametrize(
     ("mode", "piecewise_capture_available", "expected"),
     [
-        (CUDAGraphMode.FULL_DECODE_ONLY, True, CUDAGraphMode.FULL_DECODE_ONLY),
-        (CUDAGraphMode.FULL_DECODE_ONLY, False, CUDAGraphMode.FULL_DECODE_ONLY),
-        (CUDAGraphMode.FULL, True, CUDAGraphMode.FULL_AND_PIECEWISE),
-        (CUDAGraphMode.FULL, False, CUDAGraphMode.FULL_DECODE_ONLY),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            True,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-        ),
-        (
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            False,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
+        ("FULL_DECODE_ONLY", True, "FULL_DECODE_ONLY"),
+        ("FULL", True, "FULL_AND_PIECEWISE"),
+        ("FULL", False, "FULL_DECODE_ONLY"),
+        ("FULL_AND_PIECEWISE", True, "FULL_AND_PIECEWISE"),
+        ("FULL_AND_PIECEWISE", False, "FULL_DECODE_ONLY"),
     ],
 )
 def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expected):
     assert (
         resolve_adaptive_cudagraph_mode(
-            mode, piecewise_capture_available=piecewise_capture_available
+            CUDAGraphMode[mode], piecewise_capture_available=piecewise_capture_available
         )
-        == expected
+        == CUDAGraphMode[expected]
     )
 
 
