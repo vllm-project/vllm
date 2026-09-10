@@ -847,6 +847,8 @@ class SimpleCPUOffloadScheduler:
                     continue
                 if len(gpu_block_ids) >= num_free:
                     break
+                primary_block_hash = gpu_block.block_hash
+                assert primary_block_hash is not None
                 gpu_block_ids.append(gpu_block_id)
                 advanced_per_group[g] += 1
                 if block_meta is not None:
@@ -863,7 +865,7 @@ class SimpleCPUOffloadScheduler:
                         request, token_start, token_end, curr_mm_idx
                     )
                     meta_by_hash = {
-                        gpu_block.block_hash: BlockStoreMeta(
+                        primary_block_hash: BlockStoreMeta(
                             token_ids=list(
                                 request.all_token_ids[token_start:token_end]
                             ),
@@ -879,7 +881,7 @@ class SimpleCPUOffloadScheduler:
                         block_hash = make_block_hash_with_group_id(
                             request.block_hashes[hash_idx], g
                         )
-                        if block_hash == gpu_block.block_hash:
+                        if block_hash is None or block_hash == primary_block_hash:
                             continue
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
