@@ -128,12 +128,43 @@ def get_offloader() -> BaseOffloader:
     return _instance
 
 
-def set_offloader(instance: BaseOffloader) -> None:
-    """Set the global offloader instance."""
+def set_offloader(
+    instance: BaseOffloader,
+    offload_config: "OffloadConfig | None" = None,
+) -> None:
+    """Set the global offloader instance.
+
+    Args:
+        instance: The offloader to install as the global singleton.
+        offload_config: The config `instance` was derived from. Only used to
+            detect and warn about the case where a `NoopOffloader` is
+            selected despite a non-zero offload budget having been
+            requested, which can only mean the offload configuration was
+            lost or reset somewhere before this call.
+    """
     global _instance
     _instance = instance
     if isinstance(instance, NoopOffloader):
-        logger.debug_once("Offloader set to NoopOffloader (no offloading).")
+        requested_cpu_offload_gb = (
+            offload_config.uva.cpu_offload_gb if offload_config is not None else 0
+        )
+        requested_group_size = (
+            offload_config.prefetch.offload_group_size
+            if offload_config is not None
+            else 0
+        )
+        if requested_cpu_offload_gb > 0 or requested_group_size > 0:
+            logger.warning_once(
+                "Offloader set to NoopOffloader, but cpu_offload_gb=%s and "
+                "offload_group_size=%s were requested (offload_backend=%r). "
+                "No CPU offloading will occur. The offload configuration was "
+                "likely lost or reset before reaching create_offloader().",
+                requested_cpu_offload_gb,
+                requested_group_size,
+                offload_config.offload_backend,
+            )
+        else:
+            logger.debug_once("Offloader set to NoopOffloader (no offloading).")
     else:
         logger.info_once("Offloader set to %s", type(instance).__name__)
 
@@ -148,9 +179,33 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader
 
-    backend = offload_config.offload_backend
+    requested_backend = offload_config.offload_backend
+    backend = requested_backend
     uva = offload_config.uva
     prefetch = offload_config.prefetch
+
+    # An explicitly requested (non-"auto") backend handed a zero budget for
+    # that backend can only mean the offload configuration was lost or reset
+    # before reaching this call: there is no legitimate reason to force a
+    # specific backend and then configure it with nothing to offload.
+    if requested_backend == "uva" and uva.cpu_offload_gb <= 0:
+        logger.warning_once(
+            "offload_backend=%r was requested but uva.cpu_offload_gb=%s. "
+            "No CPU offloading will occur. This combination can only happen "
+            "if the offload configuration was lost or reset before reaching "
+            "create_offloader().",
+            requested_backend,
+            uva.cpu_offload_gb,
+        )
+    elif requested_backend == "prefetch" and prefetch.offload_group_size <= 0:
+        logger.warning_once(
+            "offload_backend=%r was requested but "
+            "prefetch.offload_group_size=%s. No CPU offloading will occur. "
+            "This combination can only happen if the offload configuration "
+            "was lost or reset before reaching create_offloader().",
+            requested_backend,
+            prefetch.offload_group_size,
+        )
 
     if backend == "auto":
         if prefetch.offload_group_size > 0:

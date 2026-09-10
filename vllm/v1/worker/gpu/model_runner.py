@@ -355,7 +355,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb = EPLBController(self.parallel_config, self.device)
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
 
-        set_offloader(create_offloader(self.vllm_config.offload_config))
+        set_offloader(
+            create_offloader(self.vllm_config.offload_config),
+            self.vllm_config.offload_config,
+        )
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len

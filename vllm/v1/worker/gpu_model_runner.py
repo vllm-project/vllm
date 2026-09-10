@@ -978,7 +978,7 @@ class GPUModelRunner(
 
         # Model weight offloader
         # Make sure this is called before any get_offloader call
-        set_offloader(create_offloader(self.offload_config))
+        set_offloader(create_offloader(self.offload_config), self.offload_config)
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
