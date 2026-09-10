@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -205,12 +206,14 @@ class WeightCacheDaemon:
                         self._handle_connection(conn)
                     except (ConnectionError, EOFError):
                         logger.warning("Client disconnected mid-request")
-                    except Exception:
-                        # A single malformed or malicious request must not take
-                        # down the daemon for every other engine on this GPU.
+                    except Exception as e:
+                        # Report the error back instead of just closing the
+                        # socket, but don't let it take the daemon down.
                         logger.exception(
                             "Error handling weight cache client; continuing"
                         )
+                        with contextlib.suppress(OSError):
+                            send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
             if os.path.exists(socket_path):
@@ -344,6 +347,7 @@ def main() -> None:
         )
     # Checked before loading anything: an unsupported quantization method would
     # otherwise only surface in the engine, after a full load.
+    check_ipc_platform_support(where="daemon")
     check_ipc_quant_support(vllm_config.model_config, where="daemon")
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
