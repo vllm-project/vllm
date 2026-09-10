@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+from vllm.platforms import current_platform
 
 
 def decode_nccl_unique_id(
@@ -135,6 +136,33 @@ class NCCLRendezvous(Protocol):
     world_size: int
 
 
+def _require_usable_communicator(comm: "PyNcclCommunicator") -> "PyNcclCommunicator":
+    """Off CUDA/ROCm, reject a communicator that disabled itself.
+
+    `PyNcclCommunicator` degrades to a no-op instead of raising when the NCCL
+    library will not load, and every collective then early-returns on
+    `self.disabled`. That is the right default for the inference collectives it
+    was written for, but for weight transfer it means a whole update round
+    "succeeds" without moving a byte, leaving the workers serving stale weights
+    with no error anywhere.
+    """
+    if current_platform.is_cuda_alike():
+        # Unchanged where NCCL is the native transport: a disabled communicator
+        # there means `world_size == 1` or `VLLM_DISABLE_PYNCCL`, both long-standing
+        # behavior that callers may rely on.
+        return comm
+    if comm.disabled or not comm.available:
+        platform = current_platform.device_type or "this platform"
+        raise RuntimeError(
+            "NCCL weight transfer needs a working PyNccl communicator, but it "
+            f"disabled itself on {platform} (rank={comm.rank}, "
+            f"world_size={comm.world_size}). Every collective would be a no-op, "
+            "silently leaving the inference weights stale while the transfer "
+            "reports success."
+        )
+    return comm
+
+
 def stateless_init_process_group(
     master_address: str,
     master_port: int,
@@ -155,7 +183,7 @@ def stateless_init_process_group(
     pg = StatelessProcessGroup.create(
         host=master_address, port=master_port, rank=rank, world_size=world_size
     )
-    return PyNcclCommunicator(pg, device=device)
+    return _require_usable_communicator(PyNcclCommunicator(pg, device=device))
 
 
 def uid_init_process_group(
@@ -171,11 +199,13 @@ def uid_init_process_group(
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-    return PyNcclCommunicator.from_unique_id_bytes(
-        nccl_unique_id_bytes,
-        rank=rank,
-        world_size=world_size,
-        device=device,
+    return _require_usable_communicator(
+        PyNcclCommunicator.from_unique_id_bytes(
+            nccl_unique_id_bytes,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
     )
 
 
