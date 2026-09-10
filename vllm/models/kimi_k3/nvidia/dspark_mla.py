@@ -498,6 +498,7 @@ class K3DSparkForCausalLM(nn.Module):
         loader = AutoWeightsLoader(self)
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
-        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_context_kv_metadata()
-        return loaded_weights
