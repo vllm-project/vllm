@@ -17,6 +17,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -71,8 +72,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         layer_idx: int = 0,
         ple_dense_layer_id: int | None = None,
         prefix: str = "",
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -102,8 +105,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             prefix=f"{prefix}.ple_embedding",
             quant_config=quant_config,
             params_dtype=model_config.dtype,
+            use_sequence_parallel=self.use_sequence_parallel,
         )
-        # The PLE cache is TP-replicated, so this merged projection is too.
+        # Projection weights stay replicated even when their token rows are sharded.
         self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),
             [self.hc_hidden_size, self.hidden_size],
@@ -154,18 +158,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
     def start_prefetch(
         self,
-        hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> None:
         """Start the pinned PLE lookup while the preceding decoder layer runs."""
-        self.ple_embedding.start_prefetch(
-            hidden_states,
-            input_ids,
-            query_start_loc,
-            ngram_context,
-        )
+        self.ple_embedding.start_prefetch(input_ids, query_start_loc, ngram_context)
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -380,7 +378,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
-        if input_ids.shape[0] != hidden_states.shape[0]:
+        if (
+            not self.use_sequence_parallel
+            and input_ids.shape[0] != hidden_states.shape[0]
+        ):
             raise ValueError(
                 "PLE expects input_ids and hidden_states to have the same "
                 f"token length, got {input_ids.shape[0]} and "
@@ -392,6 +393,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             query_start_loc,
             ngram_context,
         )
+        assert embeddings.shape[0] == hidden_states.shape[0]
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
@@ -404,7 +406,17 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
+        if self.use_sequence_parallel:
+            # Gather both branches together and trim SP padding before convolution.
+            packed_output = torch.cat([gated_output, conv_input], dim=-1)
+            packed_output = sp_all_gather(packed_output)[: input_ids.shape[0]]
+            gated_output, conv_input = packed_output.split(self.hc_hidden_size, dim=-1)
+            # The convolution kernels require contiguous input and residual rows.
+            gated_output = gated_output.contiguous()
+            conv_input = conv_input.contiguous()
         self._short_conv(conv_input, gated_output)
+        if self.use_sequence_parallel:
+            gated_output = sp_shard(gated_output)
         return gated_output
 
 

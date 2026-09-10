@@ -43,6 +43,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
@@ -56,6 +57,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
+    is_sequence_parallel_enabled,
 )
 
 
@@ -174,6 +176,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         config: Qwen4ExpTextConfig = model_config.hf_text_config
 
         self.config = config
+        self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
         self.vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -316,6 +319,13 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
+        full_num_tokens = positions.shape[-1]
+        if self.use_sequence_parallel:
+            # SP requires PP=1, so the first-rank branch sets prev_block_output.
+            assert prev_block_output is not None
+            hidden_states = sp_shard(hidden_states)
+            # The FC output is already complete and needs only a slice.
+            prev_block_output = sp_shard(prev_block_output)
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -343,6 +353,17 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 hidden_states, block_output, injection
             )
         )
+        if self.use_sequence_parallel:
+            # Gather both outputs together, then restore their contiguous layouts.
+            packed_hidden_states = torch.cat(
+                [sample_hidden_states, multi_hidden], dim=-1
+            )
+            packed_hidden_states = sp_all_gather(packed_hidden_states)[:full_num_tokens]
+            sample_hidden_states, multi_hidden = packed_hidden_states.split(
+                [hidden_size, hc_count * hidden_size], dim=-1
+            )
+            sample_hidden_states = sample_hidden_states.contiguous()
+            multi_hidden = multi_hidden.contiguous()
         return sample_hidden_states, multi_hidden
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

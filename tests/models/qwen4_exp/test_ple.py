@@ -454,33 +454,55 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     )
 
 
-def test_pinned_embedding_forward_finalizes_prefetched_output(
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("total_tokens", [2, 3])
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_pinned_embedding_finalize_prefetch_optionally_reduces_output(
     monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+    total_tokens: int,
+    reduce_results: bool,
 ) -> None:
+    """Deferring reduction must preserve full token rows and wait for the lookup."""
     embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
     nn.Module.__init__(embedding)
-    embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
+    values = torch.arange(1, 13).reshape(4, 3)
+    embedding._prefetch_buffer = torch.stack(
+        (values, torch.zeros_like(values)), dim=1
+    ).to(dtype)
     embedding._output_dim = 6
-    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
-    expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
-
-    def finalize_prefetched(
-        prefetch_output: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        assert prefetch_output is embedding._prefetch_buffer
-        output.copy_(expected)
-
+    embedding.tp_size = 2
+    embedding.reduce_results = reduce_results
+    embedding.etp_data_parallel_size = 1
+    embedding._prefetch_stream = object()
+    waited_streams: list[object] = []
+    reduced_dtypes = []
     monkeypatch.setattr(
-        embedding,
-        "_finalize_prefetch",
-        finalize_prefetched,
+        torch.cuda,
+        "current_stream",
+        lambda: SimpleNamespace(wait_stream=waited_streams.append),
     )
 
-    output = embedding(hidden_states)
+    def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        assert waited_streams == [embedding._prefetch_stream]
+        reduced_dtypes.append(tensor.dtype)
+        # The remote rank owns the other head's vocabulary rows.
+        return tensor + tensor.flip(1)
 
-    assert output.dtype == embedding._prefetch_buffer.dtype
-    assert torch.equal(output, expected)
+    embedding.parallel_group = SimpleNamespace(all_reduce=all_reduce)
+    output = embedding.finalize_prefetch(total_tokens=total_tokens)
+
+    expected = (
+        values.unsqueeze(1).expand(-1, 2, -1).to(dtype)
+        if reduce_results
+        else embedding._prefetch_buffer
+    )
+    expected = expected[:total_tokens].flatten(-2)
+    comm_dtype = torch.int8 if dtype == torch.float8_e4m3fn else dtype
+    assert reduced_dtypes == ([comm_dtype] if reduce_results else [])
+    assert waited_streams == [embedding._prefetch_stream]
+    assert output.dtype == dtype
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
 
 
 def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
