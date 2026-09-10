@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """K3 dense MLA draft model for DSpark speculative decoding on ROCm/AMD.
 
-This initial ROCm port intentionally keeps the existing NVIDIA MLA
-implementation so that dispatch changes do not alter the kernels used by the
-draft model. The AMD-native attention path is introduced separately.
+The draft decoder uses ``KimiK3MultiHeadLatentAttentionWrapper`` so absorb
+BMM goes through generic ``MLAAttention`` (AITER FP4/FP8 when those flags are
+on). Context-KV insert stays on grouped ``concat_and_cache_mla_grouped``.
+Do not reuse ``KimiMLAAttention``: that class is NoPE-only i.e. has no RoPE.
 """
 
+import math
 from collections.abc import Iterable
 
 import torch
@@ -14,12 +16,18 @@ import torch.nn as nn
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
+    RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mla import MLAModules
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -28,11 +36,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
-from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from .linear import KimiMLP
+from .mla import KimiK3MultiHeadLatentAttentionWrapper
 
 
 def _duplicate_context_kv_weights(
@@ -57,6 +65,137 @@ def _duplicate_context_kv_weights(
         yield f"context_kv_proj.{param_name}", fused_weight
 
 
+def _make_dspark_mla_attention(
+    *,
+    config,
+    cache_config,
+    quant_config,
+    prefix: str,
+) -> KimiK3MultiHeadLatentAttentionWrapper:
+    """Build DSpark MLA with RoPE and a non-causal decode KV-cache spec."""
+    hidden_size = config.hidden_size
+    num_heads = config.num_attention_heads
+    qk_nope_head_dim = config.qk_nope_head_dim
+    qk_rope_head_dim = config.qk_rope_head_dim
+    v_head_dim = config.v_head_dim
+    q_lora_rank = config.q_lora_rank
+    kv_lora_rank = config.kv_lora_rank
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
+    tp_size = get_tensor_model_parallel_world_size()
+    assert num_heads % tp_size == 0
+    num_local_heads = num_heads // tp_size
+    scaling = qk_head_dim**-0.5
+
+    rope_parameters = dict(config.rope_parameters)
+    if rope_parameters["rope_type"] != "default":
+        rope_parameters["rope_type"] = (
+            "deepseek_yarn"
+            if rope_parameters.get("apply_yarn_scaling", True)
+            else "deepseek_llama_scaling"
+        )
+    rotary_emb = get_rope(
+        qk_rope_head_dim,
+        max_position=config.max_position_embeddings,
+        rope_parameters=rope_parameters,
+        is_neox_style=False,
+        dtype=torch.float32,
+    )
+    if rope_parameters["rope_type"] == "deepseek_yarn":
+        mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
+        scaling_factor = rope_parameters["factor"]
+        mscale = (
+            1.0
+            if scaling_factor <= 1
+            else 0.1 * float(mscale_all_dim) * math.log(scaling_factor) + 1.0
+        )
+        scaling *= mscale * mscale
+
+    fused_qkv_a_proj = None
+    kv_a_proj_with_mqa = None
+    q_a_layernorm = None
+    q_b_proj = None
+    q_proj = None
+    if q_lora_rank is not None:
+        fused_qkv_a_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [q_lora_rank, kv_lora_rank + qk_rope_head_dim],
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fused_qkv_a_proj",
+            disable_tp=True,
+        )
+        q_a_layernorm = RMSNorm(q_lora_rank, eps=config.rms_norm_eps)
+        q_b_proj = ColumnParallelLinear(
+            q_lora_rank,
+            num_heads * qk_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_b_proj",
+        )
+    else:
+        kv_a_proj_with_mqa = ReplicatedLinear(
+            hidden_size,
+            kv_lora_rank + qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
+        )
+        q_proj = ColumnParallelLinear(
+            hidden_size,
+            num_heads * qk_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+
+    kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
+    kv_b_proj = ColumnParallelLinear(
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+        quant_config=quant_config,
+        prefix=f"{prefix}.kv_b_proj",
+    )
+    o_proj = RowParallelLinear(
+        num_heads * v_head_dim,
+        hidden_size,
+        bias=False,
+        quant_config=quant_config,
+        prefix=f"{prefix}.o_proj",
+    )
+
+    mla_modules = MLAModules(
+        kv_a_layernorm=kv_a_layernorm,
+        kv_b_proj=kv_b_proj,
+        rotary_emb=rotary_emb,
+        o_proj=o_proj,
+        fused_qkv_a_proj=fused_qkv_a_proj,
+        kv_a_proj_with_mqa=kv_a_proj_with_mqa,
+        q_a_layernorm=q_a_layernorm,
+        q_b_proj=q_b_proj,
+        q_proj=q_proj,
+        indexer=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+    )
+    return KimiK3MultiHeadLatentAttentionWrapper(
+        hidden_size,
+        num_local_heads,
+        scaling,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+        q_lora_rank,
+        kv_lora_rank,
+        mla_modules,
+        cache_config,
+        quant_config,
+        prefix,
+        non_causal_multi_token_decode=True,
+    )
+
+
 class K3DSparkDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -69,22 +208,13 @@ class K3DSparkDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         quant_config = get_draft_quant_config(vllm_config)
-        self.self_attn = MultiHeadLatentAttention(
+        self.self_attn = _make_dspark_mla_attention(
             config=config,
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
             cache_config=vllm_config.cache_config,
             quant_config=quant_config,
             prefix=maybe_prefix(
                 prefix, f"layers.{start_layer_id + layer_idx}.self_attn"
             ),
-            use_rope=True,
-            non_causal_multi_token_decode=True,
         )
         # Both row-parallel outputs stay un-reduced; their all-reduces are fused
         # into the RMSNorm that follows via fused_allreduce_rms_norm.
@@ -291,7 +421,7 @@ class K3DSparkModel(nn.Module):
         if context_slot_mapping is None:
             return
 
-        cache_layers = [layer.self_attn for layer in self.layers]
+        cache_layers = [layer.self_attn.mla_attn for layer in self.layers]
         if (
             not is_quantized_kv_cache(cache_layers[0].kv_cache_dtype)
             and self._has_uniform_block_layout(cache_layers)
@@ -303,7 +433,7 @@ class K3DSparkModel(nn.Module):
             # Grouped context KV insert only supports unquantized (bf16) KV cache
             # and assumes that all layers share the same block layout.
 
-            if isinstance(context_slot_mapping, (list, tuple)):
+            if isinstance(context_slot_mapping, list | tuple):
                 per_layer_slot_mappings = [
                     s for s in context_slot_mapping if s is not None
                 ]
@@ -330,15 +460,14 @@ class K3DSparkModel(nn.Module):
             )
             return
 
-        for layer_idx, layer in enumerate(self.layers):
+        for layer_idx, attn in enumerate(cache_layers):
             slot_mapping = (
                 context_slot_mapping[layer_idx]
-                if isinstance(context_slot_mapping, (list, tuple))
+                if isinstance(context_slot_mapping, list | tuple)
                 else context_slot_mapping
             )
             if slot_mapping is None:
                 continue
-            attn = layer.self_attn
             attn.impl.do_kv_cache_update(
                 all_kv_c_normed[layer_idx],
                 all_k_pe[layer_idx],
@@ -350,7 +479,7 @@ class K3DSparkModel(nn.Module):
 
     def _has_uniform_block_layout(
         self,
-        cache_layers: list[MultiHeadLatentAttention],
+        cache_layers: list[MLAAttention],
     ) -> bool:
         if not hasattr(self, "_layers_share_kv_block_layout"):
             ref_cache = cache_layers[0].kv_cache
@@ -364,7 +493,7 @@ class K3DSparkModel(nn.Module):
 
     def _get_context_kv_cache_ptrs(
         self,
-        cache_layers: list[MultiHeadLatentAttention],
+        cache_layers: list[MLAAttention],
     ) -> torch.Tensor:
         # The per-layer KV cache base pointers are stable after allocation, so
         # build the pointer array once and return it on every call.
@@ -449,7 +578,7 @@ class K3DSparkForCausalLM(nn.Module):
         return self.model.combine_hidden_states(hidden_states)
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
-        return [layer.self_attn.layer_name for layer in self.model.layers]
+        return [layer.self_attn.mla_attn.layer_name for layer in self.model.layers]
 
     def precompute_and_store_context_kv(
         self,

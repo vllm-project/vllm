@@ -66,8 +66,9 @@ steps:
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
   - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_dspark_mla.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_dspark_mla.py
   mirror:
     amd:
       label: ":amd: (MI300) Basic Models (Other)"
@@ -79,8 +80,9 @@ steps:
       source_file_dependencies:
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_hyv4_rocm.py
+      - tests/models/test_dspark_mla.py
       commands:
-      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_dspark_mla.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
 
 - label: ":nvidia: (B200) Inkling"
