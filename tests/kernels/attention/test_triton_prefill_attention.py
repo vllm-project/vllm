@@ -9,6 +9,7 @@ import vllm.v1.attention.ops.triton_prefill_attention as prefill_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.v1.attention.ops.triton_prefill_attention import (
+    _get_encoder_launch,
     _get_head_dim_blocks,
     _split_head_dim,
     context_attention_fwd,
@@ -322,6 +323,45 @@ def test_rdna_narrows_the_kv_tile_and_nothing_else(monkeypatch) -> None:
     assert tuned.grid == stock.grid
 
 
+@pytest.mark.parametrize("D", [72, 128])
+def test_context_attention_non_contiguous_heads(D: int):
+    """A head stride the 16-byte alignment hint must not be applied to.
+
+    The hint is keyed off the runtime strides, not head_dim, so a view whose
+    head axis is not 8-element aligned has to fall back and stay correct.
+    """
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    dtype = torch.bfloat16
+    total_tokens = B * S
+
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    # Slicing a padded head axis keeps D contiguous but breaks the 8-element
+    # alignment of the head stride.
+    q, k, v, o = (
+        torch.randn(total_tokens, H, D + 4, dtype=dtype, device=DEVICE_TYPE)[..., :D]
+        for _ in range(4)
+    )
+    assert q.stride(1) % 8 != 0
+
+    context_attention_fwd(
+        q, k, v, o, b_start_loc, seq_lens, S, is_causal=True, sliding_window_q=None
+    )
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
 def test_split_head_dim_never_widens_the_dot():
     """Whatever the head dim, the split is never worse than one block.
 
@@ -358,7 +398,7 @@ def test_split_head_dim_declines_when_it_would_not_pay(Lk: int):
 @pytest.mark.parametrize("on_gfx115x", [True, False])
 def test_get_head_dim_blocks_is_gated(monkeypatch: pytest.MonkeyPatch, on_gfx115x):
     """The split is only taken where it has been measured."""
-    monkeypatch.setattr(prefill_ops, "_ON_GFX115X", on_gfx115x)
+    monkeypatch.setattr(prefill_ops, "_on_gfx115x", lambda: on_gfx115x)
     assert _get_head_dim_blocks(72) == ((64, 16) if on_gfx115x else (128, 0))
     assert _get_head_dim_blocks(128) == (128, 0)
 
@@ -366,7 +406,7 @@ def test_get_head_dim_blocks_is_gated(monkeypatch: pytest.MonkeyPatch, on_gfx115
 @pytest.mark.parametrize("D", [72, 96])
 def test_context_attention_split_d_forced(monkeypatch: pytest.MonkeyPatch, D: int):
     """Exercise the split-D kernel even off gfx115x, so CI always covers it."""
-    monkeypatch.setattr(prefill_ops, "_ON_GFX115X", True)
+    monkeypatch.setattr(prefill_ops, "_on_gfx115x", lambda: True)
     assert _get_head_dim_blocks(D)[1] > 0
 
     torch.manual_seed(42)
@@ -391,3 +431,40 @@ def test_context_attention_split_d_forced(monkeypatch: pytest.MonkeyPatch, D: in
         )
 
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("head_dim", [72, 80])
+def test_gfx115x_encoder_launch(
+    monkeypatch: pytest.MonkeyPatch, head_dim: int, dtype: torch.dtype
+):
+    """The 64 + 16 split-D head dims take a tile narrower still, with 4 warps."""
+    monkeypatch.setattr(prefill_ops, "_prefer_narrow_kv_tile", lambda: True)
+    monkeypatch.setattr(prefill_ops, "_on_gfx115x", lambda: True)
+    assert _get_encoder_launch(head_dim, dtype) == (16, 4)
+
+
+@pytest.mark.parametrize("head_dim", [64, 88, 96, 128])
+def test_gfx115x_encoder_launch_leaves_other_head_dims_alone(
+    monkeypatch: pytest.MonkeyPatch, head_dim: int
+):
+    """Everything else is slower this way and keeps the RDNA tile."""
+    monkeypatch.setattr(prefill_ops, "_prefer_narrow_kv_tile", lambda: True)
+    monkeypatch.setattr(prefill_ops, "_on_gfx115x", lambda: True)
+    assert _get_encoder_launch(head_dim, torch.bfloat16) is None
+
+
+@pytest.mark.parametrize(
+    "on_gfx115x,dtype",
+    [
+        (False, torch.bfloat16),  # any other architecture
+        (True, torch.float32),  # untuned dtype
+    ],
+)
+def test_get_encoder_launch_declines(
+    monkeypatch: pytest.MonkeyPatch, on_gfx115x: bool, dtype: torch.dtype
+):
+    """Everything outside the measured envelope keeps the generic config."""
+    monkeypatch.setattr(prefill_ops, "_prefer_narrow_kv_tile", lambda: True)
+    monkeypatch.setattr(prefill_ops, "_on_gfx115x", lambda: on_gfx115x)
+    assert _get_encoder_launch(72, dtype) is None

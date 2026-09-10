@@ -31,11 +31,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
 
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX115X
-else:
-    _ON_GFX115X = False
-
 
 def _prefer_narrow_kv_tile() -> bool:
     """RDNA3/RDNA4 prefer a narrower KV tile than the shared default."""
@@ -45,6 +40,15 @@ def _prefer_narrow_kv_tile() -> bool:
 
     # RDNA3/RDNA4 only: on_gfx1x() excludes gfx10xx and gfx1250.
     return on_gfx1x()
+
+
+def _on_gfx115x() -> bool:
+    """The RDNA3.5 APUs, a subset of the parts _prefer_narrow_kv_tile covers."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx115x
+
+    return on_gfx115x()
 
 
 @triton.jit
@@ -76,6 +80,7 @@ def _fwd_kernel(
     SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
+    HEAD_STRIDE_ALIGNED_8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -92,13 +97,32 @@ def _fwd_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+
+    # In the packed [seq, heads, dim] layout the head stride equals head_dim.
+    # When head_dim is a multiple of 8 but not 16 (e.g. 72), Triton's integer
+    # auto-specialization does not attach tt.divisibility=8 to stride_*h -- its
+    # threshold is 16 -- so the D-contiguous Q/K/V loads are treated as 2-byte
+    # aligned and lower to scalar loads instead of vectorized 16-byte ones.
+    # Hinting the head offset restores the alignment fact. The wrapper sets the
+    # flag from the actual runtime strides, so this stays sound for
+    # non-contiguous views.
+    off_h_q = cur_head * stride_qh
+    off_h_k = cur_kv_head * stride_kh
+    off_h_v = cur_kv_head * stride_vh
+    off_h_o = cur_head * stride_oh
+    if HEAD_STRIDE_ALIGNED_8:
+        off_h_q = tl.multiple_of(off_h_q, 8)
+        off_h_k = tl.multiple_of(off_h_k, 8)
+        off_h_v = tl.multiple_of(off_h_v, 8)
+        off_h_o = tl.multiple_of(off_h_o, 8)
+
     off_q = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-        + cur_head * stride_qh
+        + off_h_q
         + offs_d[None, :]
     )
-    off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
-    off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :]
+    off_k = offs_n[None, :] * stride_kbs + off_h_k + offs_d[:, None]
+    off_v = offs_n[:, None] * stride_vbs + off_h_v + offs_d[None, :]
 
     mask_d = offs_d < Lk
 
@@ -122,15 +146,11 @@ def _fwd_kernel(
         mask_dt = offs_dt < Lk
         off_qt = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-            + cur_head * stride_qh
+            + off_h_q
             + offs_dt[None, :]
         )
-        off_kt = (
-            offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_dt[:, None]
-        )
-        off_vt = (
-            offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_dt[None, :]
-        )
+        off_kt = offs_n[None, :] * stride_kbs + off_h_k + offs_dt[:, None]
+        off_vt = offs_n[:, None] * stride_vbs + off_h_v + offs_dt[None, :]
         qt = tl.load(
             Q + off_qt,
             mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
@@ -256,7 +276,7 @@ def _fwd_kernel(
     acc = acc / l_i[:, None]
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-        + cur_head * stride_oh
+        + off_h_o
         + offs_d[None, :]
     )
     out_ptrs = Out + off_o
@@ -267,7 +287,7 @@ def _fwd_kernel(
         acc_t = acc_t / l_i[:, None]
         off_o_tail = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-            + cur_head * stride_oh
+            + off_h_o
             + offs_dt[None, :]
         )
         tl.store(
@@ -322,9 +342,58 @@ def _get_head_dim_blocks(Lk: int) -> tuple[int, int]:
         ``(BLOCK_DMODEL, BLOCK_DMODEL_TAIL)``.
 
     """
-    if _ON_GFX115X:
+    if _on_gfx115x():
         return _split_head_dim(Lk)
     return triton.next_power_of_2(Lk), 0
+
+
+def _gfx115x_encoder_launch(
+    head_dim: int, dtype: torch.dtype
+) -> tuple[int, int] | None:
+    """KV tile and warp count for this kernel on gfx115x.
+
+    The head dims that split into a 64-wide main block and a 16-wide tail --
+    72 for SigLIP and Qwen3-VL, 80 for Qwen2.5-VL -- want a KV tile narrower
+    still than the one ``_prefer_narrow_kv_tile`` picks, and 4 warps rather
+    than 8. Measured on gfx1151, that is worth 1.26x at both. It does not
+    generalise: 64, 88 and 96 are ~5% slower this way and 128 is 2.3x slower,
+    so they keep the wider tile.
+
+    Args:
+        head_dim: Attention head dimension.
+        dtype: Query dtype; only the 16-bit paths were tuned.
+
+    Returns:
+        ``(BLOCK_N, num_warps)``, or None to keep the generic config.
+
+    """
+    if dtype not in (torch.bfloat16, torch.float16):
+        return None
+    if _split_head_dim(head_dim) != (64, 16):
+        return None
+    return 16, 4
+
+
+def _get_encoder_launch(head_dim: int, dtype: torch.dtype) -> tuple[int, int] | None:
+    """Pick the launch config for this architecture.
+
+    Only the parts _prefer_narrow_kv_tile already narrows are considered, so
+    this refines that tile rather than competing with it. Add a branch here to
+    tune another architecture; the generic config is whatever falls through.
+
+    Args:
+        head_dim: Attention head dimension.
+        dtype: Query dtype.
+
+    Returns:
+        ``(BLOCK_N, num_warps)``, or None to keep the generic config.
+
+    """
+    if not _prefer_narrow_kv_tile():
+        return None
+    if _on_gfx115x():
+        return _gfx115x_encoder_launch(head_dim, dtype)
+    return None
 
 
 def get_block_size(dtype: torch.dtype) -> int:
@@ -358,9 +427,19 @@ def context_attention_fwd(
     b_seq_len: [b]
     out: [b * s, head, head_dim]
     """
-    BLOCK = get_block_size(q.dtype)
-
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+
+    block_m = block_n = get_block_size(q.dtype)
+    num_warps = 4 if Lk <= 64 else 8
+
+    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
+    # leaves dtypes whose default tile is already 32, such as float32, alone.
+    if _prefer_narrow_kv_tile():
+        block_n = min(block_n, 32)
+
+    tuned_launch = _get_encoder_launch(Lk, q.dtype)
+    if tuned_launch is not None:
+        block_n, num_warps = tuned_launch
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
@@ -371,17 +450,21 @@ def context_attention_fwd(
     if sinks is not None:
         assert sinks.shape[0] == head, "Sinks must be num_query_heads size"
 
-    grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
-    num_warps = 4 if Lk <= 64 else 8
-
-    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
-    # leaves dtypes whose default tile is already 32, such as float32, alone.
-    BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
+    grid = (batch, head, triton.cdiv(max_input_len, block_m))
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
 
     block_dmodel, block_dmodel_tail = _get_head_dim_blocks(Lk)
+
+    # Checked against the actual runtime strides rather than head_dim, so the
+    # hint stays sound for non-contiguous Q/K/V/O views. See _fwd_kernel.
+    head_stride_aligned_8 = (
+        q.stride(1) % 8 == 0
+        and k.stride(1) % 8 == 0
+        and v.stride(1) % 8 == 0
+        and o.stride(1) % 8 == 0
+    )
 
     _fwd_kernel[grid](
         q,
@@ -401,10 +484,10 @@ def context_attention_fwd(
         o.stride(0),
         o.stride(1),
         kv_group_num=kv_group_num,
-        BLOCK_M=BLOCK,
+        BLOCK_M=block_m,
         BLOCK_DMODEL=block_dmodel,
         BLOCK_DMODEL_TAIL=block_dmodel_tail,
-        BLOCK_N=BLOCK_N,
+        BLOCK_N=block_n,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
@@ -413,4 +496,5 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        HEAD_STRIDE_ALIGNED_8=head_stride_aligned_8,
     )
