@@ -102,10 +102,12 @@ def _builder(
         _supports_segmented_dcp_verify=rocm_aiter_mla._segmented_dcp_verify_supported(
             dcp_world_size, 1
         ),
+        _supports_native_dcp_verify=False,
         # Derived once in the real constructor, so derive it once here too.
         _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
+        _graph_dcp_global_kv_indptr=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -282,6 +284,44 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
     )
 
     assert metadata.dcp_verify is not None
+
+
+def test_native_dcp_verify_uses_global_indptr_and_regular_page_table(monkeypatch):
+    qlen = 4
+    builder = _builder(
+        mtp_decode_qlen=qlen,
+        dcp_world_size=2,
+        kv_cache_dtype="fp8",
+        kernel_block_size=2,
+    )
+    builder._supports_native_dcp_verify = True
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _ExpandPageIndicesKernel()
+    )
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.tensor([[7, 8, 9], [10, 11, 12]], dtype=torch.int32),
+        seq_lens_device=torch.tensor([5, 6], dtype=torch.int32),
+        max_seq_len=6,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
+    )
+
+    assert metadata.dcp_verify is None
+    assert metadata.dcp_global_kv_indptr.tolist() == [0, 10, 22]
+    assert metadata.paged_kv_indices is not None
+    # Work scheduling covers every local KV entry. The native AITER kernel
+    # applies the global causal bound using dcp_global_kv_indptr.
+    assert get_mla_metadata_v1.call_args.args[5] is False
 
 
 def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
@@ -478,6 +518,160 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     reference = torch.empty_like(output)
     q_nope_fp32 = q_nope.float()
     q_pe_fp32 = q_pe.float()
+    for query_pos in range(qlen):
+        visible = global_seq_len - qlen + query_pos + 1
+        keys = kv_dequant[:visible]
+        scores = torch.einsum(
+            "hd,nd->hn", q_nope_fp32[query_pos], keys[:, :kv_lora_rank]
+        )
+        scores += torch.einsum(
+            "hd,nd->hn", q_pe_fp32[query_pos], keys[:, kv_lora_rank:]
+        )
+        probs = torch.softmax(scores * sm_scale, dim=-1)
+        reference[query_pos] = probs @ keys[:, :kv_lora_rank]
+
+    torch.testing.assert_close(output, reference, rtol=3e-2, atol=3e-2)
+
+
+def test_native_dcp_verify_matches_causal_attention():
+    """Native AITER CP masking must match full causal attention."""
+    from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    dcp_world_size = 2
+    qlen = 4
+    num_heads = 64
+    kv_lora_rank = 512
+    rope_dim = 64
+    head_dim = kv_lora_rank + rope_dim
+    global_seq_len = 259
+    q_scale = 0.02
+    kv_scale = 0.02
+    sm_scale = head_dim**-0.5
+
+    q_nope_source = torch.randn(
+        qlen, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+    )
+    q_pe_source = torch.randn(
+        qlen, num_heads, rope_dim, dtype=torch.bfloat16, device=device
+    )
+    q_nope = (q_nope_source / q_scale).to(torch.float8_e4m3fn)
+    q_pe = (q_pe_source / q_scale).to(torch.float8_e4m3fn)
+    kv_source = torch.randn(
+        global_seq_len, head_dim, dtype=torch.float32, device=device
+    )
+    kv_fp8 = (kv_source / kv_scale).to(torch.float8_e4m3fn)
+    kv_dequant = kv_fp8.float() * kv_scale
+
+    partials = []
+    for dcp_rank in range(dcp_world_size):
+        local_kv = kv_fp8[dcp_rank::dcp_world_size]
+        qo_indptr = torch.tensor([0, qlen], dtype=torch.int32, device=device)
+        local_kv_indptr = torch.tensor(
+            [0, local_kv.shape[0]], dtype=torch.int32, device=device
+        )
+        last_page_lens = torch.ones(1, dtype=torch.int32, device=device)
+        metadata_info = get_mla_metadata_info_v1(
+            1,
+            qlen,
+            num_heads,
+            dtypes.fp8,
+            dtypes.fp8,
+            is_sparse=False,
+            fast_mode=True,
+        )
+        work_buffers = [
+            torch.empty(size, dtype=dtype, device=device)
+            for size, dtype in metadata_info
+        ]
+        (
+            work_meta_data,
+            work_indptr,
+            work_info_set,
+            reduce_indptr,
+            reduce_final_map,
+            reduce_partial_map,
+        ) = work_buffers
+        get_mla_metadata_v1(
+            qo_indptr,
+            local_kv_indptr,
+            last_page_lens,
+            num_heads,
+            1,
+            False,
+            work_meta_data,
+            work_info_set,
+            work_indptr,
+            reduce_indptr,
+            reduce_final_map,
+            reduce_partial_map,
+            page_size=1,
+            kv_granularity=16,
+            max_seqlen_qo=qlen,
+            uni_seqlen_qo=qlen,
+            fast_mode=True,
+            dtype_q=dtypes.fp8,
+            dtype_kv=dtypes.fp8,
+            is_cp_round_robin=True,
+        )
+        decode = SimpleNamespace(
+            max_qo_len=qlen,
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=local_kv_indptr,
+            paged_kv_indices=torch.arange(
+                local_kv.shape[0], dtype=torch.int32, device=device
+            ),
+            paged_kv_last_page_len=last_page_lens,
+            dcp_global_kv_indptr=torch.tensor(
+                [0, global_seq_len], dtype=torch.int32, device=device
+            ),
+            use_gluon_decode=False,
+            use_gluon_verify=False,
+            dcp_verify=None,
+            has_persistent_metadata=True,
+            attn_out_dtype=torch.bfloat16,
+        )
+        attn_metadata = SimpleNamespace(
+            decode=decode,
+            causal=True,
+            work_meta_data=work_meta_data,
+            work_indptr=work_indptr,
+            work_info_set=work_info_set,
+            reduce_indptr=reduce_indptr,
+            reduce_final_map=reduce_final_map,
+            reduce_partial_map=reduce_partial_map,
+        )
+        impl = object.__new__(AiterMLAImpl)
+        impl.num_heads = num_heads // dcp_world_size
+        impl.dcp_world_size = dcp_world_size
+        impl.dcp_rank = dcp_rank
+        impl.kv_cache_dtype = "fp8"
+        impl.kv_lora_rank = kv_lora_rank
+        impl.qk_rope_head_dim = rope_dim
+        impl.scale = sm_scale
+        layer = SimpleNamespace(
+            _q_scale=torch.tensor(q_scale, device=device),
+            _k_scale=torch.tensor(kv_scale, device=device),
+        )
+
+        partials.append(
+            impl.forward_mqa(
+                (q_nope, q_pe), local_kv.view(-1, 1, head_dim), attn_metadata, layer
+            )
+        )
+
+    output, lse = partials[0]
+    assert lse is not None
+    for rank_output, rank_lse in partials[1:]:
+        assert rank_lse is not None
+        output, lse = _lse_combine_natural(
+            output.float(), lse, rank_output.float(), rank_lse, torch.float32
+        )
+
+    reference = torch.empty_like(output)
+    q_nope_fp32 = q_nope.float() * q_scale
+    q_pe_fp32 = q_pe.float() * q_scale
     for query_pos in range(qlen):
         visible = global_seq_len - qlen + query_pos + 1
         keys = kv_dequant[:visible]

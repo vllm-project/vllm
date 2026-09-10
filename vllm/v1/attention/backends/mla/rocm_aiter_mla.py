@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import inspect
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
@@ -215,6 +217,20 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _native_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
+    """Whether the installed AITER exposes native causal DCP verification."""
+    if os.environ.get("VLLM_ROCM_AITER_NATIVE_DCP_VERIFY", "0") != "1":
+        return False
+    if dcp_world_size <= 1 or cp_interleave != 1:
+        return False
+    try:
+        params = inspect.signature(_get_aiter_mla_decode()).parameters
+    except (ImportError, ModuleNotFoundError, ValueError, TypeError):
+        return False
+    return {"g_kv_indptr", "cp_world_size", "cp_rank", "causal"} <= set(params)
+
+
 def _aiter_mla_small_head_mode() -> str:
     """Small-head (<16) MLA decode kernel selection.
 
@@ -380,6 +396,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     paged_kv_last_page_len: torch.Tensor | None = None
     # The query indptr, shape : [num_decode + 1]
     qo_indptr: torch.Tensor | None = None
+    # Global KV indptr used by AITER's native round-robin DCP causal mask.
+    dcp_global_kv_indptr: torch.Tensor | None = None
     # The dtype of MLA out tensor
     attn_out_dtype: torch.dtype = torch.bfloat16
     # The max query output length: int
@@ -489,15 +507,22 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        supports_native_dcp_verify = _native_dcp_verify_supported(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+        )
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             AiterMLAMetadata,
-            supports_dcp_with_varlen=supports_segmented_dcp_verify,
+            supports_dcp_with_varlen=(
+                supports_segmented_dcp_verify or supports_native_dcp_verify
+            ),
         )
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
+        self._supports_native_dcp_verify = supports_native_dcp_verify
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -637,6 +662,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # require stable addresses while row lengths vary between replays.
         self._dcp_verify_buffers: AiterMLADCPVerifyMetadata | None = None
         self._graph_seq_lens: torch.Tensor | None = None
+        self._graph_dcp_global_kv_indptr: torch.Tensor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
@@ -650,6 +676,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._graph_seq_lens = torch.zeros(
                 max_num_reqs, dtype=torch.int32, device=device
             )
+
+            if self._supports_native_dcp_verify:
+                self._graph_dcp_global_kv_indptr = torch.zeros(
+                    max_num_reqs + 1, dtype=torch.int32, device=device
+                )
 
             if self._supports_segmented_dcp_verify and self._mtp_decode_qlen > 1:
                 # A DCP rank's shard of the longest sequence bounds every verify
@@ -1063,9 +1094,43 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.dcp_world_size,
             causal,
         )
-        use_segmented_dcp_verify = (
-            self._supports_segmented_dcp_verify and max_qo_len > 1
+        use_native_dcp_verify = (
+            self._supports_native_dcp_verify and max_qo_len > 1 and causal
         )
+        use_segmented_dcp_verify = (
+            self._supports_segmented_dcp_verify
+            and max_qo_len > 1
+            and not use_native_dcp_verify
+        )
+
+        dcp_global_kv_indptr = None
+        if use_native_dcp_verify:
+            assert dcp_tot_seq_lens_device is not None
+            global_seq_lens = dcp_tot_seq_lens_device
+            if pad_uniform_mtp:
+                global_seq_lens = torch.where(
+                    qo_lens_device > 0,
+                    global_seq_lens,
+                    global_seq_lens.new_full((), max_qo_len),
+                )
+            global_indptr_src = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.int32, device=device),
+                    global_seq_lens.cumsum(dim=0, dtype=torch.int32),
+                ]
+            )
+            if self._graph_dcp_global_kv_indptr is not None:
+                self._graph_dcp_global_kv_indptr[: 1 + num_kernel_reqs].copy_(
+                    global_indptr_src, non_blocking=True
+                )
+                self._graph_dcp_global_kv_indptr[1 + num_kernel_reqs :].fill_(
+                    global_indptr_src[-1]
+                )
+                dcp_global_kv_indptr = self._graph_dcp_global_kv_indptr[
+                    : 1 + num_kernel_reqs
+                ]
+            else:
+                dcp_global_kv_indptr = global_indptr_src
 
         # Segmented DCP verify carries its own per-row subpage table, so the
         # flat per-token view is dead work for it. Leave the buffer alone and
@@ -1181,7 +1246,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
-                causal,
+                causal and not use_native_dcp_verify,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
                 self._mla_work_indptr,
@@ -1233,6 +1298,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
             qo_indptr=qo_indptr,
+            dcp_global_kv_indptr=dcp_global_kv_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             max_qo_len=max_qo_len,
             min_kv_seq_len=min_kv_seq_len,
@@ -2032,7 +2098,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.attn_out_dtype,
             )
 
-        if self.dcp_world_size > 1 and int(decode.max_qo_len) > 1:
+        if (
+            attn_metadata.causal
+            and self.dcp_world_size > 1
+            and int(decode.max_qo_len) > 1
+            and getattr(decode, "dcp_global_kv_indptr", None) is None
+        ):
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires segmented MLA."
             )
@@ -2087,6 +2158,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # The vLLM custom-op wrapper exposes only the in-place output and
             # drops aiter's final LSE, which the cross-shard merge needs, so go
             # through aiter's native entry point on the DCP path.
+            dcp_global_kv_indptr = getattr(decode, "dcp_global_kv_indptr", None)
             _, lse = _get_aiter_mla_decode()(
                 mla_padded_q,
                 kv_buffer.view(-1, 1, 1, mla_padded_q.shape[-1]),
@@ -2097,13 +2169,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.paged_kv_last_page_len,
                 decode.max_qo_len,
                 sm_scale=self.scale,
-                return_lse=True,
+                return_lse=self.dcp_world_size > 1,
+                causal=attn_metadata.causal,
+                g_kv_indptr=dcp_global_kv_indptr,
+                cp_world_size=(
+                    self.dcp_world_size if dcp_global_kv_indptr is not None else 1
+                ),
+                cp_rank=(self.dcp_rank if dcp_global_kv_indptr is not None else 0),
                 **mla_kwargs,
             )
-            assert lse is not None, (
-                "aiter mla_decode_fwd(return_lse=True) returned no LSE; upgrade "
-                "aiter to a build with decode LSE support."
-            )
+            if self.dcp_world_size > 1:
+                assert lse is not None, (
+                    "aiter mla_decode_fwd(return_lse=True) returned no LSE; "
+                    "upgrade aiter to a build with decode LSE support."
+                )
         else:
             rocm_aiter_ops.mla_decode_fwd(
                 mla_padded_q,
