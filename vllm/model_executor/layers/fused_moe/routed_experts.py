@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
+from vllm import envs
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -168,7 +169,25 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
+        # need full intermediate size pre-sharding for WNA16 act order
+        if self._needs_intermediate_size_param(self.quant_method):
+            moe_quant_params["intermediate_size_full"] = (
+                self.moe_config.intermediate_size
+            )
+
+        # GPU/CPU mixed mode: construct the expert weights on the host when
+        # VLLM_EXPERTS_LOAD_DEVICE=cpu. create_weights() allocates with no
+        # explicit device, so a scoped default device keeps the parameters on
+        # CPU from construction onward (the weight loaders then copy into them
+        # in place). Everything else the layer owns -- router tables, expert
+        # maps, the shared experts -- keeps its normal device, so only the
+        # expert weights move. This is what lets a MoE whose experts exceed
+        # device memory build without OOM.
+        if envs.VLLM_EXPERTS_LOAD_DEVICE == "cpu":
+            with torch.device("cpu"):
+                self.quant_method.create_weights(layer=self, **moe_quant_params)
+        else:
+            self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
 

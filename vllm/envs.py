@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_EXPERTS_LOAD_DEVICE: Literal["gpu", "cpu"] = "gpu"
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
@@ -615,6 +616,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
+    # Device that holds the routed-expert weights. "cpu" enables the
+    # GPU/CPU mixed mode: attention and every other layer stay on the
+    # compute device while expert weights are constructed and kept on the
+    # host, so a MoE whose experts exceed device memory no longer OOMs at
+    # model construction. Orthogonal to VLLM_TARGET_DEVICE.
+    "VLLM_EXPERTS_LOAD_DEVICE": env_with_choices(
+        "VLLM_EXPERTS_LOAD_DEVICE", "gpu", ["gpu", "cpu"], case_sensitive=False
+    ),
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: (
         os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
