@@ -340,6 +340,42 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize(
+    ("encoder_budget", "expected_encoder_inputs"),
+    [
+        (None, [0]),
+        (1200, [0, 1]),
+    ],
+)
+def test_encoder_budget_controls_concurrent_mm_residency(
+    encoder_budget: int | None,
+    expected_encoder_inputs: list[int],
+):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_num_encoder_input_tokens=encoder_budget,
+        encoder_cache_size=encoder_budget,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=1300,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=600),
+                PlaceholderRange(offset=601, length=600),
+            ]
+        ],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_encoder_inputs[request.request_id] == (
+        expected_encoder_inputs
+    )
+
+
 @pytest.mark.parametrize("has_running", [True, False])
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new

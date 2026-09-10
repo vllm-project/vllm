@@ -52,6 +52,8 @@ def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
+    max_num_encoder_input_tokens: int | None = None,
+    encoder_cache_size: int | None = None,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
@@ -102,6 +104,13 @@ def create_scheduler(
         model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
+    encoder_scheduler_kwargs = {}
+    if max_num_encoder_input_tokens is not None:
+        encoder_scheduler_kwargs["max_num_encoder_input_tokens"] = (
+            max_num_encoder_input_tokens
+        )
+    if encoder_cache_size is not None:
+        encoder_scheduler_kwargs["encoder_cache_size"] = encoder_cache_size
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -113,6 +122,7 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
+        **encoder_scheduler_kwargs,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

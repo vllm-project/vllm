@@ -367,6 +367,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             human_readable_int_args = {
                 "max_num_batched_tokens",
                 "max_num_scheduled_tokens",
+                "max_num_encoder_input_tokens",
+                "encoder_cache_size",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
                 "max_num_queued_tokens",
@@ -687,6 +689,10 @@ class EngineArgs:
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
+    max_num_encoder_input_tokens: int | None = (
+        SchedulerConfig.max_num_encoder_input_tokens
+    )
+    encoder_cache_size: int | None = SchedulerConfig.encoder_cache_size
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -1630,6 +1636,14 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--max-num-encoder-input-tokens",
+            **scheduler_kwargs["max_num_encoder_input_tokens"],
+        )
+        scheduler_group.add_argument(
+            "--encoder-cache-size",
+            **scheduler_kwargs["encoder_cache_size"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -2397,6 +2411,13 @@ class EngineArgs:
         assert model_config.max_model_len is not None, (
             "max_model_len must be set by this point"
         )
+        encoder_scheduler_kwargs: dict[str, Any] = {}
+        if self.max_num_encoder_input_tokens is not None:
+            encoder_scheduler_kwargs["max_num_encoder_input_tokens"] = (
+                self.max_num_encoder_input_tokens
+            )
+        if self.encoder_cache_size is not None:
+            encoder_scheduler_kwargs["encoder_cache_size"] = self.encoder_cache_size
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -2418,6 +2439,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            **encoder_scheduler_kwargs,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

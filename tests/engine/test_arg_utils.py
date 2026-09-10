@@ -9,7 +9,13 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CompilationConfig,
+    ModelConfig,
+    SchedulerConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -688,6 +694,47 @@ def test_human_readable_other_args():
     assert args.max_num_batched_tokens == 2_000
     args = parser.parse_args(["--max-num-batched-tokens", "4K"])
     assert args.max_num_batched_tokens == 2**10 * 4
+
+    args = parser.parse_args(
+        [
+            "--max-num-encoder-input-tokens",
+            "64K",
+            "--encoder-cache-size",
+            "1m",
+        ]
+    )
+    assert args.max_num_encoder_input_tokens == 2**16
+    assert args.encoder_cache_size == 1_000_000
+
+
+def test_encoder_budget_args_propagate_to_scheduler_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--max-num-batched-tokens",
+            "2K",
+            "--max-num-encoder-input-tokens",
+            "64K",
+            "--encoder-cache-size",
+            "128K",
+        ]
+    )
+
+    scheduler_config = (
+        EngineArgs.from_cli_args(args=args).create_engine_config().scheduler_config
+    )
+
+    assert scheduler_config.max_num_encoder_input_tokens == 2**16
+    assert scheduler_config.encoder_cache_size == 2**17
+
+
+def test_encoder_budget_args_default_to_max_num_batched_tokens():
+    scheduler_config = SchedulerConfig.default_factory(max_num_batched_tokens=4096)
+
+    assert scheduler_config.max_num_encoder_input_tokens == 4096
+    assert scheduler_config.encoder_cache_size == 4096
 
 
 def test_numa_bind_args():

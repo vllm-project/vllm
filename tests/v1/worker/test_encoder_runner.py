@@ -25,10 +25,25 @@ from vllm.multimodal.inputs import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+def test_v1_profile_reserves_full_encoder_cache():
+    runner = object.__new__(GPUModelRunner)
+    runner.encoder_cache = {}
+    runner.inputs_embeds_size = HIDDEN
+    runner.dtype = torch.float32
+    runner.device = torch.device("cpu")
+
+    runner._reserve_encoder_cache_for_profile(cache_size=7)
+
+    reservation = runner.encoder_cache["tmp_profile_reservation"]
+    assert reservation.shape == (7, HIDDEN)
+    assert reservation.dtype == torch.float32
 
 
 def _model_state(cache: EncoderCache) -> MagicMock:
