@@ -11,12 +11,22 @@ import torch
 
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.quantization import resolve_quantization_config
+from vllm.config.model import ModelConfig
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    resolve_quantization_config,
+)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
     OnlineMxfp4SharedExpertLoader,
 )
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    mxfp4_quantize,
 )
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
@@ -167,6 +177,79 @@ def test_online_shared_expert_quantization_fusion_tp() -> None:
     assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=0), w2[:, :4])
     assert torch.equal(loader._tp_shard(w13, "w3", tp_size=2, tp_rank=1), w13[4:])
     assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=1), w2[:, 4:])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MXFP4 shared-expert loading requires ROCm.",
+)
+def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    """A BF16 shared expert is quantized while routed MXFP4 weights are loaded."""
+    default_vllm_config.model_config = ModelConfig()
+    hidden_size = intermediate_size = 64
+    num_routed_experts = 2
+    device = current_platform.device_type
+    online_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*shared_expert*": "mxfp4"})
+    )
+    quant_config = QuarkConfig(_QUARK_MXFP4_CONFIG)
+    quant_config.online_quantization_config = online_config
+
+    with torch.device(device):
+        runner = FusedMoEFactory(
+            num_experts=num_routed_experts,
+            top_k=1,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            n_shared_experts=1,
+            fuse_shared_experts=True,
+            shared_expert_prefix="model.layers.0.mlp.shared_expert",
+            prefix="model.layers.0.mlp.experts",
+            quant_config=quant_config,
+        )
+        layer = runner.routed_experts
+        assert isinstance(layer.quant_method, QuarkOCP_MX_MoEMethod)
+
+        routed_gate, _ = mxfp4_quantize(
+            torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
+        )
+        routed_up, _ = mxfp4_quantize(
+            torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
+        )
+        routed_down, _ = mxfp4_quantize(
+            torch.randn(hidden_size, intermediate_size, dtype=torch.bfloat16)
+        )
+        shared_gate = torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
+        shared_up = torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
+        shared_down = torch.randn(hidden_size, intermediate_size, dtype=torch.bfloat16)
+
+        list(
+            layer.load_weights(
+                [
+                    ("0.gate_proj.weight", routed_gate),
+                    ("0.up_proj.weight", routed_up),
+                    ("0.down_proj.weight", routed_down),
+                    ("2.gate_proj.weight", shared_gate),
+                    ("2.up_proj.weight", shared_up),
+                    ("2.down_proj.weight", shared_down),
+                ]
+            )
+        )
+
+    expected_gate, expected_gate_scale = mxfp4_quantize(shared_gate)
+    expected_up, expected_up_scale = mxfp4_quantize(shared_up)
+    expected_down, expected_down_scale = mxfp4_quantize(shared_down)
+    assert torch.equal(layer.w13_weight[2, :intermediate_size], expected_gate)
+    assert torch.equal(layer.w13_weight[2, intermediate_size:], expected_up)
+    assert torch.equal(layer.w2_weight[2], expected_down)
+    assert torch.equal(
+        layer.w13_weight_scale[2, :intermediate_size], expected_gate_scale
+    )
+    assert torch.equal(layer.w13_weight_scale[2, intermediate_size:], expected_up_scale)
+    assert torch.equal(layer.w2_weight_scale[2], expected_down_scale)
 
 
 @pytest.mark.skipif(
