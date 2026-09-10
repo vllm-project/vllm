@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -116,7 +116,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
-        _PREPARE_DFLASH_INPUTS_KERNEL.register_warmup(speculator=self)
+        prepare_dflash_inputs.register_warmup(speculator=self)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -412,7 +412,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert self.draft_kv_cache_group_id >= 0
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
-            _PREPARE_DFLASH_INPUTS_KERNEL(
+            prepare_dflash_inputs(
                 self.input_buffers,
                 self.block_tables.slot_mappings[gid],
                 self.context_positions,
@@ -778,11 +778,11 @@ def _prepare_dflash_warmup_inputs(*, speculator: DFlashSpeculator):
     return cases
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_prepare_dflash_inputs_kernel,
     warmup_inputs=_prepare_dflash_warmup_inputs,
 )
-def _PREPARE_DFLASH_INPUTS_KERNEL(
+def prepare_dflash_inputs(
     input_buffers: InputBuffers,
     query_slot_mapping: torch.Tensor,
     context_positions: torch.Tensor,

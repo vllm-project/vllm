@@ -9,7 +9,7 @@ from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -65,7 +65,7 @@ def _scatter_states_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_scatter_states_kernel,
     warmup_inputs=_scatter_states_warmup_inputs,
 )

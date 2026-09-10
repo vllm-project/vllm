@@ -6,7 +6,7 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, tldevice, triton
@@ -1316,24 +1316,24 @@ def _insert_resampled_warmup_inputs(
     )
 
 
-_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = triton_kernel(
+_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = triton_kernel_dispatcher_with_warmup(
     warmup_inputs=_compute_local_logits_stats_warmup_inputs
 )(_compute_local_logits_stats_kernel)
-_COMPUTE_CUMULATIVE_LOG_P_KERNEL = triton_kernel(
+_COMPUTE_CUMULATIVE_LOG_P_KERNEL = triton_kernel_dispatcher_with_warmup(
     warmup_inputs=_compute_cumulative_log_p_warmup_inputs
 )(_compute_cumulative_log_p_kernel)
-_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = triton_kernel(
+_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = triton_kernel_dispatcher_with_warmup(
     warmup_inputs=_compute_local_residual_mass_warmup_inputs
 )(_compute_local_residual_mass_kernel)
-_REJECTION_KERNEL = triton_kernel(warmup_inputs=_rejection_warmup_inputs)(
-    _rejection_kernel
-)
-_RESAMPLE_KERNEL = triton_kernel(warmup_inputs=_resample_warmup_inputs)(
-    _resample_kernel
-)
-_INSERT_RESAMPLED_KERNEL = triton_kernel(warmup_inputs=_insert_resampled_warmup_inputs)(
-    _insert_resampled_kernel
-)
+_REJECTION_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_rejection_warmup_inputs
+)(_rejection_kernel)
+_RESAMPLE_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_resample_warmup_inputs
+)(_resample_kernel)
+_INSERT_RESAMPLED_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_insert_resampled_warmup_inputs
+)(_insert_resampled_kernel)
 
 
 def rejection_sample(

@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -738,7 +738,7 @@ def _wna16_warmup_inputs(
                     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=fused_moe_kernel_gptq_awq,
     warmup_inputs=_wna16_warmup_inputs,
 )

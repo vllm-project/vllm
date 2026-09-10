@@ -10,7 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
@@ -134,9 +134,9 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
-        _SELECTOR_WALK_KERNEL.register_warmup(speculator=self)
+        _selector_walk.register_warmup(speculator=self)
         if self.draft_logits is not None:
-            _CACHE_DRAFT_LOGITS_KERNEL.register_warmup(speculator=self)
+            _cache_draft_logits.register_warmup(speculator=self)
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -151,7 +151,7 @@ class DFlash2Speculator(DFlashSpeculator):
         num_reqs: int,
     ) -> None:
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _SELECTOR_WALK_KERNEL(
+        _selector_walk(
             scores.contiguous(),
             candidate_ids.contiguous(),
             self.sample_pos,
@@ -172,7 +172,7 @@ class DFlash2Speculator(DFlashSpeculator):
         draft_logits = self.draft_logits
         assert draft_logits is not None
         block_k = triton.next_power_of_2(self.selector_top_k)
-        _CACHE_DRAFT_LOGITS_KERNEL(
+        _cache_draft_logits(
             draft_logits,
             self._cached_candidate_ids,
             candidate_ids,
@@ -244,8 +244,10 @@ def _selector_walk_warmup_inputs(*, speculator: DFlash2Speculator):
     )
 
 
-@triton_kernel(kernel=_selector_walk_kernel, warmup_inputs=_selector_walk_warmup_inputs)
-def _SELECTOR_WALK_KERNEL(
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_selector_walk_kernel, warmup_inputs=_selector_walk_warmup_inputs
+)
+def _selector_walk(
     scores: torch.Tensor,
     candidate: torch.Tensor,
     sample_pos: torch.Tensor,
@@ -286,11 +288,11 @@ def _cache_draft_logits_warmup_inputs(*, speculator: DFlash2Speculator):
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_cache_draft_logits_kernel,
     warmup_inputs=_cache_draft_logits_warmup_inputs,
 )
-def _CACHE_DRAFT_LOGITS_KERNEL(
+def _cache_draft_logits(
     draft_logits: torch.Tensor,
     cached_candidate: torch.Tensor,
     candidate: torch.Tensor,

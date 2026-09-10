@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -1036,7 +1036,7 @@ def _prepare_prefill_inputs_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_prepare_prefill_inputs_kernel,
     warmup_inputs=_prepare_prefill_inputs_warmup_inputs,
 )
@@ -1086,7 +1086,7 @@ def _prepare_decode_inputs_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_prepare_decode_inputs_kernel,
     warmup_inputs=_prepare_decode_inputs_warmup_inputs,
 )
@@ -1137,7 +1137,7 @@ def _update_draft_inputs_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_update_draft_inputs_kernel,
     warmup_inputs=_update_draft_inputs_warmup_inputs,
 )

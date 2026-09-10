@@ -13,7 +13,7 @@ from vllm.model_executor.warmup.jit_warmup import WarmupChoices
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -1099,7 +1099,7 @@ def _prepare_input_buffers_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_prepare_input_buffers_kernel,
     warmup_inputs=_prepare_input_buffers_warmup_inputs,
 )
@@ -1159,7 +1159,7 @@ def _prepare_input_hidden_states_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_prepare_input_hidden_states_and_embeddings_kernel,
     warmup_inputs=_prepare_input_hidden_states_warmup_inputs,
 )
@@ -1217,7 +1217,7 @@ def _pad_trailing_draft_slots_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_pad_trailing_draft_slots_kernel,
     warmup_inputs=_pad_trailing_draft_slots_warmup_inputs,
 )
@@ -1267,7 +1267,9 @@ def _cache_inputs_warmup_inputs(
     )
 
 
-@triton_kernel(kernel=_cache_inputs_kernel, warmup_inputs=_cache_inputs_warmup_inputs)
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_cache_inputs_kernel, warmup_inputs=_cache_inputs_warmup_inputs
+)
 def _cache_inputs(
     draft_input_ids: torch.Tensor,
     draft_input_embeds: torch.Tensor | None,
@@ -1312,7 +1314,7 @@ def _shift_input_ids_warmup_inputs() -> dict[str, Any]:
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_shift_input_ids_kernel,
     warmup_inputs=_shift_input_ids_warmup_inputs,
 )
@@ -1345,7 +1347,7 @@ def _shift_input_embeds_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_shift_input_embeds_kernel,
     warmup_inputs=_shift_input_embeds_warmup_inputs,
 )

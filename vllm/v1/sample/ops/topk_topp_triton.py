@@ -21,7 +21,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1360,7 +1360,9 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     )
 
 
-@triton_kernel(kernel=_topk_topp_kernel, warmup_inputs=_topk_topp_warmup_inputs)
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_topk_topp_kernel, warmup_inputs=_topk_topp_warmup_inputs
+)
 def _topk_topp(
     logits: torch.Tensor,
     buffer: torch.Tensor,
@@ -1421,7 +1423,7 @@ def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_topp_sb_stats_kernel,
     warmup_inputs=_topp_split_stats_warmup_inputs,
 )
@@ -1468,7 +1470,7 @@ def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_topp_sb_step_kernel,
     warmup_inputs=_topp_split_step_warmup_inputs,
 )
@@ -1518,7 +1520,7 @@ def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_topp_sb_mask_kernel,
     warmup_inputs=_topp_split_mask_warmup_inputs,
 )

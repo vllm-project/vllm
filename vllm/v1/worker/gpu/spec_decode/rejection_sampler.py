@@ -11,7 +11,7 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -96,7 +96,7 @@ def _flatten_sampled_warmup_inputs(*, num_speculative_steps: int) -> dict[str, A
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=_flatten_sampled_kernel,
     warmup_inputs=_flatten_sampled_warmup_inputs,
 )

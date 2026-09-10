@@ -631,7 +631,7 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
 
 
 class TritonKernelDispatcher(Generic[P]):
-    """Callable Triton launcher produced by :func:`triton_kernel`."""
+    """Callable Triton launcher with compile-time warmup support."""
 
     def __init__(
         self,
@@ -669,7 +669,7 @@ class TritonNativeKernelDispatcher(TritonKernelDispatcher[Any]):
 
 
 @overload
-def triton_kernel(
+def triton_kernel_dispatcher_with_warmup(
     *,
     warmup_inputs: Callable[..., WarmupCases],
     kernel: None = None,
@@ -677,14 +677,14 @@ def triton_kernel(
 
 
 @overload
-def triton_kernel(
+def triton_kernel_dispatcher_with_warmup(
     *,
     warmup_inputs: Callable[..., WarmupCases],
     kernel: Any,
 ) -> Callable[[Callable[P, DispatchSpec]], TritonKernelDispatcher[P]]: ...
 
 
-def triton_kernel(
+def triton_kernel_dispatcher_with_warmup(
     *,
     warmup_inputs: Callable[..., WarmupCases],
     kernel: Any | None = None,
