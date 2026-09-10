@@ -17,6 +17,8 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("{0}")]
+    InvalidReasoningEffort(String),
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -92,6 +94,7 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::InvalidReasoningEffort(_)
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. } => true,

@@ -816,6 +816,9 @@ def rocm_aiter_sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -837,6 +840,9 @@ def rocm_aiter_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -900,6 +906,9 @@ def rocm_aiter_sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             compress_ratio,
+            candidate_blocks,
+            candidate_block_size,
+            candidate_write,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -955,6 +964,30 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
+            if candidate_blocks is not None:
+                from vllm.model_executor.layers.sparse_attn_indexer import (
+                    _apply_candidate_mask,
+                    _select_candidate_blocks,
+                )
+
+                chunk_candidates = candidate_blocks[chunk.token_start : chunk.token_end]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates.shape[1],
+                        candidate_block_size,
+                        chunk_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates,
+                        candidate_block_size,
+                    )
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -1022,6 +1055,37 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
+        if candidate_blocks is not None:
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                _apply_candidate_mask,
+                _select_candidate_blocks,
+            )
+
+            num_rows = logits.shape[0]
+            visible = decode_metadata.seq_lens.reshape(-1)
+            if visible.numel() != num_rows:
+                visible = visible.repeat_interleave(next_n)
+            visible = visible[:num_rows].to(torch.int64)
+            row_starts = torch.zeros_like(visible)
+            decode_candidates = candidate_blocks[:num_rows]
+            if candidate_write:
+                _select_candidate_blocks(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates.shape[1],
+                    candidate_block_size,
+                    decode_candidates,
+                )
+            else:
+                _apply_candidate_mask(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates,
+                    candidate_block_size,
+                )
+
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
@@ -1078,6 +1142,10 @@ def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
         )
 
         return _upcast_e8m0_to_fp32(scale).contiguous()
+    if scale.dtype == torch.uint8:
+        # MXFP8 parameters preserve E8M0 scales as their raw exponent bytes.
+        # They are biased exponents, not numeric uint8 scale values.
+        return torch.exp2(scale.to(torch.int16).to(torch.float32) - 127.0)
     return scale.to(torch.float32)
 
 
@@ -1202,14 +1270,17 @@ def _get_cached_wo_a_bf16(
     cached = getattr(wo_a, "_dsv4_wo_a_bf16", None)
     if cached is not None:
         return cached
-    if hasattr(wo_a, "weight_scale_inv"):
+    weight_scale = getattr(wo_a, "weight_scale_inv", None)
+    if weight_scale is None:
+        # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+        # historical ``_inv`` suffix.
+        weight_scale = getattr(wo_a, "weight_scale", None)
+    if weight_scale is not None:
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
         )
         wo_a_scale = _expand_2d_block_scales(
-            wo_a.weight_scale_inv.view(
-                n_local_groups, -1, wo_a.weight_scale_inv.shape[-1]
-            ),
+            weight_scale.view(n_local_groups, -1, weight_scale.shape[-1]),
             o_lora_rank,
             hidden_dim,
         )

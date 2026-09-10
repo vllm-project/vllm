@@ -45,6 +45,86 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
+def _select_candidate_blocks(
+    logits: torch.Tensor,
+    row_ks: torch.Tensor,
+    row_ke: torch.Tensor,
+    topk_blocks: int,
+    block_size: int,
+    out: torch.Tensor,
+) -> None:
+    """Level one of the v4.1 two-level top-k: per-row candidate blocks.
+
+    Port of the reference ``select_candidate_blocks``: a block scores as its
+    best position; the row's newest (partially filled) block is pinned;
+    blocks the row cannot reach (-inf after the causal bound) are dropped.
+
+    ``logits`` is [R, W] in *packed* column space: row r may attend packed
+    columns [row_ks[r], row_ke[r]), which map to request-local positions
+    col - row_ks[r]. ``out`` [R, topk_blocks] receives request-local block
+    ids, -1 padded.
+    """
+    R, W = logits.shape
+    if R == 0:
+        return
+    cols = torch.arange(W, device=logits.device)
+    ks = row_ks.unsqueeze(1)
+    valid = (cols >= ks) & (cols < row_ke.unsqueeze(1))
+    scores = logits.masked_fill(~valid, -torch.inf)
+    # [R, W] local block index per column; out-of-range columns clamp to
+    # block 0 but carry -inf scores, so they never win the amax.
+    local_block = ((cols.unsqueeze(0) - ks) // block_size).clamp(min=0)
+    nblocks = (W + block_size - 1) // block_size
+    block_scores = logits.new_full((R, nblocks), -torch.inf)
+    block_scores.scatter_reduce_(
+        1, local_block, scores, reduce="amax", include_self=True
+    )
+    # Pin the block holding the row's newest position: it is only partially
+    # filled but holds the most recent tokens. Empty rows (cudagraph padding
+    # with seq_len 0) have no newest block and stay all -inf, so they select
+    # -1 everywhere.
+    row_len = row_ke - row_ks
+    last = ((row_len - 1) // block_size).clamp(min=0)
+    pin = torch.where(row_len > 0, torch.inf, -torch.inf).to(block_scores.dtype)
+    block_scores.scatter_(1, last.unsqueeze(1), pin.unsqueeze(1))
+    top = block_scores.topk(min(topk_blocks, nblocks), dim=-1)
+    out.fill_(-1)
+    k = top.indices.shape[1]
+    out[:, :k] = torch.where(top.values > -torch.inf, top.indices, -1).to(out.dtype)
+
+
+def _apply_candidate_mask(
+    logits: torch.Tensor,
+    row_ks: torch.Tensor,
+    row_ke: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Level two: keep only positions inside the row's candidate blocks.
+
+    ``candidate_blocks`` holds request-local block ids (-1 padded); they are
+    shifted back into packed column space with ``row_ks``. Everything outside
+    the causal range or outside the candidates is set to -inf in place.
+    """
+    R, W = logits.shape
+    if R == 0:
+        return
+    cols = torch.arange(W, device=logits.device)
+    ks = row_ks.unsqueeze(1)
+    valid = (cols >= ks) & (cols < row_ke.unsqueeze(1))
+    # [R, K, bs] packed columns of every candidate position; padded entries
+    # clamp to column 0 with a zero src so amax is unaffected.
+    pos = candidate_blocks.to(torch.int64).unsqueeze(-1) * block_size
+    packed = ks.unsqueeze(-1) + pos + torch.arange(block_size, device=ks.device)
+    idx = packed.clamp_(0, W - 1).view(R, -1)
+    src = (candidate_blocks >= 0).unsqueeze(-1).expand(-1, -1, block_size)
+    keep = torch.zeros(R, W, dtype=torch.int8, device=logits.device)
+    keep.scatter_reduce_(
+        1, idx, src.reshape(R, -1).to(torch.int8), reduce="amax", include_self=True
+    )
+    logits.masked_fill_((keep == 0) | ~valid, -torch.inf)
+
+
 def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -316,12 +396,23 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+
+    if candidate_blocks is not None:
+        # Candidate blocks are request-local; the DCP-sharded logits layout
+        # would need per-rank translation that is not implemented.
+        assert dcp_world_size == 1, (
+            "v4.1 two-level candidate filtering is not supported with DCP."
+        )
+        assert candidate_block_size > 0
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -361,6 +452,9 @@ def sparse_attn_indexer(
             use_pcp,
             dense_mha_metadata_layer_name,
             use_fp4_cache,
+            candidate_blocks=candidate_blocks,
+            candidate_block_size=candidate_block_size,
+            candidate_write=candidate_write,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -506,6 +600,30 @@ def sparse_attn_indexer(
                         clean_logits=False,
                     )
                 num_rows = logits.shape[0]
+                if candidate_blocks is not None:
+                    # Two-level selection (v4.1): the candidate source
+                    # publishes its top blocks; later indexers mask their
+                    # scores to them. Both before the row top-k.
+                    chunk_candidates = candidate_blocks[
+                        chunk.token_start : chunk.token_end
+                    ]
+                    if candidate_write:
+                        _select_candidate_blocks(
+                            logits,
+                            cu_seqlen_ks,
+                            cu_seqlen_ke,
+                            chunk_candidates.shape[1],
+                            candidate_block_size,
+                            chunk_candidates,
+                        )
+                    else:
+                        _apply_candidate_mask(
+                            logits,
+                            cu_seqlen_ks,
+                            cu_seqlen_ke,
+                            chunk_candidates,
+                            candidate_block_size,
+                        )
                 ops.top_k_per_row_prefill(
                     logits,
                     cu_seqlen_ks,
@@ -612,6 +730,34 @@ def sparse_attn_indexer(
                 indices=decode_metadata.indices,
             )
         num_rows = logits.shape[0]
+        if candidate_blocks is not None:
+            # Two-level selection (v4.1) on the decode logits; columns are
+            # request-local compressed positions. seq_lens is (B, next_n)
+            # for native spec decode (per-row effective lens) and (B, 1)
+            # otherwise.
+            vis = seq_lens.reshape(-1)
+            if vis.numel() != num_rows:
+                vis = vis.repeat_interleave(next_n)
+            vis = vis[:num_rows].to(torch.int64)
+            row_ks = torch.zeros_like(vis)
+            decode_candidates = candidate_blocks[:num_rows]
+            if candidate_write:
+                _select_candidate_blocks(
+                    logits,
+                    row_ks,
+                    vis,
+                    decode_candidates.shape[1],
+                    candidate_block_size,
+                    decode_candidates,
+                )
+            else:
+                _apply_candidate_mask(
+                    logits,
+                    row_ks,
+                    vis,
+                    decode_candidates,
+                    candidate_block_size,
+                )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         use_cooperative_topk = (
@@ -712,6 +858,9 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -719,7 +868,7 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer", "candidate_blocks"],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -751,6 +900,9 @@ class SparseAttnIndexer(CustomOp):
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
         compress_ratio: int = 1,
+        candidate_blocks: torch.Tensor | None = None,
+        candidate_block_size: int = 0,
+        candidate_write: bool = False,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -764,6 +916,11 @@ class SparseAttnIndexer(CustomOp):
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
+        # v4.1 two-level selection: the candidate source indexer writes the
+        # top candidate blocks here; later indexers mask their scores with it.
+        self.candidate_blocks = candidate_blocks
+        self.candidate_block_size = candidate_block_size
+        self.candidate_write = candidate_write
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -846,6 +1003,9 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            candidate_blocks=self.candidate_blocks,
+            candidate_block_size=self.candidate_block_size,
+            candidate_write=self.candidate_write,
         )
 
     def forward_xpu(
@@ -868,12 +1028,16 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx11
+        from vllm.platforms.rocm import on_gfx11, on_gfx950
 
         if (
             rocm_aiter_ops.is_enabled()
             or rocm_aiter_ops.is_rdna_aiter_enabled()
             or on_gfx11()
+            # The so-called AITER sparse indexer op has a native gfx950 path:
+            # its cache insert, MQA logits, and top-k fallbacks are implemented
+            # by local Triton/C++ kernels and do not require the aiter package.
+            or on_gfx950()
         ):
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
@@ -891,8 +1055,11 @@ class SparseAttnIndexer(CustomOp):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
                 compress_ratio=self.compress_ratio,
+                candidate_blocks=self.candidate_blocks,
+                candidate_block_size=self.candidate_block_size,
+                candidate_write=self.candidate_write,
             )
         raise RuntimeError(
-            "Sparse attention indexer ROCm path is only supported on AITER. "
-            "Please enable aiter with VLLM_ROCM_USE_AITER=1"
+            "Sparse attention indexer ROCm path requires AITER or a supported "
+            "native architecture (gfx950/gfx11)."
         )

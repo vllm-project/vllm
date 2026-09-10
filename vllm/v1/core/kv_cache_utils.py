@@ -22,6 +22,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KpoolTailSpec,
@@ -2010,15 +2011,22 @@ def _get_packed_kv_cache_groups(
             cdiv(len(names), n) * page for page, names in page_size_layers.items()
         )
 
-    # Bytes a block must hold however the mamba buckets end up split: a mamba
-    # bucket can go down to one state per group, every other bucket's split is
-    # already fixed by the repeat pattern.
+    # Bytes a block must hold however the state buckets end up split: mamba,
+    # circular-buffer and unsplit sliding-window buckets can go down to one
+    # state per group, every other bucket's split is fixed by the repeat pattern.
+    def is_state_bucket(spec: UniformTypeKVCacheSpecs) -> bool:
+        if isinstance(spec.first_spec, (MambaSpec, CircularBufferSpec)):
+            return True
+        return repeats_per_group is None and isinstance(
+            spec.first_spec, SlidingWindowSpec
+        )
+
     anchor_bytes = max(
         (
             widest_group_bytes(
                 page_size_layers,
                 len(spec.kv_cache_specs)
-                if isinstance(spec.first_spec, MambaSpec)
+                if is_state_bucket(spec)
                 else num_groups_for(spec, balanced),
             )
             for spec, page_size_layers, balanced in bucketed
@@ -2029,10 +2037,9 @@ def _get_packed_kv_cache_groups(
     groups = []
     for spec, page_size_layers, balanced in bucketed:
         num_groups = num_groups_for(spec, balanced)
-        # `_align_hybrid_block_size` pads a mamba state up to one attention
-        # page, so cap a mamba group at the states a block already fits rather
-        # than let it widen the block.
-        if anchor_bytes and isinstance(spec.first_spec, MambaSpec):
+        # Cap a state group at the states a block already fits rather than let
+        # it widen the block.
+        if anchor_bytes and is_state_bucket(spec):
             states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
             num_groups = max(
                 num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
@@ -2068,8 +2075,9 @@ def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
     if spec_config is None or not spec_config.use_eagle():
         return False
     model_config = vllm_config.model_config
-    return (
-        model_config is not None and model_config.hf_config.model_type == "deepseek_v4"
+    return model_config is not None and model_config.hf_config.model_type in (
+        "deepseek_v4",
+        "deepseek_v41",
     )
 
 
@@ -2090,9 +2098,9 @@ def _annotate_eagle_groups(
        spec merging, wherever grouping happens to land. It is sufficient but
        not necessary: a drafter whose spec is indistinguishable from the
        target's cannot be found this way.
-    2. Model-scoped positional fallback for DeepseekV4, whose MTP block reuses
-       the target's own decoder layer and so carries no spec marker. Its draft
-       attention layer is always the last registered layer, so flag whichever
+    2. Model-scoped positional fallback for DeepseekV4/V4.1, whose MTP block
+       reuses the target's own decoder layer and so carries no spec marker. Its
+       draft attention layer is always the last registered layer, so flag whichever
        group holds it. This rule is only valid where the groups partition
        exactly the layers of ``kv_cache_spec``, which is true on the packed
        grouping path and not in general; other callers must leave
@@ -2105,7 +2113,8 @@ def _annotate_eagle_groups(
         kv_cache_spec: The kv cache spec of each attention layer, in layer
             registration order. Only read by rule 2.
         kv_cache_groups: Groups to annotate in place.
-        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4 packed group.
+        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4/V4.1 packed
+            group.
     """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle_block_drop():

@@ -290,3 +290,25 @@ def test_deepseek_v32_dispatches_selected_mha(
             expected_args[1:],
         )
     )
+
+
+def test_select_candidate_blocks_tolerates_empty_rows():
+    """Full-cudagraph decode pads the batch with seq_len-0 rows. The newest
+    block pin must not index -1 for them (device-side assert); they select
+    no candidate blocks and real rows still pin their newest block."""
+    block_size, topk_blocks = 8, 3
+    logits = torch.zeros(3, 64)
+    logits[0, 3] = 5.0  # block 0 scores highest for row 0
+    logits[2, 9] = 5.0  # block 1 scores highest for row 2
+    row_ks = torch.zeros(3, dtype=torch.int64)
+    row_ke = torch.tensor([40, 0, 17])
+    out = torch.empty(3, topk_blocks, dtype=torch.int32)
+
+    sparse_indexer._select_candidate_blocks(
+        logits, row_ks, row_ke, topk_blocks, block_size, out
+    )
+
+    assert out[1].tolist() == [-1, -1, -1]
+    assert out[0, 0].item() == 4 and 0 in out[0].tolist()  # newest block pinned
+    assert out[2, 0].item() == 2 and 1 in out[2].tolist()
+    assert (out[0] >= 0).all() and (out[2, :2] >= 0).all()

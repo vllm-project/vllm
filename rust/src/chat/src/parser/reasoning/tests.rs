@@ -35,6 +35,10 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("DeepSeek-V4.1-Exp"),
+        Some(names::DEEPSEEK_V41)
+    );
 }
 
 #[test]
