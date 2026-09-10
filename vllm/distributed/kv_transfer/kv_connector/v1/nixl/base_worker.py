@@ -1306,6 +1306,7 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        # Count once per handshake, regardless of waiting requests.
                         self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
@@ -2812,13 +2813,15 @@ class NixlBaseConnectorWorker:
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
 
-        # Process receive failures reported by background threads.
+        # Process receive failures reported by background threads. Each
+        # producer already recorded a specific metric (handshake or
+        # notification), so only the failure bookkeeping runs here.
         while not self._failed_recv_reqs.empty():
             try:
                 req_id = self._failed_recv_reqs.get_nowait()
             except queue.Empty:
                 break
-            self._handle_failed_transfer(req_id, None, self._recv_failures)
+            self._handle_failed_transfer(req_id, None, self._recv_failures, failure=None)
 
         failed_recv_reqs: set[ReqId] = set()
         if self._recv_failures:
