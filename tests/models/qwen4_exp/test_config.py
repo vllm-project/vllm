@@ -154,6 +154,7 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
             pipeline_parallel_size=2, enable_dbo=False, ubatch_size=1
         ),
         speculative_config=None,
+        use_v2_model_runner=True,
     )
     with patch.object(
         Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
@@ -164,6 +165,77 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
                     vllm_config
                 )
         else:
+            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+
+def test_qwen4_exp_requires_v2_model_runner() -> None:
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(),
+            multimodal_config=None,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, enable_dbo=False, ubatch_size=1
+        ),
+        speculative_config=None,
+        use_v2_model_runner=False,
+    )
+    with patch.object(
+        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
+    ):
+        with pytest.raises(NotImplementedError, match="requires the V2 model runner"):
+            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+
+@pytest.mark.parametrize("method", ["dflash", "dspark", "mtp", "ngram", "unsupported"])
+def test_qwen4_exp_speculative_method_validation(method: str) -> None:
+    spec_config = SimpleNamespace(
+        method=method,
+        enable_adaptive_verification=False,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(),
+            multimodal_config=None,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, enable_dbo=False, ubatch_size=1
+        ),
+        speculative_config=spec_config,
+        use_v2_model_runner=True,
+    )
+    with patch.object(
+        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
+    ):
+        if method == "unsupported":
+            with pytest.raises(NotImplementedError, match="speculative decoding supports"):
+                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
+                    vllm_config
+                )
+        else:
+            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+
+def test_qwen4_exp_rejects_adaptive_verification() -> None:
+    spec_config = SimpleNamespace(
+        method="dspark",
+        enable_adaptive_verification=True,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(),
+            multimodal_config=None,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, enable_dbo=False, ubatch_size=1
+        ),
+        speculative_config=spec_config,
+        use_v2_model_runner=True,
+    )
+    with patch.object(
+        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
+    ):
+        with pytest.raises(ValueError, match="Adaptive verification.*is not supported"):
             Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 

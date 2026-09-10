@@ -66,13 +66,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         dflash_config = (
             getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
         )
-        if dflash_config.get("sample_from_anchor", False):
-            raise ValueError(
-                "sample_from_anchor=True is not supported for DFlash. "
-                "DFlash uses a fixed 1+N query layout where the anchor "
-                "is the bonus token."
-            )
-        self.sample_from_anchor = False
+        self.sample_from_anchor = bool(dflash_config.get("sample_from_anchor", False))
+        if self.sample_from_anchor:
+            self.num_query_per_req = self.num_speculative_steps
 
         # Context positions for the K/V precompute. Populated by
         # prepare_dflash_inputs, and processed by the model's

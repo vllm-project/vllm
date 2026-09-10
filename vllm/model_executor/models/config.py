@@ -861,6 +861,11 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        if not vllm_config.use_v2_model_runner:
+            raise NotImplementedError(
+                "Qwen4Exp requires the V2 model runner; relaunch with "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
@@ -886,15 +891,25 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
         spec_config = vllm_config.speculative_config
-        if spec_config is not None and spec_config.method not in {
-            "mtp",
-            "ngram",
-            "ngram_gpu",
-        }:
-            raise NotImplementedError(
-                "Qwen4Exp speculative decoding supports only its native MTP "
-                "checkpoint and linear n-gram proposers"
-            )
+        if spec_config is not None:
+            if spec_config.method not in {
+                "mtp",
+                "ngram",
+                "ngram_gpu",
+                "dflash",
+                "dspark",
+            }:
+                raise NotImplementedError(
+                    "Qwen4Exp speculative decoding supports only native MTP, "
+                    "linear n-gram proposers, and DFlash/DSpark drafters"
+                )
+            if spec_config.enable_adaptive_verification:
+                raise ValueError(
+                    "Adaptive verification (enable_adaptive_verification=True) "
+                    "is not supported for Qwen4Exp because its GatedDeltaNet (GDN) "
+                    "attention backend does not support device-side query length "
+                    "mismatch trimming. Pass enable_adaptive_verification=False."
+                )
 
 
 class Qwen4ExpForCausalLMConfig(Qwen4ExpForConditionalGenerationConfig):
