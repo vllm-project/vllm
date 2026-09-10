@@ -4,8 +4,7 @@
 
 """Text encoding adapted from the DeepSeek V4.1 checkpoint reference encoder.
 
-Message normalization and serving controls live in deepseek_v41.py. Keep this
-text grammar aligned with ds-code-260903-new/encoding/encoding.py.
+Message normalization and serving controls live in deepseek_v41.py.
 """
 
 import copy
