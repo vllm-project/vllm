@@ -226,5 +226,6 @@ class DefaultModelState(ModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
             ubatch_idx=ubatch_idx,
+            fast_prefill=input_batch.fast_prefill,
         )
         return attn_metadata
