@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
@@ -126,8 +127,6 @@ def speculative_target_watermark_key(watermark_config: WatermarkConfig) -> int:
     that never construct a sampler (the JIT warmup) can reproduce the exact
     kernel argument the engine will use.
     """
-    from vllm.v1.watermarking.factory import create_watermarker
-
     return _resolve_watermark_key(
         create_speculative_target_watermarker(create_watermarker(watermark_config))
     )
