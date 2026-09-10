@@ -318,7 +318,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Inter-output latency in seconds. Approximates TPOT when each output contains one token, but differs from request-level TPOT under speculative decoding or varying aggregation weights.",
+      "description": "Inter-token latency in seconds, measured between consecutive streamed outputs. It approximates TPOT when each output contains one token, but differs from request-level TPOT under speculative decoding or varying aggregation weights.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -484,7 +484,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Per-request Time Per Output Token (TPOT) in seconds, computed as decode time divided by the number of output tokens minus one.",
+      "description": "Per-request Time Per Output Token (TPOT) in seconds, computed as (end-to-end latency - TTFT) divided by the number of output tokens minus one. Requests with no more than one output token are recorded as zero; vllm bench serve excludes these requests from its TPOT statistics.",
       "fieldConfig": {
         "defaults": {
           "color": {

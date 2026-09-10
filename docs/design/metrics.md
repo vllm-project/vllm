@@ -33,7 +33,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
-- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency (time between consecutive decode outputs).
+- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency (time between consecutive streamed outputs).
 - `vllm:request_time_per_output_token_seconds` (Histogram) - Per-request Time Per Output Token (TPOT).
 - `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
@@ -50,8 +50,8 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
 - `vllm:prompt_tokens` - Prompt tokens.
 - `vllm:generation_tokens` - Generation tokens.
-- `vllm:inter_token_latency_seconds` - Inter-output latency in seconds. Approximates TPOT when each output contains exactly one token, but differs from request-level TPOT when an output contains multiple tokens or when aggregation weights differ.
-- `vllm:request_time_per_output_token_seconds` - Per-request Time Per Output Token (TPOT) in seconds, computed as `decode_time / (num_generation_tokens - 1)`. It is recorded as zero for requests that generate no more than one token.
+- `vllm:inter_token_latency_seconds` - Inter-token latency in seconds, measured between consecutive streamed outputs. It approximates TPOT when each output contains exactly one token, but differs from request-level TPOT when an output contains multiple tokens or when aggregation weights differ.
+- `vllm:request_time_per_output_token_seconds` - Per-request Time Per Output Token (TPOT) in seconds, computed as `(end-to-end latency - TTFT) / (number of output tokens - 1)`. It is recorded as zero for requests that generate no more than one token.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
@@ -65,9 +65,19 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 
 See [the PR which added this Dashboard](https://github.com/vllm-project/vllm/pull/2316) for interesting and useful background on the choices made here.
 
-`vllm:inter_token_latency_seconds` records one sample per decode output event
-(the wall-clock gap between successive `NEW_TOKENS` events), whereas
-`vllm:request_time_per_output_token_seconds` is recorded once per finished request as `decode_time / (num_generation_tokens - 1)`. These two metrics differ when an output bundles multiple tokens (e.g. speculative decoding) or when mean ITL and mean per-request TPOT are aggregated over differing weights. Requests that generate no more than one token are recorded with a TPOT of zero, which can pull down the mean of the per-request TPOT histogram. Use `vllm:request_time_per_output_token_seconds` to match the per-request TPOT reported by [`vllm bench serve`](../benchmarking/cli.md), and use `vllm:inter_token_latency_seconds` when you specifically want the inter-output latency distribution.
+`vllm:inter_token_latency_seconds` records one sample per streamed output event
+(the wall-clock gap between successive outputs), whereas
+`vllm:request_time_per_output_token_seconds` is recorded once per finished request
+as `(end-to-end latency - TTFT) / (number of output tokens - 1)`. These two
+metrics differ when an output bundles multiple tokens (e.g. speculative
+decoding) or when mean ITL and mean per-request TPOT are aggregated over
+differing weights. See [Understanding the latency metrics](../benchmarking/cli.md#understanding-the-latency-metrics)
+for the benchmark definitions. Requests that generate no more than one token
+are recorded with a TPOT of zero, while `vllm bench serve` excludes them from
+its TPOT statistics. Therefore, the Prometheus histogram and benchmark TPOT
+statistics can differ. Use `vllm:request_time_per_output_token_seconds` for
+request-level TPOT and `vllm:inter_token_latency_seconds` when you specifically
+want the inter-output latency distribution.
 
 ### Prometheus Client Library
 
