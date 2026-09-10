@@ -25,6 +25,7 @@ from vllm.v1.watermarking.prfs.philox import (
 from vllm.v1.watermarking.prfs.philox import (
     _UINT32_MASK as _UINT32_MASK_VALUE,
 )
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 
 if HAS_TRITON:
     from triton.language import math as tl_math
@@ -53,6 +54,8 @@ def _repeated_context_mask_kernel(
     contexts_ptr,
     context_stride,
     CONTEXT_WIDTH: tl.constexpr,
+    CONTEXT_BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     req_idx = tl.load(req_indices_ptr + row).to(tl.int64)
@@ -62,11 +65,21 @@ def _repeated_context_mask_kernel(
     total_len = tl.load(total_lens_ptr + safe_req_idx, mask=valid_req, other=0)
     output_len = total_len - prompt_len
 
-    repeated = tl.full((), False, tl.int1)
-    previous_output_pos = 0
-    while previous_output_pos < output_len:
-        matches = valid_req
+    offsets = tl.arange(0, BLOCK)
+    context_offsets = tl.arange(0, CONTEXT_BLOCK)
+    context_tokens = tl.load(
+        contexts_ptr + row * context_stride + context_offsets,
+        mask=context_offsets < CONTEXT_WIDTH,
+        other=-1,
+    )
+    repeated = tl.full((), 0, tl.int32)
+    for block_start in tl.range(0, output_len, BLOCK):
+        previous_output_pos = block_start + offsets
+        matches = valid_req & (previous_output_pos < output_len)
         for offset in range(CONTEXT_WIDTH):
+            context_token = tl.sum(
+                tl.where(context_offsets == offset, context_tokens, 0), axis=0
+            )
             historical_pos = previous_output_pos + offset - CONTEXT_WIDTH
             historical_token = tl.load(
                 all_token_ids_ptr
@@ -76,12 +89,34 @@ def _repeated_context_mask_kernel(
                 mask=valid_req & (historical_pos >= 0),
                 other=-1,
             )
-            context_token = tl.load(contexts_ptr + row * context_stride + offset)
             matches &= historical_token == context_token
-        repeated |= matches
-        previous_output_pos += 1
-
+        repeated |= tl.max(matches.to(tl.int32), axis=0)
     tl.store(output_ptr + row, repeated)
+
+
+def _repeated_context_mask_cpu(
+    all_token_ids: torch.Tensor,
+    req_indices: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    total_lens: torch.Tensor,
+    contexts: torch.Tensor,
+) -> torch.Tensor:
+    repeated = torch.zeros(len(req_indices), dtype=torch.bool)
+    for row, req_idx_tensor in enumerate(req_indices):
+        req_idx = int(req_idx_tensor)
+        if req_idx < 0:
+            continue
+        prompt_len = int(prompt_lens[req_idx])
+        total_len = int(total_lens[req_idx])
+        output_tokens = all_token_ids[req_idx, prompt_len:total_len].tolist()
+        prefix = [-1] * contexts.shape[-1]
+        current_context = tuple(contexts[row].tolist())
+        for token_id in output_tokens:
+            if tuple(prefix[-contexts.shape[-1] :]) == current_context:
+                repeated[row] = True
+                break
+            prefix.append(token_id)
+    return repeated
 
 
 def repeated_context_mask(
@@ -92,23 +127,16 @@ def repeated_context_mask(
     contexts: torch.Tensor,
 ) -> torch.Tensor:
     if all_token_ids.device.type == "cpu":
-        repeated = torch.zeros(len(req_indices), dtype=torch.bool)
-        for row, req_idx_tensor in enumerate(req_indices):
-            req_idx = int(req_idx_tensor)
-            if req_idx < 0:
-                continue
-            prompt_len = int(prompt_lens[req_idx])
-            total_len = int(total_lens[req_idx])
-            output_tokens = all_token_ids[req_idx, prompt_len:total_len].tolist()
-            prefix = [-1] * contexts.shape[-1]
-            current_context = tuple(contexts[row].tolist())
-            for token_id in output_tokens:
-                if tuple(prefix[-contexts.shape[-1] :]) == current_context:
-                    repeated[row] = True
-                    break
-                prefix.append(token_id)
-        return repeated
+        return _repeated_context_mask_cpu(
+            all_token_ids,
+            req_indices,
+            prompt_lens,
+            total_lens,
+            contexts,
+        )
 
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
     repeated = torch.empty(len(req_indices), dtype=torch.bool, device=contexts.device)
     _repeated_context_mask_kernel[(len(req_indices),)](
         repeated,
@@ -120,6 +148,8 @@ def repeated_context_mask(
         contexts,
         contexts.stride(0),
         CONTEXT_WIDTH=contexts.shape[-1],
+        CONTEXT_BLOCK=triton.next_power_of_2(contexts.shape[-1]),
+        BLOCK=512,
     )
     return repeated
 
@@ -182,15 +212,61 @@ def _philox_gumbel_kernel(
     logits_stride,
     contexts_ptr,
     context_stride,
+    repeated_mask_ptr,
+    watermarking_ptr,
+    expanded_idx_mapping_ptr,
+    seeds_ptr,
+    pos_ptr,
+    temp_ptr,
     key_0_value,
     key_1_value,
     vocab_size,
     CONTEXT_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    USE_FP64: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     block_index = tl.program_id(1)
     groups = block_index * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+
+    if watermarking_ptr is not None:
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
+        valid_req = req_state_idx >= 0
+        temp = tl.load(temp_ptr + req_state_idx, mask=valid_req, other=0.0).to(
+            tl.float32
+        )
+        use_watermark = tl.load(
+            watermarking_ptr + req_state_idx, mask=valid_req, other=False
+        ) & (temp != 0.0)
+        if repeated_mask_ptr is not None:
+            use_watermark &= ~tl.load(repeated_mask_ptr + row)
+        if not use_watermark:
+            seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
+            pos = tl.load(pos_ptr + row)
+            candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = candidate < vocab_size
+            logits_row = logits_ptr + row * logits_stride
+            logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
+                tl.float32
+            )
+            value, index = gumbel_noised_argmax(
+                logits,
+                candidate,
+                mask,
+                seed,
+                pos,
+                temp,
+                IS_DRAFTING=False,
+                USE_FP64=USE_FP64,
+                APPLY_TEMPERATURE=False,
+            )
+            token_id = block_index * BLOCK_SIZE + index
+            tl.store(
+                local_argmax_ptr + row * local_argmax_stride + block_index,
+                token_id,
+            )
+            tl.store(local_max_ptr + row * local_max_stride + block_index, value)
+            return
 
     key_0 = key_0_value.to(tl.uint32)
     key_1 = key_1_value.to(tl.uint32)
@@ -266,7 +342,9 @@ def _philox_gumbel_kernel(
 
 
 def philox_gumbel_sample(
-    logits: torch.Tensor, contexts: torch.Tensor, key: int
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
 ) -> torch.Tensor:
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
@@ -286,11 +364,74 @@ def philox_gumbel_sample(
         logits.stride(0),
         contexts,
         contexts.stride(0),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         key & _UINT32_MASK_VALUE,
         key >> 32,
         vocab_size,
         CONTEXT_WIDTH=contexts.shape[-1],
         BLOCK_SIZE=block_size,
+        USE_FP64=False,
+    )
+    max_block_index = local_max.argmax(dim=-1, keepdim=True)
+    return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
+
+
+def mixed_philox_gumbel_sample(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    repeated_mask: torch.Tensor | None,
+    watermarking: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperatures: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    if repeated_mask is not None:
+        repeated_mask = repeated_mask.contiguous()
+    watermarking = watermarking.contiguous()
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    positions = positions.contiguous()
+    num_tokens, vocab_size = logits.shape
+    block_size = 1024
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+    local_max = logits.new_empty(
+        num_tokens,
+        num_blocks,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+    )
+    _philox_gumbel_kernel[(num_tokens, num_blocks)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        logits,
+        logits.stride(0),
+        contexts,
+        contexts.stride(0),
+        repeated_mask,
+        watermarking,
+        expanded_idx_mapping,
+        seeds,
+        positions,
+        temperatures,
+        key & _UINT32_MASK_VALUE,
+        key >> 32,
+        vocab_size,
+        CONTEXT_WIDTH=contexts.shape[-1],
+        BLOCK_SIZE=block_size,
+        USE_FP64=use_fp64,
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)

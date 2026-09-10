@@ -44,8 +44,10 @@ def test_gumbel_config_warns_about_degenerate_generations(monkeypatch):
     WatermarkConfig(key=42)
 
     assert messages == [
-        "Single-key Gumbel-max watermarking may increase the frequency of "
-        "degenerate generations, including repetition loops."
+        (
+            "Single-key Gumbel-max watermarking may increase the frequency of "
+            "degenerate generations, including repetition loops."
+        )
     ]
 
 
@@ -105,8 +107,8 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
         2, 1, dtype=torch.int64
     )
-    sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: (
-        torch.zeros(2, dtype=torch.bool)
+    sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: torch.zeros(
+        2, dtype=torch.bool
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.gpu_sampler.gumbel_sample",
@@ -240,6 +242,7 @@ def test_repeated_context_mask_ignores_prompt_tokens():
 def _repeated_context_inputs(
     context_width: int, device: str = "cpu"
 ) -> tuple[torch.Tensor, ...]:
+    """Build repeated, unique, and padded request rows for mask tests."""
     prompt = [101, 102, 103, 104]
     repeated_output = [*range(1, context_width + 1)] * 2
     unique_output = [*range(1, context_width + 2)]
@@ -271,7 +274,7 @@ def _repeated_context_inputs(
     )
 
 
-@pytest.mark.parametrize("context_width", [1, 4, 16])
+@pytest.mark.parametrize("context_width", [1, 3, 4, 16, 17])
 def test_repeated_context_mask(context_width: int):
     repeated = repeated_context_mask(*_repeated_context_inputs(context_width))
 
@@ -281,14 +284,47 @@ def test_repeated_context_mask(context_width: int):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-@pytest.mark.parametrize("context_width", [1, 4, 16])
+@pytest.mark.parametrize("context_width", [1, 3, 4, 16, 17])
 def test_repeated_context_mask_accelerator_parity(context_width: int):
     cpu_inputs = _repeated_context_inputs(context_width)
-    accelerator_inputs = _repeated_context_inputs(context_width, "cuda")
+    accelerator_inputs = list(_repeated_context_inputs(context_width, "cuda"))
+    contexts = accelerator_inputs[-1]
+    storage = torch.empty(
+        contexts.shape[0], contexts.shape[1] * 2, dtype=contexts.dtype, device="cuda"
+    )
+    storage[:, ::2] = contexts
+    accelerator_inputs[-1] = storage[:, ::2]
 
     expected = repeated_context_mask(*cpu_inputs)
     actual = repeated_context_mask(*accelerator_inputs).cpu()
 
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_repeated_context_mask_scans_multiple_blocks():
+    context = [1, 2, 3, 4]
+    repeated_output = [*range(10_000, 11_030), *context, 99, *context]
+    unique_output = list(range(20_000, 21_039))
+    prompt = [101, 102, 103, 104]
+    rows = [prompt + repeated_output, prompt + unique_output]
+    all_token_ids = torch.zeros((2, len(rows[0])), dtype=torch.int32)
+    for row, token_ids in enumerate(rows):
+        all_token_ids[row, : len(token_ids)] = torch.tensor(token_ids)
+    inputs = (
+        all_token_ids,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([len(prompt), len(prompt)], dtype=torch.int32),
+        torch.tensor([len(rows[0]), len(rows[1])], dtype=torch.int32),
+        torch.tensor([context, unique_output[-4:]], dtype=torch.int64),
+    )
+
+    expected = repeated_context_mask(*inputs)
+    actual = repeated_context_mask(*(value.cuda() for value in inputs)).cpu()
+
+    assert torch.equal(expected, torch.tensor([True, False]))
     assert torch.equal(actual, expected)
 
 
