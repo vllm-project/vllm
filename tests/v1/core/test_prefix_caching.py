@@ -295,20 +295,23 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
 
 
 def test_hisparse_reports_when_context_is_fully_resident():
+    """A page the pool reuses under a host-reading request stops being resident."""
     manager = make_hisparse_kv_cache_manager(32, 16)
-    request = make_request(
-        "request",
-        list(range(2 * HISPARSE_BLOCK_SIZE)),
-        HISPARSE_BLOCK_SIZE,
-        sha256,
-    )
-    assert manager.allocate_slots(request, num_new_tokens=32) is not None
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
     coordinator = manager.hisparse_coordinator
-    scheduled = ((request.request_id, 31, 1),)
-
+    scheduled = ((request.request_id, len(tokens) - 1, 1),)
     assert coordinator.all_context_pages_resident(scheduled)
-    assert coordinator.resident_managers[0].release_resident_page(request.request_id, 0)
+
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    _publish_hisparse_pages(manager)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks())
+
     assert not coordinator.all_context_pages_resident(scheduled)
+    assert coordinator.take_block_table_updates().keys() == {request.request_id}
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
@@ -404,49 +407,39 @@ def allocate_external_prefix(
     )
 
 
-def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
-    manager = make_hisparse_kv_cache_manager(
-        18,
-        18,
-        max_model_len=160,
-    )
+def test_hisparse_low_pool_releases_clean_pages_for_admission():
+    """A request that fills the pool starts reading from host so others fit."""
+    manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)
+    coordinator = manager.hisparse_coordinator
     first = make_request("first", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    assert manager.block_pool.get_num_free_blocks() == 1
+    pool = manager.block_pool
+    assert pool.get_num_free_blocks() == 1
 
     second = make_request(
         "second", list(range(HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
-    assert (
-        manager.allocate_slots(
-            second,
-            num_new_tokens=16,
-            full_sequence_must_fit=True,
-        )
-        is None
-    )
-    assert manager.hisparse_coordinator.has_pending_reclamation()
-    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
-    assert spills
-    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
-    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
-    assert not manager.hisparse_coordinator.has_pending_reclamation()
-    assert (
-        manager.allocate_slots(
-            second,
-            num_new_tokens=16,
-            full_sequence_must_fit=True,
-        )
-        is not None
-    )
+    admit = dict(num_new_tokens=16, full_sequence_must_fit=True)
+    assert manager.allocate_slots(second, **admit) is None
 
-    first_blocks = manager.get_block_ids("first")
-    block_table_updates = manager.hisparse_coordinator.take_block_table_updates()
-    assert block_table_updates.get("first") == first_blocks
+    # Filling the pool past the watermark asked for a hot region; once the
+    # eager spills land, every sealed page is released to the free queue.
+    assert all(
+        first.request_id in hot_manager.hot_required
+        for hot_manager in coordinator.hot_managers
+    )
+    _publish_hisparse_pages(manager)
+    assert pool.get_num_free_blocks() == 1 + 6
+    assert manager.allocate_slots(second, **admit) is not None
+
+    first_resident = manager.get_blocks(first.request_id).blocks[2]
+    assert first_resident[0].is_null
+    updates = coordinator.take_block_table_updates()
+    assert updates[first.request_id] == manager.get_block_ids(first.request_id)
 
     first.num_computed_tokens = 128
-    assert manager.allocate_slots(first, num_new_tokens=16) is None
-    assert not manager.hisparse_coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(first, num_new_tokens=16) is not None
+    assert len(manager.get_blocks(first.request_id).blocks[3]) == 2
 
 
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
@@ -852,8 +845,8 @@ def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     )
 
 
-def test_hisparse_shadow_pages_free_under_pool_pressure():
-    """Shadow-pinned blocks must be the first, copy-free reclaim tier."""
+def test_hisparse_finished_request_leaves_free_copies():
+    """Clean pages of a finished request are free-queue blocks, not pins."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
@@ -862,17 +855,16 @@ def test_hisparse_shadow_pages_free_under_pool_pressure():
     manager.free(original)
 
     coordinator = manager.hisparse_coordinator
-    assert coordinator.shadow_pages
+    assert coordinator.copies
     pool = manager.block_pool
-    free_before = pool.get_num_free_blocks()
-    reclaimed = coordinator.reclaim_resident_blocks(2)
-    assert reclaimed >= 2
-    assert pool.get_num_free_blocks() == free_before + reclaimed
+    assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    assert not coordinator.copies
     assert not coordinator.spills_to_send
 
 
-def test_hisparse_reset_prefix_cache_unpins_shadow_pages():
-    """Reset must release shadow pins before checking the physical pool."""
+def test_hisparse_reset_prefix_cache_drops_copies():
+    """Reset must forget GPU copies along with the host hashes they mirror."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
@@ -880,23 +872,26 @@ def test_hisparse_reset_prefix_cache_unpins_shadow_pages():
     _publish_hisparse_pages(manager)
     manager.free(request)
 
-    assert manager.hisparse_coordinator.shadow_pages
+    coordinator = manager.hisparse_coordinator
+    assert coordinator.copies
     assert manager.reset_prefix_cache()
-    assert not manager.hisparse_coordinator.shadow_pages
+    assert not coordinator.copies
 
 
-def test_hisparse_stale_shadow_entry_is_ignored():
-    """A recycled host block id must not resurrect another request's pages."""
+def test_hisparse_reused_copy_is_not_adopted():
+    """A host prefix hit must not adopt a GPU copy the pool has handed out."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
     _publish_hisparse_pages(manager)
+    indexer_blocks = list(manager.get_blocks("original").blocks[1])
     manager.free(original)
-
-    coordinator = manager.hisparse_coordinator
-    for entry in coordinator.shadow_pages.values():
-        entry.host_hash = "stale"
+    pool = manager.block_pool
+    pool.touch(indexer_blocks)
+    reused = pool.get_new_blocks(pool.get_num_free_blocks())
+    pool.free_blocks(reused)
+    pool.free_blocks(indexer_blocks)
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     computed, num_computed, _ = manager.get_computed_blocks(resumed)
@@ -909,37 +904,6 @@ def test_hisparse_stale_shadow_entry_is_ignored():
     )
     resident_blocks = manager.get_blocks("resumed").blocks[2]
     assert all(block.is_null for block in resident_blocks[:3])
-
-
-def test_hisparse_recomputes_capacity_after_reclaim_requires_hot(monkeypatch):
-    """A resident-to-hot transition must update the admission requirement."""
-    # One pool block is reserved as the null block. Holding three leaves one
-    # free; reclaiming one makes the stale two-block estimate fit while the
-    # refreshed estimate, including two hot blocks, does not.
-    manager = make_hisparse_kv_cache_manager(5, 16)
-    request = make_request(
-        "transitioning",
-        [0],
-        HISPARSE_BLOCK_SIZE,
-        sha256,
-    )
-    pool = manager.block_pool
-    held = pool.get_new_blocks(3)
-
-    def reclaim(*_args):
-        for hot_manager in manager.hisparse_coordinator.hot_managers:
-            hot_manager.require_hot(request.request_id)
-        pool.free_blocks([held.pop()])
-
-    monkeypatch.setattr(
-        manager.hisparse_coordinator, "reclaim_resident_blocks", reclaim
-    )
-
-    # The original two-block estimate fits after reclaim, but the transition
-    # adds a two-block hot region. Admission must defer instead of reaching
-    # BlockPool.get_new_blocks with an overcommitted shared pool.
-    assert manager.allocate_slots(request, num_new_tokens=1) is None
-    assert pool.get_num_free_blocks() == 2
 
 
 def test_hisparse_external_import_uses_hard_gpu_footprint():

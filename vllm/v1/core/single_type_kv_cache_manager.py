@@ -2331,16 +2331,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend(new_blocks)
         return new_blocks
 
-    def reclaimable_pages(self) -> set[tuple[str, int]]:
-        """Return sealed resident pages."""
-        pages: set[tuple[str, int]] = set()
-        for request_id, blocks in self.req_to_blocks.items():
-            # Retain the active page and one predecessor for overlapping steps.
-            for block_idx, block in enumerate(blocks[:-2]):
-                if not block.is_null:
-                    pages.add((request_id, block_idx))
-        return pages
-
     def adopt_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock
     ) -> bool:
@@ -2357,24 +2347,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             return None
         block = blocks[block_idx]
         return None if block.is_null else block
-
-    def release_resident_page(
-        self,
-        request_id: str,
-        block_idx: int,
-        expected_block: KVCacheBlock | None = None,
-    ) -> KVCacheBlock | None:
-        blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
-            return None
-        block = blocks[block_idx]
-        if block.is_null or (
-            expected_block is not None and block is not expected_block
-        ):
-            return None
-        blocks[block_idx] = self._null_block
-        self.block_pool.free_blocks([block])
-        return block
 
 
 def get_manager_for_kv_cache_spec(
