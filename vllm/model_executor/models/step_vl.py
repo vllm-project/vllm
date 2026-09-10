@@ -22,6 +22,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
+from .interfaces import supports_pp
 from .step3_vl import Step3VLForConditionalGeneration
 from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -148,7 +149,7 @@ class PerceptionEncoderMLP(nn.Module):
         self,
         input_dim: int,
         hidden_dim: int,
-        act_layer: Callable[[], nn.Module],
+        act_layer: Callable[[torch.Tensor], torch.Tensor],
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -257,7 +258,7 @@ class PerceptionEncoderVisionBlock(nn.Module):
         max_grid_height: int,
         max_grid_width: int,
         mlp_ratio: float = 4.0,
-        ls_init_value: float = None,
+        ls_init_value: float | None = None,
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
@@ -310,7 +311,7 @@ class PerceptionEncoderVisionTransformer(nn.Module):
         max_grid_height: int,
         max_grid_width: int,
         mlp_ratio: float = 4.0,
-        ls_init_value: float = None,
+        ls_init_value: float | None = None,
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
@@ -496,7 +497,7 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
         super(Step3VLForConditionalGeneration, self).__init__()
 
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -522,14 +523,16 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+            self.language_model = language_model
+            assert supports_pp(language_model)
 
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _get_vision_model_output(
