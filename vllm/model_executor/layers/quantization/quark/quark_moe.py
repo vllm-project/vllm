@@ -62,9 +62,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
-    _WEIGHT_QUANT_DTYPE_MAP,
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
+    QUANT_KEY_TO_QUANT_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1197,7 +1197,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     supported_activation_quant_keys = [
-        *_ACTIVATION_QUANT_KEY_MAP,
+        *_ACTIVATION_QUANT_KEY_MAP.values(),
         kFp8DynamicTensorSym,
         kFp8StaticTensorSym,
         None,
@@ -1510,8 +1510,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             assert self.activation_quant_key is not None
             return ocp_mx_moe_quant_config(
-                quant_dtype=_ACTIVATION_QUANT_KEY_MAP[self.activation_quant_key],
-                weight_dtype=_WEIGHT_QUANT_DTYPE_MAP[self.weight_quant_key],
+                quant_dtype=QUANT_KEY_TO_QUANT_DTYPE[self.activation_quant_key],
+                weight_dtype=QUANT_KEY_TO_QUANT_DTYPE[self.weight_quant_key],
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 w1_bias=layer.w13_bias,

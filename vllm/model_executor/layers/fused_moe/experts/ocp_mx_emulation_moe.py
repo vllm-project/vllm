@@ -24,8 +24,8 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExpert
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    _ACTIVATION_QUANT_DTYPE_MAP,
-    _ACTIVATION_QUANT_KEY_MAP,
+    QUANT_DTYPE_TO_QUANT_KEY,
+    QUANT_KEY_TO_QUANT_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -76,7 +76,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         self.activation_quant_key = (
             None
             if activation_dtype is None
-            else _ACTIVATION_QUANT_DTYPE_MAP[activation_dtype]
+            else QUANT_DTYPE_TO_QUANT_KEY[activation_dtype]
         )
 
         # TODO: Migrate quant_config._a1.dtype to be QuantKey directly.
@@ -85,7 +85,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         elif self.activation_quant_key == kFp8StaticTensorSym:
             self._quant_dtype = current_platform.fp8_dtype()
         else:
-            self._quant_dtype = _ACTIVATION_QUANT_KEY_MAP[self.activation_quant_key]
+            self._quant_dtype = QUANT_KEY_TO_QUANT_DTYPE[self.activation_quant_key]
 
     @staticmethod
     def is_supported_config(

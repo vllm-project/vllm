@@ -20,16 +20,18 @@ _WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
     "mxfp6_e2m3": kMxfp6E2M3Static,
 }
 
-_ACTIVATION_QUANT_KEY_MAP: dict[QuantKey, str] = {
-    kFp8StaticTensorSym: "fp8",
-    kMxfp4Dynamic: "mxfp4",
-    kMxfp6E3M2Dynamic: "mxfp6_e3m2",
-    kMxfp6E2M3Dynamic: "mxfp6_e2m3",
+_ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
+    "mxfp4": kMxfp4Dynamic,
+    "mxfp6_e3m2": kMxfp6E3M2Dynamic,
+    "mxfp6_e2m3": kMxfp6E2M3Dynamic,
 }
 
-_WEIGHT_QUANT_DTYPE_MAP = {value: key for key, value in _WEIGHT_QUANT_KEY_MAP.items()}
-_ACTIVATION_QUANT_DTYPE_MAP = {
-    value: key for key, value in _ACTIVATION_QUANT_KEY_MAP.items()
+QUANT_DTYPE_TO_QUANT_KEY: dict[str, QuantKey] = {
+    **_ACTIVATION_QUANT_KEY_MAP,
+    "fp8": kFp8StaticTensorSym,
+}
+QUANT_KEY_TO_QUANT_DTYPE = {
+    value: key for key, value in QUANT_DTYPE_TO_QUANT_KEY.items()
 }
 
 OCP_MX_DTYPES = {
