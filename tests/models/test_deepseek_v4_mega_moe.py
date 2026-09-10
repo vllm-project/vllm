@@ -27,6 +27,7 @@ from vllm.models.deepseek_v4_1.common.mm_preprocess import (
 from vllm.models.deepseek_v4_1.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
@@ -38,6 +39,7 @@ pytestmark = pytest.mark.skipif(
 def v41_moe_config(dist_init):
     return SimpleNamespace(
         model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
             hf_config=DeepseekV41Config(
                 text_config=dict(
                     hidden_size=128,
@@ -80,7 +82,10 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     config = v41_moe_config.model_config.hf_config
     config.hidden_size = 256
     config.vision_n_layers = int(vision)
-    with torch.device("cuda"):
+    with (
+        set_default_torch_dtype(v41_moe_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
         moe = DeepseekV41MoE(v41_moe_config, prefix=f"model.layers.{layer_id}.ffn")
         hidden_states = torch.randn(4, config.hidden_size, dtype=torch.bfloat16)
         input_ids = (
@@ -90,7 +95,6 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         )
 
     with torch.no_grad():
-        moe.gate.weight.data = moe.gate.weight.data.to(torch.bfloat16)
         moe.gate.weight.normal_(std=0.01)
         moe.gate.e_score_correction_bias.copy_(torch.arange(num_experts, device="cuda"))
         if vision:
@@ -165,7 +169,10 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypa
     config.hidden_size = 256
     config.num_hash_layers = 1
     config.vocab_size = 32
-    with torch.device("cuda"):
+    with (
+        set_default_torch_dtype(v41_moe_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
         moe = DeepseekV4MoE(
             v41_moe_config,
             prefix="model.layers.0.ffn",
@@ -183,7 +190,6 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypa
         dim=1,
     )
     with torch.no_grad():
-        moe.gate.weight.data = moe.gate.weight.data.to(torch.bfloat16)
         moe.gate.weight.normal_(std=0.01)
         moe.gate.tid2eid.copy_(fixed_ids)
 
