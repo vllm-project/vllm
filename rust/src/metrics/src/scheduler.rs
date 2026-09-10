@@ -241,6 +241,25 @@ impl EncodeLabelValue for LoraLoadedLevel {
     }
 }
 
+/// Labels for `vllm:lora_adapter_load_seconds`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LoraLoadTransitionLabels {
+    pub model_name: String,
+    pub engine: u32,
+    /// `load` (disk into the CPU cache) or `activate` (CPU cache into a GPU slot).
+    pub transition: String,
+}
+
+pub type LoraLoadTransitionHistogramFamily =
+    Family<LoraLoadTransitionLabels, Histogram, fn() -> Histogram>;
+
+const LORA_LOAD_SECONDS_BUCKETS: [f64; 10] =
+    [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+
+fn lora_load_seconds_histogram() -> Histogram {
+    Histogram::new(LORA_LOAD_SECONDS_BUCKETS.iter().copied())
+}
+
 /// Labels for `vllm:lora_adapter_loaded`, one series per resident adapter.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, EncodeLabelSet)]
 pub struct LoraLoadedLabels {
@@ -270,6 +289,7 @@ pub struct SchedulerMetrics {
     pub lora_cpu_adapters: Family<EngineLabels, U64Gauge>,
     pub lora_gpu_slots: Family<EngineLabels, U64Gauge>,
     pub lora_adapter_loaded: Family<LoraLoadedLabels, U64Gauge>,
+    pub lora_load_seconds: LoraLoadTransitionHistogramFamily,
 
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
@@ -382,6 +402,13 @@ impl SchedulerMetrics {
             "vllm:lora_adapter_loaded",
             "Residency of individual LoRA adapters in the worker's adapter caches. The series exists (value 1) while the adapter is resident; 'level' is 'gpu' when the adapter is active in a GPU slot and 'cpu' when it is only in the host cache.",
             lora_adapter_loaded.clone(),
+        );
+        let lora_load_seconds =
+            Family::new_with_constructor(lora_load_seconds_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:lora_adapter_load_seconds",
+            "Histogram of LoRA adapter transition time in seconds. 'transition' is 'load' for a read from disk into the CPU cache and 'activate' for a move from the CPU cache into a GPU slot.",
+            lora_load_seconds.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -596,6 +623,7 @@ impl SchedulerMetrics {
             lora_cpu_adapters,
             lora_gpu_slots,
             lora_adapter_loaded,
+            lora_load_seconds,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
