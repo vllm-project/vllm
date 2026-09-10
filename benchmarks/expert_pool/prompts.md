@@ -1,8 +1,8 @@
-# 速度測定に使用したプロンプト全文
+# Prompts used for the speed measurement
 
-`pair.json`の`rendered_prompt`をそのまま表示しています。実際の送信は同ファイルの固定トークン列を使います。
+The `rendered_prompt` field of `pair.json`, shown as is. The client sends the frozen token ids from the same file.
 
-## 1回目：28096_836
+## 1st (warmup): 28096_836
 
 ```text
 <|im_start|>system
@@ -81,7 +81,7 @@ Which of our officially supported platforms is this issue occurring on?
 
 ```
 
-## 2回目：18827_741
+## 2nd (measured): 18827_741
 
 ```text
 <|im_start|>system
