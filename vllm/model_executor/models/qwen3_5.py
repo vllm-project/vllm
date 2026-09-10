@@ -28,6 +28,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -37,6 +38,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
+)
+from vllm.model_executor.layers.fused_swiglu_gemm import (
+    fused_swiglu_gemm,
+    supports_fused_swiglu_gemm,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -49,6 +54,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -73,7 +79,7 @@ from .interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from .qwen2_moe import Qwen2MoeMLP
 from .qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
@@ -101,6 +107,47 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class Qwen3_5MLP(Qwen2MoeMLP):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        expert_gate: torch.nn.Linear | None = None,
+        is_sequence_parallel: bool = False,
+        disable_tp: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            hidden_act=hidden_act,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            expert_gate=expert_gate,
+            is_sequence_parallel=is_sequence_parallel,
+            disable_tp=disable_tp,
+            prefix=prefix,
+        )
+        # Hardware and linear-backend introspection is intentionally kept out
+        # of the torch.compile region. Unsupported token counts fall back in
+        # the custom-op implementation.
+        self.use_fused_swiglu_gemm = supports_fused_swiglu_gemm(self.gate_up_proj)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_fused_swiglu_gemm:
+            out = fused_swiglu_gemm(x, self.gate_up_proj.weight)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
+            out = self.act_fn(gate_up)
+        out, _ = self.down_proj(out)
+        if self.expert_gate is not None:
+            out = F.sigmoid(self.expert_gate(x)[0]) * out
+        return out
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -169,7 +216,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.mlp",
             )
         elif config.model_type == "qwen3_5_text":
-            self.mlp = Qwen3NextMLP(
+            self.mlp = Qwen3_5MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
