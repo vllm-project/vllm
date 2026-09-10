@@ -43,7 +43,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_DTYPE_MAP,
-    _WEIGHT_QUANT_DTYPE_MAP,
+    _WEIGHT_QUANT_KEY_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -709,7 +709,7 @@ class QuarkConfig(QuantizationConfig):
             return QuantKeyMatch(False, None, None)
 
         weight_dtype = weight_quant["dtype"].replace("fp", "mxfp")
-        weight_quant_key = _WEIGHT_QUANT_DTYPE_MAP[weight_dtype]
+        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
         if input_quant is None:
             activation_quant_key = None
         elif not input_quant.get("is_dynamic"):

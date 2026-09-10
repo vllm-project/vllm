@@ -1872,17 +1872,17 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
 # "mxfp6_e3m2") silently skips the fake-quantization the emulation exists for.
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
 @pytest.mark.parametrize(
-    ("activation_dtype", "expected_quant_dtype"),
+    ("activation_dtype", "expected_quant_dtype", "weight_dtype"),
     [
-        (None, None),
-        ("mxfp4", "mxfp4"),
-        ("mxfp6_e3m2", "mxfp6_e3m2"),
-        ("mxfp6_e2m3", "mxfp6_e2m3"),
-        ("fp8", current_platform.fp8_dtype()),
+        (None, None, "mxfp4"),
+        ("mxfp4", "mxfp4", "mxfp4"),
+        ("mxfp6_e3m2", "mxfp6_e3m2", "mxfp6_e3m2"),
+        ("mxfp6_e2m3", "mxfp6_e2m3", "mxfp6_e2m3"),
+        ("fp8", current_platform.fp8_dtype(), "mxfp4"),
     ],
 )
 def test_emulation_activation_quant_dtype_is_dispatchable(
-    activation_dtype, expected_quant_dtype
+    activation_dtype, expected_quant_dtype, weight_dtype
 ):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import (
@@ -1899,8 +1899,8 @@ def test_emulation_activation_quant_dtype_is_dispatchable(
     quant_config = FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(activation_dtype),
         _a2=FusedMoEQuantDesc(activation_dtype),
-        _w1=FusedMoEQuantDesc("mxfp4"),
-        _w2=FusedMoEQuantDesc("mxfp4"),
+        _w1=FusedMoEQuantDesc(weight_dtype),
+        _w2=FusedMoEQuantDesc(weight_dtype),
     )
     moe_config = FusedMoEConfig(
         num_experts=8,
@@ -1917,6 +1917,7 @@ def test_emulation_activation_quant_dtype_is_dispatchable(
     )
     experts = OCP_MXQuantizationEmulationTritonExperts(moe_config, quant_config)
 
+    assert experts.weight_quant_dtype == weight_dtype
     assert experts.quant_dtype == expected_quant_dtype
     if experts.quant_dtype is None:
         return

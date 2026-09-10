@@ -14,10 +14,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 OCP_MX_BLOCK_SIZE = 32
 
-_WEIGHT_QUANT_KEY_MAP: dict[QuantKey, str] = {
-    kMxfp4Static: "mxfp4",
-    kMxfp6E3M2Static: "mxfp6_e3m2",
-    kMxfp6E2M3Static: "mxfp6_e2m3",
+_WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
+    "mxfp4": kMxfp4Static,
+    "mxfp6_e3m2": kMxfp6E3M2Static,
+    "mxfp6_e2m3": kMxfp6E2M3Static,
 }
 
 _ACTIVATION_QUANT_KEY_MAP: dict[QuantKey, str] = {

@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
+    _WEIGHT_QUANT_DTYPE_MAP,
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
 )
@@ -1201,7 +1202,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         kFp8StaticTensorSym,
         None,
     ]
-    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP]
+    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
     def __init__(
         self,
@@ -1476,10 +1477,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
             )
-        elif self.weight_quant_key == kMxfp4Static and self.activation_quant_key in [
-            kFp8DynamicTensorSym,
-            kFp8StaticTensorSym,
-        ]:
+        elif (
+            self.weight_quant_key == kMxfp4Static
+            and self.activation_quant_key == kFp8StaticTensorSym
+        ):
             return mxfp4_w4a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
@@ -1510,7 +1511,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             assert self.activation_quant_key is not None
             return ocp_mx_moe_quant_config(
                 quant_dtype=_ACTIVATION_QUANT_KEY_MAP[self.activation_quant_key],
-                weight_dtype=_WEIGHT_QUANT_KEY_MAP[self.weight_quant_key],
+                weight_dtype=_WEIGHT_QUANT_DTYPE_MAP[self.weight_quant_key],
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 w1_bias=layer.w13_bias,

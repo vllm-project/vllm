@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
     supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP, None]
-    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP]
+    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
     def __init__(
         self,
