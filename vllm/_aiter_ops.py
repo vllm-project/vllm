@@ -1970,7 +1970,7 @@ class rocm_aiter_ops:
                 from aiter.ops import topk
 
                 cls._TOPK_GATING_AVAILABLE = bool(
-                    getattr(topk, "TOPK_GATING_SOFTMAX_RENORMALIZES", False)
+                    getattr(topk, "TOPK_GATING_SUPPORTS_SOFTMAX_RENORM", False)
                 )
             except ImportError:
                 cls._TOPK_GATING_AVAILABLE = False
