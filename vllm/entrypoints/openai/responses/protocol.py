@@ -180,7 +180,7 @@ class ResponsesRequest(OpenAIBaseModel):
     tools: list[Tool] = Field(default_factory=list)
     top_logprobs: int | None = 0
     top_p: float | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True

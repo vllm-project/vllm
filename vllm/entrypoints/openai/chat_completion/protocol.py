@@ -264,7 +264,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     min_p: float | None = None
     repetition_penalty: float | None = None
     watermarking: bool = True
@@ -509,7 +509,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+    stream_interval: Annotated[int, Field(ge=1, le=_INT64_MAX)] | None = Field(
         default=None,
         description=(
             "Number of tokens to batch into each streamed chunk. Raises the "
@@ -1105,7 +1105,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     # vLLM extensions
     best_of: int | None = None
     use_beam_search: bool = False
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     min_p: float | None = None
     repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
