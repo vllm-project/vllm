@@ -82,6 +82,18 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    dsv4_fused_attention: bool | None = None
+    """DeepSeek V4.1 on FlashMLA/SM100: run Q RoPE, sparse attention, inverse
+    RoPE and the FP8 cast of the output in FlashMLA's fused kernel and feed the
+    ``wo_a`` einsum directly. None enables it when the kernel is available;
+    True raises at startup if it is not."""
+
+    dsv4_fused_decode_min_tokens: int = 0
+    """With ``dsv4_fused_attention``, decode steps with fewer query tokens than
+    this use the split-KV FlashMLA decode kernel instead (the fused kernel runs
+    one query token per CTA and has no split-KV). 0 always uses the fused
+    kernel."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
@@ -115,6 +127,12 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+
+        if self.dsv4_fused_decode_min_tokens < 0:
+            raise ValueError(
+                "dsv4_fused_decode_min_tokens must be >= 0, got "
+                f"{self.dsv4_fused_decode_min_tokens}"
+            )
 
         if self.use_fp4_indexer_cache is not None:
             logger.warning(
