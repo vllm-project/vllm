@@ -219,3 +219,122 @@ def test_rocm_aiter_grouped_topk_torch_compile_compatibility():
         topk_weights_original, topk_weights_compiled, rtol=1e-2, atol=1e-2
     )
     assert torch.allclose(topk_ids_original, topk_ids_compiled)
+
+
+def test_rocm_aiter_topk_gating_custom_op_registration():
+    assert hasattr(torch.ops.vllm, "rocm_aiter_topk_gating")
+    assert callable(torch.ops.vllm.rocm_aiter_topk_gating)
+
+
+def _sort_routing(weights: torch.Tensor, ids: torch.Tensor):
+    ids_sorted, order = torch.sort(ids, dim=-1)
+    weights_sorted = torch.gather(weights, 1, order)
+    return weights_sorted, ids_sorted
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4, 16, 64])
+@pytest.mark.parametrize("num_experts", [256, 512])
+@pytest.mark.parametrize("topk", [8, 10])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_rocm_aiter_topk_gating_matches_softmax_reference(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+):
+    """Numerical check vs softmax + topk, including Qwen3.8 (E=512, k=10)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.topk_gating_available():
+        pytest.skip("aiter.ops.topk.topk_gating is not available")
+
+    torch.manual_seed(0)
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.bfloat16, device="cuda"
+    )
+    scores = torch.softmax(gating_output.float(), dim=-1)
+    ref_weights, ref_ids = torch.topk(scores, k=topk, dim=-1)
+    if renormalize:
+        ref_weights = ref_weights / ref_weights.sum(dim=-1, keepdim=True)
+
+    topk_weights = torch.empty((num_tokens, topk), dtype=torch.float32, device="cuda")
+    topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+    token_expert_indices = torch.empty(
+        (num_tokens, topk), dtype=torch.int32, device="cuda"
+    )
+    torch.ops.vllm.rocm_aiter_topk_gating(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        0,
+        "",
+    )
+
+    got_w, got_ids = _sort_routing(topk_weights, topk_ids)
+    ref_w, ref_ids_sorted = _sort_routing(ref_weights, ref_ids.to(torch.int32))
+    assert torch.equal(got_ids, ref_ids_sorted)
+    torch.testing.assert_close(got_w, ref_w, atol=2e-2, rtol=2e-2)
+
+
+def test_rocm_aiter_topk_gating_torch_compile_compatibility():
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.topk_gating_available():
+        pytest.skip("aiter.ops.topk.topk_gating is not available")
+
+    token, expert, topk, renormalize = 4, 512, 10, True
+    gating_output = torch.randn((token, expert), dtype=torch.bfloat16, device="cuda")
+    device = gating_output.device
+
+    def gating_fn(gating_output, topk_weights, topk_ids, token_expert_indices):
+        return torch.ops.vllm.rocm_aiter_topk_gating(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            0,
+            "",
+        )
+
+    torch.library.opcheck(
+        torch.ops.vllm.rocm_aiter_topk_gating,
+        (
+            torch.empty((token, topk), dtype=torch.float32, device=device),
+            torch.empty((token, topk), dtype=torch.int32, device=device),
+            torch.empty((token, topk), dtype=torch.int32, device=device),
+            gating_output,
+        ),
+        kwargs={
+            "renormalize": renormalize,
+            "num_shared_experts": 0,
+            "shared_expert_scoring_func": "",
+        },
+        test_utils=("test_faketensor"),
+    )
+
+    compiled_fn = torch.compile(
+        gating_fn,
+        fullgraph=True,
+        backend="inductor",
+        mode="reduce-overhead",
+        dynamic=False,
+    )
+
+    def alloc():
+        return (
+            torch.empty((token, topk), dtype=torch.float32, device=device),
+            torch.empty((token, topk), dtype=torch.int32, device=device),
+            torch.empty((token, topk), dtype=torch.int32, device=device),
+        )
+
+    w0, i0, t0 = alloc()
+    w1, i1, t1 = alloc()
+    gating_fn(gating_output, w0, i0, t0)
+    compiled_fn(gating_output, w1, i1, t1)
+    w0, i0 = _sort_routing(w0, i0)
+    w1, i1 = _sort_routing(w1, i1)
+    assert torch.allclose(w0, w1, rtol=1e-2, atol=1e-2)
+    assert torch.equal(i0, i1)
