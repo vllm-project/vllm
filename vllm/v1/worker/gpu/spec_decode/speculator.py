@@ -152,6 +152,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
+        self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -330,7 +331,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
+            is_prefilling=self.draft_is_prefilling[:num_reqs],
         )
         return attn_metadata
 
