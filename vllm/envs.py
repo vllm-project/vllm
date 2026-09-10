@@ -2212,6 +2212,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # Whether to skip version suffix when building package
+    "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
+        int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
+    ),
 }
 
 
@@ -2381,6 +2385,7 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        "VLLM_SKIP_VERSION_SUFFIX",
     }
 
     from vllm.config.utils import normalize_value
