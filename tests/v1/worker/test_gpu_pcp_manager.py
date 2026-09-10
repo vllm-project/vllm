@@ -88,7 +88,7 @@ def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
         device=torch.device("cpu"),
     )
 
-    actual = manager.get_num_tokens_for_dispatch(
+    _, actual, _ = manager.get_dispatch_batch_shape(
         np.asarray(num_scheduled_tokens, dtype=np.int32),
         np.asarray(is_prefilling, dtype=np.bool_),
     )

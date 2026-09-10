@@ -41,6 +41,8 @@ class PCPSchedule:
     # [num_local_rows] global request index for each of THIS rank's local rows,
     # in local row order.
     local_to_global_req_idx_np: np.ndarray
+    # Whether NO request in the batch is PCP-split.
+    all_rows_replicated: bool
 
 
 _current_pcp_schedule: PCPSchedule | None = None
@@ -181,9 +183,11 @@ class PCPManager:
                 "MRV2 PCP does not support speculative decoding yet."
             )
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.has_full_cudagraphs():
-            raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
         if parallel_config.decode_context_parallel_size > 1:
+            if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL:
+                raise NotImplementedError(
+                    "MRV2 PCP cannot capture a FULL CUDA graph over mixed batches."
+                )
             if parallel_config.dcp_comm_backend != "ag_rs":
                 raise NotImplementedError(
                     "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
@@ -195,6 +199,10 @@ class PCPManager:
                 raise NotImplementedError(
                     "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
                     "Set -cc.cudagraph_mode=NONE."
+                )
+            if cudagraph_mode.has_full_cudagraphs():
+                raise NotImplementedError(
+                    "MRV2 PCP supports PIECEWISE CUDA graphs only."
                 )
 
     @staticmethod
@@ -368,6 +376,7 @@ class PCPManager:
                     (segment.global_batch_req_idx for segment in local_segments),
                     dtype=np.int32,
                 ),
+                all_rows_replicated=bool(replicated.all()),
             )
         )
 
@@ -423,21 +432,24 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def get_num_tokens_for_dispatch(
+    def get_dispatch_batch_shape(
         self,
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-    ) -> int:
-        """Return the largest real rank-local batch before graph padding."""
-        return max(
-            sum(
+    ) -> tuple[int, int, int]:
+        """``(num_reqs, num_tokens, max_query_len)`` of the rank-local batch."""
+        num_reqs = num_tokens = max_query_len = 0
+        for rank in range(self.pcp_world_size):
+            chunk_lens = [
                 chunk_len
                 for _, _, chunk_len in self._iter_rank_chunks(
                     rank, num_scheduled_tokens, is_prefilling
                 )
-            )
-            for rank in range(self.pcp_world_size)
-        )
+            ]
+            num_reqs = max(num_reqs, len(chunk_lens))
+            num_tokens = max(num_tokens, sum(chunk_lens))
+            max_query_len = max(max_query_len, max(chunk_lens, default=0))
+        return num_reqs, num_tokens, max_query_len
 
     @property
     def input_buffers(self) -> InputBuffers:
@@ -698,6 +710,14 @@ class PCPManager:
         self._gathered_kv_slot_mappings.fill_(PAD_SLOT_ID)
         return self._gathered_kv_slot_mappings[:, : num_tokens * self.pcp_world_size]
 
+    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+        assert self._local_block_tables is not None
+        assert num_reqs <= self._local_block_tables[0].shape[0], (
+            f"dummy batch wants {num_reqs} rows but the PCP block tables hold "
+            f"{self._local_block_tables[0].shape[0]}"
+        )
+        return tuple(bt[:num_reqs].zero_() for bt in self._local_block_tables)
+
     def _convert_to_gathered_slot_mappings(
         self,
         global_batch_slot_mappings: torch.Tensor,
@@ -750,8 +770,19 @@ def set_replicated_pcp_schedule(input_batch: InputBatch) -> None:
             seq_lens_np=query_lens,
             nominal_chunk_query_lens_np=query_lens,
             local_to_global_req_idx_np=np.arange(num_reqs, dtype=np.int32),
+            all_rows_replicated=True,
         )
     )
+
+
+def moe_should_all_reduce(cudagraph_mode: CUDAGraphMode) -> bool:
+    """Whether the MoE should all-reduce instead of gather/reduce-scatter."""
+    if cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        return False
+    schedule = get_current_pcp_schedule()
+    if schedule is None:
+        return False
+    return schedule.all_rows_replicated
 
 
 def maybe_partition_pcp_batch(
@@ -775,6 +806,16 @@ def maybe_get_pcp_dummy_slot_mappings(
     if manager is None:
         return block_tables.get_dummy_slot_mappings(num_tokens)
     return manager.get_dummy_slot_mappings(num_tokens)
+
+
+def maybe_get_pcp_dummy_block_tables(
+    manager: PCPManager | None,
+    block_tables: BlockTables,
+    num_reqs: int,
+) -> tuple[torch.Tensor, ...]:
+    if manager is None:
+        return block_tables.get_dummy_block_tables(num_reqs)
+    return manager.get_dummy_block_tables(num_reqs)
 
 
 def maybe_restore_pcp_for_sampling(
