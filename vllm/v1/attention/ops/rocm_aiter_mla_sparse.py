@@ -759,7 +759,7 @@ def rocm_fp8_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     *,
-    skip_k_cache_insert: bool = False,
+    compress_ratio: int = 1,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -776,7 +776,8 @@ def rocm_fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
-        skip_k_cache_insert: True when the DSv4 compressor already wrote k_cache.
+        compress_ratio: DSv4 compressor layers pass > 1 and take the Triton
+            kernel. DSv3.2/GLM leave the default 1 and stay on AITER.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -787,9 +788,10 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # Block-flat indexer cache (DSv4 compressor write); AITER's
-    # deepgemm_fp8_paged_mqa_logits reads shuffled (Preshuffle=True).
-    if (_ON_GFX950 or _ON_GFX942) and skip_k_cache_insert and block_size > 1:
+    # skip_k_cache_insert cannot identify this layout: the fused DSv3.2 ROCm
+    # writer also skips the standalone insert. DSv4 already passes
+    # compress_ratio > 1; DSv3.2 leaves the default 1.
+    if (_ON_GFX950 or _ON_GFX942) and compress_ratio > 1 and block_size > 1:
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -1115,7 +1117,7 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
                 token_to_seq=chunk.token_to_seq,
-                cache_layout="NORMAL" if skip_k_cache_insert else None,
+                cache_layout="NORMAL" if compress_ratio > 1 else None,
             )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
@@ -1189,7 +1191,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
-            skip_k_cache_insert=skip_k_cache_insert,
+            compress_ratio=compress_ratio,
         )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
