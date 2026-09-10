@@ -420,6 +420,15 @@ class MoeWNA16Method(FusedMoEMethodBase):
             backend=self.wna16_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        if self.wna16_backend == WNA16MoEBackend.TRITON:
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                _dispatch_wna16,
+            )
+
+            _dispatch_wna16.register_warmup(
+                layer=layer,
+                experts=self.moe_kernel.fused_experts,
+            )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         has_zp = self.quant_config.has_zp
