@@ -328,3 +328,101 @@ def test_fused_prefill_matches_sparse_fwd_pipeline(s_q: int):
     torch.testing.assert_close(
         z, z_ref, rtol=2e-2, atol=2e-2 * z_ref.abs().max().item()
     )
+
+
+def _v41_cache(k: torch.Tensor, block_size: int, bytes_per_token: int, align: int):
+    """Insert RoPE'd-at-position-0 rows into a V4.1 fp8 / fp4 paged cache."""
+    from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    num_tokens = k.shape[0]
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    page = round_up(block_size * bytes_per_token, align)
+    cache = torch.zeros(num_blocks, page, dtype=torch.uint8, device=k.device)
+    cache_3d = cache[:, : block_size * bytes_per_token].view(
+        num_blocks, block_size, bytes_per_token
+    )
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=k.device)
+    cos_sin = make_cos_sin_cache(1, k.device)
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=k.device)
+    rope_quant_insert(k, positions, cos_sin, cache_3d, slots, 1)
+    return cache_3d.unsqueeze(2)
+
+
+def test_fused_decode_v41_fp8_swa_with_fp4_extra():
+    """Fused decode over a V4.1 fp8 SWA cache and a V4.1 fp4 compressed cache.
+
+    Compared with the split-KV kernel (same formats) at the lse and, per token,
+    with a bf16 torch softmax over the dequantized rows.
+    """
+    _skip_unless_supported()
+    from tests.kernels.dsv41_kv_reference import (
+        dequantize_v41_fp4,
+        dequantize_v41_fp8,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    s_q, h_q, n_groups = 40, 64, 8
+    scale = HEAD_DIM**-0.5
+    cos_sin = make_cos_sin_cache(8192, device)
+    positions = torch.randint(0, 8192, (s_q,), device=device)
+    q_std = torch.randn(s_q, h_q, HEAD_DIM, device=device, dtype=torch.bfloat16)
+    k_swa = torch.randn(2048, HEAD_DIM, device=device, dtype=torch.bfloat16)
+    k_ex = torch.randn(4096, HEAD_DIM, device=device, dtype=torch.bfloat16)
+    swa = _v41_cache(k_swa, 32, 528, 512)
+    extra = _v41_cache(k_ex, 64, 288, 256)
+    swa_idx, swa_len = _random_indices(s_q, 128, 2048, device)
+    ex_idx, ex_len = _random_indices(s_q, 512, 4096, device, min_len=0)
+
+    _, lse_ref = fm.flash_mla_with_kvcache(
+        q=rope_gptj(q_std, positions, cos_sin).unsqueeze(1),
+        k_cache=swa,
+        block_table=None,
+        head_dim_v=HEAD_DIM,
+        tile_scheduler_metadata=fm.FlashMLASchedMeta(),
+        cache_seqlens=None,
+        is_fp8_kvcache=True,
+        indices=swa_idx.view(s_q, 1, -1),
+        topk_length=swa_len,
+        softmax_scale=scale,
+        extra_k_cache=extra,
+        extra_indices_in_kvcache=ex_idx.view(s_q, 1, -1),
+        extra_topk_length=ex_len,
+    )
+    out_fp8, out_sf, lse = fm.flash_mla_fused_sparse_decode(
+        permute_q_to_fused(q_std),
+        swa,
+        swa_idx,
+        scale,
+        positions.to(torch.int32),
+        cos_sin,
+        n_groups,
+        topk_length=swa_len,
+        extra_k_cache=extra,
+        extra_indices=ex_idx,
+        extra_topk_length=ex_len,
+    )
+    torch.testing.assert_close(lse, lse_ref.view(s_q, h_q), rtol=1e-3, atol=1e-3)
+    assert out_fp8.shape == (s_q, n_groups, 4096) and out_sf.stride(0) == 1
+
+    swa_flat = swa.reshape(swa.shape[0], -1)
+    swa_rows = dequantize_v41_fp8(
+        swa_flat[:, : 32 * 512].reshape(-1, 512),
+        swa_flat[:, 32 * 512 :].reshape(-1, 16),
+    )
+    ex_flat = extra.reshape(extra.shape[0], -1)
+    ex_rows = dequantize_v41_fp4(
+        ex_flat[:, : 64 * 256].reshape(-1, 256), ex_flat[:, 64 * 256 :].reshape(-1, 32)
+    )
+    q_r = rope_gptj(q_std, positions, cos_sin).float()
+    for t in range(s_q):
+        rows = torch.cat(
+            [
+                swa_rows[swa_idx[t, : swa_len[t]].long()],
+                ex_rows[ex_idx[t, : ex_len[t]].long()],
+            ]
+        ).float()
+        ref_lse = torch.logsumexp(q_r[t] @ rows.T * scale, -1)
+        torch.testing.assert_close(lse[t], ref_lse, rtol=2e-2, atol=2e-2)

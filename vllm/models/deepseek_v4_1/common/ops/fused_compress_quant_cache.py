@@ -245,8 +245,27 @@ def rope_quant_insert(
     if num_tokens == 0:
         return
     launch_kwargs = {"launch_pdl": False} if current_platform.is_cuda() else {}
+    if kv_cache.dtype == torch.uint8 and kv_cache.shape[-1] != 584:
+        # DeepSeek V4.1 fp8 (528 B) / fp4 (288 B) FlashMLA formats.
+        from .kv_formats_v41 import (
+            V41_FP4_BYTES,
+            V41_FP8_BYTES,
+            rope_v41_fp4_insert,
+            rope_v41_fp8_insert,
+        )
+
+        insert = {
+            V41_FP8_BYTES: rope_v41_fp8_insert,
+            V41_FP4_BYTES: rope_v41_fp4_insert,
+        }.get(kv_cache.shape[-1])
+        if insert is None:
+            raise ValueError(
+                f"Unsupported packed KV row of {kv_cache.shape[-1]} bytes; "
+                "expected 584 (V4), 528 (V4.1 fp8) or 288 (V4.1 fp4)."
+            )
+        insert(latent, positions, cos_sin_cache, kv_cache, slot_mapping, compress_ratio)
+        return
     if kv_cache.dtype == torch.uint8:
-        assert kv_cache.shape[-1] == 584
         _rope_quant_insert_kernel[(num_tokens,)](
             latent,
             positions,

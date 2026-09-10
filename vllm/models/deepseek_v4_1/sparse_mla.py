@@ -83,6 +83,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
         "auto",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # V4.1 fp8 SWA rows + V4.1 fp4 compressed rows (SM100)
     ]
 
     @staticmethod
@@ -123,6 +124,23 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if kv_cache_dtype == "nvfp4_ds_mla" and device_capability.major != 10:
+            return "nvfp4_ds_mla needs SM100 (FlashMLA V4.1 fp8/fp4 sparse decode)"
+        return None
 
 
 @dataclass

@@ -6,6 +6,7 @@ DeepseekV4 MLA Attention Layer
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -109,19 +110,52 @@ def _fill_short_context_topk_indices(
     )
 
 
+@dataclass(frozen=True)
+class DSv4KVLayout:
+    """Per-token KV format of the two DeepSeek V4.1 caches.
+
+    ``swa_bytes`` / ``compressed_bytes`` are the packed bytes per token of the
+    FlashMLA paged formats (``None``: plain rows in ``torch_dtype``); the
+    alignments are the page-stride multiples FlashMLA's TMA loads need.
+    """
+
+    cache_dtype: str
+    torch_dtype: torch.dtype
+    swa_bytes: int | None
+    swa_alignment: int
+    compressed_bytes: int | None
+    compressed_alignment: int
+
+
+DSV4_KV_LAYOUTS: dict[str, DSv4KVLayout] = {
+    # V4: 448 e4m3 NoPE + 64 bf16 RoPE + 8 B scale row (7 ue8m0 per 64).
+    "fp8_ds_mla": DSv4KVLayout("fp8_ds_mla", torch.uint8, 584, 576, 584, 576),
+    # SWA: V4.1 fp8, 512 e4m3 (RoPE quantized) + 16 ue8m0 per 32.
+    # Compressed: V4.1 fp4, 512 e2m1 + 32 e4m3 scales per 16.
+    "nvfp4_ds_mla": DSv4KVLayout("nvfp4_ds_mla", torch.uint8, 528, 512, 288, 256),
+}
+
+
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
     kv_cache_dtype: str,
     cache_config: CacheConfig | None,
-) -> tuple[str, torch.dtype]:
-    """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
+) -> DSv4KVLayout:
+    """Map ``(backend layout family, --kv-cache-dtype)`` to a KV layout.
 
-    Both layouts are paged; they differ in the per-token block format. The
-    ``fp8_ds_mla`` format is UE8M0 block-scaled fp8 packed as ``uint8`` (the
-    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
-    page-size specs pick the 576B per-token slot). Plain-row backends store each
-    token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
+    FlashMLA backends store packed paged formats (``fp8_ds_mla``: V4 584 B rows;
+    ``nvfp4_ds_mla``: V4.1 fp8 528 B sliding-window rows and V4.1 fp4 288 B
+    compressed rows). The canonical ``fp8_ds_mla`` string is written back onto
+    ``cache_config`` so the page-size specs pick the 576 B per-token slot.
+    Plain-row backends store each token's KV row in its element dtype: bf16 or
+    per-tensor FP8 E4M3.
     """
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        if not use_fp8_ds_mla_layout:
+            raise ValueError(
+                "nvfp4_ds_mla is a FlashMLA-only DeepSeek V4.1 KV cache format."
+            )
+        return DSV4_KV_LAYOUTS["nvfp4_ds_mla"]
     if use_fp8_ds_mla_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
         if kv_cache_dtype == "auto":
@@ -136,15 +170,14 @@ def _resolve_dsv4_kv_cache_dtype(
         if kv_cache_dtype != "fp8_ds_mla":
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8_ds_mla"
-            kv_cache_dtype = "fp8_ds_mla"
             logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
-        return kv_cache_dtype, torch.uint8
+        return DSV4_KV_LAYOUTS["fp8_ds_mla"]
 
     # Plain bf16 / per-tensor fp8 KV row (FlashInfer).
     if kv_cache_dtype.startswith("fp8"):
-        return kv_cache_dtype, torch.float8_e4m3fn
+        return DSv4KVLayout(kv_cache_dtype, torch.float8_e4m3fn, None, 512, None, 512)
     # auto / bfloat16 -> plain bf16 KV row.
-    return kv_cache_dtype, torch.bfloat16
+    return DSv4KVLayout(kv_cache_dtype, torch.bfloat16, None, 512, None, 512)
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -453,9 +486,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # Resolve the kv-cache dtype from this backend's block format. The same
         # resolution drives the SWA cache tensor dtype below.
-        self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
+        self.kv_layout = _resolve_dsv4_kv_cache_dtype(
             self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
         )
+        self.kv_cache_dtype = self.kv_layout.cache_dtype
+        self.kv_cache_torch_dtype = self.kv_layout.torch_dtype
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.uses_fused_kernel_layouts:
+            raise ValueError(
+                "nvfp4_ds_mla requires the FlashMLA fused attention layer "
+                "(attention_config.dsv4_fused_attention)."
+            )
 
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
@@ -465,6 +505,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
             block_size=32,
+            state_content_bytes=self.kv_layout.swa_bytes,
+            alignment=self.kv_layout.swa_alignment,
         )
 
         # The attention layer itself was already registered with the
@@ -966,23 +1008,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # DeepseekV4SWACache.
         if not self.is_kv_source:
             return None
-        # fp8_ds_mla is a UE8M0 block-scaled uint8 layout and needs 576B
-        # alignment; plain bf16 / per-tensor fp8 rows use natural element-size
-        # pages.
-        uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
+        # Packed FlashMLA formats carry their bytes per token and page
+        # alignment in the layout table; plain bf16 / per-tensor fp8 rows use
+        # natural element-size pages. head_size stays semantic (512).
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
+            dtype=self.kv_cache_torch_dtype,
             tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
+            alignment=self.kv_layout.compressed_alignment,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
-            # head_size stays semantic (512).
-            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+            state_content_bytes=self.kv_layout.compressed_bytes,
         )
 
     def _compressed_kv_cache(self) -> torch.Tensor:

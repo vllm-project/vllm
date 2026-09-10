@@ -413,6 +413,15 @@ def dequantize_and_gather_k_cache(
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
+    if k_cache.dtype == torch.uint8 and k_cache.shape[-1] != 584:
+        # DeepSeek V4.1 fp8 (528 B) / fp4 (288 B) FlashMLA formats.
+        from .kv_formats_v41 import gather_dequant_v41
+
+        gather_dequant_v41(
+            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        )
+        return
+
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (

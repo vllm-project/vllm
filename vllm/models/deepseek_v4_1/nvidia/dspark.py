@@ -49,6 +49,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+    rope_quant_insert,
+)
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -245,27 +248,17 @@ def _insert_context_kv(
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
+    if cache_dtype == torch.uint8:
+        # Packed FlashMLA layouts (V4 584 B or V4.1 fp8 528 B), KV only.
+        rope_quant_insert(kv, positions, cos_sin_cache, swa_cache, slot_mapping, 1)
+        return
     n_ctx = kv.shape[0]
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
         device=kv.device,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-        )
-    elif cache_dtype == torch.bfloat16:
+    if cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             dummy_q,

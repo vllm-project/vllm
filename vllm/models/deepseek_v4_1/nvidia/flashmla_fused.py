@@ -51,7 +51,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_SUPPORTED_KV_CACHE_DTYPES = ("auto", "fp8", "fp8_ds_mla")
+_SUPPORTED_KV_CACHE_DTYPES = ("auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla")
+_FUSED_KV_LAYOUTS = ("fp8_ds_mla", "nvfp4_ds_mla")
 
 
 def dsv4_fused_attention_enabled(vllm_config: VllmConfig) -> bool:
@@ -64,7 +65,7 @@ def dsv4_fused_attention_enabled(vllm_config: VllmConfig) -> bool:
     if ok and hf_config.num_attention_heads // hf_config.o_groups != WV_GROUP_SIZE:
         ok, reason = False, f"needs {WV_GROUP_SIZE} heads per o_group"
     if ok and vllm_config.cache_config.cache_dtype not in _SUPPORTED_KV_CACHE_DTYPES:
-        ok, reason = False, "needs the fp8_ds_mla KV cache layout"
+        ok, reason = False, "needs the fp8_ds_mla or nvfp4_ds_mla KV cache layout"
     if not ok:
         if flag is True:
             raise ValueError(f"dsv4_fused_attention=True is unsupported: {reason}")
@@ -79,7 +80,7 @@ class DeepseekV4FlashMLAFusedAttention(DeepseekV4FlashMLAAttention):
         super().__init__(vllm_config, *args, **kwargs)
         if self.n_local_heads // self.n_local_groups != WV_GROUP_SIZE:
             raise ValueError("fused attention needs 8 heads per wo_a group")
-        if self.kv_cache_dtype != "fp8_ds_mla":
+        if self.kv_cache_dtype not in _FUSED_KV_LAYOUTS:
             raise NotImplementedError(
                 f"fused attention does not support kv-cache dtype {self.kv_cache_dtype}"
             )
