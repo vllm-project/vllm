@@ -38,14 +38,26 @@ def _second_binder_test_kernel(x, value, BLOCK: tl.constexpr):
     pass
 
 
+@triton.jit
+def _pointer_group_test_kernel(x_ptr, value, BLOCK: tl.constexpr):
+    pass
+
+
 class _FakeTritonKernel:
     arg_names = ("first", "second", "CONST")
 
     def __init__(self) -> None:
         self.warmup_calls: list[dict[str, Any]] = []
+        self.runtime_calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
 
     def warmup(self, **kwargs: Any) -> None:
         self.warmup_calls.append(kwargs)
+
+    def __getitem__(self, grid: Any) -> Any:
+        def launch(*args: Any, **kwargs: Any) -> None:
+            self.runtime_calls.append((grid, args, kwargs))
+
+        return launch
 
 
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
@@ -335,6 +347,76 @@ def test_direct_triton_kernel_preserves_native_call_shape(
     assert owner.kernel.warmup_calls == [
         {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
     ]
+
+
+def test_triton_kernel_decorates_native_launchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _FakeTritonKernel()
+
+    def warmup_inputs(kernel: Any = kernel) -> dict[str, Any]:
+        return triton_warmup_inputs(
+            kernel,
+            "warmup",
+            WarmupChoices(1, 2),
+            grid=(2,),
+            CONST=7,
+        )
+
+    launcher = triton_kernel(warmup_inputs=warmup_inputs)(kernel)
+    launcher[(3,)]("runtime", 4, CONST=8)
+
+    assert kernel.runtime_calls == [((3,), ("runtime", 4), {"CONST": 8})]
+
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_precompile_keys",
+        lambda kernel, kwargs: {(id(kernel), kwargs["second"], kwargs["CONST"])},
+    )
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_compile_keys",
+        lambda kernel, kwargs: {
+            TritonJitKey(id(kernel), "fake", 0, (kwargs["second"], kwargs["CONST"]))
+        },
+    )
+
+    keys = launcher.warmup_plan()
+    assert len(keys) == 2
+    launcher._owner.compile(keys[0])
+    assert kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
+    ]
+
+
+def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
+    inputs = triton_warmup_inputs(
+        _pointer_group_test_kernel,
+        grid=(1,),
+        pointer_dtypes={torch.float32: ("x_ptr",)},
+        value=2,
+        BLOCK=16,
+    )
+
+    assert inputs["x_ptr"] == TritonWarmupTensor(torch.float32)
+    assert inputs["value"] == 2
+
+    with pytest.raises(ValueError, match="not a pointer: value"):
+        triton_warmup_inputs(
+            _pointer_group_test_kernel,
+            grid=(1,),
+            pointer_dtypes={torch.float32: ("value",)},
+            x_ptr=TritonWarmupTensor(torch.float32),
+            BLOCK=16,
+        )
+    with pytest.raises(ValueError, match="Missing Triton pointer inputs: x_ptr"):
+        triton_warmup_inputs(
+            _pointer_group_test_kernel,
+            grid=(1,),
+            pointer_dtypes={},
+            value=2,
+            BLOCK=16,
+        )
 
 
 def test_triton_range_is_deduplicated_before_binder(
