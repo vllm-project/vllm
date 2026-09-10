@@ -157,11 +157,7 @@ def _get_backend_priorities(
         # So prefer FlashAttention when non-causal on SM100f.
         if device_capability.major == 10 and not use_non_causal:
             return [
-                *(
-                    [AttentionBackendEnum.TRITON_FLASHINFER_COMPOSITE]
-                    if use_mm_prefix
-                    else []
-                ),
+                *([AttentionBackendEnum.TRITON_FLASHINFER] if use_mm_prefix else []),
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,

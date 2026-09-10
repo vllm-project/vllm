@@ -68,7 +68,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import (
+    MMPrefixAttentionRouting,
+    create_composite_attention_backend,
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
     get_num_attention_heads_from_layers,
@@ -505,6 +508,28 @@ class FlashInferBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256, 512]
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_mla,
+        has_sink,
+        use_sparse,
+        use_mm_prefix,
+        device_capability,
+    ):
+        config = get_current_vllm_config_or_none()
+        if (
+            config is not None
+            and config.model_config is not None
+            and config.model_config.rswa_window is not None
+        ):
+            return "R-SWA is not supported"
+        return None
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -2729,3 +2754,15 @@ def _copy_page_indices_kernel(
             block_ids,
             mask=i + offset < num_blocks,
         )
+
+
+TRITON_FLASHINFER = create_composite_attention_backend(
+    TritonAttentionBackend,
+    FlashInferBackend,
+    name="TRITON_FLASHINFER",
+    module=__name__,
+    routing_policy=MMPrefixAttentionRouting,
+    head_sizes=(256, 512),
+    kernel_block_sizes=(128,),
+    device_major=10,
+)

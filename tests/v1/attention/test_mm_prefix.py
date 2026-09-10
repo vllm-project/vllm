@@ -661,7 +661,7 @@ def test_composite_routes_queries_that_need_image_masking(
     """Historical images and single-query steps must use the causal graph path."""
     from types import SimpleNamespace
 
-    from vllm.v1.attention.backends.triton_flashinfer import requires_mm_prefix
+    from vllm.v1.attention.backends.utils import requires_mm_prefix
 
     common = SimpleNamespace(
         max_query_len=query_len,
@@ -675,7 +675,10 @@ def test_composite_routes_queries_that_need_image_masking(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
 @pytest.mark.parametrize("head_size", [256, 512])
-def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size):
+@pytest.mark.parametrize("reverse_children", [False, True])
+def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
+    head_size, reverse_children
+):
     """Changing routes must preserve KV writes, image masking and graph replay."""
     if not current_platform.is_device_capability_family(100):
         pytest.skip("The composite supports Blackwell")
@@ -685,9 +688,21 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size)
     from vllm.model_executor.layers.attention import Attention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
-    from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
-    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-    from vllm.v1.attention.backends.triton_flashinfer import TritonFlashInferBackend
+    from vllm.v1.attention.backends.flashinfer import (
+        TRITON_FLASHINFER as TritonFlashInferBackend,
+    )
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferBackend,
+        FlashInferMetadata,
+    )
+    from vllm.v1.attention.backends.triton_attn import (
+        TritonAttentionBackend,
+        TritonAttentionMetadata,
+    )
+    from vllm.v1.attention.backends.utils import (
+        MMPrefixAttentionRouting,
+        create_composite_attention_backend,
+    )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
     torch.manual_seed(42)
@@ -699,7 +714,7 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size)
         max_num_batched_tokens=512,
         block_size=128,
         enforce_eager=True,
-        attention_config={"backend": "TRITON_FLASHINFER_COMPOSITE"},
+        attention_config={"backend": "TRITON_FLASHINFER"},
     ).create_engine_config()
     cfg.cache_config.kv_cache_layout = "LBHNC"
     window = 128 if head_size == 256 else None
@@ -712,6 +727,26 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size)
         else FullAttentionSpec(**spec_kwargs)
     )
     backend = TritonFlashInferBackend
+    if reverse_children:
+        # Swapping the children and policy must preserve outputs and KV writes;
+        # dispatch cannot depend on a particular child's class or position.
+        class ReversedRouting(MMPrefixAttentionRouting):
+            capture_variant = 0
+
+            def select(self, metadata):
+                return 1 - super().select(metadata)
+
+            @staticmethod
+            def variant_uses_mm_prefix(variant):
+                return variant == 1
+
+        backend = create_composite_attention_backend(
+            FlashInferBackend,
+            TritonAttentionBackend,
+            name="CUSTOM",
+            module=__name__,
+            routing_policy=ReversedRouting,
+        )
     with set_current_vllm_config(cfg), set_default_torch_dtype(DTYPE):
         layer = Attention(
             32,
@@ -783,6 +818,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size)
             )
             torch.testing.assert_close(output.float(), expected, atol=2e-2, rtol=2e-2)
             if qlen == 1:
+                metadata = builder.build_for_cudagraph_capture(common)
+                assert isinstance(metadata, metadata_type)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     layer.impl.forward(

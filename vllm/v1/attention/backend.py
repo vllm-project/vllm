@@ -878,6 +878,9 @@ class AttentionImplBase(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
+        return (self,)
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""

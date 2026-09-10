@@ -58,11 +58,17 @@ llm = LLM(
 
 ### Triton/FlashInfer Composite
 
-On Blackwell, `TRITON_FLASHINFER_COMPOSITE` is preferred for compatible
+On Blackwell, `TRITON_FLASHINFER` is preferred for compatible
 multimodal-prefix configurations, including Gemma 4 with BF16 KV cache. It uses
 Triton when a batch's current queries require bidirectional image attention,
 and FlashInfer for causal text prefills and decode. Historical image tokens
-alone do not select Triton. Routing is internal to one backend and one KV cache.
+alone do not select Triton.
+
+This is an instantiation of `create_composite_attention_backend` with Triton,
+FlashInfer, and `MMPrefixAttentionRouting`. The reusable factory owns child
+implementations, metadata dispatch, compatible cache requirements, and workspace
+sharing. The routing policy selects the child and defines graph-capture safety.
+Other combinations can reuse the same machinery.
 
 The backend supports head dimensions 256/512, unquantized FP16/BF16 KV cache,
 and 128-token kernel pages with a head-major cache layout. Native FlashInfer
@@ -77,7 +83,7 @@ It can also be selected explicitly:
 
 ```bash
 vllm serve google/gemma-4-31B-it \
-    --attention-backend TRITON_FLASHINFER_COMPOSITE
+    --attention-backend TRITON_FLASHINFER
 ```
 
 ### Manual Selection
