@@ -5,12 +5,11 @@ import json
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from vllm.parser.mistral import MistralToolCall
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-from ...utils import check_logprobs_close
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
