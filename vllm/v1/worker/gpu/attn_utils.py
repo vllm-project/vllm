@@ -321,7 +321,7 @@ def get_query_lens_mismatch_unsupported_backend(
 
 
 def init_kv_cache(
-    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
+    runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -377,6 +377,9 @@ def init_kv_cache(
     runner_kv_caches.extend(
         cache for name, cache in kv_caches.items() if name not in forward_context
     )
+    runner_kv_caches[:] = [
+        cache for cache in runner_kv_caches if cache.device == device
+    ]
     return kv_caches
 
 
