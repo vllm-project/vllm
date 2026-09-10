@@ -52,6 +52,14 @@ _REASONING_PARSERS_TO_REGISTER = {
         "gemma4_engine_reasoning_parser",
         "Gemma4ParserReasoningAdapter",
     ),
+    "gigachat35": (
+        "gigachat35_reasoning_parser",
+        "GigaChat35ReasoningParser",
+    ),
+    "gigachat35_thinking": (
+        "gigachat35_reasoning_parser",
+        "GigaChat35ReasoningWithThinkingParser",
+    ),
     "glm45": (
         "glm47_moe_reasoning_parser",
         "Glm47MoeParserReasoningAdapter",

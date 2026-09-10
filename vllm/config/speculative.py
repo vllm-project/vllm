@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
+    "gigachat3_5_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -844,6 +845,14 @@ class SpeculativeConfig:
                     "architectures": ["Qwen4ExpMTP"],
                     "index_share_for_mtp_iteration": share_mtp_indices,
                 }
+            )
+
+        if hf_config.model_type == "gigachat3_5":
+            hf_config.model_type = "gigachat3_5_mtp"
+        if hf_config.model_type == "gigachat3_5_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["GigaChat35MTPModel"]}
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
