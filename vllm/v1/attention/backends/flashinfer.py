@@ -507,10 +507,7 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
-        elif (
-            kv_cache_dtype.startswith("nvfp4")
-            or kv_cache_dtype == "fp8_k_nvfp4_v"
-        ):
+        elif kv_cache_dtype.startswith("nvfp4") or kv_cache_dtype == "fp8_k_nvfp4_v":
             return torch.uint8
         else:
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
@@ -1941,14 +1938,14 @@ class FlashInferImpl(AttentionImpl):
         # and clearing one on every decode step.
         self._trtllm_multi_ctas_kv_counter_buffer = None
         if (
-            self.supports_xqa_or_trtllm_gen_decode
+            self.is_kvcache_fp8_k_nvfp4_v
+            and self.supports_xqa_or_trtllm_gen_decode
             and vllm_config is not None
             and current_platform.is_device_capability_family(100)
         ):
             device = torch.device("cuda", torch.cuda.current_device())
             max_runtime_heads = (
-                num_heads
-                * vllm_config.parallel_config.decode_context_parallel_size
+                num_heads * vllm_config.parallel_config.decode_context_parallel_size
             )
             counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
                 vllm_config.scheduler_config.max_num_seqs,

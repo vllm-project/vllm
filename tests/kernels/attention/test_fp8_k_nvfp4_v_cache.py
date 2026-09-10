@@ -122,9 +122,7 @@ def test_fp8_k_nvfp4_v_store_rejects_fp16() -> None:
         dtype=torch.uint8,
         device="cuda",
     )
-    key = torch.randn(
-        1, num_heads, head_size, dtype=torch.float16, device="cuda"
-    )
+    key = torch.randn(1, num_heads, head_size, dtype=torch.float16, device="cuda")
     value = torch.randn_like(key)
     slot_mapping = torch.zeros(1, dtype=torch.int64, device="cuda")
     scale = torch.ones(1, dtype=torch.float32, device="cuda")
