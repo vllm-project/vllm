@@ -6,7 +6,7 @@ vLLM contains pre-compiled C++ and CUDA (12.9) binaries.
 --8<-- [end:installation]
 --8<-- [start:requirements]
 
-- GPU: compute capability 7.5 or higher (e.g., T4, RTX20xx, A100, L4, H100, B200, etc.)
+- GPU: compute capability 7.5 or higher (e.g., T4, RTX20xx, A100, L4, H100, B200, RTX 5090, etc.)
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
@@ -34,7 +34,7 @@ uv pip install vllm --torch-backend=auto
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
-    NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
+    NVIDIA Blackwell GPUs (e.g., B200, GB200, RTX 5090) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
 As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
 
