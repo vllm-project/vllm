@@ -613,6 +613,32 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_rejects_whitespace_only_structured_outputs_grammar() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "structured_outputs": {"grammar": " \t\n"},
+        }))
+        .expect("parse structured_outputs");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("grammar cannot be an empty string")
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_defaults_function_tool_fields() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
