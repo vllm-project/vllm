@@ -149,13 +149,22 @@ class MultiModalCacheStats(BaseCacheStats):
     - `reset`: Whether `reset_mm_cache` was invoked.
     - `queries`: Refers to the number of multi-modal data items
       that were queried.
+    - `invalidations`: Number of P0-shadow entries dropped for P0/P1
+      drift recovery (see `MultiModalCacheMissError`); a runaway rate
+      here is the operator-visible signal for a poisoned cache entry.
     """
+
+    invalidations: int = 0
 
     def record(self, num_queries: int, num_hits: int) -> None:
         """Aggregate request information into the stats."""
         self.requests += 1
         self.queries += num_queries
         self.hits += num_hits
+
+    def record_invalidations(self, num_invalidations: int) -> None:
+        """Fold newly-observed P0-shadow invalidations into the stats."""
+        self.invalidations += num_invalidations
 
 
 @dataclass

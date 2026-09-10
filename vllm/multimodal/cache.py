@@ -466,6 +466,14 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
             mm_config.mm_processor_cache_gb,
             MultiModalProcessorCacheItemMetadata,
         )
+        # Count of P0/P1-drift recovery evictions since the last delta poll.
+        # A monotonically increasing counter that ticks whenever `invalidate`
+        # drops a stale shadow entry; observed by the renderer's
+        # `update_mm_cache_stats` and surfaced through the
+        # `vllm:mm_cache_invalidations` prometheus counter so operators can
+        # alert on runaway drift (see #55546).
+        self._num_invalidations = 0
+        self._last_num_invalidations = 0
 
     @override
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -499,11 +507,26 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._cache.stat(delta=delta)
 
+    def num_invalidations(self, *, delta: bool = False) -> int:
+        """Number of P0-shadow invalidations since construction.
+
+        When ``delta=True``, returns and resets the count observed since the
+        previous call. Matches the same delta-polling contract as
+        ``make_stats``.
+        """
+        total = self._num_invalidations
+        if delta:
+            observed = total - self._last_num_invalidations
+            self._last_num_invalidations = total
+            return observed
+        return total
+
     @override
     def invalidate(self, mm_hash: str) -> None:
         # Drop our stale shadow entry so the next request for this hash re-sends the
         # data and repopulates P1 (see MultiModalCacheMissError).
-        self._cache.pop(mm_hash, None)
+        if self._cache.pop(mm_hash, None) is not None:
+            self._num_invalidations += 1
 
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):

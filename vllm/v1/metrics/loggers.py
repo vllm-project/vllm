@@ -660,6 +660,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_mm_cache_hits, per_engine_labelvalues
         )
 
+        counter_mm_cache_invalidations = self._counter_cls(
+            name="vllm:mm_cache_invalidations",
+            documentation=(
+                "Multi-modal P0 shadow-cache invalidations (P0/P1 drift recovery)."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_mm_cache_invalidations = create_metric_per_engine(
+            counter_mm_cache_invalidations, per_engine_labelvalues
+        )
+
         #
         # Counters
         #
@@ -1098,6 +1109,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
             self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
+            self.counter_mm_cache_invalidations[engine_idx].inc(
+                mm_cache_stats.invalidations
+            )
 
         if iteration_stats is None:
             return

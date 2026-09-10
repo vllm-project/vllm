@@ -220,6 +220,15 @@ class BaseRenderer(ABC, Generic[_T]):
         if mm_processor_cache and mm_cache_stats:
             delta = mm_processor_cache.make_stats(delta=True)
             mm_cache_stats.record(delta.total, delta.hits)
+            # Sender caches with a shadow entry expose an invalidation
+            # counter (see MultiModalProcessorSenderCache.num_invalidations);
+            # other cache flavours don't drift and don't provide this
+            # signal, hence the getattr / duck-typed poll.
+            invalidations_getter = getattr(
+                mm_processor_cache, "num_invalidations", None
+            )
+            if callable(invalidations_getter):
+                mm_cache_stats.record_invalidations(invalidations_getter(delta=True))
 
     def clear_mm_cache(self) -> None:
         mm_processor_cache = self.mm_processor_cache
