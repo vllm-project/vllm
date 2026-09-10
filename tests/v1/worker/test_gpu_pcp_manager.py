@@ -43,7 +43,8 @@ def test_replicated_decode_piecewise_graph_padding(monkeypatch):
         [segment.global_batch_req_idx for segment in rank] for rank in segments_by_rank
     ]
     assert request_indices == [[0, 1, 2], [0, 1, 2]]
-    assert torch.equal(manager._hidden_restore_idx, torch.tensor([0, 1, 2]))
+    assert manager._hidden_restore_idx is None
+    assert manager._hidden_states_are_replicated
     assert torch.equal(
         manager._padded_gather_idx,
         torch.tensor([0, 1, 2, 0, 0, 1, 2, 0]),

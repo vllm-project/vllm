@@ -33,6 +33,21 @@ class PromptLogprobsWorker:
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
 
+    def needs_prompt_hidden_states(
+        self, input_batch: InputBatch, prompt_lens: np.ndarray
+    ) -> bool:
+        if not self.in_progress_prompt_logprobs:
+            return False
+        indices = input_batch.idx_mapping_np
+        lengths = prompt_lens[indices]
+        return bool(
+            np.any(
+                self.uses_prompt_logprobs[indices]
+                & (input_batch.num_computed_prefill_tokens_np < lengths)
+                & (lengths >= input_batch.prefill_len_np)
+            )
+        )
+
     def compute_prompt_logprobs(
         self,
         logits_fn: Callable[[torch.Tensor], torch.Tensor],
@@ -45,6 +60,8 @@ class PromptLogprobsWorker:
         # [max_num_reqs]
         prompt_lens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
+        if not self.in_progress_prompt_logprobs:
+            return {}
         idx_mapping_np = input_batch.idx_mapping_np
         needs_prompt_logprobs = self.uses_prompt_logprobs[idx_mapping_np]
         if not np.any(needs_prompt_logprobs):
