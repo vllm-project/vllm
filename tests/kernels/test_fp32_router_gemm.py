@@ -135,11 +135,11 @@ def _assert_topk_routing_consistency(out, ref):
     reason="GateLinear SM120 integration requires exact capability (12, 0)",
 )
 @pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
-@pytest.mark.parametrize("num_tokens", [0, 1, 32, 33, 64])
+@pytest.mark.parametrize("num_tokens", [0, 1, 16, 17, 32, 33, 64])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_sm120_gate_linear(dist_init, num_tokens, hidden_dim, num_experts, dtype):
-    """Preserve FP32 logits and expert selection across the M=32 kernel limit."""
+    """Preserve logits and expert selection across the FP32/BF16 batch limits."""
     torch.manual_seed(42)
     with torch.device("cuda"):
         gate = GateLinear(

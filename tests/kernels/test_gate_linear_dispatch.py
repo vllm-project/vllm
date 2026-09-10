@@ -187,6 +187,48 @@ def test_sm120_fp32_router_preserves_requested_output_dtype(monkeypatch, deferre
     torch.testing.assert_close(output, torch.ones(33, 128, dtype=torch.bfloat16))
 
 
+@pytest.mark.parametrize("device_capability", [(9, 0), (10, 0), (12, 0)])
+@pytest.mark.parametrize(
+    "dtype,num_tokens,sm120_native",
+    [
+        (torch.float32, 16, True),
+        (torch.float32, 17, False),
+        (torch.float32, 32, False),
+        (torch.bfloat16, 17, True),
+        (torch.bfloat16, 32, True),
+        (torch.bfloat16, 33, False),
+    ],
+)
+def test_fp32_router_runtime_batch_limit(
+    monkeypatch, device_capability, dtype, num_tokens, sm120_native
+):
+    """Bound SM120 FP32 batches without changing BF16 or earlier CUDA dispatch."""
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=False,
+        is_cuda=True,
+        params_dtype=torch.float32,
+        input_size=6144,
+        output_size=128,
+        device_capability=device_capability,
+    )
+    native_calls = []
+
+    def native_router(x, weight):
+        native_calls.append(x.shape[0])
+        return torch.nn.functional.linear(x.float(), weight)
+
+    monkeypatch.setattr(gate_linear_mod.ops, "fp32_router_gemm", native_router)
+    with torch.no_grad():
+        gate.weight.zero_()
+        x = torch.ones(num_tokens, 6144, dtype=dtype)
+        output = gate_linear_mod.fp32_router_gemm_dispatch_impl(x, gate.weight, False)
+    expected_native = sm120_native if device_capability == (12, 0) else num_tokens <= 32
+    assert bool(native_calls) == expected_native
+    assert output.dtype == torch.float32
+    torch.testing.assert_close(output, torch.zeros(num_tokens, 128))
+
+
 def test_rocm_no_bias_bf16_fp32_enables_fused_gemm(monkeypatch):
     gate = _make_gate(monkeypatch, is_rocm=True, bias=False)
     assert not gate.allow_specialized_router_gemm
