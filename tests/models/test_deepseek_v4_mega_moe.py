@@ -14,7 +14,6 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4ForCausalLM,
     DeepseekV4MegaMoEExperts,
     DeepseekV4MoE,
-    MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
 )
@@ -93,6 +92,12 @@ def test_deepseek_v41_moe_routes_without_hash_table(
             if vision
             else None
         )
+    assert moe.gate.tid2eid is None
+    assert moe.gate.weight.shape == (num_experts, config.hidden_size)
+    assert isinstance(moe.experts, DeepseekV4MegaMoEExperts)
+    assert moe.experts.w13_weight.shape == (num_experts, 256, 128)
+    assert moe.experts.top_k == top_k
+    assert (config.n_routed_experts, config.num_experts_per_tok) == (8, 2)
 
     with torch.no_grad():
         moe.gate.weight.normal_(std=0.01)
@@ -159,6 +164,21 @@ def test_deepseek_v41_fused_moe_uses_draft_counts_or_main_defaults(
     assert moe.gate.weight.shape == (expected[0], 128)
     assert (captured["num_experts"], captured["top_k"]) == expected
     assert captured["hash_indices_table"] is None
+
+
+def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
+    config = v41_moe_config.model_config.hf_config
+    config.num_hash_layers = 1
+    config.vocab_size = 32
+    moe = DeepseekV4MoE(
+        v41_moe_config,
+        prefix="model.layers.0.ffn",
+        num_hash_layers=config.num_hash_layers,
+    )
+    assert moe.gate.tid2eid.shape == (32, 2)
+    assert moe.gate.e_score_correction_bias is None
+    with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
+        moe(torch.zeros(1, 128))
 
 
 def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypatch):
@@ -549,7 +569,6 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     class FakeGate(torch.nn.Module):
         tid2eid = None
         e_score_correction_bias = None
-        bias_vl = None
 
         def __init__(self):
             super().__init__()
@@ -576,17 +595,27 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     moe.shared_experts = FakeSharedExperts()
     moe.scoring_func = "sqrtsoftplus"
     moe.n_activated_experts = 1
+    moe.renormalize = True
+    moe.hash_indices_dtype = torch.int64
     moe.routed_scaling_factor = 1.0
     moe.ep_rank = 0
     moe.swiglu_limit = 10.0
+
+    def fake_mega_gate(x, *args, **kwargs):
+        return (
+            torch.ones(x.shape[0], 1),
+            torch.zeros(x.shape[0], 1, dtype=torch.int64),
+        )
+
     monkeypatch.setattr(
         "vllm.utils.deep_gemm.bf16_mega_gate",
-        lambda *args, **kwargs: (
-            torch.ones(2, 1),
-            torch.zeros(2, 1, dtype=torch.int64),
-        ),
+        fake_mega_gate,
     )
-    metadata = MegaGateRoutingMetadata(None, None, None)
+    metadata = prepare_mega_gate_routing_metadata(
+        torch.zeros(2, dtype=torch.int64),
+        has_hash_routing=False,
+        image_sentinel_base_id=None,
+    )
     output = moe(torch.zeros(2, 128), mega_gate_metadata=metadata)
 
     expected = 1 if fused else 3

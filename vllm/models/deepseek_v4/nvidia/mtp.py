@@ -183,7 +183,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         ).unsqueeze(-2)
         mega_gate_metadata = None
         if self.use_mega_moe:
-            routing_input_ids = input_ids.to(torch.int64)
+            routing_input_ids = input_ids
             if self.mtp_block.use_sequence_parallel:
                 routing_input_ids = sp_shard(routing_input_ids)
             mega_gate_metadata = prepare_mega_gate_routing_metadata(

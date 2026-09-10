@@ -209,7 +209,7 @@ class DSparkDeepseekV4Model(nn.Module):
         mega_gate_metadata = None
         if self.use_mega_moe:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
-                input_ids.to(torch.int64),
+                input_ids,
                 has_hash_routing=False,
                 image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
                 if getattr(self.config, "vision_n_layers", 0) > 0

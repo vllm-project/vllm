@@ -841,12 +841,13 @@ class DeepseekV4MoE(nn.Module):
         )
         self.moe_intermediate_size = config.moe_intermediate_size
         self.swiglu_limit = config.swiglu_limit
+        self.renormalize = config.norm_topk_prob
         self.scoring_func = getattr(config, "scoring_func", "sqrtsoftplus")
         if self.use_mega_moe and self.scoring_func != "sqrtsoftplus":
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently supports sqrtsoftplus routing only."
             )
-        if self.use_mega_moe and not config.norm_topk_prob:
+        if self.use_mega_moe and not self.renormalize:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE requires normalized top-k probabilities."
             )
@@ -874,6 +875,7 @@ class DeepseekV4MoE(nn.Module):
             image_sentinel_lo if getattr(config, "vision_n_layers", 0) > 0 else 0
         )
         is_hash_moe = extract_layer_index(prefix) < num_hash_layers
+        self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
             # Use randint instead of empty to avoid garbage values causing
@@ -883,7 +885,7 @@ class DeepseekV4MoE(nn.Module):
                     0,
                     self.n_routed_experts,
                     (config.vocab_size, self.n_activated_experts),
-                    dtype=torch.int64 if self.use_mega_moe else torch.int32,
+                    dtype=self.hash_indices_dtype,
                 ),
                 requires_grad=False,
             )

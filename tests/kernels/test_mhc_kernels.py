@@ -107,7 +107,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     carried_mixes = []
 
     def make_layer(mix):
-        def forward(hidden, positions, ids, pre, post, res, residual):
+        def forward(hidden, positions, ids, pre, post, res, residual, **kwargs):
             carried_mixes.append(pre)
             return hidden, None, None, None, mix
 
@@ -115,6 +115,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
+        use_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
