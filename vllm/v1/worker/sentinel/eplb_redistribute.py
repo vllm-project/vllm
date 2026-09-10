@@ -233,9 +233,7 @@ def reload_experts_from_disk(
     if not reload_set:
         return 0
 
-    from vllm.model_executor.model_loader.default_loader import (
-        DefaultModelLoader,
-    )
+    from vllm.model_executor.model_loader import get_model_loader
 
     moe_layers = list(model.moe_layers)
     prefix_renames = getattr(
@@ -257,8 +255,7 @@ def reload_experts_from_disk(
     expert_prefixes = {f"{ckpt_prefix(i)}{e}.": (i, e) for i, e in reload_set}
     fused_prefixes = {ckpt_prefix(i): i for i, _ in reload_set}
 
-    loader = DefaultModelLoader(vllm_config.load_config)
-    loader.local_expert_ids = None
+    loader = get_model_loader(vllm_config.load_config)
 
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 
 import torch
 import torch.nn as nn
@@ -38,6 +39,18 @@ class BaseModelLoader(ABC):
         """Load weights into a model. This standalone API allows
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
+
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Iterate over all weights by checkpoint name, for filtered
+        partial reloads (e.g. FT expert reload after scale_down)."""
+        raise NotImplementedError(
+            f"load_format={self.load_config.load_format!r} does not support "
+            "iterating weights by checkpoint name"
+        )
 
     @instrument(span_name="Load model")
     def load_model(
