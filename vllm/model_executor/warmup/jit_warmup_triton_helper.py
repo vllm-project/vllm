@@ -32,6 +32,9 @@ def triton_warmup_inputs(
     kernel: Any,
     *args: Any,
     grid: tuple[int, ...],
+    pointer_dtypes: (
+        Mapping[Any, Iterable[str]] | Iterable[tuple[Any, Iterable[str]]] | None
+    ) = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Build launcher inputs from Triton's native positional argument order."""
@@ -47,7 +50,28 @@ def triton_warmup_inputs(
         raise ValueError(
             f"Triton inputs passed twice: {', '.join(sorted(duplicate_names))}"
         )
-    return {"grid": grid, **inputs, **kwargs}
+    inputs.update(kwargs)
+    if pointer_dtypes is not None:
+        pointer_names = _triton_pointer_arg_names(kernel)
+        groups = (
+            pointer_dtypes.items()
+            if isinstance(pointer_dtypes, Mapping)
+            else pointer_dtypes
+        )
+        for dtype, names in groups:
+            for name in names:
+                if name not in arg_names:
+                    raise ValueError(f"Unknown Triton pointer argument: {name}")
+                if name not in pointer_names:
+                    raise ValueError(f"Triton argument is not a pointer: {name}")
+                if name in inputs:
+                    raise ValueError(f"Triton input passed twice: {name}")
+                inputs[name] = TritonWarmupTensor(dtype)
+        missing_pointers = pointer_names - inputs.keys()
+        if missing_pointers:
+            names = ", ".join(sorted(missing_pointers))
+            raise ValueError(f"Missing Triton pointer inputs: {names}")
+    return {"grid": grid, **inputs}
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -832,16 +856,45 @@ class TritonKernelDispatcher(Generic[P]):
         return self._owner.get_warmup_keys(*args, **kwargs)
 
 
+class TritonNativeKernelDispatcher:
+    """Native ``kernel[grid](...)`` proxy with registered warmup inputs."""
+
+    def __init__(self, owner: "_DecoratedDirectTritonJitKernel") -> None:
+        self._owner = owner
+        self.__wrapped__ = owner.kernel
+        self.__name__ = getattr(owner.kernel, "__name__", type(owner.kernel).__name__)
+        self.__qualname__ = getattr(owner.kernel, "__qualname__", self.__name__)
+        self.__doc__ = getattr(owner.kernel, "__doc__", None)
+        self.__module__ = getattr(owner.kernel, "__module__", __name__)
+
+    def __call__(self, grid: tuple[int, ...], *args: Any, **kwargs: Any) -> Any:
+        return self._owner(grid, *args, **kwargs)
+
+    def __getitem__(self, grid: tuple[int, ...]) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self._owner.kernel[grid])
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._owner.kernel, name)
+
+    def register_warmup(self, *args: Any, **kwargs: Any) -> None:
+        self._owner.register_warmup(*args, **kwargs)
+
+    def warmup_plan(self, *args: Any, **kwargs: Any) -> list[TritonCompileKey]:
+        return self._owner.get_warmup_keys(*args, **kwargs)
+
+
 def triton_kernel(
     *,
-    kernel: Any,
     warmup_inputs: Callable[..., WarmupCases],
-) -> Callable[[Callable[P, DispatchSpec]], TritonKernelDispatcher[P]]:
-    """Decorate one kernel's runtime dispatch with automatic Triton warmup."""
+    kernel: Any | None = None,
+) -> Callable[[Any], Any]:
+    """Decorate a dispatch function or a native Triton kernel for warmup."""
 
-    def decorate(
-        dispatch: Callable[P, DispatchSpec],
-    ) -> TritonKernelDispatcher[P]:
+    def decorate(dispatch: Any) -> Any:
+        if kernel is None:
+            return TritonNativeKernelDispatcher(
+                _DecoratedDirectTritonJitKernel(dispatch, warmup_inputs)
+            )
         owner = _DecoratedTritonJitKernel(kernel, warmup_inputs, dispatch)
         return TritonKernelDispatcher(owner, dispatch)
 
@@ -916,6 +969,50 @@ class DirectTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
         inputs = triton_warmup_inputs(self.kernel, *args, grid=grid, **kwargs)
         inputs.pop("grid")
         return self.launch(grid, {}, **inputs)
+
+
+class _DecoratedDirectTritonJitKernel(DirectTritonJitKernel):
+    def __init__(
+        self,
+        kernel: Any,
+        warmup_inputs: Callable[..., WarmupCases],
+    ) -> None:
+        self.kernel = kernel
+        self._warmup_inputs_fn = warmup_inputs
+        self._range_boundaries = _dispatch_integer_constants(warmup_inputs)
+        super().__init__()
+
+    def warmup_cases(self, *args: Any, **kwargs: Any) -> WarmupCases:
+        return self._warmup_inputs_fn(*args, **kwargs)
+
+    def _concrete_warmup_cases(
+        self, *args: Any, **kwargs: Any
+    ) -> Iterable[Mapping[str, Any]]:
+        cases_node = get_function_source_node(self._warmup_inputs_fn)
+        uses_symbolic_domains = any(
+            isinstance(node, ast.Call)
+            and (get_ast_full_name(node.func) or "").split(".")[-1]
+            in {"WarmupIntRange", "WarmupChoices", "_when"}
+            for node in ast.walk(cases_node)
+        )
+        if uses_symbolic_domains:
+            return self._expand_warmup_cases(
+                self._warmup_inputs_fn,
+                *args,
+                _value_expander=self._expand_triton_value,
+                **kwargs,
+            )
+        cases = self._warmup_inputs_fn(*args, **kwargs)
+        return (cases,) if isinstance(cases, Mapping) else cases
+
+    def _expand_triton_value(self, value: Any) -> tuple[Any, ...]:
+        if isinstance(value, WarmupIntRange):
+            return _triton_range_values(value, self._range_boundaries)
+        if isinstance(value, WarmupChoices):
+            return value.values
+        if isinstance(value, (list, tuple)):
+            return tuple(value)
+        return (value,)
 
 
 @dataclass(frozen=True)
@@ -1045,6 +1142,15 @@ def _pointer_arg_names(
         if name in candidate_names:
             pointer_names.add(name)
     return frozenset(pointer_names)
+
+
+def _triton_pointer_arg_names(kernel: Callable[..., Any]) -> frozenset[str]:
+    function_def = get_function_source_node(kernel)
+    if not isinstance(function_def, ast.FunctionDef):
+        raise ValueError("Expected Triton kernel to be defined as a function")
+    source_fn = getattr(kernel, "fn", kernel)
+    arg_names = tuple(inspect.signature(source_fn).parameters)
+    return _pointer_arg_names(function_def, arg_names)
 
 
 def trace_triton_kernel_specialization_args(
