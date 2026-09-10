@@ -810,10 +810,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and can_use_xqa_or_trtllm_gen_decode
             and self.num_qo_heads // self.num_kv_heads > 1
         ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
-        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode
+        # The large-page TRTLLM kernels have no hdim512 specialization.
+        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode and not (
+            self.head_dim == 512 and self.page_size >= 128
+        )
         self.flashinfer_trtllm_api_decode_kernel: FlashInferDecodeKernel | None = (
             self._get_flashinfer_trtllm_api_decode_kernel()
-            if can_use_xqa_or_trtllm_gen_decode
+            if self.use_trtllm_decode_attention
             else None
         )
         # The dedicated FlashInfer XQA API accepts head dimensions in
@@ -1321,22 +1324,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
-        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        # Large pages use trtllm-gen except for its unsupported hdim512 shape.
         prefill_force_trtllm = (
             True if page_size >= 128 else self.attention_config.use_trtllm_attention
         )
-        prefill_use_trtllm = causal and use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_prefill_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type_prefill,
-            is_prefill=True,
-            force_use_trtllm=prefill_force_trtllm,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
+        prefill_use_trtllm = (
+            not (self.head_dim == 512 and page_size >= 128)
+            and causal
+            and use_trtllm_attention(
+                self.num_qo_heads,
+                self.num_kv_heads,
+                num_prefill_tokens,
+                max_seq_len,
+                self.dcp_world_size,
+                self.cache_dtype,
+                self.q_data_type_prefill,
+                is_prefill=True,
+                force_use_trtllm=prefill_force_trtllm,
+                has_sinks=self.has_sinks,
+                has_spec=uses_spec_reorder,
+            )
         )
         decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
             causal or self.use_dedicated_xqa

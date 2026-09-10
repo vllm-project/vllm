@@ -730,3 +730,64 @@ def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
         )
     assert impl.vllm_flash_attn_version == expected
     assert impl.fa4_hd256 == (expected == 4)
+
+
+@blackwell_only
+@pytest.mark.parametrize("use_mm_prefix", [False, True])
+def test_mm_prefix_selects_composite_without_changing_causal_default(use_mm_prefix):
+    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    with (
+        set_current_vllm_config(VllmConfig()),
+        patch.object(
+            current_platform,
+            "get_device_capability",
+            return_value=DeviceCapability(10, 0),
+        ),
+    ):
+        backend = get_attn_backend(
+            256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
+        )
+    expected = "TRITON_FLASHINFER_COMPOSITE" if use_mm_prefix else "FLASHINFER"
+    assert backend.get_name() == expected
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    "config_kwargs,feature_kwargs",
+    [
+        ({"rswa_window": 1024}, {}),
+        ({}, {"kv_cache_dtype": "fp8"}),
+        ({}, {"block_size": 16}),
+        ({}, {"use_dcp": True}),
+        ({}, {"use_pcp": True}),
+        ({}, {"use_adaptive_verification": True}),
+    ],
+)
+def test_composite_rejects_features_not_shared_by_both_routes(
+    config_kwargs, feature_kwargs
+):
+    """Automatic selection must not admit features only one child can execute."""
+    from vllm.v1.attention.backends.triton_flashinfer import TritonFlashInferBackend
+
+    cfg = _hd256_config(is_mm_prefix_lm=True, **config_kwargs)
+    cfg.model_config.get_num_attention_heads.return_value = 32
+    cfg.model_config.get_num_kv_heads.return_value = 16
+    args = dict(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=128,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(10, 0),
+        attn_type=AttentionType.DECODER,
+    )
+    args.update(feature_kwargs)
+    with patch(
+        "vllm.v1.attention.backends.triton_flashinfer.get_current_vllm_config_or_none",
+        return_value=cfg,
+    ):
+        assert TritonFlashInferBackend.validate_configuration(**args)

@@ -638,3 +638,159 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2), (
         "test batch does not actually exercise the mm_prefix branch"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
+@pytest.mark.parametrize(
+    "query_len,seq_len,spans,expected,unclamped_expected",
+    [
+        (16, 32, [(20, 28)], True, True),
+        (16, 32, [(0, 16)], False, True),
+        (16, 32, [(0, 17)], True, True),
+        (16, 32, [(32, 40)], False, False),
+        (16, 32, [(31, 40)], False, True),
+        (1, 24, [(20, 28)], False, True),
+        (0, 24, [(20, 28)], False, False),
+        (16, 32, [(20, 20)], False, False),
+        (16, 64, [(20, 28)], False, False),
+    ],
+)
+def test_composite_routes_queries_that_need_image_masking(
+    query_len, seq_len, spans, expected, unclamped_expected
+):
+    """Historical images and single-query steps must use the causal graph path."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.triton_flashinfer import requires_mm_prefix
+
+    common = SimpleNamespace(
+        max_query_len=query_len,
+        mm_req_doc_ranges={0: spans},
+        query_start_loc_cpu=torch.tensor([0, query_len]),
+        seq_lens_cpu_upper_bound=torch.tensor([seq_len]),
+    )
+    assert requires_mm_prefix(common) is expected
+    assert requires_mm_prefix(common, unclamped_window=True) is unclamped_expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
+@pytest.mark.parametrize("head_size", [256, 512])
+def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(head_size):
+    """Changing routes must preserve KV writes, image masking and graph replay."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("The composite supports Blackwell")
+
+    from vllm.config import set_current_vllm_config
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+    from vllm.v1.attention.backends.triton_flashinfer import TritonFlashInferBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+
+    torch.manual_seed(42)
+    cfg = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        max_model_len=512,
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        block_size=128,
+        enforce_eager=True,
+        attention_config={"backend": "TRITON_FLASHINFER_COMPOSITE"},
+    ).create_engine_config()
+    cfg.cache_config.kv_cache_layout = "LBHNC"
+    window = 128 if head_size == 256 else None
+    spec_kwargs = dict(
+        block_size=128, num_kv_heads=16, head_size=head_size, dtype=DTYPE
+    )
+    spec = (
+        SlidingWindowSpec(**spec_kwargs, sliding_window=window)
+        if window
+        else FullAttentionSpec(**spec_kwargs)
+    )
+    backend = TritonFlashInferBackend
+    with set_current_vllm_config(cfg), set_default_torch_dtype(DTYPE):
+        layer = Attention(
+            32,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads=16,
+            cache_config=cfg.cache_config,
+            prefix="composite_test",
+            per_layer_sliding_window=window,
+            attn_backend=backend,
+        ).to(DEVICE)
+        layer.mm_prefix_clamp_sliding_window = window is not None
+        assert backend.get_builder_cls().get_cudagraph_support(cfg, spec) == (
+            AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        )
+        if window:
+            layer.mm_prefix_clamp_sliding_window = False
+            assert backend.get_builder_cls().get_cudagraph_support(cfg, spec) == (
+                AttentionCGSupport.NEVER
+            )
+            layer.mm_prefix_clamp_sliding_window = True
+        builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
+        builder.set_kernel_block_size(128)
+        cache = torch.empty(2, 16, 128, 2 * head_size, dtype=DTYPE, device=DEVICE)
+        keys = torch.randn(209, 16, head_size, dtype=DTYPE, device=DEVICE)
+        values = torch.randn_like(keys)
+        table = torch.tensor([[0, 1]], dtype=torch.int32, device=DEVICE)
+        previous = 0
+        for end, spans, metadata_type in [
+            (128, [(32, 111)], TritonAttentionMetadata),
+            (129, [(32, 111)], FlashInferMetadata),
+            (145, [(32, 111)], FlashInferMetadata),
+            (209, [(32, 111), (160, 207)], TritonAttentionMetadata),
+        ]:
+            qlen = end - previous
+            starts = torch.tensor([0, qlen], dtype=torch.int32)
+            lengths = torch.tensor([end], dtype=torch.int32)
+            common = CommonAttentionMetadata(
+                query_start_loc=starts.to(DEVICE),
+                query_start_loc_cpu=starts,
+                seq_lens=lengths.to(DEVICE),
+                seq_lens_cpu_upper_bound=lengths,
+                num_reqs=1,
+                num_actual_tokens=qlen,
+                max_query_len=qlen,
+                max_seq_len=end,
+                block_table_tensor=table,
+                slot_mapping=torch.arange(previous, end, device=DEVICE),
+                mm_req_doc_ranges={0: spans},
+                _seq_lens_cpu=lengths,
+            )
+            metadata = builder.build(0, common)
+            assert isinstance(metadata, metadata_type)
+            query = torch.randn(qlen, 32, head_size, dtype=DTYPE, device=DEVICE)
+            key, value = keys[previous:end], values[previous:end]
+            output = torch.empty_like(query)
+            layer.impl.do_kv_cache_update(layer, key, value, cache, common.slot_mapping)
+            layer.impl.forward(layer, query, key, value, cache, metadata, output)
+            expected = _dense_reference(
+                query,
+                [keys[:end]],
+                [values[:end]],
+                [qlen],
+                [end],
+                {0: spans},
+                window,
+                head_size**-0.5,
+                mm_clamp_sw=window or 0,
+            )
+            torch.testing.assert_close(output.float(), expected, atol=2e-2, rtol=2e-2)
+            if qlen == 1:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    layer.impl.forward(
+                        layer, query, key, value, cache, metadata, output
+                    )
+                output.zero_()
+                graph.replay()
+                torch.testing.assert_close(
+                    output.float(), expected, atol=2e-2, rtol=2e-2
+                )
+            previous = end
