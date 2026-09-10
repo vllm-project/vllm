@@ -60,30 +60,9 @@ pub struct MultimodalModelInfo {
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
 ///
 /// Modalities absent from the map are unlimited.
-pub type MmLimitPerPrompt = HashMap<MmLimitModality, MmLimitSpec>;
+pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
 
-/// Modalities that `--limit-mm-per-prompt` can be keyed by.
-///
-/// Closed on purpose: these are exactly the keys Python accepts, per
-/// `MultiModalDummyOptionsBuiltins` in `vllm/config/multimodal.py`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MmLimitModality {
-    Image,
-    Audio,
-    Video,
-}
-
-impl MmLimitModality {
-    /// The wire name, matching Python's modality strings.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Image => "image",
-            Self::Audio => "audio",
-            Self::Video => "video",
-        }
-    }
-}
+pub use vllm_engine_core_client::protocol::multimodal::MmModality;
 
 /// One modality's limit, in either of the two shapes Python accepts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,17 +625,17 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
 /// Embedding inputs share their base modality's budget rather than getting one
 /// of their own, matching Python's `modality.replace("_embeds", "")` in
 /// `vllm/entrypoints/chat_utils.py`.
-fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmLimitModality> {
+fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,
         MediaContentPart::ImageUrl { .. }
         | MediaContentPart::ImageData { .. }
-        | MediaContentPart::ImageEmbeds { .. } => Some(MmLimitModality::Image),
+        | MediaContentPart::ImageEmbeds { .. } => Some(MmModality::Image),
         MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
-            Some(MmLimitModality::Audio)
+            Some(MmModality::Audio)
         }
         MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
-            Some(MmLimitModality::Video)
+            Some(MmModality::Video)
         }
     }
 }
@@ -667,7 +646,7 @@ impl MultimodalModelInfo {
     ///
     /// Modalities without a configured count are unlimited.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
-        let mut counts: HashMap<MmLimitModality, usize> = HashMap::new();
+        let mut counts: HashMap<MmModality, usize> = HashMap::new();
         for part in media_parts {
             if let Some(modality) = media_part_limit_modality(part) {
                 *counts.entry(modality).or_default() += 1;
@@ -738,7 +717,11 @@ impl MultimodalModelInfo {
             for (item, range) in izip!(media.items, media_ranges) {
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
-                    modality: media.modality.to_string(),
+                    modality: match media.modality {
+                        Modality::Image | Modality::ImageEmbeds => MmModality::Image,
+                        Modality::Video => MmModality::Video,
+                        Modality::Audio => MmModality::Audio,
+                    },
                     identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
                     mm_position: range,
                     mm_hash: Some(item.hash),
@@ -1029,10 +1012,8 @@ mod tests {
 
     #[test]
     fn validate_mm_limits_enforces_configured_limit_at_the_boundary() {
-        let info = qwen3_vl_info_with_limits(HashMap::from([(
-            MmLimitModality::Image,
-            MmLimitSpec::Count(1),
-        )]));
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
         assert!(info.validate_mm_limits(&[image_url_part()]).is_ok());
 
         let error = info.validate_mm_limits(&[image_url_part(), image_url_part()]).unwrap_err();
@@ -1047,10 +1028,8 @@ mod tests {
 
     #[test]
     fn validate_mm_limits_counts_image_embeds_against_the_image_limit() {
-        let info = qwen3_vl_info_with_limits(HashMap::from([(
-            MmLimitModality::Image,
-            MmLimitSpec::Count(1),
-        )]));
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
         let image_embeds_part = MediaContentPart::ImageEmbeds {
             payload: serde_json::Value::String("AAAA".to_string()),
             uuid: None,
@@ -1068,7 +1047,7 @@ mod tests {
     #[test]
     fn validate_mm_limits_treats_a_count_less_options_object_as_unlimited() {
         let info = qwen3_vl_info_with_limits(HashMap::from([(
-            MmLimitModality::Image,
+            MmModality::Image,
             MmLimitSpec::Options {
                 count: None,
                 extra: BTreeMap::from([("width".to_string(), serde_json::json!(512))]),
@@ -1086,9 +1065,9 @@ mod tests {
     fn limit_map_parses_both_shapes_python_accepts() {
         let limits = parse_limits(r#"{"image": 16, "video": {"count": 1, "num_frames": 32}}"#);
 
-        assert_eq!(limits[&MmLimitModality::Image].count(), Some(16));
-        assert_eq!(limits[&MmLimitModality::Video].count(), Some(1));
-        assert_eq!(limits.get(&MmLimitModality::Audio), None);
+        assert_eq!(limits[&MmModality::Image].count(), Some(16));
+        assert_eq!(limits[&MmModality::Video].count(), Some(1));
+        assert_eq!(limits.get(&MmModality::Audio), None);
     }
 
     #[test]

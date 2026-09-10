@@ -728,7 +728,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 assert_eq!(features.len(), 2);
 
                 for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
-                    assert_eq!(feature.modality, "image");
+                    assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
                     assert_eq!(
