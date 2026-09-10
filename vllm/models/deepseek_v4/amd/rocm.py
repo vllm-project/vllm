@@ -677,10 +677,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         aux_stream = aux_streams[0]
         main_stream = None
-        if is_forward_context_available():
-            main_stream = get_forward_context().additional_kwargs.get("main_stream")
+        # if is_forward_context_available():
+        #     main_stream = get_forward_context().additional_kwargs.get("main_stream")
         if main_stream is None:
             main_stream = torch.cuda.current_stream()
+        
         aux_stream.wait_stream(main_stream)
         with torch.cuda.stream(aux_stream):
             compressor_chain()

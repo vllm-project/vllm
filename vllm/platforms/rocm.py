@@ -1142,20 +1142,20 @@ class RocmPlatform(Platform):
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
         )
 
-    @classmethod
-    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
-        """Cache the current HIP stream once per forward pass.
+    # @classmethod
+    # def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
+    #     """Cache the current HIP stream once per forward pass.
 
-        Called once per ``set_forward_context()`` invocation (i.e. once per
-        forward) while the ambient current stream is that forward's logical
-        "main" stream: the worker compute stream at runtime, and the capture
-        stream inside graph capture. The CSA multi-stream fork reads this
-        cached handle so every fork/join edge binds to the same stream
-        object, keeping the stream DAG statically reason-able and avoiding
-        per-call ``torch.cuda.current_stream()`` queries that widen the HIP
-        stream handle pool.
-        """
-        return {"main_stream": torch.cuda.current_stream()}
+    #     Called once per ``set_forward_context()`` invocation (i.e. once per
+    #     forward) while the ambient current stream is that forward's logical
+    #     "main" stream: the worker compute stream at runtime, and the capture
+    #     stream inside graph capture. The CSA multi-stream fork reads this
+    #     cached handle so every fork/join edge binds to the same stream
+    #     object, keeping the stream DAG statically reason-able and avoiding
+    #     per-call ``torch.cuda.current_stream()`` queries that widen the HIP
+    #     stream handle pool.
+    #     """
+    #     return {"main_stream": torch.cuda.current_stream()}
 
     @classmethod
     @with_amdsmi_context
