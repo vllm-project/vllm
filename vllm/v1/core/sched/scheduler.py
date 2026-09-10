@@ -57,8 +57,10 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
+    iter_layer_specs,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -263,6 +265,17 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        # A sliding-window group that opted out of prefix caching cannot be
+        # restored from a hit, so the trailing window is recomputed instead.
+        self.prefix_replay_tokens = max(
+            (
+                spec.sliding_window
+                for group in kv_cache_config.kv_cache_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+                if isinstance(spec, SlidingWindowSpec) and not spec.prefix_cacheable
+            ),
+            default=0,
+        )
         # Positions past the computed tokens that the drafter reads mid-prefill.
         # Eagle-family drafters read 1 ahead, but multi-module MTP reads
         # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
@@ -1019,6 +1032,12 @@ class Scheduler(SchedulerInterface):
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
 
+                # SWA bounded replay: the last `prefix_replay_tokens` of a hit
+                # are recomputed. Their blocks stay allocated; the worker skips
+                # their paged-KV writes (kv_write_start).
+                kv_write_start = num_computed_tokens
+                num_replay_tokens = 0
+
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
@@ -1029,6 +1048,11 @@ class Scheduler(SchedulerInterface):
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
+                    if self.prefix_replay_tokens and num_computed_tokens > 0:
+                        num_replay_tokens = min(
+                            self.prefix_replay_tokens, num_computed_tokens
+                        )
+                        num_computed_tokens -= num_replay_tokens
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1075,6 +1099,9 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
+                    if num_new_tokens <= num_replay_tokens:
+                        # Replayed tokens alone make no progress; wait for budget.
+                        break
 
                     # Apply Mamba alignment before encoder caps.
                     if self.need_mamba_block_aligned_split:
@@ -1154,7 +1181,8 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    # Replayed tokens already have slots.
+                    num_new_tokens - num_replay_tokens,
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
@@ -1259,6 +1287,7 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                request.kv_write_start = kv_write_start
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [

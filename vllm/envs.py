@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     V_SCALE_CONSTANT: int = 100
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
+    VLLM_DEEPSEEK_V4_SWA_BOUNDED_REPLAY: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
@@ -1407,6 +1408,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, use the packaged Rust client for `vllm bench serve`.
     "VLLM_USE_RUST_BENCH": lambda: bool(int(os.getenv("VLLM_USE_RUST_BENCH", "0"))),
+    # DeepSeek-V4 family: keep the sliding-window KV out of prefix caching and
+    # recompute the trailing window after a prefix-cache or KV-connector hit.
+    "VLLM_DEEPSEEK_V4_SWA_BOUNDED_REPLAY": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_SWA_BOUNDED_REPLAY", "0"))
+    ),
     # Path to the vllm-rs binary. Defaults to "auto" which discovers the
     # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
     # or VLLM_USE_RUST_BENCH=1.
