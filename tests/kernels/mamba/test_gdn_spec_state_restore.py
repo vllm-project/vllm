@@ -3,7 +3,7 @@
 
 import dataclasses
 import types
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -20,14 +20,141 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 
-pytestmark = pytest.mark.skipif(
+
+@pytest.mark.parametrize("recover_state", [False, True])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_rocm_decode_routes_state_recovery(recover_state, interleaved):
+    """AITER decode must not bypass recovery after a speculative step."""
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=2,
+        spec_decode_src_indices=torch.tensor([3, 5]) if recover_state else None,
+        num_accepted_tokens=torch.tensor([3, 1]) if recover_state else None,
+    )
+    qkvz = torch.randn(2, 8)
+    ba = torch.randn(2, 2)
+    qkv, z, b, a = torch.randn(2, 6), torch.randn(2, 2), ba[:, :1], ba[:, 1:]
+    z_out = torch.empty_like(z)
+    out = torch.ones(2, 1, 2)
+    layer = types.SimpleNamespace(
+        prefix="gdn",
+        gqa_interleaved_layout=interleaved,
+        _forward_core_decode_aiter=Mock(),
+        prepare_gdn_attention_core_inputs=Mock(return_value=(qkv, z, b, a)),
+        _forward_core=Mock(),
+    )
+    context = types.SimpleNamespace(attn_metadata={"gdn": metadata})
+    with patch.object(gdn, "get_forward_context", return_value=context):
+        gdn.QwenGatedDeltaNetAttention._forward_core_rocm(layer, qkvz, ba, z_out, out)
+    if interleaved and not recover_state:
+        layer._forward_core_decode_aiter.assert_called_once_with(
+            qkvz=qkvz,
+            ba=ba,
+            z_out=z_out,
+            core_attn_out=out,
+            attn_metadata=metadata,
+        )
+        layer.prepare_gdn_attention_core_inputs.assert_not_called()
+        layer._forward_core.assert_not_called()
+    else:
+        layer._forward_core_decode_aiter.assert_not_called()
+        layer.prepare_gdn_attention_core_inputs.assert_called_once_with(qkvz, ba, 2)
+        layer._forward_core.assert_called_once_with(
+            mixed_qkv=qkv, b=b, a=a, core_attn_out=out
+        )
+        torch.testing.assert_close(z_out, z)
+        assert torch.count_nonzero(out) == 0
+
+
+@pytest.mark.parametrize("accepted", [1, 3])
+@pytest.mark.parametrize("dim_first", [False, True])
+def test_rocm_decode_preserves_recovery_inputs(accepted, dim_first):
+    """Execute recovery on CPU while mocking only preprocessing and kernels."""
+    destination = torch.tensor([1, 4])
+    source = torch.tensor([accepted, 4])
+    counts = torch.tensor([accepted, 1], dtype=torch.int32)
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=2,
+        non_spec_state_indices_tensor=destination,
+        spec_decode_src_indices=source,
+        num_accepted_tokens=counts,
+    )
+    ssm = torch.arange(6 * 4, dtype=torch.float32).reshape(6, 1, 2, 2)
+    expected = ssm.clone()
+    expected[destination] = ssm[source]
+    conv = torch.zeros(6, 6, 5) if dim_first else torch.zeros(6, 5, 6)
+    qkv = torch.ones(2, 6)
+    a, b = torch.zeros(2, 1), torch.zeros(2, 1)
+    z = torch.ones(2, 1, 2)
+    layer = types.SimpleNamespace(
+        prefix="gdn",
+        gqa_interleaved_layout=True,
+        enable_packed_recurrent_decode=True,
+        kv_cache=(conv, ssm),
+        head_k_dim=2,
+        activation="silu",
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        conv1d=types.SimpleNamespace(weight=torch.ones(6, 1, 4), bias=None),
+        prepare_gdn_attention_core_inputs=Mock(return_value=(qkv, z, b, a)),
+        _forward_core_decode_aiter=Mock(),
+    )
+    for name in ("_forward_core", "_forward_core_decode_non_spec"):
+        setattr(
+            layer,
+            name,
+            types.MethodType(getattr(gdn.QwenGatedDeltaNetAttention, name), layer),
+        )
+    context = types.SimpleNamespace(attn_metadata={"gdn": metadata})
+    with (
+        patch.object(gdn, "get_forward_context", return_value=context),
+        patch.object(gdn, "is_conv_state_dim_first", return_value=dim_first),
+        patch.object(gdn, "causal_conv1d_update", return_value=qkv) as conv_update,
+        patch.object(
+            gdn, "fused_recurrent_gated_delta_rule_packed_decode"
+        ) as recurrent,
+    ):
+        gdn.QwenGatedDeltaNetAttention._forward_core_rocm(
+            layer,
+            torch.zeros(2, 8),
+            torch.zeros(2, 2),
+            torch.empty_like(z),
+            torch.zeros_like(z),
+        )
+    layer._forward_core_decode_aiter.assert_not_called()
+    conv_update.assert_called_once()
+    recurrent.assert_called_once()
+    assert conv_update.call_args.kwargs["num_accepted_tokens"] is counts
+    torch.testing.assert_close(
+        conv_update.call_args.kwargs["conv_state_indices"], destination
+    )
+    torch.testing.assert_close(
+        conv_update.call_args.args[1], conv if dim_first else conv.transpose(-1, -2)
+    )
+    assert recurrent.call_args.kwargs["initial_state"] is ssm
+    torch.testing.assert_close(ssm, expected)
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUDA GDN state-restoration test"
 )
-
-
 @pytest.mark.parametrize("accepted", [1, 3])
 @pytest.mark.parametrize("mode", ["decode", "packed_decode", "mixed"])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])

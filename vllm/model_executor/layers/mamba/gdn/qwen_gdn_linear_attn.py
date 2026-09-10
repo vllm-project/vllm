@@ -1203,8 +1203,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
-        the packed layout and falls through to ``_forward_core``.
+        dispatches directly to ``_forward_core_decode_aiter`` unless recovery
+        from a previous speculative step is required. Otherwise unpacks the
+        packed layout and falls through to ``_forward_core`` for state recovery.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1232,6 +1233,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if (
             self.gqa_interleaved_layout
             and attn_metadata.spec_sequence_masks is None
+            and attn_metadata.spec_decode_src_indices is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
