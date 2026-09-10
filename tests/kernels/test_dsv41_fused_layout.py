@@ -3,6 +3,7 @@
 """Index permutations between the standard [h, d] layout and the layouts the
 FlashMLA fused sparse-attention kernel reads (Q) and writes (O)."""
 
+import pytest
 import torch
 
 from vllm.models.deepseek_v4_1.common.ops.fused_layout import (
@@ -83,3 +84,37 @@ def test_permute_helpers_accept_fp8_storage():
     w2 = torch.randn(1024, 8 * 512).to(torch.float8_e4m3fn)
     s2 = torch.zeros(1024, 128, dtype=torch.uint8)
     permute_wo_a_(w2, s2)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 5, 129])
+def test_inv_rope_quant_permuted_output_matches_standard(num_tokens):
+    """The split-KV fallback's O quant must emit the fused kernel's layout."""
+    from tests.kernels.attention.test_flashmla_fused_sparse import (
+        make_cos_sin_cache,
+    )
+    from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+        fused_inv_rope_fp8_quant,
+    )
+
+    device = torch.device("cuda")
+    n_groups = 2
+    o = torch.randn(num_tokens, n_groups * 8, 512, device=device, dtype=torch.bfloat16)
+    positions = torch.randint(0, 4096, (num_tokens,), device=device)
+    cos_sin = make_cos_sin_cache(4096, device)
+    kwargs = dict(
+        n_groups=n_groups,
+        heads_per_group=8,
+        quant_group_size=32,
+        tma_aligned_scales=True,
+    )
+    std_fp8, std_sf = fused_inv_rope_fp8_quant(o, positions, cos_sin, **kwargs)
+    perm_fp8, perm_sf = fused_inv_rope_fp8_quant(
+        o, positions, cos_sin, permuted_output=True, **kwargs
+    )
+    perm = o_fused_permutation(8, 512).to(device)
+    assert torch.equal(perm_fp8.view(torch.uint8), std_fp8.view(torch.uint8)[..., perm])
+    chunk_perm = o_fused_chunk_permutation(8, 512).to(device)
+    std_bytes = std_sf.contiguous().view(torch.uint8).view(num_tokens, n_groups, 128)
+    perm_bytes = perm_sf.contiguous().view(torch.uint8).view(num_tokens, n_groups, 128)
+    assert torch.equal(perm_bytes, std_bytes[..., chunk_perm])
+    assert perm_sf.stride() == std_sf.stride()
