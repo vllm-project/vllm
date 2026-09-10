@@ -1048,7 +1048,9 @@ def test_indexer_chunk_list_is_identical_across_pcp_ranks(
     num_scheduled_tokens, num_computed_tokens, workspace, pcp_world_size
 ):
     """Each chunk issues a DCP all-gather, so the chunk list must not be rank-local."""
-    from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
+    )
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
     num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
@@ -1069,7 +1071,7 @@ def test_indexer_chunk_list_is_identical_across_pcp_ranks(
         )
         reqs = np.array([req for req, _, _ in rows], dtype=np.int64)
         invariant_specs.append(
-            split_indexer_prefill_chunks(
+            DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
                 torch.from_numpy(scheduled[reqs]),
                 torch.from_numpy(nominal[reqs]),
                 workspace,
@@ -1077,7 +1079,7 @@ def test_indexer_chunk_list_is_identical_across_pcp_ranks(
             )
         )
         local_specs.append(
-            split_indexer_prefill_chunks(
+            DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
                 torch.tensor([seq for _, seq, _ in rows]),
                 torch.tensor([q for _, _, q in rows]),
                 workspace,
