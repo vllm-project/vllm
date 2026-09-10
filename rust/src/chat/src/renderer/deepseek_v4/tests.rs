@@ -401,56 +401,30 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 }
 
 #[test]
-fn non_json_tool_call_arguments_become_one_string_parameter() {
-    let mut request = ChatRequest {
-        messages: vec![
-            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
-                AssistantToolCall {
-                    id: "text".to_string(),
-                    name: "search".to_string(),
-                    arguments: "not json".to_string(),
-                },
-            )]),
-            ChatMessage::tool_response("text result", "text"),
-        ],
-        ..ChatRequest::for_test()
-    };
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking".to_string(), Value::Bool(false));
+fn rejects_tool_call_arguments_that_are_not_a_json_object() {
+    for (arguments, message) in [
+        ("not json", "invalid JSON arguments"),
+        ("[1, 2]", "must be a JSON object"),
+    ] {
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call".to_string(),
+                        name: "search".to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                )]),
+                ChatMessage::tool_response("result", "call"),
+            ],
+            ..ChatRequest::for_test()
+        };
 
-    expect![[r#"
-        <｜begin▁of▁sentence｜>
-
-        <｜DSML｜tool_calls>
-        <｜DSML｜invoke name="search">
-        <｜DSML｜parameter name="arguments" string="true">not json</｜DSML｜parameter>
-        </｜DSML｜invoke>
-        </｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>text result</tool_result><｜Assistant｜></think>"#]]
-    .assert_eq(&render_request(&request));
-}
-
-#[test]
-fn rejects_non_object_json_tool_call_arguments() {
-    let request = ChatRequest {
-        messages: vec![
-            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
-                AssistantToolCall {
-                    id: "array".to_string(),
-                    name: "search".to_string(),
-                    arguments: "[1, 2]".to_string(),
-                },
-            )]),
-            ChatMessage::tool_response("array result", "array"),
-        ],
-        ..ChatRequest::for_test()
-    };
-
-    assert!(matches!(
-        DeepSeekV4ChatRenderer::new().render(&request),
-        Err(Error::ChatTemplate(message)) if message.contains("must be a JSON object")
-    ));
+        assert!(matches!(
+            DeepSeekV4ChatRenderer::new().render(&request),
+            Err(Error::ChatTemplate(error)) if error.contains(message)
+        ));
+    }
 }
 
 #[test]

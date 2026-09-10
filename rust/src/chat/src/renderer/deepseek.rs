@@ -676,15 +676,26 @@ fn render_tool_call(
 }
 
 /// Decode assistant tool-call arguments into the object the reference
-/// encoders iterate over.
+/// encoder iterates over.
 ///
-/// Both references keep text that is not JSON as a single `arguments`
-/// parameter instead of failing the request. V4.1 additionally tolerates
-/// JSON strings, including double-encoded ones, and wraps any other
-/// non-object value the same way; V4 rejects non-object JSON.
+/// V4 requires a JSON object. V4.1 tolerates JSON strings, including
+/// double-encoded ones, and keeps anything that still is not an object as a
+/// single `arguments` parameter, matching the reference `encoding.py`.
 fn decode_arguments(raw: &str, dialect: DsDialect) -> Result<Map<String, Value>> {
-    let decoded = match dialect {
-        DsDialect::V4 => serde_json::from_str(raw).ok(),
+    match dialect {
+        DsDialect::V4 => {
+            let arguments: Value = serde_json::from_str(raw).map_err(|error| {
+                Error::ChatTemplate(format!(
+                    "assistant tool call has invalid JSON arguments for DeepSeek: {error}"
+                ))
+            })?;
+            match arguments {
+                Value::Object(arguments) => Ok(arguments),
+                _ => Err(Error::ChatTemplate(
+                    "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
+                )),
+            }
+        }
         DsDialect::V41 => {
             let mut value = Value::String(raw.to_owned());
             for _ in 0..2 {
@@ -694,19 +705,11 @@ fn decode_arguments(raw: &str, dialect: DsDialect) -> Result<Map<String, Value>>
                     Err(_) => break,
                 }
             }
-            Some(value)
+            Ok(match value {
+                Value::Object(arguments) => arguments,
+                _ => Map::from_iter([("arguments".to_owned(), Value::String(raw.to_owned()))]),
+            })
         }
-    };
-
-    match (decoded, dialect) {
-        (Some(Value::Object(arguments)), _) => Ok(arguments),
-        (Some(_), DsDialect::V4) => Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
-        )),
-        _ => Ok(Map::from_iter([(
-            "arguments".to_owned(),
-            Value::String(raw.to_owned()),
-        )])),
     }
 }
 
