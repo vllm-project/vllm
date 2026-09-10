@@ -698,7 +698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.fast_prefill = FastPrefillHelper(
                 self.cudagraph_manager, self.max_num_tokens
             )
-        check_attention_cp_compatibility(self.vllm_config)
+        check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(

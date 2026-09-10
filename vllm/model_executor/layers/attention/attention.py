@@ -270,7 +270,6 @@ class Attention(nn.Module, AttentionLayerBase):
             sliding_window = None
 
         vllm_config = get_current_vllm_config()
-        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
