@@ -452,7 +452,7 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         """
         Cache the blocks for the request.
@@ -465,6 +465,8 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
+            replay_boundaries: Positions a later request replaying this prompt
+                can resume at, from ``get_replay_boundaries``.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -473,9 +475,9 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [replay_boundary]
+        # retention: every position a replaying sibling can resume at (see
+        # ``get_replay_boundaries``) and any detected shared-prefix junction.
+        reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
 
@@ -818,13 +820,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         super().cache_blocks(
             request,
             num_tokens,
             retention_interval=retention_interval,
-            replay_boundary=replay_boundary,
+            replay_boundaries=replay_boundaries,
         )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
@@ -1228,7 +1230,7 @@ class CircularBufferManager(FullAttentionManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         return
 
@@ -1940,14 +1942,14 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
             num_tokens,
             retention_interval=retention_interval,
-            replay_boundary=replay_boundary,
+            replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
@@ -2090,7 +2092,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
@@ -2148,8 +2150,6 @@ class SinkFullAttentionManager(FullAttentionManager):
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
-        num_sink_block = sink_len // self.block_size
-        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
 def get_manager_for_kv_cache_spec(
