@@ -421,9 +421,9 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "quantization with group_shape=(1,128).",
             )
 
-        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
-        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
-        # through to the generic backend.
+        # RDNA only has the aiter Triton blockscale backend, which needs a
+        # per-(N,K) tune. Reject untuned shapes so the dispatcher falls through
+        # to the generic backend.
         if rocm_aiter_ops.is_rdna_linear_enabled():
             n, k = config.weight_shape
             if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
