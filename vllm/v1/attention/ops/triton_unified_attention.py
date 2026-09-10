@@ -802,8 +802,9 @@ def _gfx1151_decode_3d_launch_config(
 
     A single KV head gives the 3D grid one head to spread across, so the
     Triton defaults leave the CUs waiting on KV loads rather than overlapping
-    them. The shape classes that benefit are opted in explicitly; everything
-    else keeps the defaults.
+    them. A handful of KV heads has the same problem in milder form, and wants
+    a deeper pipeline. The shape classes that benefit are opted in explicitly;
+    everything else keeps the defaults.
 
     Args:
         num_kv_heads: KV heads in the layer.
@@ -814,6 +815,8 @@ def _gfx1151_decode_3d_launch_config(
     """
     if num_kv_heads == 1:
         return {"num_warps": 4, "num_stages": 1, "waves_per_eu": 2}
+    if num_kv_heads <= 4 and head_size <= 128:
+        return {"num_warps": 4, "num_stages": 3, "waves_per_eu": 4}
     return {}
 
 
