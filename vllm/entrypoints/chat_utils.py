@@ -1773,7 +1773,7 @@ def _parse_chat_message_content_mm_part(
                 # with url as a dict of {"url": url}
                 audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
-        if part.get("input_audio") is not None:
+        if "input_audio" in part:
             input_audio_params = _InputAudioParser(part).get("input_audio", None)
             return "input_audio", input_audio_params
         if "video_url" in part:
