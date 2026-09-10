@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from contextlib import contextmanager
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -29,11 +30,16 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
+    KFp8StaticTensorMoE,
+    KMxfp8StaticMoE,
+    KNvfp4StaticMoE,
     ModelOptFp8Config,
     ModelOptLinearMethod,
     ModelOptMixedPrecisionConfig,
+    ModelOptMoEMethod,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
+    build_moe_method,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -724,7 +730,7 @@ def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
 def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     quant_method, expected_use_a16, act_key_is_none
 ):
-    """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
+    """``ModelOptMoEMethod``: when the ckpt's ``quant_method`` is
     ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
     ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
     (their ``_supports_quant_scheme`` requires
@@ -733,8 +739,9 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     ckpt silently went to the cutlass W4A4 path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptMoEMethod,
         ModelOptNvFp4Config,
-        ModelOptNvFp4FusedMoE,
+        resolve,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kNvfp4Dynamic,
@@ -761,7 +768,8 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
             return_value=False,
         ),
     ):
-        moe = ModelOptNvFp4FusedMoE(config, MagicMock())
+        spec, ctx, _ = resolve(quant_method, config, "")
+        moe = ModelOptMoEMethod(spec, ctx, MagicMock(), quant_config=config)
 
     assert moe.use_a16 is expected_use_a16
     _, kwargs = mock_select.call_args
@@ -770,6 +778,124 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+@contextmanager
+def _patch_moe_backend_select():
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_fp8_moe_backend",
+            return_value=(MagicMock(), MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(MagicMock(), MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_mxfp8_moe_backend",
+            return_value=(MagicMock(), MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=False,
+        ),
+    ):
+        yield
+
+
+@pytest.mark.parametrize(
+    "per_layer_algo, scheme_cls, expected_use_a16",
+    [
+        ("FP8", KFp8StaticTensorMoE, None),
+        ("NVFP4", KNvfp4StaticMoE, False),
+        ("W4A16_NVFP4", KNvfp4StaticMoE, True),
+        ("MXFP8", KMxfp8StaticMoE, None),
+    ],
+)
+def test_modelopt_mixed_precision_dispatches_moe_layer(
+    per_layer_algo, scheme_cls, expected_use_a16
+):
+    """Mixed precision routes a RoutedExperts layer through
+    ``ModelOptMoEMethod`` with the scheme for that layer's ``quant_algo``.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    config = m.ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    "model.layers.0.mlp.experts": {"quant_algo": per_layer_algo}
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config = MagicMock()
+    with _patch_moe_backend_select():
+        method = config.get_quant_method(layer, "model.layers.0.mlp.experts")
+
+    assert isinstance(method, ModelOptMoEMethod)
+    assert isinstance(method.wsch, scheme_cls)
+    if expected_use_a16 is not None:
+        assert method.use_a16 is expected_use_a16
+
+
+@pytest.mark.parametrize("algo", ["FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO"])
+def test_build_moe_method_rejects_linear_only_fp8(algo):
+    config = ModelOptFp8Config(
+        quant_method=algo,
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    with pytest.raises(NotImplementedError, match=algo):
+        build_moe_method(config, algo, "", MagicMock())
+
+
+def test_build_moe_method_deepseek_nvfp4_is_w4a4():
+    """Deepseek V4 builds ``ModelOptNvFp4Config(quant_method='NVFP4')`` and
+    calls ``build_moe_method(..., 'NVFP4')`` — W4A4, not W4A16.
+    """
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+    with _patch_moe_backend_select():
+        method = build_moe_method(config, "NVFP4", "", MagicMock())
+
+    assert isinstance(method, ModelOptMoEMethod)
+    assert isinstance(method.wsch, KNvfp4StaticMoE)
+    assert method.use_a16 is False
+
+
+def test_modelopt_mixed_precision_skips_pcpt_moe():
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    config = m.ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    "model.layers.0.mlp.experts": {
+                        "quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"
+                    }
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config = MagicMock()
+    assert config.get_quant_method(layer, "model.layers.0.mlp.experts") is None
 
 
 @pytest.mark.parametrize(
