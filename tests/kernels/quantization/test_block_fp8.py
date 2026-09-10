@@ -19,6 +19,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     _run_b12x_fp8_block_scaled_mm,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.rdna4 import (
+    RDNA4Fp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -300,9 +303,10 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     out = torch.zeros((M, N), device="cuda", dtype=out_dtype)
 
-    assert As_fp8.shape == (M, (K + 127) // 128), (
-        f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
-    )
+    assert As_fp8.shape == (
+        M,
+        (K + 127) // 128,
+    ), f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
 
     fp8_gemm_nt((A_fp8, As_fp8), (B_fp8, Bs_fp8), out)
 
@@ -410,3 +414,296 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
     # ordering can flap an output between adjacent BF16 values one ULP apart.
     assert rel_diff < 0.003
     assert cosine >= 0.99999
+
+
+@pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (1, 128, 128),
+        (2, 128, 128),
+        (4, 128, 256),
+        (16, 128, 384),
+        (17, 5120, 3072),
+        (33, 17408, 5120),
+        (39, 16384, 8192),
+        (48, 17408, 5120),
+        (64, 5120, 3072),
+        (65, 128, 256),
+        (72, 128, 256),
+        (129, 128, 256),
+        (249, 128, 256),
+        (256, 8192, 5120),
+        (523, 5120, 8704),
+        (784, 7168, 5120),
+        (1024, 8192, 5120),
+    ],
+)
+@torch.inference_mode()
+def test_rdna4_block_fp8_flydsl_matches_triton(m, n, k):
+    supported, reason = RDNA4Fp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    generator = torch.Generator(device="cuda").manual_seed(m + k)
+    a = (torch.randn((m, k), device="cuda", generator=generator) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    weight = (torch.randn((n, k), device="cuda", generator=generator) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    a_scale = (
+        torch.rand((m, k // 128), device="cuda", generator=generator) * 0.05 + 0.001
+    )
+    weight_scale = (
+        torch.rand((n // 128, k // 128), device="cuda", generator=generator) * 0.05
+        + 0.001
+    )
+
+    reference = w8a8_triton_block_scaled_mm(
+        a, weight, a_scale, weight_scale, [128, 128], torch.bfloat16
+    )
+    output = torch.ops.vllm.rdna4_fp8_block_scaled_mm(a, weight, a_scale, weight_scale)
+    torch.testing.assert_close(output, reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (2, 2560, 1280),
+        (1, 12288, 384),
+        (16, 12160, 640),
+        (16, 12288, 640),
+        (17, 4096, 1280),
+        (24, 4224, 640),
+        (31, 8192, 3072),
+        (32, 1792, 1280),
+        (39, 16384, 8192),
+        (48, 5376, 3840),
+        (64, 384, 384),
+        (65, 512, 1024),
+        (65, 1024, 1280),
+        (129, 768, 3840),
+        (256, 384, 1280),
+        (257, 1024, 1280),
+        (129, 1152, 1024),
+        (129, 3072, 512),
+        (129, 5376, 640),
+        # Full-B-prefetch K boundary and odd rotated K-block count.
+        (129, 2176, 896),
+        (129, 2176, 1024),
+        (129, 2176, 1152),
+        (513, 3072, 512),
+        (1025, 384, 1280),
+        (255, 1024, 512),
+        (256, 256, 1024),
+        (256, 512, 4096),
+        (256, 512, 4224),
+        (127, 1024, 1152),
+        (65, 2048, 128),
+        (512, 3072, 512),
+        (512, 3072, 640),
+        (32, 5120, 128),
+        (33, 5120, 640),
+        # Both M-tile sizes at the inclusive 64MiB boundary and above it.
+        (32, 8192, 8192),
+        (33, 8192, 8192),
+        (32, 8320, 8192),
+        (33, 8320, 8192),
+        # Split-K ownership and CTA-count boundaries, including rotation-free M.
+        (256, 1024, 2816),
+        (256, 1024, 3072),
+        (257, 1024, 3072),
+        (65, 2048, 3072),
+        (65, 2176, 3072),
+        (1024, 256, 2816),
+        (1024, 256, 3072),
+        (1025, 256, 3072),
+        # Wave32 CU tiles: 64-column scale ownership, split K and LDS lookahead.
+        (128, 1536, 2048),
+        (128, 1536, 4096),
+        (512, 1536, 4096),
+        (4097, 4096, 384),
+    ],
+)
+@torch.inference_mode()
+def test_rdna4_block_fp8_rotated_k_graph_replay(m, n, k):
+    """Every rotated K block must use current scales on each graph replay."""
+    supported, reason = RDNA4Fp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    generator = torch.Generator(device="cuda").manual_seed(934)
+    a = (torch.randn((m, k), device="cuda", generator=generator) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    weight = (torch.randn((n, k), device="cuda", generator=generator) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    a_scale = torch.ones((m, k // 128), device="cuda", dtype=torch.float32)
+    weight_scale = torch.ones((n // 128, k // 128), device="cuda", dtype=torch.float32)
+    for _ in range(2):
+        torch.ops.vllm.rdna4_fp8_block_scaled_mm(a, weight, a_scale, weight_scale)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = torch.ops.vllm.rdna4_fp8_block_scaled_mm(
+            a, weight, a_scale, weight_scale
+        )
+
+    scale_blocks = k // 128
+    for kb in dict.fromkeys(
+        (0, min(1, scale_blocks - 1), scale_blocks // 2, scale_blocks - 1)
+    ):
+        a_scale.zero_()
+        a_scale[:, kb] = 1.0
+        weight_scale.fill_(0.5)
+        output.fill_(float("nan"))
+        graph.replay()
+        reference = (
+            a[:, kb * 128 : (kb + 1) * 128].float()
+            @ weight[:, kb * 128 : (kb + 1) * 128].float().t()
+        ) * 0.5
+        torch.testing.assert_close(
+            output, reference.to(torch.bfloat16), rtol=0.01, atol=0.0005
+        )
+
+
+@pytest.mark.parametrize(
+    "m,n,k,padding",
+    [
+        (1, 384, 384, 128),
+        (3, 12160, 384, 128),
+        (15, 12288, 640, 256),
+        (17, 4096, 640, 128),
+        (24, 4224, 1280, 256),
+        (31, 1792, 1280, 128),
+        (31, 8192, 384, 128),
+        (33, 5120, 3072, 256),
+        (49, 5376, 3840, 128),
+        (63, 3584, 5120, 256),
+        (65, 384, 384, 128),
+        (65, 1024, 512, 128),
+        (96, 1024, 1280, 128),
+        (129, 768, 1152, 128),
+        (129, 768, 768, 128),
+        (255, 384, 5376, 128),
+        (127, 1792, 1280, 128),
+        (129, 1024, 1024, 128),
+        (255, 256, 1024, 256),
+        (257, 128, 1024, 128),
+        (257, 5376, 3840, 128),
+        (129, 5376, 1280, 128),
+        (512, 10752, 5376, 128),
+        (1025, 384, 640, 128),
+        (255, 512, 4096, 128),
+        (255, 512, 4224, 128),
+        (127, 1024, 1152, 256),
+        (127, 384, 128, 4),
+        (512, 3072, 512, 128),
+        (513, 3072, 512, 128),
+        (129, 5376, 640, 4),
+        (129, 2176, 1152, 4),
+        (127, 1536, 4096, 4),
+        (513, 1536, 4224, 128),
+        (4097, 4096, 384, 4),
+    ],
+)
+@torch.inference_mode()
+def test_rdna4_block_fp8_ragged_routes_with_padded_weight_rows(m, n, k, padding):
+    """Routing must preserve actual weight strides and partial M-tile masks."""
+    supported, reason = RDNA4Fp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    generator = torch.Generator(device="cuda").manual_seed(m + n + k)
+    a = (torch.randn((m, k), device="cuda", generator=generator) * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    backing = (
+        torch.randn((n, k + padding), device="cuda", generator=generator) * 0.25
+    ).to(torch.float8_e4m3fn)
+    weight = backing[:, :k]
+    a_scale = torch.rand((m, k // 128), device="cuda", generator=generator)
+    weight_scale = torch.rand((n // 128, k // 128), device="cuda", generator=generator)
+    reference = w8a8_triton_block_scaled_mm(
+        a, weight, a_scale, weight_scale, [128, 128], torch.bfloat16
+    )
+    output = torch.ops.vllm.rdna4_fp8_block_scaled_mm(a, weight, a_scale, weight_scale)
+    torch.testing.assert_close(output, reference, rtol=0.02, atol=0.0625)
+
+
+@pytest.mark.parametrize("row_stride", [0, 124, 129])
+@torch.inference_mode()
+def test_rdna4_block_fp8_rejects_unsupported_weight_row_strides(row_stride):
+    """Overlapping or unaligned weight rows must fail before kernel execution."""
+    supported, reason = RDNA4Fp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    m, n, k = 65, 128, 128
+    a = torch.empty((m, k), device="cuda", dtype=torch.float8_e4m3fn)
+    backing = torch.empty(
+        (n - 1) * row_stride + k, device="cuda", dtype=torch.float8_e4m3fn
+    )
+    weight = backing.as_strided((n, k), (row_stride, 1))
+    a_scale = torch.ones((m, 1), device="cuda", dtype=torch.float32)
+    weight_scale = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    with pytest.raises(
+        ValueError, match="row stride must be at least K and divisible by 4"
+    ):
+        torch.ops.vllm.rdna4_fp8_block_scaled_mm(a, weight, a_scale, weight_scale)
+
+
+@pytest.mark.parametrize(
+    "m,n,k,row_stride,accepted",
+    [
+        pytest.param(8388607, 128, 512, 512, True, id="a-below-4gib"),
+        pytest.param(8388608, 128, 512, 512, False, id="a-at-4gib"),
+        pytest.param(8388609, 128, 512, 512, False, id="a-above-4gib"),
+        pytest.param(1, 128, 128, 33554428, True, id="weight-below-4gib"),
+        pytest.param(1, 128, 128, 33554432, False, id="weight-at-4gib"),
+        pytest.param(1, 128, 128, 33554436, False, id="weight-above-4gib"),
+        pytest.param(65535, 32768, 128, 128, True, id="output-below-4gib"),
+        pytest.param(65536, 32768, 128, 128, False, id="output-at-4gib"),
+        pytest.param(65537, 32768, 128, 128, False, id="output-above-4gib"),
+        pytest.param(65, 128, 128, 132, True, id="weight-padding4"),
+        pytest.param(65, 128, 128, 148, True, id="weight-padding20"),
+    ],
+)
+def test_rdna4_block_fp8_buffer_byte_span_contract(
+    monkeypatch, m, n, k, row_stride, accepted
+):
+    """Reject descriptor wraparound without allocating multi-GiB tensors."""
+    pytest.importorskip("flydsl")
+    from vllm.model_executor.kernels.linear.scaled_mm.flydsl_kernels import (
+        rdna4_fp8_blockscale,
+    )
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: types.SimpleNamespace(gcnArchName="gfx1201"),
+    )
+
+    def metadata(shape, dtype, stride=None):
+        strides = stride or (shape[1], 1)
+        return types.SimpleNamespace(
+            shape=shape,
+            ndim=2,
+            dtype=dtype,
+            device=torch.device("cuda:0"),
+            is_contiguous=lambda: strides == (shape[1], 1),
+            stride=lambda dim: strides[dim],
+        )
+
+    a = metadata((m, k), torch.float8_e4m3fn)
+    weight = metadata((n, k), torch.float8_e4m3fn, (row_stride, 1))
+    a_scale = metadata((m, k // 128), torch.float32)
+    weight_scale = metadata((n // 128, k // 128), torch.float32)
+    if accepted:
+        assert rdna4_fp8_blockscale.validate_tensors(
+            a, weight, a_scale, weight_scale
+        ) == (m, n, k)
+    else:
+        with pytest.raises(ValueError, match="smaller than 4 GiB"):
+            rdna4_fp8_blockscale.validate_tensors(a, weight, a_scale, weight_scale)
