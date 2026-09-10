@@ -12,8 +12,7 @@ GENERATION = REPO_ROOT / "tests/models/language/generation"
 HELPERS = [
     GENERATION / "_common_models.py",
     GENERATION / "_granite_models.py",
-    # NOTE: _hybrid_models.py is added by the hybrid-split PR; whichever PR
-    # merges second extends this list with it.
+    GENERATION / "_hybrid_models.py",
 ]
 
 
