@@ -67,6 +67,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -492,6 +493,11 @@ class GPUModelRunner(
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
+        # Set in load_model(). Kept alive (rather than discarded once the
+        # model is constructed) so Worker.sleep/wake_up/reload_weights can
+        # notify it of GPU-memory-validity transitions via the optional
+        # on_sleep/on_wake_up/on_weights_reloaded hooks.
+        self.model_loader: BaseModelLoader | None = None
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
@@ -5268,6 +5274,7 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
+                self.model_loader = model_loader
                 # Capture warmup providers selected while constructing the model.
                 with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                     self.model = model_loader.load_model(
@@ -5522,26 +5529,39 @@ class GPUModelRunner(
         counter_before_reloading = time.perf_counter()
 
         # load weights from disk if none are provided
+        reloaded_by_loader = False
         if weights_iterator is None:
-            model_loader = get_model_loader(self.load_config)
-            if not hasattr(model_loader, "get_all_weights"):
-                raise NotImplementedError(
-                    f"Model reloading with `{self.load_config.load_format}` format"
-                )
+            # Reuse the loader that received the sleep/wake hooks, so any
+            # state it keeps across them sees the reload too.
+            model_loader = self.model_loader or get_model_loader(self.load_config)
 
             if weights_path is not None:
                 # The revision belongs to the model we are reloading away from,
                 # so it must not be carried over to the new path.
                 self.model_config.model = weights_path
                 self.model_config.revision = None
-            weights_iterator = model_loader.get_all_weights(self.model_config, model)
-            weights_iterator = cast(
-                Iterable[tuple[str, torch.Tensor]], weights_iterator
+
+            reloaded_by_loader = model_loader.reload_weights_inplace(
+                self.vllm_config, self.model_config, model
             )
+            if not reloaded_by_loader:
+                if not hasattr(model_loader, "get_all_weights"):
+                    raise NotImplementedError(
+                        f"Model reloading with `{self.load_config.load_format}` format"
+                    )
+                weights_iterator = model_loader.get_all_weights(
+                    self.model_config, model
+                )
+                weights_iterator = cast(
+                    Iterable[tuple[str, torch.Tensor]], weights_iterator
+                )
 
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
+        if reloaded_by_loader:
+            # The loader validates its own weights.
+            loaded_weights = None
+        elif is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)
             loaded_weights = model.load_weights(weights_iterator)
