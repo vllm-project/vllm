@@ -68,11 +68,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.composite import (
-    MMPrefixAttentionRouting,
-    create_composite_attention_backend,
-)
-from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
@@ -2734,15 +2729,3 @@ def _copy_page_indices_kernel(
             block_ids,
             mask=i + offset < num_blocks,
         )
-
-
-TRITON_FLASHINFER = create_composite_attention_backend(
-    TritonAttentionBackend,
-    FlashInferBackend,
-    name="TRITON_FLASHINFER",
-    module=__name__,
-    routing_policy=MMPrefixAttentionRouting,
-    head_sizes=(256, 512),
-    kernel_block_sizes=(128,),
-    device_major=10,
-)
