@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import shutil
+from pathlib import Path
+
+import pytest
 import torch
 
 from tests.utils import multi_gpu_test
@@ -20,20 +24,30 @@ PROMPTS = [
 ACCEPTANCE_TOLERANCE = 0.95
 
 
-def _run(pp_size: int) -> float:
-    llm = LLM(
-        model=MODEL,
+def _run(
+    pp_size: int,
+    model: str,
+    draft: str,
+    cudagraph_mode: str | None,
+) -> float:
+    kwargs = dict(
+        model=model,
         tensor_parallel_size=1,
         pipeline_parallel_size=pp_size,
         max_model_len=512,
         gpu_memory_utilization=0.45,
         disable_log_stats=False,
-        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         speculative_config={
             "method": "eagle3",
-            "model": DRAFT,
+            "model": draft,
             "num_speculative_tokens": 3,
         },
+    )
+    if cudagraph_mode is not None:
+        kwargs["compilation_config"] = {"cudagraph_mode": cudagraph_mode}
+
+    llm = LLM(
+        **kwargs,
     )
     try:
         llm.generate(

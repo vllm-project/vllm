@@ -4,11 +4,15 @@
 
 import pytest
 
+from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.mimo import MiMoModel
-from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-    verify_supports_aux_hidden_states_over_pp,
-)
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.qwen2 import Qwen2Model
+
+# Kimi-K3 / DSpark: 93 layers, target_layer_ids [2, 23, 47, 71, 89].
+# get_eagle3_aux_layers_from_config maps target_layer_ids -> +1.
+NUM_LAYERS = 93
+AUX_IDS = (3, 24, 48, 72, 90)
 
 
 def _local_aux_layer_ids(start_layer, end_layer, aux_ids, is_first_rank):

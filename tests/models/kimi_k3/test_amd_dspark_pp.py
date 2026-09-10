@@ -71,6 +71,37 @@ def test_first_stage_packs_local_aux_hidden_states(monkeypatch):
     torch.testing.assert_close(output["aux_hidden_states_0"], initial)
 
 
+def test_non_first_stage_skips_start_layer_aux_state(monkeypatch):
+    incoming = torch.tensor([[1.0, 2.0]])
+    local = torch.tensor([[3.0, 4.0]])
+    model = _model(
+        start_layer=1,
+        end_layer=2,
+        layer_output=(local, None),
+        aux_layers=(1, 2),
+    )
+    monkeypatch.setattr(
+        kimi_linear,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
+    )
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=IntermediateTensors(
+            {
+                "hidden_states": incoming,
+                "residual": incoming,
+            }
+        ),
+    )
+
+    assert isinstance(output, IntermediateTensors)
+    assert "aux_hidden_states_1" not in output.tensors
+    torch.testing.assert_close(output["aux_hidden_states_0"], local)
+
+
 def test_last_stage_prepends_remote_aux_hidden_states(monkeypatch):
     remote = torch.tensor([[1.0, 2.0]])
     incoming = torch.tensor([[3.0, 4.0]])

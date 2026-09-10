@@ -784,9 +784,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
             remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
 
         if self.config.attn_res_block_size is None:
             for layer_idx, layer in enumerate(
