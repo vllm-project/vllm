@@ -2612,7 +2612,7 @@ class Scheduler(SchedulerInterface):
         # We must defer freeing blocks if an async kv connector may
         # write to them immediately (not ordered with GPU stream).
         return not self.defer_block_free or (
-            request.last_sched_seq > self.processed_step_seq
+            request.last_sched_seq <= self.processed_step_seq
         )
 
     def _free_request_blocks(self, request: Request):
