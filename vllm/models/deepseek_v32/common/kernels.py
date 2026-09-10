@@ -274,12 +274,9 @@ def _fused_norm_rope_kernel(
                 )
                 kv_2d = tl.reshape(kv_c.to(tl.float32), (MLA_NUM_TILES, MLA_TILE_DIM))
                 amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
-                # sf = e4m3(max(amax/6, 2^-9)), rounded UP so amax/sf <= 6 and the
-                # tile's largest element cannot saturate e2m1.
-                sf_f = tl.maximum(amax * (1.0 / 6.0), 0.001953125)
-                # Round-to-nearest, matching cvt_warp_fp16_to_fp4 and the rest
-                # of vLLM's NVFP4 quantizers.
-                sf8 = sf_f.to(tl.float8e4nv)
+                # sf = e4m3(max(amax/6, 2^-9)), round-to-nearest like
+                # cvt_warp_fp16_to_fp4.
+                sf8 = tl.maximum(amax * (1.0 / 6.0), 0.001953125).to(tl.float8e4nv)
                 q = kv_2d * (1.0 / sf8.to(tl.float32))
                 qp = tl.reshape(q, (KV_DIM // 2, 2))
                 sel = tl.arange(0, 2)[None, :]
