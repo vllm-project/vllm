@@ -333,21 +333,19 @@ def _parse_find_command(tokens: list[str]) -> FindSelection | None:
 
 
 def _dash_c_code_operand(tokens: list[str]) -> str | None:
-    """For ``bash -c '<code>' [$0] [args]`` / ``sh -c ...`` / a combined group
-    like ``bash -ec '<code>'``, the ``<code>`` string the shell runs. ``None``
-    when this is not a ``-c`` invocation (plain ``bash script.sh`` / ``bash -x
-    script.sh``). Everything after the code operand is a positional parameter
-    (``$0``, ``$1``, ...), not a script or command that executes."""
+    """For ``bash -c '<code>' [$0] [args]`` / ``sh -c ...`` / a combined short
+    group with ``c`` anywhere in it (``-ec``, ``-ce``, ``-euxc``), the ``<code>``
+    string the shell runs. ``None`` when this is not a ``-c`` invocation (plain
+    ``bash script.sh`` / ``bash -x script.sh``). Everything after the code
+    operand is a positional parameter (``$0``, ``$1``, ...), not a script or
+    command that executes."""
     if not tokens or tokens[0].rsplit("/", 1)[-1] not in ("bash", "sh"):
         return None
     for i, token in enumerate(tokens[1:], start=1):
         if not token.startswith("-"):
             return None  # script operand reached; a later `-c` is *its* flag
-        # `-c`, or a short-option group ending in `c` (`-ec`, `-euxc`) - `-c`
-        # takes an argument, so it can only be last in a group.
-        if token == "-c" or (
-            len(token) >= 2 and token[1] != "-" and token.endswith("c")
-        ):
+        # a short-option group (single dash) with `c` among its flags.
+        if not token.startswith("--") and "c" in token[1:]:
             return tokens[i + 1] if i + 1 < len(tokens) else None
     return None
 
