@@ -42,6 +42,7 @@ def _make_offloading_config(
     groups: tuple[OffloadingGroupConfig, ...] | None = None,
     tokens_per_hash: int = 16,
     blocks_per_chunk: int = 1,
+    max_model_len: int = 4096,
     rank: int = 0,
     world_size: int = 1,
     tp_size: int | None = None,
@@ -70,7 +71,9 @@ def _make_offloading_config(
         enable_kv_cache_events=False,
         extra_config=normalized_extra_config,
         engine_id="test-engine",
-        model=OffloadingModelConfig(name="test-model", dtype="float16"),
+        model=OffloadingModelConfig(
+            name="test-model", dtype="float16", max_model_len=max_model_len
+        ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
             blocks_per_chunk=blocks_per_chunk,
@@ -166,6 +169,141 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
     assert spec.cpu_page_size_per_worker == 0
     assert spec.kv_bytes_per_chunk == 0
     assert spec.num_chunks == 0
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2, 4])
+def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
+    """One uncapped group makes the capacity the slot count in KV tokens.
+
+    A slot holds blocks_per_chunk blocks of tokens_per_block tokens each, so
+    dropping either factor understates the tier.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=blocks_per_chunk,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 12 // blocks_per_chunk
+    assert spec.tier_info.capacity_tokens_at_max_len == (
+        spec.num_blocks * blocks_per_chunk * tokens_per_block
+    )
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
+    world_size: int,
+):
+    """A slot holds every worker's copy of the block, so capacity divides by TP.
+
+    Without the num_copies factor a TP=4 tier would be reported at four times
+    the tokens it can hold.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=world_size,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 12 // world_size
+    assert (
+        spec.tier_info.capacity_tokens_at_max_len == spec.num_blocks * tokens_per_block
+    )
+
+
+def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
+    """A replicated layout stores one copy, so capacity does not divide by TP.
+
+    Same TP=4 sizing as the test above, which yields 3 slots; deduplicating to a
+    single copy yields 12.
+    """
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=4,
+        replicated_layout=True,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 12
+    assert spec.tier_info.capacity_tokens_at_max_len == 12 * tokens_per_block
+
+
+def test_cpu_spec_tier_info_mirrors_spec_sizing():
+    """The exported facts are the spec's own, not a second derivation."""
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 5,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=1,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.tier_info.num_chunks == spec.num_blocks
+    assert spec.tier_info.blocks_per_chunk == spec.blocks_per_chunk
+    assert spec.tier_info.kv_bytes_per_chunk == spec.kv_bytes_per_chunk
+
+
+def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
+    """A tier sized to nothing holds zero tokens; that is known, not unknown."""
+    spec = _create_spec(
+        worker_kv_bytes_per_block=0,
+        groups=(OffloadingGroupConfig(16, ("layer",)),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 0
+    assert spec.tier_info.capacity_tokens_at_max_len == 0
+
+
+def test_cpu_spec_tier_info_capacity_shrinks_when_a_second_group_shares_slots():
+    """Two groups take two chunks for one request, so the capacity halves."""
+    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",)),))
+    two_groups = _create_spec(
+        groups=(
+            OffloadingGroupConfig(16, ("full_layer",)),
+            OffloadingGroupConfig(16, ("swa_layer",)),
+        ),
+    )
+
+    assert isinstance(one_group, CPUOffloadingSpec)
+    assert isinstance(two_groups, CPUOffloadingSpec)
+    assert two_groups.num_blocks == one_group.num_blocks
+    assert two_groups.tier_info.capacity_tokens_at_max_len == (
+        one_group.tier_info.capacity_tokens_at_max_len // 2
+    )
+
+
+def test_cpu_spec_tier_info_no_token_capacity_without_a_kv_cache_group():
+    """A model with no KV cache has no group whose chunk size to apply."""
+    spec = _create_spec(groups=())
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks > 0
+    assert spec.tier_info.capacity_tokens_at_max_len is None
+
+
+def test_cpu_spec_tier_info_no_token_capacity_without_max_model_len():
+    """The capacity holds at max_model_len, so an unknown length gives None."""
+    spec = _create_spec(max_model_len=0)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks > 0
+    assert spec.tier_info.capacity_tokens_at_max_len is None
 
 
 def test_tiering_spec_aligns_row_size():

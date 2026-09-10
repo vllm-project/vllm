@@ -6,7 +6,7 @@ import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -17,8 +17,12 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
-from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.config import OffloadingConfig, OffloadingGroupConfig
+from vllm.v1.kv_offload.cpu.common import (
+    CPU_TIER_INFO_LABELS,
+    CPUCacheTierInfo,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -41,6 +45,61 @@ def _all_workers_barrier() -> None:
     group.barrier()
 
 
+def _chunks_per_request(
+    groups: tuple[OffloadingGroupConfig, ...],
+    blocks_per_chunk: int,
+    seq_len: int,
+) -> int:
+    """Chunks one request of seq_len tokens holds, summed over every group.
+
+    A group without a window holds one chunk for each chunk-sized span of the
+    request. A group with a window holds no more than the window, because the
+    tier lets the older chunks of that group age out.
+    """
+    total = 0
+    for group in groups:
+        chunk_count = cdiv(seq_len, blocks_per_chunk * group.tokens_per_block)
+        window_chunks = group.sliding_window_size_in_chunks
+        if window_chunks is not None:
+            chunk_count = min(chunk_count, window_chunks)
+        total += chunk_count
+    return total
+
+
+def _capacity_tokens_at_max_len(
+    groups: tuple[OffloadingGroupConfig, ...],
+    blocks_per_chunk: int,
+    num_chunks: int,
+    max_model_len: int,
+) -> int | None:
+    """Largest token count the tier serves at a length up to max_model_len.
+
+    A tier of num_chunks slots holds num_chunks / _chunks_per_request(seq_len)
+    requests, so it serves num_chunks * seq_len // _chunks_per_request(seq_len)
+    tokens. _chunks_per_request is a step function of seq_len, so that ratio
+    rises between two steps and drops at each step. Every peak therefore sits at
+    the last token of a chunk. Measure one such length for each group chunk size,
+    add max_model_len, and keep the largest result.
+
+    Returns:
+        The token count, or None when max_model_len is 0 and the caller
+        therefore did not know the longest request.
+    """
+    tokens_per_chunk = {blocks_per_chunk * group.tokens_per_block for group in groups}
+    if max_model_len <= 0 or not tokens_per_chunk or min(tokens_per_chunk) <= 0:
+        return None
+
+    seq_len_candidates = {
+        round_down(max_model_len, tokens) for tokens in tokens_per_chunk
+    }
+    seq_len_candidates.add(max_model_len)
+    return max(
+        num_chunks * seq_len // _chunks_per_request(groups, blocks_per_chunk, seq_len)
+        for seq_len in seq_len_candidates
+        if seq_len > 0
+    )
+
+
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
 
@@ -49,6 +108,21 @@ class CPUOffloadingSpec(OffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.CPU_CONFIG_INFO: OffloadingGaugeMetadata(
+                documentation=(
+                    "Static configuration of this engine's CPU KV offload tier: "
+                    "its size in slots and in bytes, and the most KV tokens it "
+                    "can serve when full, at any request length up to "
+                    "max_model_len, or 'None' when max_model_len is not known. "
+                    "The token count charges a bounded group its cap: the window "
+                    "tail for a sliding window, which "
+                    "prefix_cache_retention_interval=0 gives, and one state for a "
+                    "recurrent group. Emitted from the first scheduler step, so "
+                    "absent on an idle engine. Sum across engines for the whole "
+                    "instance."
+                ),
+                labelnames=CPU_TIER_INFO_LABELS,
+            ),
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
                     "Fraction of CPU KV-cache space currently pinned by active "
@@ -126,6 +200,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.tier_info = self._build_tier_info(config)
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -135,6 +211,20 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
+        )
+
+    def _build_tier_info(self, config: OffloadingConfig) -> CPUCacheTierInfo:
+        """Resolve the tier's static facts, including its token capacity."""
+        return CPUCacheTierInfo(
+            num_chunks=self.num_blocks,
+            blocks_per_chunk=self.blocks_per_chunk,
+            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+            capacity_tokens_at_max_len=_capacity_tokens_at_max_len(
+                config.groups,
+                self.blocks_per_chunk,
+                self.num_blocks,
+                config.model.max_model_len,
+            ),
         )
 
     @override
@@ -151,6 +241,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_chunks=self.num_chunks,
+                tier_info=self.tier_info,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,

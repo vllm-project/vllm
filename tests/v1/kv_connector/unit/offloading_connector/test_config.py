@@ -165,6 +165,22 @@ def _mla_spec(
     )
 
 
+def _swa_spec(sliding_window: int = 128) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+_HIDDEN_STATE_KWARGS: dict[str, Any] = {
+    "block_size": 16,
+    "num_kv_heads": 1,
+    "head_size": 512,
+    "dtype": torch.float32,
+}
 _MAMBA_SPEC = MambaSpec(
     block_size=16,
     shapes=((16, 1),),
@@ -443,6 +459,55 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
         expected,
         16,
     )
+
+
+@pytest.mark.parametrize(
+    "kv_cache_spec,window_chunks",
+    [
+        (_full_attention_spec(), None),
+        (_mla_spec(), None),
+        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), None),
+        (_MAMBA_SPEC, 1),
+        (_swa_spec(), 8),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={
+                    "mla": _mla_spec(),
+                    "hidden": HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS),
+                },
+            ),
+            None,
+        ),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={"swa0": _swa_spec(), "swa1": _swa_spec()},
+            ),
+            8,
+        ),
+    ],
+)
+def test_group_carries_the_chunks_the_tier_keeps_per_request(
+    kv_cache_spec: KVCacheSpec, window_chunks: int | None
+):
+    """The group reports how far back its attention reaches, counted in chunks.
+
+    A capacity estimate needs that bound: a windowed or recurrent group keeps a
+    fixed number of chunks however long the request grows, while an unbounded
+    group keeps one for every chunk of the request. A worker-side group hands
+    over an aggregate of its layers, which must resolve to the same bound as the
+    single layer it wraps.
+    """
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+    assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
 
 
 def test_preserves_data_parallel_config():
@@ -728,13 +793,7 @@ def test_parallelism_agnostic_for_single_full_attention_group():
     assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
 
 
-_SWA_SPEC = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=4,
-    head_size=128,
-    dtype=torch.float32,
-    sliding_window=128,
-)
+_SWA_SPEC = _swa_spec()
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,

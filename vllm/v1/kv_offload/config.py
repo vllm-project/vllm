@@ -14,6 +14,9 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Chunks of this group the tier keeps for one request, or None when
+    # attention reaches back without a bound (a full layer).
+    sliding_window_size_in_chunks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Longest request the engine accepts, in tokens. 0 when not known.
+    max_model_len: int = 0
 
 
 @dataclass(frozen=True)
