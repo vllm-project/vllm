@@ -758,27 +758,24 @@ def test_mm_prefix_selects_composite_without_changing_causal_default(use_mm_pref
 
 @blackwell_only
 @pytest.mark.parametrize(
-    "config_kwargs,feature_kwargs",
+    "feature_kwargs,reason",
     [
-        ({"rswa_window": 1024}, {}),
-        ({}, {"kv_cache_dtype": "fp8"}),
-        ({}, {"block_size": 16}),
-        ({}, {"use_dcp": True}),
-        ({}, {"use_pcp": True}),
-        ({}, {"use_adaptive_verification": True}),
+        ({"use_rswa": True}, "R-SWA not supported"),
+        ({"kv_cache_dtype": "fp8"}, "kv_cache_dtype not supported"),
+        ({"block_size": 16}, "block_size not supported"),
+        ({"use_dcp": True}, "DCP not supported"),
+        ({"use_pcp": True}, "PCP not supported"),
+        ({"use_adaptive_verification": True}, "device-cpu query lens mismatch"),
     ],
 )
-def test_composite_rejects_features_not_shared_by_both_routes(
-    config_kwargs, feature_kwargs
-):
+def test_composite_rejects_features_not_shared_by_both_routes(feature_kwargs, reason):
     """Automatic selection must not admit features only one child can execute."""
-    from vllm.v1.attention.backends.flashinfer import (
-        TRITON_FLASHINFER as TritonFlashInferBackend,
-    )
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.attention.backends.flashinfer import TRITON_FLASHINFER
 
-    cfg = _hd256_config(is_mm_prefix_lm=True, **config_kwargs)
-    cfg.model_config.get_num_attention_heads.return_value = 32
-    cfg.model_config.get_num_kv_heads.return_value = 16
+    config = EngineArgs(
+        model="google/gemma-4-31B-it", dtype="bfloat16"
+    ).create_engine_config()
     args = dict(
         head_size=256,
         dtype=torch.bfloat16,
@@ -793,11 +790,28 @@ def test_composite_rejects_features_not_shared_by_both_routes(
         attn_type=AttentionType.DECODER,
     )
     args.update(feature_kwargs)
-    with (
-        set_current_vllm_config(VllmConfig()),
-        patch(
-            "vllm.v1.attention.backends.flashinfer.get_current_vllm_config_or_none",
-            return_value=cfg,
-        ),
-    ):
-        assert TritonFlashInferBackend.validate_configuration(**args)
+    with set_current_vllm_config(config):
+        reasons = TRITON_FLASHINFER.validate_configuration(**args)
+    assert any(reason in message for message in reasons), reasons
+
+
+@blackwell_only
+def test_rswa_selection_does_not_reuse_causal_result():
+    """An R-SWA requirement must invalidate a previously cached causal selection."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        attention_config={"backend": "TRITON_FLASHINFER"},
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        assert (
+            get_attn_backend(256, torch.bfloat16, None).get_name()
+            == "TRITON_FLASHINFER"
+        )
+        config.model_config.model_arch_config.rswa_window = 128
+        with pytest.raises(ValueError, match="R-SWA"):
+            get_attn_backend(256, torch.bfloat16, None)
+        config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"

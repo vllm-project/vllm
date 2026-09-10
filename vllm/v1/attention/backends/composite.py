@@ -433,6 +433,12 @@ def create_composite_attention_backend(
             )
 
         @classmethod
+        def supports_rswa(cls):
+            return all(
+                backend.supports_rswa() for backend in (general_backend, causal_backend)
+            )
+
+        @classmethod
         def supports_pcp(cls):
             return False
 

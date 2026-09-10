@@ -512,28 +512,6 @@ class FlashInferBackend(AttentionBackend):
         return [64, 128, 256, 512]
 
     @classmethod
-    def supports_combination(
-        cls,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink,
-        use_sparse,
-        use_mm_prefix,
-        device_capability,
-    ):
-        config = get_current_vllm_config_or_none()
-        if (
-            config is not None
-            and config.model_config is not None
-            and config.model_config.rswa_window is not None
-        ):
-            return "R-SWA is not supported"
-        return None
-
-    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         # FlashInfer supports SM75+, but is currently broken on SM75 (Turing):
         # https://github.com/flashinfer-ai/flashinfer/issues/3620 (fix:
