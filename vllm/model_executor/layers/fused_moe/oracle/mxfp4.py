@@ -757,15 +757,26 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
-            activation == MoEActivation.SITU or activation == MoEActivation.SILU
-        ):
-            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-            # which would inflate weights and OOM.
-            intermediate_size = round_up(intermediate_size, 128)
-            hidden_size = round_up(hidden_size, 128)
+        if backend in (
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+        ) and (activation in (MoEActivation.SITU, MoEActivation.SILU)):
+            # These W4A16 kernels only need 128-element alignment: K3's
+            # AITER kernel on gfx950 (#50597), and matmul_ogs on CDNA3
+            # (block_k=128 whenever weight scales are present). Rounding
+            # intermediate_size up to 256 instead pads TP-sharded fp4
+            # expert weights by up to a third (~30 GiB per GPU for
+            # DeepSeek-V4-Pro at TP8), memory that would otherwise be
+            # KV cache (#53961). Keep 256 for SWIGLUOAI (gpt-oss,
+            # #38043) and CDNA4 (block_k=256).
+            from vllm.platforms.rocm import get_cdna_version
+
+            if get_cdna_version() == 4:
+                intermediate_size = round_up(intermediate_size, 256)
+                hidden_size = round_up(hidden_size, 256)
+            else:
+                intermediate_size = round_up(intermediate_size, 128)
+                hidden_size = round_up(hidden_size, 128)
         else:
             intermediate_size = round_up(intermediate_size, 256)
             hidden_size = round_up(hidden_size, 256)
