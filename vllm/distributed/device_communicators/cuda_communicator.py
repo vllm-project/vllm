@@ -47,7 +47,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             global_world_size,
             use_all2all=use_all2all,
         )
-        if "tp" not in unique_name:
+        # Match the group name exactly so ETP does not enable TP-only backends.
+        if unique_name.split(":")[0] != "tp":
             # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
             use_torch_symm_mem = False
@@ -630,6 +631,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
+
+    def suspend(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.suspend()
+
+    def resume(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.resume()
 
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.

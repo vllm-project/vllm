@@ -43,9 +43,6 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
-                                   torch::stable::Tensor const& perm);
-
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
@@ -530,20 +527,25 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(
-    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
-    double linear_beta = -1.0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                  double beta = 1.0, double linear_beta = -1.0);
 void situ_and_mul_quant(
     torch::stable::Tensor& out, torch::stable::Tensor& scale,
     torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
     int64_t group_size = 0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    std::optional<torch::stable::Tensor> num_valid_tokens = std::nullopt,
     int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
                          double beta = 1.0, double linear_beta = -1.0);
+void masked_moe_activation(torch::stable::Tensor& out,
+                           torch::stable::Tensor& input,
+                           const torch::stable::Tensor& valid_token_counts,
+                           const std::string& activation,
+                           double clamp_limit = 0.0, double alpha = 1.0,
+                           double beta = 0.0, double situ_beta = 1.0,
+                           double situ_linear_beta = -1.0);
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
@@ -582,11 +584,10 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
                                 torch::stable::Tensor b_q_weight,
                                 torch::stable::Tensor b_gptq_qzeros,
                                 torch::stable::Tensor b_gptq_scales,
-                                torch::stable::Tensor b_g_idx, bool use_exllama,
-                                bool use_v2_format, int64_t bit);
+                                bool use_exllama, bool use_v2_format,
+                                int64_t bit);
 
-void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
-                  int64_t bit);
+void gptq_shuffle(torch::stable::Tensor q_weight, int64_t bit);
 
 // Cache ops (shared CUDA/ROCm)
 void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
