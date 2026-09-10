@@ -207,12 +207,10 @@ class CPUWorker(Worker):
         # prewarm, and the auto KV-cache-size calc below -- which relies on
         # a warmup forward pass having already bumped RSS to a realistic
         # steady-state value -- is bypassed whenever the size is explicit.
-        if (
+        return not (
             self.compilation_config.mode == CompilationMode.NONE
             and self.cache_config.kv_cache_memory_bytes is not None
-        ):
-            return False
-        return True
+        )
 
     def determine_available_memory(self) -> int:
         if self._should_warm_up_model():
