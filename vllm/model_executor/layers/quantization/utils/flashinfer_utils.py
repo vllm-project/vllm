@@ -13,7 +13,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
+def get_nvfp4_per_token_base_global_scale() -> float:
+    """Return the per-token base scale for FlashInfer's NVFP4 recipe."""
+    from flashinfer.quantization.nvfp4_quantization_utils import (
+        current_nvfp4_4over6_config,
+        nvfp4_e4m3_max,
+    )
+
+    return 1.0 / (nvfp4_e4m3_max(current_nvfp4_4over6_config()) * 6.0)
 
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
@@ -60,7 +68,7 @@ def quantize_nvfp4_per_token_input(
 
     return nvfp4_quantize(
         hidden_states,
-        NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+        get_nvfp4_per_token_base_global_scale(),
         sfLayout=SfLayout.layout_linear,
         per_token_activation=True,
     )
