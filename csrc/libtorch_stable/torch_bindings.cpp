@@ -429,7 +429,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+      "int q_head_padded, float eps, int cache_block_size, "
+      "bool apply_q_norm=True) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -437,13 +438,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
       "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
       "Tensor position_ids, Tensor cos_sin_cache, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
       "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
 
   // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
   ops.def(
