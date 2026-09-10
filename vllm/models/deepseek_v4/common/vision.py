@@ -269,9 +269,7 @@ def run_dp_sharded_vision_tower(
 
     sizes = [h * w for h, w in vit_grid]
     cum_patches = [0, *itertools.accumulate(sizes)]
-    image_to_tp_rank, gpu_sample_counts, _ = get_load_balance_assignment(
-        sizes, tp_size
-    )
+    image_to_tp_rank, gpu_sample_counts, _ = get_load_balance_assignment(sizes, tp_size)
     cum_sample_counts = [0, *itertools.accumulate(gpu_sample_counts)]
 
     # Rows the aligner emits per image: each grid dim is padded up to a
