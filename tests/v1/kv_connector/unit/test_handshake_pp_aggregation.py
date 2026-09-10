@@ -103,6 +103,7 @@ def _run_engine_core_handshake(
             async_scheduling=False,
         ),
         speculative_config=None,
+        kv_transfer_config=None,
         ec_transfer_config=None,
         max_concurrent_batches=1,
         model_config=SimpleNamespace(runner_type="generate", is_diffusion=False),
