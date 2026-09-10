@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import struct
 import tempfile
 import threading
 import time
@@ -1069,7 +1070,7 @@ def runai_safetensors_weights_iterator(
 
 def _fastsafetensors_memory_budget(
     device: torch.device, pg: Any, derive: bool = True
-) -> int | None:
+) -> tuple[int | None, str]:
     """Device memory the fastsafetensors fit planner may spend.
 
     Model parameters are allocated before weights are loaded, so the free
@@ -1085,7 +1086,10 @@ def _fastsafetensors_memory_budget(
             leave every rank unplanned.
 
     Returns:
-        Budget in bytes, or None if it could not be determined.
+        The budget in bytes and why, or None and why not. An unplanned load has
+        several causes -- asked for, unmodellable, unreadable, or too little
+        memory to reserve headroom from -- and they are not interchangeable
+        when someone is working out why a load behaved as it did.
     """
     # Zero means "no bound". Every rank contributes a value and takes part in
     # the reduce below, whatever its local state: a rank that returned early
@@ -1095,9 +1099,9 @@ def _fastsafetensors_memory_budget(
     # planner cannot model, or a failed reading -- leaves them all unplanned.
     override = envs.VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET
     if override >= 0:
-        budget = override
+        budget, reason = override, "explicit" if override else "disabled"
     elif not derive:
-        budget = 0
+        budget, reason = 0, "residency not modellable"
     else:
         try:
             free, _ = current_platform.mem_get_info()
@@ -1108,15 +1112,36 @@ def _fastsafetensors_memory_budget(
             # growth rather than proving none; this reserve absorbs the
             # difference, which is comfortable at those sizes.
             budget = max(free - max(free // 20, 1 << 30), 0)
+            reason = "derived" if budget else "no memory to reserve from"
         except Exception as e:
             logger.warning("fastsafetensors memory budget unavailable (%s)", e)
-            budget = 0
+            budget, reason = 0, "free memory unreadable"
 
     if pg.size() > 1 and torch.distributed.is_initialized():
         agreed = torch.tensor([budget], dtype=torch.int64, device=device)
         torch.distributed.all_reduce(agreed, op=torch.distributed.ReduceOp.MIN)
-        budget = int(agreed.item())
-    return budget or None
+        agreed_budget = int(agreed.item())
+        if agreed_budget != budget:
+            budget, reason = agreed_budget, "agreed across ranks"
+    return (budget or None), reason
+
+
+def _safetensors_largest_tensor(hf_weights_files: list[str]) -> int:
+    """Largest single tensor across the shards, in bytes.
+
+    The planner can split a shard but never a tensor, so this is the atomic
+    unit a chunk must be able to hold.
+    """
+    largest = 0
+    for path in hf_weights_files:
+        with open(path, "rb") as f:
+            header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            start, end = meta["data_offsets"]
+            largest = max(largest, end - start)
+    return largest
 
 
 def fastsafetensors_weights_iterator(
@@ -1163,6 +1188,12 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
+    # Planning and GDS are mutually exclusive in fastsafetensors 0.4: the GDS
+    # copier does not implement sub-file chunking, so a planned load on a
+    # GDS-capable host would construct the loader, fail, and fall back with a
+    # misleading "GDS not enabled" warning. Choose planning -- running out of
+    # memory fails the load, while buffered reads only slow it -- and let
+    # VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET=0 select GDS instead.
     nogds = pg.size() > 1
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
@@ -1175,7 +1206,10 @@ def fastsafetensors_weights_iterator(
     # quantized parameter than the checkpoint bytes it consumes -- would be
     # over-charged by the quantization ratio and refused a load that fits, so
     # leave those unplanned unless a budget was asked for explicitly.
-    budget = _fastsafetensors_memory_budget(device, pg, derive=not accumulate_resident)
+    budget, budget_reason = _fastsafetensors_memory_budget(
+        device, pg, derive=not accumulate_resident
+    )
+    nogds = nogds or budget is not None
 
     def _make_loader(nogds: bool) -> "ParallelLoader":
         kwargs = dict(
@@ -1193,21 +1227,15 @@ def fastsafetensors_weights_iterator(
         try:
             return ParallelLoader(
                 device_memory_budget=budget,
-                # Allocate each chunk at its planned budget rather than its
-                # span, so the caching allocator reuses blocks instead of
-                # fragmenting when the model barely fits. Capped at the largest
-                # shard so a load never stages more than one whole shard, which
-                # is what it would have staged unplanned; without the cap the
-                # budget is the only bound and a small checkpoint would reserve
-                # most of free memory. The cap binds only where the plan
-                # already fits a whole file, so chunked plans are unchanged,
-                # and a shard is never smaller than its largest tensor, so it
-                # cannot make a feasible plan infeasible.
-                max_batch_bytes=max(
-                    (os.path.getsize(f) for f in hf_weights_files), default=0
-                )
+                # A chunk must hold the largest tensor, since a shard can be
+                # split but a tensor cannot; twice that bounds staging at
+                # eff_depth x cap rather than at the budget, which would
+                # otherwise reserve most of free memory however small the
+                # checkpoint. The cap only binds where it leaves the plan
+                # feasible, and stops binding once it exceeds the largest
+                # shard, where the plan is whole-file anyway.
+                max_batch_bytes=2 * _safetensors_largest_tensor(hf_weights_files)
                 or None,
-                use_chunk_budget_as_allocation_size=True,
                 **kwargs,
             )
         except BudgetInfeasibleError as e:
@@ -1226,6 +1254,13 @@ def fastsafetensors_weights_iterator(
                 "the memory bound and stages whole shards, which is likely to "
                 "run out of memory during loading."
             ) from e
+
+    logger.info(
+        "fastsafetensors: %s (%s)%s",
+        f"budget {budget / (1 << 30):.2f} GiB" if budget else "unplanned",
+        budget_reason,
+        "" if nogds else ", GDS",
+    )
 
     # GDS can fail either at construction or lazily inside the producer
     # thread during iteration (e.g. cuFileHandleRegister returning
