@@ -10,6 +10,7 @@ wired through ``vllm.v1.attention.backends.rocm_aiter_fa``:
 """
 
 import importlib
+from typing import cast
 
 import pytest
 import torch
@@ -783,7 +784,9 @@ def test_aiter_fa_shared_kv_matches_reference(
             32 * BLOCK_SIZE, num_kv_heads, head_size, dtype=torch.bfloat16
         )
         value = torch.randn_like(key)
-        target.impl.do_kv_cache_update(
+        from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionImpl
+
+        cast(AiterFlashAttentionImpl, target.impl).do_kv_cache_update(
             target,
             key,
             value,
