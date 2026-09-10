@@ -57,7 +57,8 @@ use super::{
     build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
     render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -691,11 +692,24 @@ fn test_render_app_with_parser_selections(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+}
+
+fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
+    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
-        text: TextRequestProcessor::new(backend.clone(), 128),
+        max_model_len,
+        text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
@@ -944,6 +958,20 @@ async fn test_admin_app_with_ready_and_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
+    (
+        build_router_with_dev_mode_and_lora(state, true, true),
+        engine_task,
+    )
+}
+
+async fn test_admin_state_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
@@ -968,16 +996,146 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_dev_mode_and_lora(
-            Arc::new(AppState::new(
-                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat,
-            )),
-            true,
-            true,
-        ),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         engine_task,
     )
+}
+
+/// Engine script that answers one `add_lora` utility call with `loaded` and
+/// hands the decoded LoRA request tuple to `check`.
+fn add_lora_script(
+    loaded: bool,
+    check: impl FnOnce(&[Value]) + Send + 'static,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+            let args = array[3].as_array().expect("utility args");
+            check(args[0].as_array().expect("lora request tuple"));
+            send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_loads_and_lists_with_parent() {
+    // An absolute local path: the runtime endpoint would reject it without
+    // VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES, static config trusts it.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        ready,
+        add_lora_script(true, |lora| {
+            assert_eq!(lora[0], Value::from("alice"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/adapters/alice"));
+            assert_eq!(lora[3], Value::from("base-model"));
+        }),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        is_3d_lora_weight: false,
+    };
+    let request = state.load_static_lora(&module).await.expect("load static lora");
+    assert_eq!(request.lora_name, "alice");
+    assert_eq!(request.lora_int_id, 1);
+
+    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "alice");
+    assert_eq!(json["data"][1]["root"], "/adapters/alice");
+    assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_requires_lora_enabled_engine() {
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine has no lora");
+    assert!(matches!(error, LoadLoraError::Disabled(_)), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_fails_when_engine_rejects_it() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(false, |_| {})).await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine rejected");
+    assert!(
+        matches!(error, LoadLoraError::NotLoaded { .. }),
+        "{error:?}"
+    );
+    assert!(state.served_lora_requests().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_rejects_empty_name_or_path() {
+    // The JSON form of `--lora-modules` is not validated at parse time; the
+    // manager rejects empty fields before any engine RPC.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, |_dealer, _push| {
+            boxed_test_future(async {})
+        })
+        .await;
+
+    for (name, path) in [("", "org/alice"), ("alice", "")] {
+        let module = LoraModulePath {
+            name: name.to_string(),
+            path: path.to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let error = state.load_static_lora(&module).await.expect_err("empty field");
+        assert!(
+            matches!(error, LoadLoraError::InvalidAdapter { .. }),
+            "{error:?}"
+        );
+    }
 }
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
@@ -1267,6 +1425,26 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_list_models_reports_configured_max_model_len() {
+    for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
+        let mut app = test_render_app_with_max_model_len(configured);
+        let response = app
+            .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let card = json["data"][0].as_object().expect("card object");
+        assert!(card.contains_key("max_model_len"));
+        assert_eq!(
+            card["max_model_len"], expected,
+            "configured: {configured:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2558,7 +2736,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].modality.as_str(), "image");
             assert_eq!(features[0].identifier, "image-1");
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -2621,7 +2799,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
             qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmModality::Image,
                 vllm_chat::multimodal::MmLimitSpec::Count(1),
             )])),
         )),
@@ -2934,6 +3112,64 @@ async fn http_metrics_group_error_statuses() {
             Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
         ),
         1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_collapse_unknown_methods() {
+    let mut app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    for (method, path) in [
+        ("XVULNCARD000001", "/tokenize"),
+        ("XVULNCARD000002", "/tokenize"),
+        ("XVULNCARD000003", "/detokenize"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let after = METRICS.render().unwrap();
+    assert!(
+        !after.contains("XVULNCARD"),
+        "raw method tokens must not appear in metrics: {after}"
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/tokenize\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/detokenize\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"other\",handler=\"/tokenize\""),
+        ),
+        2.0
     );
 }
 

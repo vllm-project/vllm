@@ -82,6 +82,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        self.llm_engine.vllm_config._check_watermarking_unsupported(beam_search=True)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id

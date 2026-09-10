@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import safetensors
-import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -13,8 +12,12 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.logger import init_logger
-from vllm.utils.collection_utils import is_list_of
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -52,8 +55,7 @@ class ECExampleConnector(ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
-        self._model_config = vllm_config.model_config
-        self._metadata_fields_cache: dict[str, set[str]] = {}
+        self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
             self._storage_path = transfer_config.get_from_extra_config(
@@ -88,14 +90,20 @@ class ECExampleConnector(ECConnectorBase):
                 "In connector.start_load_caches, but the connector metadata is None"
             )
             return
+        # A bare "cuda" makes safetensors load onto cuda:0. Pin the load to the
+        # selected device so tensor-parallel workers load the cache locally.
+        device = current_platform.device_type
+        if current_platform.is_cuda_alike():
+            device = f"{device}:{current_platform.current_device()}"
         # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(
-                filename, device=current_platform.device_type
-            )["ec_cache"]
+            with gpu_sync_allowed():
+                ec_cache = safetensors.torch.load_file(filename, device=device)[
+                    "ec_cache"
+                ]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
@@ -117,7 +125,8 @@ class ECExampleConnector(ECConnectorBase):
             return
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
-        tensors = {"ec_cache": ec_cache.detach().cpu()}
+        with gpu_sync_allowed():
+            tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
@@ -169,36 +178,6 @@ class ECExampleConnector(ECConnectorBase):
         self._mm_datas_need_loads.clear()
         return meta
 
-    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
-        """Which processed keys this model needs published for `modality`.
-
-        Read from `MultiModalDataParser.embedding_fields`, the same declaration
-        the consumer's parser requires, so the two cannot drift. An empty set
-        means the modality cannot be delivered out of band, and the consumer
-        will process the media itself.
-        """
-        if modality in self._metadata_fields_cache:
-            return self._metadata_fields_cache[modality]
-
-        fields: set[str] = set()
-        try:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
-            fields = info.data_parser.placeholder_metadata_fields(modality)
-        except Exception:
-            # Reporting nothing is a safe degradation: the consumer falls back to
-            # processing the media itself.
-            logger.warning(
-                "Could not determine the placeholder metadata fields for "
-                "modality %s; the consumer will preprocess the media itself.",
-                modality,
-                exc_info=True,
-            )
-
-        self._metadata_fields_cache[modality] = fields
-        return fields
-
     def request_finished(
         self,
         request: "Request",
@@ -214,28 +193,10 @@ class ECExampleConnector(ECConnectorBase):
         if not self.is_producer:
             return False, None
 
-        items = []
-        for feature in request.mm_features:
-            metadata = {}
-            # `data` is None for items served from the processor cache, in which
-            # case the metadata is unavailable here and the consumer has to fall
-            # back to processing the media itself.
-            if feature.data is not None:
-                wanted = self._placeholder_metadata_fields(feature.modality)
-                for key, value in feature.data.get_data().items():
-                    if key not in wanted:
-                        continue
-                    if isinstance(value, torch.Tensor):
-                        metadata[key] = value.tolist()
-                    elif is_list_of(value, (int, float)):
-                        # Some metadata (e.g. Qwen3-VL video timestamps) is
-                        # produced as a plain list rather than a tensor.
-                        metadata[key] = value
-            items.append({"mm_hash": feature.identifier, **metadata})
-
+        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
         if not items:
             return False, None
-        return False, {"ec_items": items}
+        return False, items
 
     # ==============================
     # Helper functions
