@@ -9,6 +9,7 @@ from vllm_test_utils.monitor import monitor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemorySnapshot,
+    allocator_ceiling_bytes,
     cap_unified_memory_budget,
     limit_torch_allocator_to_budget,
     memory_profiling,
@@ -291,3 +292,65 @@ def test_allocator_cap_tracks_capped_budget_on_busy_host():
     assert applied_ceiling <= budget + 1  # float rounding
     assert applied_ceiling <= available - 8 * GiB_bytes
     assert fraction < util
+
+
+def test_request_memory_rejects_exhausted_host():
+    """Regression: when available memory is at or below the host reserve the cap
+    returns 0, and ``free_memory < requested`` cannot catch it (free is never
+    negative). Reject the non-positive budget here, before the caller loads
+    weights -- the base path raises for these inputs and this one must too.
+    Reported by @hebo1221 on #49760: total=120 GiB, available=4 GiB, util=0.7,
+    reserve=8 GiB.
+    """
+    import pytest
+
+    from vllm.v1.worker.utils import request_memory
+
+    total = 120 * GiB_bytes
+    for available in (4 * GiB_bytes, 8 * GiB_bytes):
+        snapshot = MagicMock()
+        snapshot.total_memory = total
+        snapshot.free_memory = available
+        snapshot.device_ = "cuda:0"
+        cache_config = MagicMock()
+        cache_config.gpu_memory_utilization = 0.7
+        with (
+            patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+            patch("vllm.utils.mem_utils.envs") as mock_envs,
+        ):
+            mock_platform.is_integrated_gpu.return_value = True
+            mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
+            with pytest.raises(ValueError, match="at or below the"):
+                request_memory(snapshot, cache_config)
+
+
+def test_explicit_kv_cache_ceiling_is_not_utilization_derived():
+    """Regression: ``kv_cache_memory_bytes`` opts out of
+    ``gpu_memory_utilization``, so the allocator ceiling must not be derived
+    from it -- otherwise a cache larger than ``util * total`` fails against a
+    limit the user opted out of. Reported by @hebo1221 on #49760: total=120 GiB,
+    available=100 GiB, util=0.1, kv_cache_memory_bytes=20 GiB. The
+    utilization-derived ceiling is 12 GiB, below the 20 GiB cache alone.
+    """
+    total = 120 * GiB_bytes
+    available = 100 * GiB_bytes
+    util = 0.1
+    kv_bytes = 20 * GiB_bytes
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.envs") as mock_envs,
+    ):
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
+        budget = cap_unified_memory_budget(
+            "cuda:0", math.ceil(total * util), available, total
+        )
+        explicit = allocator_ceiling_bytes(budget, available, total, kv_bytes)
+        implicit = allocator_ceiling_bytes(budget, available, total, None)
+    assert budget == 12 * GiB_bytes
+    # Without explicit sizing the ceiling is still the budget: unchanged path.
+    assert implicit == budget
+    # With it, the ceiling clears the cache and stops at the host reserve.
+    assert explicit == 92 * GiB_bytes
+    assert explicit >= kv_bytes
+    assert explicit <= available - 8 * GiB_bytes
