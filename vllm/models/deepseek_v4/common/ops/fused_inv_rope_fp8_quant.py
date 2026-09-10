@@ -12,6 +12,10 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _f32_to_e4m3_uint8,
+)
+
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
@@ -146,7 +150,11 @@ class FusedInvRopeFP8QuantKernel(
             ),
             (HEAD_DIM,),
         )
-        x_quant = tl.clamp(x / scales_exp, -fp8_max, fp8_max).to(tl.float8e4nv)
+        # Ampere (SM80/SM86) lacks the Triton fp8e4nv type; encode e4m3 bytes
+        # and store through a uint8 view of the output (identical layout).
+        x_quant = _f32_to_e4m3_uint8(
+            tl.clamp(x / scales_exp, -fp8_max, fp8_max)
+        )
 
         fp8_base = (
             fp8_ptr
@@ -443,7 +451,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         o,
         positions,
         cos_sin_cache,
-        fp8_buf,
+        fp8_buf.view(torch.uint8),
         scale_buf,
         num_tokens,
         heads_per_group=heads_per_group,

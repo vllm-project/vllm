@@ -26,6 +26,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
     zip_inputs,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _e4m3_uint8_to_f32,
+    _f32_to_e4m3_uint8,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
@@ -35,6 +39,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.sparse_mla_env import is_ampere_or_ada
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
@@ -138,10 +143,10 @@ def quantize_and_insert_k_kernel(
 
             # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
             if use_fnuz:
-                x_fp8 = x_clamped.to(tl.float8e4b8)
+                x_uint8 = x_clamped.to(tl.float8e4b8).to(tl.uint8, bitcast=True)
             else:
-                x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+                # Ampere (SM80) has no fp8e4nv type; encode e4m3 bytes directly.
+                x_uint8 = _f32_to_e4m3_uint8(x_clamped)
 
             # Store as uint8 (1 byte each)
             tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
@@ -333,12 +338,12 @@ class DequantizeAndGatherKCacheKernel(
 
                     # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
                     if use_fnuz:
-                        x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                        x_float = x_uint8.to(tl.float8e4b8, bitcast=True).to(
+                            tl.float32
+                        )
                     else:
-                        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-
-                    # Convert fp8 to float32 for computation
-                    x_float = x_fp8.to(tl.float32)
+                        # Ampere (SM80) has no fp8e4nv type; decode e4m3 bytes.
+                        x_float = _e4m3_uint8_to_f32(x_uint8)
 
                     # Load and decode UE8M0 scale
                     # UE8M0: scale = 2^(stored_value - 127)
@@ -518,7 +523,7 @@ def dequantize_and_gather_k_cache(
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
-    if has_cutedsl():
+    if has_cutedsl() and not is_ampere_or_ada():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             dequantize_and_gather_k_cache_cutedsl,
@@ -1680,3 +1685,164 @@ class BuildFlashinferMixedSparseIndicesKernel(
 _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL = (
     BuildFlashinferMixedSparseIndicesKernel()
 )
+
+
+# --- ported from fork (Lvllmds4-x) for SM80 Triton sparse-MLA ---
+@triton.jit
+def _dequantize_global_slots_k_kernel(
+    out_ptr,
+    out_stride_token,
+    out_stride_slot,
+    k_cache_ptr,
+    slot_ids_ptr,
+    slot_ids_stride_token,
+    slot_ids_stride_slot,
+    cache_block_size: tl.constexpr,
+    token_data_size: tl.constexpr,
+    block_stride: tl.constexpr,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    scale_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    output_dim: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    topk_idx = tl.program_id(1)
+
+    slot_id = tl.load(
+        slot_ids_ptr
+        + token_idx * slot_ids_stride_token
+        + topk_idx * slot_ids_stride_slot
+    )
+    offsets = tl.arange(0, BLOCK_D)
+    output_row = out_ptr + token_idx * out_stride_token + topk_idx * out_stride_slot
+
+    if slot_id < 0:
+        tl.store(
+            output_row + offsets,
+            tl.zeros((BLOCK_D,), dtype=tl.float32).to(tl.bfloat16),
+            mask=offsets < output_dim,
+        )
+        return
+
+    block_idx = slot_id // cache_block_size
+    pos_in_block = slot_id % cache_block_size
+    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
+    token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+    token_scale_ptr = (
+        cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
+    )
+
+    fp8_offsets = tl.arange(0, 512)
+    fp8_mask = fp8_offsets < fp8_dim
+    x_uint8 = tl.load(token_data_ptr + fp8_offsets, mask=fp8_mask, other=0)
+    x_float = _e4m3_uint8_to_f32(x_uint8)
+
+    scale_offsets = fp8_offsets // quant_block
+    encoded_scale = tl.load(token_scale_ptr + scale_offsets, mask=fp8_mask, other=127)
+    scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+    x_dequant = x_float * scale
+    tl.store(output_row + fp8_offsets, x_dequant.to(tl.bfloat16), mask=fp8_mask)
+
+    bf16_offsets = tl.arange(0, 64)
+    bf16_cache_ptr = (token_data_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+    bf16_vals = tl.load(bf16_cache_ptr + bf16_offsets, mask=bf16_offsets < bf16_dim)
+    tl.store(
+        output_row + fp8_dim + bf16_offsets,
+        bf16_vals,
+        mask=bf16_offsets < bf16_dim,
+    )
+
+
+def dequantize_global_slots_k_cache(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_ids: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Dequantize fp8_ds_mla cache rows addressed by physical global slot ids."""
+    if slot_ids.dim() == 3:
+        assert slot_ids.shape[1] == 1
+        slot_ids = slot_ids[:, 0, :]
+    assert slot_ids.dim() == 2, (
+        f"slot_ids must be [num_tokens, topk], got {slot_ids.shape}"
+    )
+    assert out.shape[:2] == slot_ids.shape
+    assert out.shape[-1] == 512
+    assert out.dtype == torch.bfloat16
+    assert k_cache.dtype == torch.uint8
+
+    TOKEN_FP8_DIM = 448
+    TOKEN_BF16_DIM = 64
+    TOKEN_SCALE_DIM = 8
+    QUANT_BLOCK_SIZE = 64
+    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+
+    grid = slot_ids.shape
+    _dequantize_global_slots_k_kernel[grid](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        slot_ids,
+        slot_ids.stride(0),
+        slot_ids.stride(1),
+        cache_block_size=block_size,
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=k_cache.stride(0),
+        fp8_dim=TOKEN_FP8_DIM,
+        bf16_dim=TOKEN_BF16_DIM,
+        scale_dim=TOKEN_SCALE_DIM,
+        quant_block=QUANT_BLOCK_SIZE,
+        output_dim=512,
+        BLOCK_D=triton.next_power_of_2(512),
+    )
+
+
+def dequantize_combined_sparse_mla_decode_kv(
+    combined_kv: torch.Tensor,
+    compressed_k_cache: torch.Tensor,
+    compressed_slot_ids: torch.Tensor,
+    compressed_block_size: int,
+    swa_k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    swa_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    swa_block_size: int,
+) -> None:
+    """Fill `[compressed, SWA]` decode candidates into one output buffer."""
+    assert combined_kv.dim() == 3
+    compressed_topk = compressed_slot_ids.shape[-1]
+    assert combined_kv.shape[0] == compressed_slot_ids.shape[0]
+    assert combined_kv.shape[-1] == 512
+    assert combined_kv.dtype == torch.bfloat16
+    assert combined_kv.shape[1] >= compressed_topk
+
+    dequantize_global_slots_k_cache(
+        combined_kv[:, :compressed_topk],
+        compressed_k_cache,
+        compressed_slot_ids,
+        compressed_block_size,
+    )
+    swa_out = combined_kv[:, compressed_topk:]
+    if swa_out.shape[1] == 0:
+        return
+    dequantize_and_gather_k_cache(
+        swa_out,
+        swa_k_cache,
+        seq_lens=seq_lens,
+        gather_lens=swa_lens,
+        block_table=block_table,
+        block_size=swa_block_size,
+        offset=0,
+    )
+
+
+
+def sparse_prefill_combined_topk_size(topk: int, window_size: int) -> int:
+    return (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )

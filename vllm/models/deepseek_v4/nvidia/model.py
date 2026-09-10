@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
+import os
 from collections.abc import Callable, Iterable
 from inspect import signature
 from itertools import islice
@@ -1093,6 +1094,8 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -1105,6 +1108,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.prefix = prefix
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.rms_norm_eps = config.rms_norm_eps
@@ -1829,7 +1833,8 @@ class DeepseekV4ForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        return logits
 
     def forward(
         self,
