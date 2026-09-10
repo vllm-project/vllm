@@ -487,7 +487,7 @@ class EngineArgs:
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
-    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -1104,7 +1104,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
-            **parallel_kwargs["cp_kv_cache_interleave_size"],
+            **{
+                **parallel_kwargs["cp_kv_cache_interleave_size"],
+                "default": None,
+            },
         )
         parallel_group.add_argument(
             "--prefill-context-parallel-size",
@@ -2363,7 +2366,14 @@ class EngineArgs:
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
-            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=(
+                self.cp_kv_cache_interleave_size
+                if self.cp_kv_cache_interleave_size is not None
+                else ParallelConfig.cp_kv_cache_interleave_size
+            ),
+            _allow_auto_resolve_cp_interleave_size=(
+                self.cp_kv_cache_interleave_size is None
+            ),
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
