@@ -986,7 +986,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for group in self.attention_groups:
             if not isinstance(group.spec, FullAttentionSpec):
                 continue
-            group_block_size = self.single_type_managers[group.group_ids[0]].block_size
+            manager = self.single_type_managers[group.group_ids[0]]
+            if manager.retains_longer_hit:
+                continue
+            group_block_size = manager.block_size
             num_blocks = cdiv(hit_length, group_block_size)
             for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:

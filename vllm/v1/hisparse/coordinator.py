@@ -143,6 +143,7 @@ class HiSparseCoordinator:
             (host_group_id,) = host_group_ids
             self.host_group_id = host_group_id
             self.host_manager = managers[host_group_id]
+            self.host_manager.retains_longer_hit = True
         self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.transition_watermark = 0

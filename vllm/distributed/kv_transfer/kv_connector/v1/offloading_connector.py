@@ -40,7 +40,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -50,10 +51,18 @@ from vllm.v1.request import Request
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @cached_property
-    def prefix_completion_group_ids(self) -> frozenset[int]:
-        if self._kv_cache_config.hisparse_host_num_blocks is None:
-            return frozenset()
-        return frozenset(get_offloading_group_ids(self._kv_cache_config))
+    def _bounding_group_ids(self) -> tuple[int, ...]:
+        """Prefix-cacheable groups this connector does not offload.
+
+        Never offer tokens for a range some group cannot cover: past such a
+        group's own cached prefix its KV would be left unwritten.
+        """
+        offloaded = set(get_offloading_group_ids(self._kv_cache_config))
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
+            if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
+        )
 
     @property
     def scheduler(self) -> OffloadingConnectorScheduler:
@@ -88,6 +97,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
+
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        self._kv_cache_manager = kv_cache_manager
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
@@ -151,20 +164,29 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens
-        )
-
-    def get_num_new_matched_tokens_capped(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        max_num_new_tokens: int,
-    ) -> tuple[int | None, bool]:
-        return self.scheduler.get_num_new_matched_tokens(
             request,
             num_computed_tokens,
-            max_num_new_tokens=max_num_new_tokens,
+            max_num_new_tokens=self._max_loadable_tokens(request, num_computed_tokens),
         )
+
+    def _max_loadable_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> int | None:
+        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+
+        Bounded by the deepest prefix the groups this connector does not
+        offload already hold, since nothing refills them beyond it.
+        """
+        if not self._bounding_group_ids:
+            return None
+        assert self._kv_cache_manager is not None
+        coordinator = self._kv_cache_manager.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        _, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
+        )
+        bound = min(per_group_hits[group_id] for group_id in self._bounding_group_ids)
+        return max(0, bound - num_computed_tokens)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

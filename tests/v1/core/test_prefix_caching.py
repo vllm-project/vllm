@@ -26,6 +26,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -48,10 +51,6 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.hisparse.prefix_cache import (
-    get_computed_blocks_for_group_completion,
-    truncate_group_completion_blocks,
-)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -337,27 +336,16 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     manager.block_pool.evict_blocks({evicted_indexer_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    blocks, num_local, _, diverged, max_completion = (
-        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
-    )
-
-    assert diverged
+    blocks, num_local, _ = manager.get_computed_blocks(resumed)
+    max_completion = HISPARSE_BLOCK_SIZE
     assert num_local == 2 * HISPARSE_BLOCK_SIZE
-    assert max_completion == HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
 
-    completed = truncate_group_completion_blocks(
-        manager,
-        blocks,
-        num_local,
-        num_local + max_completion,
-        frozenset({1}),
-    )
     allocated = manager.allocate_slots(
         resumed,
         num_new_tokens=1,
         num_new_computed_tokens=num_local,
-        new_computed_blocks=completed,
+        new_computed_blocks=blocks,
         num_external_computed_tokens=max_completion,
     )
 
@@ -390,13 +378,93 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     assert manager.hisparse_coordinator.evict_host_blocks({evicted_host_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    _, num_local, _, diverged, max_completion = (
-        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
-    )
-
-    assert not diverged
+    _, num_local, _ = manager.get_computed_blocks(resumed)
+    connector = object.__new__(OffloadingConnector)
+    connector._kv_cache_config = manager.kv_cache_config
+    connector.bind_kv_cache_manager(manager)
     assert num_local == 0
-    assert max_completion == 0
+    assert connector._max_loadable_tokens(resumed, num_local) == 0
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "available_tokens,imported_tokens,host_blocks",
+    [(0, 0, 2), (16, 16, 2), (64, 32, 3)],
+)
+def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
+    nested, available_tokens, imported_tokens, host_blocks
+):
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(64))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=64) is not None
+    _publish_hisparse_pages(manager)
+    host, indexer, _, _ = manager.get_blocks(original.request_id).blocks
+    missing_indexer = indexer[1].block_id
+    missing_host = host[0].block_id
+    manager.free(original)
+    manager.block_pool.evict_blocks({missing_indexer})
+
+    defer = True
+
+    def lookup(request, num_computed_tokens, max_num_new_tokens=None):
+        nonlocal defer
+        if defer:
+            defer = False
+            return None, False
+        available = available_tokens
+        if max_num_new_tokens is not None:
+            available = min(available, max_num_new_tokens)
+        return available, available > 0
+
+    connector = object.__new__(OffloadingConnector)
+    connector._kv_cache_config = manager.kv_cache_config
+    connector.connector_scheduler = SimpleNamespace(get_num_new_matched_tokens=lookup)
+    if nested:
+        for _ in range(2):
+            outer = object.__new__(MultiConnector)
+            outer._connectors = (connector,)
+            outer._requests_to_connector = {}
+            connector = outer
+    connector.bind_kv_cache_manager(manager)
+    scheduler = SimpleNamespace(connector=connector, kv_cache_manager=manager)
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+
+    blocks, local, _, diverged = Scheduler._get_local_prefix_cache_hit(
+        scheduler, resumed
+    )
+    assert local == 16 and not diverged
+    assert connector.get_num_new_matched_tokens(resumed, local) == (None, False)
+
+    blocks, local, _, diverged = Scheduler._get_local_prefix_cache_hit(
+        scheduler, resumed
+    )
+    external, asynchronous = connector.get_num_new_matched_tokens(resumed, local)
+    assert external == imported_tokens
+    assert asynchronous == (external > 0)
+    assert [len(group) for group in blocks.blocks] == [3, 1, 0, 0]
+    assert (
+        manager.allocate_slots(
+            resumed,
+            int(external == 0),
+            delay_cache_blocks=True,
+            num_new_computed_tokens=local,
+            new_computed_blocks=blocks,
+            num_external_computed_tokens=external,
+        )
+        is not None
+    )
+    allocated = manager.get_blocks(resumed.request_id).blocks
+    assert len(allocated[0]) == host_blocks
+    assert allocated[2][1].is_null == (external > 0)
+    manager.free(resumed)
+
+    # A surviving indexer offload must not make absent host KV look computed.
+    manager.hisparse_coordinator.evict_host_blocks({missing_host})
+    retry = make_request("retry", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    _, local, _, _ = Scheduler._get_local_prefix_cache_hit(scheduler, retry)
+    assert local == 0
+    assert connector.get_num_new_matched_tokens(retry, local) == (0, False)
 
 
 def allocate_external_prefix(

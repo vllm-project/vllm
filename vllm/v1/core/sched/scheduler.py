@@ -54,10 +54,6 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.hisparse.prefix_cache import (
-    get_computed_blocks_for_group_completion,
-    truncate_group_completion_blocks,
-)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -532,22 +528,15 @@ class Scheduler(SchedulerInterface):
 
     def _get_local_prefix_cache_hit(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
+    ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
-        if connector is not None and connector.prefix_completion_group_ids:
-            return get_computed_blocks_for_group_completion(
-                self.kv_cache_manager, request, connector.prefix_completion_group_ids
-            )
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return (
-                *self.kv_cache_manager.get_computed_blocks_for_connector(request),
-                None,
-            )
+            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
             self.kv_cache_manager.get_computed_blocks(request)
         )
-        return blocks, num_local, shared_prefix_boundary, False, None
+        return blocks, num_local, shared_prefix_boundary, False
 
     def _reserve_prefill_lookahead(
         self,
@@ -931,7 +920,6 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                        max_group_completion_tokens,
                     ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
@@ -943,20 +931,11 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        if max_group_completion_tokens is None:
-                            ext_tokens, load_kv_async = (
-                                self.connector.get_num_new_matched_tokens(
-                                    request, block_aligned_local
-                                )
+                        ext_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, block_aligned_local
                             )
-                        else:
-                            ext_tokens, load_kv_async = (
-                                self.connector.get_num_new_matched_tokens_capped(
-                                    request,
-                                    block_aligned_local,
-                                    max_group_completion_tokens + partial_tail,
-                                )
-                            )
+                        )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -997,18 +976,7 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
-                        elif max_group_completion_tokens is not None:
-                            completed_prefix = (
-                                num_new_local_computed_tokens
-                                + num_external_computed_tokens
-                            )
-                            new_computed_blocks = truncate_group_completion_blocks(
-                                self.kv_cache_manager,
-                                new_computed_blocks,
-                                num_new_local_computed_tokens,
-                                completed_prefix,
-                                self.connector.prefix_completion_group_ids,
-                            )
+
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )

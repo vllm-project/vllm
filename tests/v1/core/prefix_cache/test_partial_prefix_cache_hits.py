@@ -42,7 +42,6 @@ def test_connector_without_divergent_hit_support_uses_common_lookup():
     manager.get_computed_blocks.return_value = (common_blocks, 0, 0)
     scheduler = SimpleNamespace(
         connector=SimpleNamespace(
-            prefix_completion_group_ids=frozenset(),
             supports_divergent_local_hybrid_hits=False,
         ),
         kv_cache_manager=manager,
@@ -50,7 +49,7 @@ def test_connector_without_divergent_hit_support_uses_common_lookup():
 
     result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
 
-    assert result == (common_blocks, 0, 0, False, None)
+    assert result == (common_blocks, 0, 0, False)
     manager.get_computed_blocks_for_connector.assert_not_called()
 
 
@@ -65,7 +64,6 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
     )
     scheduler = SimpleNamespace(
         connector=SimpleNamespace(
-            prefix_completion_group_ids=frozenset(),
             supports_divergent_local_hybrid_hits=True,
         ),
         kv_cache_manager=manager,
@@ -73,7 +71,7 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
 
     result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
 
-    assert result == (per_group_blocks, 6, 0, True, None)
+    assert result == (per_group_blocks, 6, 0, True)
     manager.get_computed_blocks.assert_not_called()
 
 

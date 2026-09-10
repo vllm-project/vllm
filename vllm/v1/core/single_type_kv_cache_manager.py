@@ -50,6 +50,9 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    # Keep this group's longer prefix until external cache lookup completes.
+    retains_longer_hit: bool = False
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
