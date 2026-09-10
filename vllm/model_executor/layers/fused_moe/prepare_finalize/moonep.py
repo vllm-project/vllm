@@ -342,14 +342,15 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             raise NotImplementedError("MoonEP PoC supports BF16 hidden states only.")
         if quant_config.quant_dtype is not None:
             raise NotImplementedError("MoonEP PoC does not support quantized dispatch.")
-        if apply_router_weight_on_input:
-            raise NotImplementedError(
-                "MoonEP PoC applies router weights in the expert runner."
-            )
         assert num_experts == self.num_global_experts
         assert self._plan is None, (
             "MoonEPPrepareAndFinalize.prepare() called again before finalize()"
         )
+        if apply_router_weight_on_input:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input requires top-1 routing"
+            )
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Buffer choice must be rank-symmetric: use the max token count
         # across DP ranks (every rank sees the same dp_metadata), falling
