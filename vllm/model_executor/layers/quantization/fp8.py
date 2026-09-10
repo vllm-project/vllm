@@ -549,7 +549,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             moe_parallel_config=moe_parallel_config,
         )
         return fp8_round_up_hidden_size_and_intermediate_size(
-            self.fp8_backend, hidden_size, intermediate_size_per_partition
+            self.fp8_backend,
+            hidden_size,
+            intermediate_size_per_partition,
+            activation=self.moe.activation,
         )
 
     def create_weights(

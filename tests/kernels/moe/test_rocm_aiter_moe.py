@@ -962,6 +962,7 @@ def test_aiter_fused_moe_gelu_tanh_padded_matches_unpadded_reference(quant: str)
     garbage tail is live weight and must not."""
     from tests.kernels.moe.utils import make_test_weights
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -977,7 +978,7 @@ def test_aiter_fused_moe_gelu_tanh_padded_matches_unpadded_reference(quant: str)
 
     hidden_dim, intermediate_dim = 512, 704
     _, intermediate_dim_padded = fp8_round_up_hidden_size_and_intermediate_size(
-        Fp8MoeBackend.AITER, hidden_dim, intermediate_dim
+        Fp8MoeBackend.AITER, hidden_dim, intermediate_dim, MoEActivation.GELU_TANH
     )
     assert intermediate_dim_padded == 768
     case = _make_moe_case(
