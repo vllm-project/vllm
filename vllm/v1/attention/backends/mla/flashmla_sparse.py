@@ -582,6 +582,7 @@ class FlashMLASparseMetadataBuilder(
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:

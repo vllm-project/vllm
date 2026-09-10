@@ -48,10 +48,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)"
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N"
   key: entrypoints-integration-api-server
   device: h200_35gb
   timeout_in_minutes: 75
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -60,12 +61,12 @@ steps:
   - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
-  - pytest -v -s entrypoints/scale_out
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
+  - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server)"
+      label: ":amd: (MI300) Entrypoints Integration (API Server) %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
@@ -81,7 +82,6 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
@@ -103,7 +103,6 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
@@ -127,13 +126,15 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
-  - tests/entrypoints/anthropic
   - tests/entrypoints/generate
+  - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   commands:
   - pytest -v -s tool_use
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
+  - pytest -v -s entrypoints/cohere
   mirror:
     amd:
       label: ":amd: (MI300) Entrypoints Integration (API Server Generate)"

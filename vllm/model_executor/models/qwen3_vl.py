@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
 from typing import Any
@@ -2120,6 +2120,7 @@ class Qwen3VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2367,8 +2368,8 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
-                positions = compute_mrope_for_media(size, merge_size).to(
-                    emb.device, non_blocking=True
+                positions = async_tensor_h2d(
+                    compute_mrope_for_media(size, merge_size), emb.device
                 )
                 positions = torch.cat(
                     [
@@ -2596,14 +2597,11 @@ class Qwen3VLForConditionalGeneration(
             identifier="DUMMY",
             mm_position=PlaceholderRange(offset=0, length=len(unpruned_token_ids)),
         )
-        original_mrope = (
-            self.get_mrope_input_positions(
-                input_tokens=unpruned_token_ids,
-                mm_features=[mm_feature],
-            )[0]
-            .to(device, non_blocking=True)
-            .permute(1, 0)
-        )
+        original_mrope_cpu = self.get_mrope_input_positions(
+            input_tokens=unpruned_token_ids,
+            mm_features=[mm_feature],
+        )[0]
+        original_mrope = async_tensor_h2d(original_mrope_cpu, device).permute(1, 0)
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
 
         with gpu_sync_allowed():

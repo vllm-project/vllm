@@ -17,7 +17,7 @@ Each model format is described by a :class:`ParserEngineConfig` that specifies:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import cached_property
@@ -54,7 +54,8 @@ class ParserEngineConfig:
 
     name: str
 
-    terminals: dict[str, str] = field(default_factory=dict)
+    # A terminal may carry several spellings; the first spelling is the canonical one.
+    terminals: Mapping[str, str | tuple[str, ...]] = field(default_factory=dict)
 
     token_id_terminals: dict[str, str] = field(default_factory=dict)
 
@@ -99,6 +100,22 @@ class ParserEngineConfig:
 
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
+
+    def terminal_literal(self, name: str) -> str | None:
+        """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
+        value = self.terminals.get(name)
+        if isinstance(value, tuple):
+            return value[0] if value else None
+        return value
+
+    @property
+    def terminal_literals(self) -> frozenset[str]:
+        """Every declared spelling across all terminals."""
+        return frozenset(
+            lit
+            for value in self.terminals.values()
+            for lit in ((value,) if isinstance(value, str) else value)
+        )
 
     @cached_property
     def terminal_defs(self):

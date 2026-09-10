@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
@@ -29,10 +30,29 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/is_sleeping",
 ];
 
+/// Map the request method to a bounded Prometheus label.
+///
+/// HTTP parsers accept arbitrary method tokens. Recording the raw token as a
+/// label would let unique values create unbounded time series.
+pub(crate) fn http_metrics_method(method: &Method) -> &str {
+    match *method {
+        Method::GET
+        | Method::POST
+        | Method::PUT
+        | Method::PATCH
+        | Method::DELETE
+        | Method::HEAD
+        | Method::OPTIONS
+        | Method::CONNECT
+        | Method::TRACE => method.as_str(),
+        _ => "other",
+    }
+}
+
 /// Record API-server HTTP metrics with Python-compatible
 /// (`PrometheusFastApiInstrumentator` style) family names and labels.
 pub async fn track_http_metrics(req: Request, next: Next) -> Response {
-    let method = req.method().as_str().to_string();
+    let method = http_metrics_method(req.method()).to_string();
     let handler = req
         .extensions()
         .get::<MatchedPath>()
@@ -78,5 +98,35 @@ fn status_group(status: u16) -> &'static str {
         4 => "4xx",
         5 => "5xx",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_methods_keep_their_names() {
+        for (method, expected) in [
+            (Method::GET, "GET"),
+            (Method::POST, "POST"),
+            (Method::PUT, "PUT"),
+            (Method::PATCH, "PATCH"),
+            (Method::DELETE, "DELETE"),
+            (Method::HEAD, "HEAD"),
+            (Method::OPTIONS, "OPTIONS"),
+            (Method::CONNECT, "CONNECT"),
+            (Method::TRACE, "TRACE"),
+        ] {
+            assert_eq!(http_metrics_method(&method), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_methods_collapse_to_other() {
+        let method = Method::from_bytes(b"XVULNCARD000001").expect("valid token");
+        assert_eq!(http_metrics_method(&method), "other");
+        let other = Method::from_bytes(b"XVULNCARD000002").expect("valid token");
+        assert_eq!(http_metrics_method(&other), "other");
     }
 }

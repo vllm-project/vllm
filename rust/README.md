@@ -90,6 +90,27 @@ It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
 tokenizer and model configuration files are loaded; model weights, PyTorch,
 and vLLM kernels are not required.
 
+To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
+in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
+the certificate file. For mTLS, pass `--ssl-ca-certs` with a CA
+bundle and set `--ssl-cert-reqs` to `1` (optional) or `2` (required) to
+verify client certificates. Use `--ssl-ciphers` to override the default
+OpenSSL cipher list.
+
+```bash
+# Combined PEM (cert + key in one file):
+vllm-rs \
+  render Qwen/Qwen3-32B \
+  --host 127.0.0.1 --max-model-len 32768 \
+  --ssl-certfile /path/to/combined.pem
+
+# Separate cert and key files:
+vllm-rs \
+  render Qwen/Qwen3-32B \
+  --host 127.0.0.1 --max-model-len 32768 \
+  --ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem
+```
+
 The render endpoints return the public token-in `GenerateRequest` consumed by
 the Rust `/inference/v1/generate` endpoint. A chat render response, or one item
 from a completion render response, can be submitted to that endpoint without

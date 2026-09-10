@@ -164,8 +164,10 @@ def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def _cgroup_cpu_limit() -> float | None:
@@ -492,15 +494,6 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
                     list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
                 )
                 return "auto"
-    return None
-
-
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
-    """Get the KV cache quantization algorithm dtype from the quantization config."""
-    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
-        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
     return None
 
 

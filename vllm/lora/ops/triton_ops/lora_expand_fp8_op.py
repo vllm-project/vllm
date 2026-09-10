@@ -367,35 +367,11 @@ def _lora_expand_fp8(
     return
 
 
-def _lora_expand_fp8_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
-    b_scale: list[torch.Tensor],
-    a_scale: torch.Tensor | None = None,
-    offset_start: int = 0,
-    add_inputs: bool = False,
-    group_k: int = 0,
-    group_n: int = 0,
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="lora_expand_fp8",
         op_func=_lora_expand_fp8,
         mutates_args=["output_tensor"],
-        fake_impl=_lora_expand_fp8_fake,
     )
     lora_expand_fp8 = torch.ops.vllm.lora_expand_fp8
 

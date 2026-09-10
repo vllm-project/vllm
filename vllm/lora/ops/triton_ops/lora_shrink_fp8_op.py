@@ -394,34 +394,11 @@ def _lora_shrink_fp8(
     return
 
 
-def _lora_shrink_fp8_fake(
-    inputs: torch.Tensor,
-    lora_a_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
-    scaling: float,
-    b_scale: list[torch.Tensor],  # LoRA weight scale per slice
-    a_scale: torch.Tensor | None = None,  # Activation scale - per-token or block-wise
-    group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
-    group_n: int = 0,  # Block size for N in block-wise quantization
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="lora_shrink_fp8",
         op_func=_lora_shrink_fp8,
         mutates_args=["output_tensor"],
-        fake_impl=_lora_shrink_fp8_fake,
     )
     lora_shrink_fp8 = torch.ops.vllm.lora_shrink_fp8
 

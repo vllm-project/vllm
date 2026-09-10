@@ -8,21 +8,8 @@ use bytes::Bytes;
 use itertools::Itertools as _;
 
 use crate::error::{Error, Result, ext_value_decode};
+use crate::protocol::dtype::{Endianness, TensorDtype};
 use crate::protocol::tensor::{ShapeExt as _, WireNdArray};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScalarType {
-    I32,
-    I64,
-    F32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Endianness {
-    Little,
-    Big,
-    Native,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct DecodedArray2<T> {
@@ -37,7 +24,7 @@ pub(super) fn decode_array2_u32(
     frames: &[Bytes],
 ) -> Result<DecodedArray2<u32>> {
     let (shape, bytes, scalar, endianness) =
-        decode_array_metadata(value, field, frames, &[ScalarType::I32, ScalarType::I64])?;
+        decode_array_metadata(value, field, frames, &[TensorDtype::I32, TensorDtype::I64])?;
     if shape.len() != 2 {
         return Err(decode_error(
             field,
@@ -46,15 +33,15 @@ pub(super) fn decode_array2_u32(
     }
 
     let data = match scalar {
-        ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
+        TensorDtype::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+        TensorDtype::I64 => decode_i64_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::F32 => unreachable!("scalar validation should reject f32"),
+        _ => unreachable!("scalar validation should accept only i32 and i64"),
     };
     Ok(DecodedArray2 {
         rows: shape[0],
@@ -69,7 +56,7 @@ pub(super) fn decode_array1_u32(
     frames: &[Bytes],
 ) -> Result<Vec<u32>> {
     let (shape, bytes, scalar, endianness) =
-        decode_array_metadata(value, field, frames, &[ScalarType::I32, ScalarType::I64])?;
+        decode_array_metadata(value, field, frames, &[TensorDtype::I32, TensorDtype::I64])?;
     if shape.len() != 1 {
         return Err(decode_error(
             field,
@@ -78,15 +65,15 @@ pub(super) fn decode_array1_u32(
     }
 
     let data = match scalar {
-        ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
+        TensorDtype::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+        TensorDtype::I64 => decode_i64_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::F32 => unreachable!("scalar validation should reject f32"),
+        _ => unreachable!("scalar validation should accept only i32 and i64"),
     };
     Ok(data)
 }
@@ -97,7 +84,7 @@ pub(super) fn decode_array2_f32(
     frames: &[Bytes],
 ) -> Result<DecodedArray2<f32>> {
     let (shape, bytes, _, endianness) =
-        decode_array_metadata(value, field, frames, &[ScalarType::F32])?;
+        decode_array_metadata(value, field, frames, &[TensorDtype::F32])?;
     if shape.len() != 2 {
         return Err(decode_error(
             field,
@@ -117,15 +104,16 @@ pub(super) fn decode_array_metadata(
     value: WireNdArray,
     field: &str,
     frames: &[Bytes],
-    expected_scalars: &[ScalarType],
-) -> Result<(Vec<usize>, Bytes, ScalarType, Endianness)> {
+    expected_scalars: &[TensorDtype],
+) -> Result<(Vec<usize>, Bytes, TensorDtype, Endianness)> {
     let mut value = value;
-    let (scalar, endianness) = parse_dtype(&value.dtype, field)?;
+    let scalar = value.dtype.scalar;
+    let endianness = value.dtype.endianness;
     if !expected_scalars.contains(&scalar) {
         return Err(decode_error(
             field,
             &format!(
-                "expected dtype in {:?}, got {}",
+                "expected dtype in {:?}, got {:?}",
                 expected_scalars, value.dtype
             ),
         ));
@@ -140,42 +128,16 @@ pub(super) fn decode_array_metadata(
     Ok((shape, bytes, scalar, endianness))
 }
 
-pub(super) fn parse_dtype(dtype: &str, field: &str) -> Result<(ScalarType, Endianness)> {
-    let (endianness, body) = match dtype.as_bytes().first().copied() {
-        Some(b'<') => (Endianness::Little, &dtype[1..]),
-        Some(b'>') => (Endianness::Big, &dtype[1..]),
-        Some(b'=') => (Endianness::Native, &dtype[1..]),
-        Some(b'|') => (Endianness::Native, &dtype[1..]),
-        _ => (Endianness::Native, dtype),
-    };
-
-    let scalar = match body {
-        "i4" | "int32" => ScalarType::I32,
-        "i8" | "int64" => ScalarType::I64,
-        "f4" | "float32" => ScalarType::F32,
-        _ => {
-            return Err(decode_error(
-                field,
-                &format!("unsupported dtype string {dtype:?}"),
-            ));
-        }
-    };
-    Ok((scalar, endianness))
-}
-
 pub(super) fn validate_byte_length(
     shape: &[usize],
     byte_len: usize,
     field: &str,
-    scalar: ScalarType,
+    scalar: TensorDtype,
 ) -> Result<()> {
     let element_count = shape
         .checked_numel()
         .ok_or_else(|| decode_error(field, "shape element count overflowed usize"))?;
-    let element_size = match scalar {
-        ScalarType::I32 | ScalarType::F32 => 4,
-        ScalarType::I64 => 8,
-    };
+    let element_size = scalar.element_size();
     let expected = element_count
         .checked_mul(element_size)
         .ok_or_else(|| decode_error(field, "byte length overflowed usize"))?;

@@ -426,6 +426,26 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
         return builder.build(0, common_metadata)
 
 
+def dense_kv_cache_tensor(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    layer_names: list[str] | None = None,
+) -> KVCacheTensor:
+    """The ``KVCacheTensor`` for a dense allocation of ``num_layers`` layers."""
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, num_blocks, num_layers, layout
+    )
+    return KVCacheTensor(
+        size=raw.numel(),
+        layers=layer_names or [str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+
+
 def dense_kv_cache_views(
     raw: torch.Tensor,
     spec: KVCacheSpec,
@@ -435,15 +455,7 @@ def dense_kv_cache_views(
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
-    layer_stride, block_stride, _, _, _ = compute_layout_strides(
-        spec, num_blocks, num_layers, layout
-    )
-    tensor = KVCacheTensor(
-        size=raw.numel(),
-        layers=[str(i) for i in range(num_layers)],
-        layer_stride=layer_stride,
-        block_stride=block_stride,
-    )
+    tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
     return create_kv_cache_views(
         raw,
         spec,

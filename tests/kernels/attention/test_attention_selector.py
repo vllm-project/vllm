@@ -10,6 +10,7 @@ import torch
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -29,7 +30,11 @@ else:
 
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
+from vllm.v1.attention.selector import (
+    AttentionSelectorConfig,
+    _cached_get_attn_backend,
+    get_attn_backend,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -77,33 +82,54 @@ def generate_params():
                 else DEVICE_REGULAR_ATTN_BACKENDS[device]
             )
             for name in backends:
-                block_sizes = DEVICE_MLA_BLOCK_SIZES[device] if use_mla else [16]
+                block_sizes = (
+                    [128]
+                    if name == "CUTLASS_MLA"
+                    else DEVICE_MLA_BLOCK_SIZES[device]
+                    if use_mla
+                    else [16]
+                )
                 for block_size in block_sizes:
-                    params.append(
-                        pytest.param(
-                            device,
-                            name,
-                            use_mla,
-                            block_size,
-                            id=f"{device}_{name}_mla_{str(use_mla)[0]}_blks{block_size}",
+                    for use_dcp in [False, True] if device != "cpu" else [False]:
+                        params.append(
+                            pytest.param(
+                                device,
+                                name,
+                                use_mla,
+                                block_size,
+                                use_dcp,
+                                id=(
+                                    f"{device}_{name}_mla_{str(use_mla)[0]}"
+                                    f"_blks{block_size}_dcp{use_dcp}"
+                                ),
+                            )
                         )
-                    )
     return params
 
 
-@pytest.mark.parametrize("device, name, use_mla, block_size", generate_params())
+@pytest.mark.parametrize(
+    "device, name, use_mla, block_size, use_dcp", generate_params()
+)
 def test_backend_selection(
     device: str,
     name: str,
     use_mla: bool,
     block_size: int,
+    use_dcp: bool,
 ):
-    """Test attention backend selection with valid device-backend pairs."""
+    """Supported GPU backends remain selectable when DCP is enabled."""
     # Create AttentionConfig with the specified backend
     attention_config = AttentionConfig(backend=AttentionBackendEnum[name])
     cache_config = CacheConfig(block_size=block_size)
     vllm_config = VllmConfig(
-        attention_config=attention_config, cache_config=cache_config
+        attention_config=attention_config,
+        cache_config=cache_config,
+        parallel_config=ParallelConfig(
+            # Skip GPU-count autodetection: selection does not launch workers.
+            distributed_executor_backend="mp" if use_dcp else None,
+            tensor_parallel_size=2 if use_dcp else 1,
+            decode_context_parallel_size=2 if use_dcp else 1,
+        ),
     )
 
     with set_current_vllm_config(vllm_config):
@@ -135,9 +161,15 @@ def test_backend_selection(
                         expected = name
                         assert backend.get_name() == expected
                 else:
-                    backend = get_attn_backend(32, torch.float16, None, use_mla=use_mla)
-                    expected = "ROCM_ATTN"
-                    assert backend.get_name() == expected
+                    if use_dcp:
+                        with pytest.raises(ValueError, match="DCP not supported"):
+                            get_attn_backend(32, torch.float16, None, use_mla=use_mla)
+                    else:
+                        backend = get_attn_backend(
+                            32, torch.float16, None, use_mla=use_mla
+                        )
+                        expected = "ROCM_ATTN"
+                        assert backend.get_name() == expected
 
         elif device == "cuda":
             if CudaPlatform is None:
@@ -228,6 +260,52 @@ def test_backend_selection(
                     backend = get_attn_backend(32, torch.float16, None, use_mla=use_mla)
                     expected = "FLASH_ATTN"
                     assert backend.get_name() == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="GPU attention backends"
+)
+@pytest.mark.parametrize(
+    "backend_name",
+    [
+        "FLASH_ATTN",
+        "FLASH_ATTN_DIFFKV",
+        "FLASHINFER",
+        "TRITON_MLA",
+        "ROCM_AITER_MLA",
+        "ROCM_AITER_TRITON_MLA",
+        "CUTLASS_MLA",
+        "FLASHMLA",
+        "FLASHINFER_MLA",
+        "TOKENSPEED_MLA",
+        "FLASH_ATTN_MLA",
+        "FLASHMLA_SPARSE",
+        "FLASHINFER_MLA_SPARSE",
+    ],
+)
+def test_supported_backend_preserves_dcp_eligibility(backend_name, default_vllm_config):
+    """DCP opt-ins preserve eligibility and unrelated configuration restrictions."""
+    if backend_name.startswith("ROCM_") and not current_platform.is_rocm():
+        pytest.skip("ROCm-specific backend")
+    try:
+        backend_cls = AttentionBackendEnum[backend_name].get_class()
+    except ImportError as error:
+        pytest.skip(f"Optional backend dependency unavailable: {error}")
+
+    config = AttentionSelectorConfig(
+        head_size=576 if backend_cls.is_mla() else 128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=backend_cls.get_preferred_block_size(64),
+        use_mla=backend_cls.is_mla(),
+        use_sparse=backend_cls.is_sparse(),
+    )
+    kwargs = dict(
+        device_capability=current_platform.get_device_capability(), **config._asdict()
+    )
+    invalid_without_dcp = backend_cls.validate_configuration(**kwargs)
+    kwargs["use_dcp"] = True
+    assert backend_cls.validate_configuration(**kwargs) == invalid_without_dcp
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda", "hip"])

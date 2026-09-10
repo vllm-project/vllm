@@ -84,7 +84,7 @@ def on_gfx950() -> bool:
     return False
 
 
-fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
+fp8_dtype = current_platform.fp8_dtype()
 
 SHAPE_COMBOS = [
     (1, 128, 256),
@@ -191,6 +191,9 @@ def mock_normalize_e4m3fn_to_e4m3fnuz(
 # NOTE: Not able to use monkeypatch because of the spawned parallel workers.
 def override_normalize_e4m3fn_to_e4m3fnuz():
     vllm.model_executor.layers.quantization.utils.w8a8_utils.normalize_e4m3fn_to_e4m3fnuz = mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    vllm.model_executor.layers.quantization.fp8.normalize_e4m3fn_to_e4m3fnuz = (
+        mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    )
 
 
 def sp_wrapper(

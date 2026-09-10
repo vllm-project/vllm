@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
+    EngramConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -105,6 +106,7 @@ from vllm.config.parallel import (
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
+from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -508,6 +510,7 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
+    dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
@@ -654,6 +657,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    watermark_config: dict[str, Any] | None = None
     diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -687,12 +691,12 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    engram_config: EngramConfig | None = VllmConfig.engram_config
     mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
-    enable_bf16x3_router_gemm: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -725,6 +729,9 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    enable_mamba_fine_grained_prefix_cache: bool = (
+        CacheConfig.enable_mamba_fine_grained_prefix_cache
+    )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -771,7 +778,10 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: (
+        Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
+    ) = None
+    kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -781,6 +791,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.engram_config, dict):
+            self.engram_config = EngramConfig(**self.engram_config)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -1191,6 +1203,10 @@ class EngineArgs:
             **parallel_kwargs["dbo_decode_token_threshold"],
         )
         parallel_group.add_argument(
+            "--dp-sync-interval",
+            **parallel_kwargs["dp_sync_interval"],
+        )
+        parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
@@ -1278,6 +1294,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
+            "--enable-mamba-fine-grained-prefix-cache",
+            **cache_kwargs["enable_mamba_fine_grained_prefix_cache"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -1636,10 +1656,6 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
-        kernel_group.add_argument(
-            "--enable-bf16x3-router-gemm",
-            **kernel_kwargs["enable_bf16x3_router_gemm"],
-        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -1666,6 +1682,8 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        vllm_kwargs["watermark_config"]["type"] = optional_type(json.loads)
+        vllm_group.add_argument("--watermark-config", **vllm_kwargs["watermark_config"])
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
@@ -1686,6 +1704,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--engram-config", **vllm_kwargs["engram_config"])
         vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
@@ -1742,9 +1761,17 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
-            help="Select KDA prefill backend.",
+            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
+            "'fused' is ROCm-only; 'auto' picks a supported backend.",
+        )
+        parser.add_argument(
+            "--kda-decode-backend",
+            dest="kda_decode_backend",
+            choices=["auto", "native", "flashinfer", "triton"],
+            default=None,
+            help="Select KDA decode backend.",
         )
         return parser
 
@@ -1964,6 +1991,14 @@ class EngineArgs:
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
 
+    def create_watermark_config(self) -> WatermarkConfig | None:
+        if self.watermark_config is None:
+            return None
+        cfg = self.watermark_config
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        return WatermarkConfig(**cfg)
+
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
@@ -2057,6 +2092,9 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            enable_mamba_fine_grained_prefix_cache=(
+                self.enable_mamba_fine_grained_prefix_cache
+            ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
@@ -2121,21 +2159,19 @@ class EngineArgs:
             )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
-            world_size = (
-                self.data_parallel_size
-                * self.pipeline_parallel_size
-                * self.tensor_parallel_size
-            )
             world_size_within_dp = (
-                self.pipeline_parallel_size * self.tensor_parallel_size
+                self.pipeline_parallel_size
+                * self.tensor_parallel_size
+                * self.prefill_context_parallel_size
             )
+            world_size = self.data_parallel_size * world_size_within_dp
             if world_size % self.nnodes != 0:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
                     f"`--nnodes {self.nnodes}` must evenly divide the total "
                     f"world size ({world_size}). Adjust `--nnodes`, "
-                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
-                    "`--tensor-parallel-size`."
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, "
+                    "`--tensor-parallel-size`, or `--prefill-context-parallel-size`."
                 )
             if not 0 <= self.node_rank < self.nnodes:
                 raise ValueError(
@@ -2309,6 +2345,7 @@ class EngineArgs:
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
+            dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
@@ -2342,6 +2379,7 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
         diffusion_config = self.create_diffusion_config()
+        watermark_config = self.create_watermark_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
@@ -2435,6 +2473,19 @@ class EngineArgs:
                 self.attention_backend
             )
 
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
+            )
+
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
         if resolved_cache_dtype.startswith("turboquant_") and (
@@ -2477,8 +2528,6 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
-        if self.enable_bf16x3_router_gemm is not None:
-            kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
@@ -2549,7 +2598,20 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
+            if (
+                self.kda_prefill_backend == "flashkda"
+                and not current_platform.is_cuda()
+            ):
+                raise ValueError(
+                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                )
+            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
+                raise ValueError(
+                    "--kda-prefill-backend=fused is only available on ROCm."
+                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
+        if self.kda_decode_backend is not None:
+            self.additional_config["kda_decode_backend"] = self.kda_decode_backend
 
         config = VllmConfig(
             model_config=model_config,
@@ -2560,10 +2622,12 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            engram_config=self.engram_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
+            watermark_config=watermark_config,
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,

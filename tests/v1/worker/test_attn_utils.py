@@ -143,15 +143,22 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
 
 
 @pytest.mark.parametrize(
-    ("kernel_block_sizes", "expected_num_blocks", "expected_num_states"),
+    (
+        "kernel_block_sizes",
+        "storage_block_size",
+        "expected_num_blocks",
+        "expected_num_states",
+    ),
     [
-        (None, 4, 64),
-        ([256], 4, 64),
-        ([64], 16, 16),
+        (None, None, 4, 64),
+        ([256], None, 4, 64),
+        ([64], None, 16, 16),
+        ([64], 256, 4, 64),
     ],
 )
 def test_allocate_compressed_mla_cache(
     kernel_block_sizes: list[int] | None,
+    storage_block_size: int | None,
     expected_num_blocks: int,
     expected_num_states: int,
 ):
@@ -161,6 +168,7 @@ def test_allocate_compressed_mla_cache(
         head_size=128,
         dtype=torch.bfloat16,
         tokens_per_state=4,
+        storage_block_size=storage_block_size,
     )
     num_pages = 4
     config = KVCacheConfig(

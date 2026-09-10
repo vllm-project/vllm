@@ -12,6 +12,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.worker.ec_connector_model_runner_mixin import (
+    ECConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR, ActiveECConnector
 
 pytestmark = pytest.mark.cpu_test
@@ -52,6 +55,9 @@ def test_saves_newly_added_caches_for_every_producer(is_producer, is_consumer):
 
     saved = [call.kwargs["mm_hash"] for call in fake.save_caches.call_args_list]
     assert saved == (["mm_new"] if is_producer else [])
+    assert fake.start_save_caches.called == is_producer
+    if is_producer:
+        assert fake.start_save_caches.call_args.kwargs["encoder_cache"] is encoder_cache
     assert fake.start_load_caches.called == is_consumer
 
 
@@ -64,6 +70,26 @@ def test_worker_meta_is_reported_on_context_exit():
 
     assert output.ec_connector_worker_meta is WORKER_META
     assert fake.clear_connector_metadata.called
+
+
+def test_v1_producer_receives_existing_encoder_cache():
+    encoder_cache = {"mm_cached": None}
+    fake = MagicMock(spec=ECConnectorBase)
+    fake.is_producer = True
+    fake.is_consumer = False
+    fake.get_finished.return_value = (None, None)
+
+    module = "vllm.v1.worker.ec_connector_model_runner_mixin"
+    with (
+        patch(f"{module}.has_ec_transfer", return_value=True),
+        patch(f"{module}.get_ec_transfer", return_value=fake),
+        ECConnectorModelRunnerMixin.maybe_get_ec_connector_output(
+            _scheduler_output(), encoder_cache
+        ),
+    ):
+        pass
+
+    assert fake.start_save_caches.call_args.kwargs["encoder_cache"] is encoder_cache
 
 
 def test_no_forward_reports_without_running_the_model():

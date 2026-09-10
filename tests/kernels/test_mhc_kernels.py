@@ -5,13 +5,23 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
+import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
 )
-from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
+from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC,
+    HAS_AITER_MHC_FUSED,
+    HAS_AITER_MHC_FUSED_NORM,
+    HAS_AITER_MHC_PRE_NORM,
+    HAS_TILELANG_MHC,
+    MHCFusedPostPreOp,
+    MHCPreOp,
+)
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
@@ -289,6 +299,220 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     torch.testing.assert_close(post_mix, post_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(res_mix, res_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
+
+
+def _rocm_mhc_inputs(num_tokens=2, hidden_size=256, hc_mult=4):
+    residual = torch.randn(
+        (num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16, device=DEVICE
+    )
+    hc_mult3 = 2 * hc_mult + hc_mult * hc_mult
+    fn = (
+        torch.randn(
+            (hc_mult3, hc_mult * hidden_size), dtype=torch.float32, device=DEVICE
+        )
+        * 1e-4
+    )
+    hc_scale = torch.randn((3,), dtype=torch.float32, device=DEVICE) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float32, device=DEVICE) * 0.1
+    norm_weight = torch.randn(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    return residual, fn, hc_scale, hc_base, norm_weight
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_mhc_pre_rocm_fallback_applies_norm(monkeypatch):
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+    ref = mhc_pre_ref(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    expected_layer_input = F.rms_norm(
+        ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
+    )
+    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC", True)
+    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_PRE_NORM", False)
+    monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+
+    out = object.__new__(MHCPreOp).forward_hip(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    torch.testing.assert_close(out[0], ref[0])
+    torch.testing.assert_close(out[1], ref[1])
+    torch.testing.assert_close(out[2], expected_layer_input)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs()
+    x = torch.randn((2, 256), dtype=torch.bfloat16, device=DEVICE)
+    post_layer_mix = torch.randn((2, 4, 1), dtype=torch.float32, device=DEVICE)
+    comb_res_mix = torch.randn((2, 4, 4), dtype=torch.float32, device=DEVICE)
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+    residual_ref = mhc_post_ref(x, residual, post_layer_mix, comb_res_mix)
+    pre_ref = mhc_pre_ref(
+        residual_ref,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    expected_layer_input = F.rms_norm(
+        pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
+    )
+    monkeypatch.setattr(mhc_layers, "HAS_AITER_MHC_FUSED", False)
+    monkeypatch.setattr(mhc_layers, "HAS_TILELANG_MHC", False)
+
+    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    torch.testing.assert_close(out[0], residual_ref)
+    torch.testing.assert_close(out[1], pre_ref[0])
+    torch.testing.assert_close(out[2], pre_ref[1])
+    torch.testing.assert_close(out[3], expected_layer_input)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC and HAS_AITER_MHC_PRE_NORM),
+    reason="AITER mHC with fused RMSNorm required",
+)
+def test_mhc_pre_rocm_aiter_fuses_norm():
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
+        num_tokens=2, hidden_size=7168
+    )
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+    ref = mhc_pre_ref(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    expected_layer_input = F.rms_norm(
+        ref[2], (ref[2].shape[-1],), norm_weight, norm_eps
+    )
+
+    out = object.__new__(MHCPreOp).forward_hip(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    torch.testing.assert_close(out[0], ref[0], atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(out[1], ref[1], atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(out[2], expected_layer_input, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_rocm() and HAS_AITER_MHC_FUSED and HAS_AITER_MHC_FUSED_NORM
+    ),
+    reason="AITER fused mHC with RMSNorm required",
+)
+def test_mhc_fused_rocm_aiter_fuses_norm():
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
+        num_tokens=2, hidden_size=7168
+    )
+    x = torch.randn((2, 7168), dtype=torch.bfloat16, device=DEVICE)
+    post_layer_mix = torch.randn((2, 4, 1), dtype=torch.float32, device=DEVICE)
+    comb_res_mix = torch.randn((2, 4, 4), dtype=torch.float32, device=DEVICE)
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+    residual_ref = mhc_post_ref(x, residual, post_layer_mix, comb_res_mix)
+    pre_ref = mhc_pre_ref(
+        residual_ref,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    expected_layer_input = F.rms_norm(
+        pre_ref[2], (pre_ref[2].shape[-1],), norm_weight, norm_eps
+    )
+
+    out = object.__new__(MHCFusedPostPreOp).forward_hip(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    torch.testing.assert_close(out[0], residual_ref, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(out[1], pre_ref[0], atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(out[2], pre_ref[1], atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(out[3], expected_layer_input, atol=5e-2, rtol=1e-2)
 
 
 @pytest.mark.skipif(

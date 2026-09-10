@@ -46,6 +46,20 @@ _T = TypeVar("_T")
 CACHE = None
 
 
+def strip_speculative_padding(token_ids: list[int]) -> list[int]:
+    """Drop speculative-decoding padding from a token block.
+
+    ngram and other speculative backends pad rejected draft positions with a
+    -1 sentinel. Structured-output grammars treat every entry as a real token
+    id, so the sentinels (and everything after the first one) are removed here,
+    before tokens reach any backend, rather than inside a single backend.
+    """
+    for i, token_id in enumerate(token_ids):
+        if token_id < 0:
+            return token_ids[:i]
+    return token_ids
+
+
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 

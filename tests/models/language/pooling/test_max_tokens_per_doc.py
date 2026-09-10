@@ -14,8 +14,6 @@ import requests
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse
 
-os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
-
 TEMPLATE_DIR = str(VLLM_PATH / "examples/pooling/score/template")
 ExpectedPromptTokens = int | tuple[int, ...]
 
@@ -128,7 +126,10 @@ def assert_prompt_tokens(actual: int, expected: ExpectedPromptTokens) -> None:
 @pytest.fixture(scope="module", params=RERANK_CONFIGS, ids=lambda c: c.model)
 def server(request):
     config: TestConfig = request.param
-    with RemoteOpenAIServer(config.model, config.args) as remote_server:
+    env_dict = {"VLLM_LOGGING_LEVEL": "WARNING"}
+    with RemoteOpenAIServer(
+        config.model, config.args, env_dict=env_dict
+    ) as remote_server:
         yield config, remote_server
 
 

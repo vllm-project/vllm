@@ -432,8 +432,9 @@ class AutoWeightsLoader:
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
         if quant_config := next(iterator, None):
-            # Get mappings and ignore prefixes for KV cache quantization scales
+            # Apply mappings for quantization-specific checkpoint tensors.
             mapper |= quant_config.get_cache_scale_mapper()
+            mapper |= quant_config.get_checkpoint_weight_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
@@ -556,7 +557,13 @@ def get_spec_layer_idx_from_weight_name(
         return None
     base = config.num_hidden_layers
     for i in range(n):
-        if weight_name.startswith((f"model.layers.{base + i}.", f"layers.{base + i}.")):
+        if weight_name.startswith(
+            (
+                f"model.layers.{base + i}.",
+                f"layers.{base + i}.",
+                f"model.language_model.layers.{base + i}.",
+            )
+        ):
             return base + i
     return None
 
@@ -827,6 +834,22 @@ class PPMissingLayer(torch.nn.Identity):
     def forward(self, *args, **kwargs):
         """Return the first arg from args or the first value from kwargs."""
         return args[0] if args else next(iter(kwargs.values()))
+
+
+def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether the last PP rank needs the target input embedding."""
+    from vllm.distributed.parallel_state import get_pp_group
+
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.method not in (
+        "eagle",
+        "eagle3",
+        "dflash",
+        "dspark",
+    ):
+        return False
+    pp = get_pp_group()
+    return pp.world_size > 1 and pp.is_last_rank
 
 
 def make_layers(

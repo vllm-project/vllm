@@ -8,7 +8,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::tool::{StructuralTagBuilder, Tool};
 
@@ -31,6 +31,8 @@ pub(crate) struct QwenCoderConfig {
     pub(crate) parser_name: &'static str,
     /// Marker that opens a tool-call block.
     pub(crate) tool_call_start: &'static str,
+    pub(crate) first_tool_call_start: &'static str,
+    pub(crate) next_tool_call_start: &'static str,
     /// Marker that closes a tool-call block.
     pub(crate) tool_call_end: &'static str,
 }
@@ -38,6 +40,8 @@ pub(crate) struct QwenCoderConfig {
 const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
     parser_name: "Qwen Coder",
     tool_call_start: TOOL_CALL_START,
+    first_tool_call_start: "\n\n<tool_call>",
+    next_tool_call_start: "\n<tool_call>",
     tool_call_end: TOOL_CALL_END,
 };
 
@@ -155,7 +159,7 @@ impl ToolParser for Qwen3CoderToolParser {
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, &mut self.mode, config)
+            parse_next_qwen_coder_event(input, &mut self.mode, config, self.emitted_tool_count > 0)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -191,9 +195,10 @@ fn parse_next_qwen_coder_event(
     input: &mut QwenCoderInput<'_>,
     mode: &mut QwenCoderMode,
     config: QwenCoderConfig,
+    after_tool_call: bool,
 ) -> ModalResult<QwenCoderEvent> {
     match mode {
-        QwenCoderMode::Text => parse_text_event(input, config),
+        QwenCoderMode::Text => parse_text_event(input, config, after_tool_call),
         QwenCoderMode::ToolCall { end_marker_scan } => {
             tool_call_event(input, end_marker_scan, config.tool_call_end)
         }
@@ -204,28 +209,22 @@ fn parse_next_qwen_coder_event(
 fn parse_text_event(
     input: &mut QwenCoderInput<'_>,
     config: QwenCoderConfig,
+    after_tool_call: bool,
 ) -> ModalResult<QwenCoderEvent> {
+    let framed_start = if after_tool_call {
+        config.next_tool_call_start
+    } else {
+        config.first_tool_call_start
+    };
     alt((
-        |input: &mut QwenCoderInput<'_>| tool_call_start_event(input, config.tool_call_start),
-        |input: &mut QwenCoderInput<'_>| safe_text_event(input, config.tool_call_start),
+        alt((literal(framed_start), literal(config.tool_call_start)))
+            .value(QwenCoderEvent::ToolCallStart),
+        |input: &mut QwenCoderInput<'_>| {
+            safe_text_len_mul(input, &[framed_start, config.tool_call_start])
+                .map(|len| QwenCoderEvent::Text { len })
+        },
     ))
     .parse_next(input)
-}
-
-/// Parse a Qwen Coder tool-call start marker.
-fn tool_call_start_event(
-    input: &mut QwenCoderInput<'_>,
-    tool_call_start: &'static str,
-) -> ModalResult<QwenCoderEvent> {
-    literal(tool_call_start).value(QwenCoderEvent::ToolCallStart).parse_next(input)
-}
-
-/// Parse a safe text run before the next Qwen Coder marker.
-fn safe_text_event(
-    input: &mut QwenCoderInput<'_>,
-    tool_call_start: &'static str,
-) -> ModalResult<QwenCoderEvent> {
-    safe_text_len(input, tool_call_start).map(|len| QwenCoderEvent::Text { len })
 }
 
 /// Parse a complete Qwen Coder tool call.
@@ -296,6 +295,7 @@ mod tests {
 
     use super::{Qwen3CoderToolParser, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -764,6 +764,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Hangzhou" })
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<Qwen3CoderToolParser>(
+            "\n\n",
+            "<tool_call>\n<function=get_weather>\n</function>\n</tool_call>",
         );
     }
 }

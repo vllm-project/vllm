@@ -7,6 +7,8 @@ use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
     parser_name: "Seed-OSS",
     tool_call_start: "<seed:tool_call>",
+    first_tool_call_start: "\n\n<seed:tool_call>",
+    next_tool_call_start: "\n<seed:tool_call>",
     tool_call_end: "</seed:tool_call>",
 };
 
@@ -79,6 +81,7 @@ mod tests {
 
     use super::SeedOssToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -248,6 +251,14 @@ mod tests {
         assert_eq!(
             error.to_report_string(),
             "tool parser parsing failed: incomplete Seed-OSS tool call"
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<SeedOssToolParser>(
+            "\n\n",
+            "<seed:tool_call>\n<function=get_weather>\n</function>\n</seed:tool_call>",
         );
     }
 }

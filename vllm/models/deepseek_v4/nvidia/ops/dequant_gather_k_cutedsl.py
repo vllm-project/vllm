@@ -73,7 +73,12 @@ class DequantGatherKCacheKernel:
             ),
         )
 
-        grid = (out.shape[0], 1024, 1)
+        num_reqs = out.shape[0]
+        max_rows = out.shape[1] - offset
+        num_workers = cutlass.max(
+            1, cutlass.min(cute.ceil_div(max_rows, 4), cute.ceil_div(8192, num_reqs))
+        )
+        grid = (num_reqs, num_workers, 1)
         self.kernel(
             out,
             k_data,

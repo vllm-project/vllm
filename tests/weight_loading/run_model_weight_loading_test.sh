@@ -28,12 +28,16 @@ do
 
     echo "=== RUNNING MODEL: $MODEL_CONFIG ==="
 
+    unset WEIGHT_LOADING_TEST_SAFETENSORS_LOAD_STRATEGY
     export QUANTIZATION=${array[0]}
     export MODEL_NAME=${array[1]}
     export REVISION=${array[2]}
     # If array length is larger than 3, then MIN_CAPABILITY is provided
     if [ ${#array[@]} -gt 3 ]; then
         export MIN_CAPABILITY=${array[3]}
+    fi
+    if [ ${#array[@]} -gt 4 ]; then
+        export WEIGHT_LOADING_TEST_SAFETENSORS_LOAD_STRATEGY=${array[4]}
     fi
     pytest -s weight_loading/test_weight_loading.py || LOCAL_SUCCESS=$?
 

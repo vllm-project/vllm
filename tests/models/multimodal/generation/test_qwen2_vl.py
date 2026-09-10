@@ -126,8 +126,10 @@ def batch_make_image_embeddings(
     # image to pixel values
     image_processor = processor.image_processor
 
+    mm_config = llm.get_llm().model_config.multimodal_config
+    mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = image_processor.preprocess(
-        images=images, return_tensors="pt"
+        images=images, return_tensors="pt", **mm_kwargs
     ).data
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
@@ -210,8 +212,10 @@ def batch_make_video_embeddings(
     # video to pixel values
     video_processor = processor.video_processor
 
+    mm_config = llm.get_llm().model_config.multimodal_config
+    mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = video_processor.preprocess(
-        videos=videos, return_tensors="pt"
+        videos=videos, return_tensors="pt", **mm_kwargs
     ).data
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]

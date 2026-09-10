@@ -445,10 +445,12 @@ async fn run_roundtrip_reasoning_and_content_inner(
     let result = run_roundtrip(case, backends, &request, assistant).await?;
 
     assert_eq!(
-        result.parsed_message.reasoning().as_deref().map(str::trim),
-        effective_thinking.then_some(expected_reasoning)
+        result.parsed_message.reasoning().as_deref(),
+        effective_thinking.then_some(expected_reasoning),
+        "parsed message: {:#?}",
+        result.parsed_message
     );
-    assert_eq!(result.parsed_message.text().trim(), expected_text);
+    assert_eq!(result.parsed_message.text(), expected_text);
     assert_eq!(result.parsed_message.tool_calls().count(), 0);
 
     assert_eq!(
@@ -508,10 +510,12 @@ async fn run_roundtrip_tool_call_mix(
     .await?;
 
     assert_eq!(
-        result.parsed_message.reasoning().as_deref().map(str::trim),
-        Some(expected_reasoning)
+        result.parsed_message.reasoning().as_deref(),
+        Some(expected_reasoning),
+        "parsed message: {:#?}",
+        result.parsed_message
     );
-    assert_eq!(result.parsed_message.text().trim(), expected_text);
+    assert_eq!(result.parsed_message.text(), expected_text);
 
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
     assert_eq!(
@@ -714,11 +718,7 @@ async fn parse_completion(
 
     while let Some(event) = events.next().await {
         if let ChatEvent::Done { message, .. } = event? {
-            // TODO: currently our parsers are not very strict about preserving or trimming
-            // whitespace, so we trim here to avoid roundtrip failures due to
-            // insignificant whitespace differences. However, this may hurt token-level
-            // fidelity so we should consider improving them.
-            return Ok(message.trim());
+            return Ok(message);
         }
     }
 
@@ -784,15 +784,14 @@ fn decoded_completion_stream(
     if chunks.is_empty() {
         events.push({
             DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: Vec::new(),
-                logprobs: None,
-                finished: Some(Finished {
+                decoded: vllm_text::DecodedText::default(),
+                sampled: vllm_text::SampledDelta::default(),
+                finished: Some(Box::new(Finished {
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                }),
+                })),
             }
         });
     } else {
@@ -805,10 +804,12 @@ fn decoded_completion_stream(
                 ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
-                delta: chunk.delta,
-                token_ids: chunk.token_ids,
-                logprobs: None,
-                finished,
+                decoded: vllm_text::DecodedText::unattributed(chunk.delta),
+                sampled: vllm_text::SampledDelta {
+                    token_ids: chunk.token_ids,
+                    logprobs: None,
+                },
+                finished: finished.map(Box::new),
             });
         }
     }
@@ -864,7 +865,7 @@ fn incremental_decode_chunks(
         for token_id in chunk_token_ids.iter().copied() {
             decoder.push_token(token_id)?;
             while let Some(chunk) = decoder.next_chunk() {
-                delta.push_str(&chunk);
+                delta.push_str(&chunk.text);
             }
         }
         chunks.push(DecodedCompletionChunk {
@@ -876,10 +877,10 @@ fn incremental_decode_chunks(
     let (last_chunk, _) = decoder.flush(None)?;
     if let Some(last_chunk) = last_chunk {
         if let Some(delta) = chunks.last_mut() {
-            delta.delta.push_str(&last_chunk);
+            delta.delta.push_str(&last_chunk.text);
         } else {
             chunks.push(DecodedCompletionChunk {
-                delta: last_chunk,
+                delta: last_chunk.text,
                 token_ids: Vec::new(),
             });
         }

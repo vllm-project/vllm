@@ -1,6 +1,7 @@
+# quantization, model, revision[, minimum capability[, safetensors load strategy]]
 fp8, amd/Meta-Llama-3.1-8B-Instruct-FP8-KV, main
 None, amd/Llama-3.2-1B-Instruct-FP8-KV, main
-fp8, amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV, main
+fp8, amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV, main, 80, prefetch
 gptq, robertgshaw2/zephyr-7b-beta-channelwise-gptq, main
 gptq, TheBloke/Llama-2-7B-GPTQ, main
 gptq, TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ, gptq-8bit--1g-actorder_True

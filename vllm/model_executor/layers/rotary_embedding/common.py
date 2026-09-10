@@ -100,23 +100,11 @@ def _flashinfer_rotary_embedding(
     )
 
 
-def _flashinfer_rotary_embedding_fake(
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    head_size: int,
-    cos_sin_cache: torch.Tensor,
-    is_neox: bool,
-) -> None:
-    return
-
-
 # Register flashinfer rotary embedding custom op
 direct_register_custom_op(
     op_name="flashinfer_rotary_embedding",
     op_func=_flashinfer_rotary_embedding,
     mutates_args=["query", "key"],  # These tensors are modified in-place
-    fake_impl=_flashinfer_rotary_embedding_fake,
 )
 
 

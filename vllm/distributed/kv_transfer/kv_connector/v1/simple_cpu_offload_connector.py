@@ -111,6 +111,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_path to be set.'
                 )
+            if disk_capacity_bytes <= 0:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
+                )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:
@@ -291,8 +295,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return False, None
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def has_pending_transfers(self) -> bool:
+    def has_pending_push_work(self) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_stores()
         return False

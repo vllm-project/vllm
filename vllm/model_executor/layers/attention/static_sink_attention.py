@@ -241,16 +241,8 @@ def maybe_populate_sink(
     self.populate_sink_kv(self_kv_cache)
 
 
-def maybe_populate_sink_fake(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="maybe_populate_sink",
     op_func=maybe_populate_sink,
     mutates_args=["self_kv_cache"],
-    fake_impl=maybe_populate_sink_fake,
 )

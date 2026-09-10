@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -9,6 +12,7 @@ from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 
 class CustomAttentionImpl(AttentionImpl):
@@ -65,6 +69,23 @@ class CustomMambaAttentionBackend(AttentionBackend):
     def get_builder_cls():
         """Mock builder class."""
         return None
+
+
+def test_custom_attention_backend_requires_dcp_opt_in():
+    """A new implementation remains usable without implicitly opting into DCP."""
+    config = AttentionSelectorConfig(
+        head_size=64,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+    )
+    kwargs = dict(device_capability=DeviceCapability(9, 0), **config._asdict())
+    assert CustomAttentionBackend.validate_configuration(**kwargs) == []
+
+    kwargs["use_dcp"] = True
+    assert CustomAttentionBackend.validate_configuration(**kwargs) == [
+        "DCP not supported"
+    ]
 
 
 def test_custom_is_not_alias_of_any_backend():

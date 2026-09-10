@@ -13,6 +13,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
+use crate::config::LoraModulePath;
 use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
 use crate::state::AppState;
 
@@ -147,7 +148,7 @@ fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
 fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
-        LoadLoraError::InvalidRequest(_) => Code::InvalidArgument,
+        LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
             Code::Internal
@@ -247,11 +248,13 @@ impl pb::control_server::Control for ControlServiceImpl {
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
         let request = request.into_inner();
-        let adapter = self
-            .state
-            .load_lora(request.lora_name, request.source_path, false, false)
-            .await
-            .map_err(load_lora_status)?;
+        let module = LoraModulePath {
+            name: request.lora_name,
+            path: request.source_path,
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let adapter = self.state.load_lora(module, false).await.map_err(load_lora_status)?;
         Ok(Response::new(pb::LoadLoraResponse {
             adapter: Some(lora_to_proto(&adapter)),
         }))

@@ -20,7 +20,9 @@ class _NonCausalMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
 
 def _metadata(
-    query_start_loc: list[int], num_tokens: int | None = None
+    query_start_loc: list[int],
+    num_tokens: int | None = None,
+    causal: bool = False,
 ) -> CommonAttentionMetadata:
     num_reqs = len(query_start_loc) - 1
     num_tokens = query_start_loc[-1] if num_tokens is None else num_tokens
@@ -38,7 +40,7 @@ def _metadata(
             num_reqs, 3
         ),
         slot_mapping=torch.arange(num_tokens),
-        causal=False,
+        causal=causal,
         seq_lens_cpu_upper_bound=None,
     )
 
@@ -50,6 +52,7 @@ def _builder(marked: bool = True) -> _NonCausalMLAMetadataBuilder:
     builder.query_len_support = QueryLenSupport.SINGLE_ONLY
     builder.non_causal_multi_token_decode = marked
     builder.dcp_world_size = 1
+    builder.use_pcp = False
     builder.metadata_cls = MLACommonMetadata
     builder.model_config = SimpleNamespace(
         dtype=torch.bfloat16, get_head_size=lambda: 576
@@ -57,9 +60,19 @@ def _builder(marked: bool = True) -> _NonCausalMLAMetadataBuilder:
     return builder
 
 
-def test_noncausal_block_uses_decode_without_cpu_lengths():
+def test_group_capability_keeps_runtime_causality_per_step():
+    builder = _builder()
+
+    target_metadata = builder.build(0, _metadata([0, 1, 2], causal=True))
+    assert (
+        target_metadata.num_decodes,
+        target_metadata.num_decode_tokens,
+        target_metadata.num_prefills,
+        target_metadata.causal,
+    ) == (2, 2, 0, True)
+
     common_metadata = _metadata([0, 8, 16])
-    metadata = _builder().build(0, common_metadata)
+    metadata = builder.build(0, common_metadata)
 
     assert metadata.num_decodes == 2
     assert metadata.num_decode_tokens == 16
@@ -109,7 +122,7 @@ def test_noncausal_decode_metadata_keeps_live_request_buffers():
     )
 
 
-def test_mla_cache_marker_is_a_group_property():
+def test_mla_cache_marker_is_promoted_to_group_capability():
     kwargs = {
         "block_size": 64,
         "num_kv_heads": 1,
@@ -123,5 +136,4 @@ def test_mla_cache_marker_is_a_group_property():
     assert not MLAAttentionSpec.merge(
         [unmarked, unmarked]
     ).non_causal_multi_token_decode
-    with pytest.raises(AssertionError, match="non_causal_multi_token_decode"):
-        MLAAttentionSpec.merge([marked, unmarked])
+    assert MLAAttentionSpec.merge([unmarked, marked]).non_causal_multi_token_decode

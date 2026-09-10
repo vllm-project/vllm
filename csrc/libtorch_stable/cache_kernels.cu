@@ -1268,6 +1268,9 @@ __global__ void gather_and_maybe_dequant_cache_page(
 #define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
 
+#define CALL_GATHER_CACHE_512(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 512)
+
 #define CALL_GATHER_CACHE_320(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 320)
 
@@ -1305,10 +1308,9 @@ void gather_and_maybe_dequant_cache(
         seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
         "seq_starts must be int32");
   }
-  STD_TORCH_CHECK(
-      head_dim == 320 || head_dim == 576,
-      "gather_and_maybe_dequant_cache only support the head_dim to 320 or 576 "
-      "for better performance")
+  STD_TORCH_CHECK(head_dim == 320 || head_dim == 512 || head_dim == 576,
+                  "gather_and_maybe_dequant_cache only support the head_dim to "
+                  "320 or 512 or 576 for better performance")
 
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
@@ -1344,6 +1346,9 @@ void gather_and_maybe_dequant_cache(
   if (head_dim == 576) {
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
                                CALL_GATHER_CACHE_576);
+  } else if (head_dim == 512) {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_512);
   } else {
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
                                CALL_GATHER_CACHE_320);

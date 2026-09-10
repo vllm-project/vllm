@@ -105,15 +105,15 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
         req_context=_CTX,
     )
@@ -382,11 +382,11 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
 
     keys = [key(i) for i in range(batch_size)]
-    store_block_ids = list(range(batch_size))
-    load_block_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
+    store_chunk_ids = list(range(batch_size))
+    load_chunk_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
     expected = tensor[:batch_size].clone()
 
-    tier.submit_store(make_job(1, keys, store_block_ids))
+    tier.submit_store(make_job(1, keys, store_chunk_ids))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert store_results[0].success
@@ -396,15 +396,15 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = 0.0
 
     # Load into a range disjoint by index from the store ids, to also
-    # exercise loading a block into a different id than it was stored from.
-    tier.submit_load(make_job(2, keys, load_block_ids, is_promotion=True))
+    # exercise loading a chunk into a different id than it was stored from.
+    tier.submit_load(make_job(2, keys, load_chunk_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
 
-    for i, bid in enumerate(load_block_ids):
-        assert torch.allclose(tensor[bid], expected[i]), (
-            f"Block {bid} data mismatch after store+load"
+    for i, cid in enumerate(load_chunk_ids):
+        assert torch.allclose(tensor[cid], expected[i]), (
+            f"Chunk {cid} data mismatch after store+load"
         )
 
 
@@ -895,7 +895,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),

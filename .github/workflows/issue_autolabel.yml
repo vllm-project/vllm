@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   add-labels:
+    if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
       - name: Label issues based on keywords

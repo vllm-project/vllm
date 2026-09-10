@@ -60,7 +60,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import StopParam
+from vllm.entrypoints.generate.base.protocol import StopParam, validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -213,6 +213,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
+    watermarking: bool = True
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -436,6 +437,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
@@ -465,6 +467,14 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod

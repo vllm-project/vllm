@@ -29,7 +29,12 @@ from .processing import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
+    from vllm.config import (
+        ModelConfig,
+        ObservabilityConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -243,6 +248,7 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
+        scheduler_config: "SchedulerConfig | None" = None,
     ) -> MultiModalInput:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -250,6 +256,8 @@ class MultiModalRegistry:
         The model is identified by `model_config`.
         """
         seq_len = model_config.max_model_len
+        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
+            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)

@@ -445,9 +445,15 @@ class TokenizeParams:
             return tokens
 
         if tokenizer is None:
-            raise ValueError("Cannot pad tokens when `skip_tokenizer_init=True`")
+            raise VLLMValidationError(
+                "Cannot pad tokens when `skip_tokenizer_init=True`",
+                parameter="pad_prompt_tokens",
+            )
         if not isinstance(tokens, list):
-            raise ValueError("Cannot pad tokens for embedding inputs")
+            raise VLLMValidationError(
+                "Cannot pad tokens for embedding inputs",
+                parameter="pad_prompt_tokens",
+            )
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
