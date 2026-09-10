@@ -20,6 +20,8 @@ from .primitives import (
     bf16x4_to_packed_u32x2,
     bf16x8_to_packed_u32x4,
     fma_f32_bf16,
+    load_global_u32x4,
+    packed_u32x4_to_bf16x8,
     sanitize_negative_zero,
     sanitize_negative_zero_u32,
     sanitize_negative_zero_u32x2,
@@ -79,12 +81,19 @@ class FusedAddMulticastSkinnyGemm:
         *,
         num_rows: int,
         hidden_dim: int,
+        tp_size: int,
+        max_m: int,
+        published_shared: bool,
         config: SkinnyConfig,
     ) -> None:
         if config.block_size % 32:
             raise ValueError("skinny block_size must be a multiple of 32")
         self.num_rows = num_rows
         self.hidden_dim = hidden_dim
+        self.tp_size = tp_size
+        self.shard_dim = hidden_dim // tp_size
+        self.max_m = max_m
+        self.published_shared = published_shared
         self.block_size = config.block_size
         self.outputs_per_block = config.outputs_per_block
         self.k_unroll = config.k_unroll
@@ -98,6 +107,7 @@ class FusedAddMulticastSkinnyGemm:
         gA: cute.Tensor,
         gB: cute.Tensor,
         gShared: cute.Tensor,
+        shared_flags: cute.Tensor,
         output_multicast_ptr: Int64,
         stream: cuda.CUstream,
     ) -> None:
@@ -119,6 +129,7 @@ class FusedAddMulticastSkinnyGemm:
             gA,
             gB,
             gShared,
+            shared_flags,
             output_multicast_ptr,
             k,
             copy_a,
@@ -138,6 +149,7 @@ class FusedAddMulticastSkinnyGemm:
         gA: cute.Tensor,
         gB: cute.Tensor,
         gShared: cute.Tensor,
+        shared_flags: cute.Tensor,
         output_multicast_ptr: Int64,
         k_extent: cutlass.Int32,
         copy_a: cute.CopyAtom,
@@ -152,6 +164,20 @@ class FusedAddMulticastSkinnyGemm:
         block_size: cutlass.Constexpr = self.block_size
         num_warps: cutlass.Constexpr = self.num_warps
         num_rows: cutlass.Constexpr = self.num_rows
+
+        current_elements = Int64(0)
+        if const_expr(self.published_shared):
+            current_index = cute.arch.load(
+                (shared_flags.iterator + 0).llvm_ptr,
+                cutlass.Uint32,
+            )
+            bytes_per_buffer = cute.arch.load(
+                (shared_flags.iterator + 2).llvm_ptr,
+                cutlass.Uint32,
+            )
+            current_elements = Int64(current_index) * (
+                Int64(bytes_per_buffer) // Int64(2)
+            )
 
         acc = cute.make_rmem_tensor(
             cute.make_layout(
@@ -253,6 +279,35 @@ class FusedAddMulticastSkinnyGemm:
                 BFloat16,
             )
             for mi in cutlass.range_constexpr(num_rows):
+                shared_values = cute.make_rmem_tensor(
+                    cute.make_layout((outputs_per_block,)),
+                    Float32,
+                )
+                shared_values.fill(0.0)
+                if const_expr(self.published_shared):
+                    shared_vector_base = (n_base // 8) * 8
+                    for source_rank in cutlass.range_constexpr(self.tp_size):
+                        shared_element = current_elements + (
+                            (Int64(mi) * self.tp_size + source_rank) * self.shard_dim
+                            + shared_vector_base
+                        )
+                        shared_ptr = cute.make_ptr(
+                            BFloat16,
+                            (gShared.iterator + shared_element).llvm_ptr,
+                            cute.AddressSpace.gmem,
+                            assumed_align=16,
+                        )
+                        shared_vector = packed_u32x4_to_bf16x8(
+                            load_global_u32x4(shared_ptr, volatile=False)
+                        ).to(Float32)
+                        for ni in cutlass.range_constexpr(outputs_per_block):
+                            shared_values[ni] = (
+                                shared_values[ni]
+                                + shared_vector[n_base + ni - shared_vector_base]
+                            )
+                else:
+                    for ni in cutlass.range_constexpr(outputs_per_block):
+                        shared_values[ni] = gShared[mi, n_base + ni].to(Float32)
                 for ni in cutlass.range_constexpr(outputs_per_block):
                     total = (
                         partials[mi, ni, None]
@@ -264,9 +319,9 @@ class FusedAddMulticastSkinnyGemm:
                         )
                     )
                     gemm_value = Float32(total).to(BFloat16)
-                    fused[ni] = (
-                        gemm_value.to(Float32) + gShared[mi, n_base + ni].to(Float32)
-                    ).to(BFloat16)
+                    fused[ni] = (gemm_value.to(Float32) + shared_values[ni]).to(
+                        BFloat16
+                    )
                 output_offset = Int64((mi * self.hidden_dim + n_base) * 2)
                 if const_expr(outputs_per_block == 2):
                     packed = sanitize_negative_zero_u32(bf16x2_to_u32(fused.load()))
@@ -303,6 +358,9 @@ def compile_kernel(
     latent_dim: int,
     hidden_dim: int,
     shard_dim: int,
+    tp_size: int,
+    max_m: int,
+    published_shared: bool,
     config: SkinnyConfig,
 ):
     key = (
@@ -311,6 +369,9 @@ def compile_kernel(
         latent_dim,
         hidden_dim,
         shard_dim,
+        tp_size,
+        max_m,
+        published_shared,
         config,
     )
     if key in _COMPILED:
@@ -335,21 +396,39 @@ def compile_kernel(
         stride=(latent_dim, 1),
         assumed_align=32,
     )
-    shared = make_fake_tensor(
-        BFloat16,
-        (num_rows, shard_dim),
-        stride=(hidden_dim, 1),
+    if published_shared:
+        shared = make_fake_tensor(
+            BFloat16,
+            (3, max_m, tp_size, shard_dim),
+            stride=(max_m * tp_size * shard_dim, tp_size * shard_dim, shard_dim, 1),
+            assumed_align=32,
+        )
+    else:
+        shared = make_fake_tensor(
+            BFloat16,
+            (num_rows, shard_dim),
+            stride=(hidden_dim, 1),
+            assumed_align=32,
+        )
+    shared_flags = make_fake_tensor(
+        cutlass.Int32,
+        (12,),
+        stride=(1,),
         assumed_align=32,
     )
     compiled = cute.compile(
         FusedAddMulticastSkinnyGemm(
             num_rows=num_rows,
             hidden_dim=hidden_dim,
+            tp_size=tp_size,
+            max_m=max_m,
+            published_shared=published_shared,
             config=config,
         ),
         a,
         b,
         shared,
+        shared_flags,
         Int64(0),
         make_fake_stream(),
         options="--ptxas-options -maxrregcount=128",
@@ -369,6 +448,8 @@ class FusedAddMulticastSkinnyGemmKernel:
         latent_dim: int,
         hidden_dim: int,
         num_rows: int,
+        max_m: int,
+        published_shared: bool,
     ) -> None:
         if not 1 <= num_rows <= 8:
             raise ValueError("skinny backend requires static M in [1, 8]")
@@ -379,11 +460,16 @@ class FusedAddMulticastSkinnyGemmKernel:
         self.hidden_dim = hidden_dim
         self.shard_dim = hidden_dim // tp_size
         self.num_rows = num_rows
+        self.max_m = max_m
+        self.published_shared = published_shared
         self._skinny = compile_kernel(
             num_rows=num_rows,
             latent_dim=latent_dim,
             hidden_dim=hidden_dim,
             shard_dim=self.shard_dim,
+            tp_size=tp_size,
+            max_m=max_m,
+            published_shared=published_shared,
             config=config_for_m(num_rows, self.shard_dim),
         )
 
@@ -391,7 +477,8 @@ class FusedAddMulticastSkinnyGemmKernel:
         self,
         latent: torch.Tensor,
         weight: torch.Tensor,
-        shared_shard: torch.Tensor,
+        shared_source: torch.Tensor,
+        shared_flags: torch.Tensor,
         mailbox: torch.Tensor,
         mailbox_multicast_ptr: int,
     ) -> torch.Tensor:
@@ -410,12 +497,6 @@ class FusedAddMulticastSkinnyGemmKernel:
                 "weight",
             ),
             (
-                shared_shard,
-                (mailbox.shape[1], self.shard_dim),
-                torch.bfloat16,
-                "shared_shard",
-            ),
-            (
                 mailbox,
                 (1, mailbox.shape[1], self.hidden_dim),
                 torch.bfloat16,
@@ -429,14 +510,36 @@ class FusedAddMulticastSkinnyGemmKernel:
                 or tensor.device != device
             ):
                 raise ValueError(f"{name} must be CUDA {dtype} {list(shape)}")
+        expected_shared_shape = (
+            (3, self.max_m, self.hidden_dim // self.shard_dim, self.shard_dim)
+            if self.published_shared
+            else (mailbox.shape[1], self.shard_dim)
+        )
+        if (
+            shared_source.shape != expected_shared_shape
+            or shared_source.dtype != torch.bfloat16
+            or shared_source.device != device
+            or shared_flags.shape != (12,)
+            or shared_flags.dtype != torch.int32
+            or shared_flags.device != device
+            or not shared_flags.is_contiguous()
+        ):
+            raise ValueError("skinny shared inputs have unsupported shape or dtype")
         if (
             not latent.is_contiguous()
             or not weight.is_contiguous()
-            or shared_shard.stride() != (self.hidden_dim, 1)
+            or (
+                not self.published_shared
+                and shared_source.stride() != (self.hidden_dim, 1)
+            )
+            or (self.published_shared and not shared_source.is_contiguous())
             or not mailbox.is_contiguous()
         ):
             raise ValueError("skinny up-projection inputs have unsupported strides")
-        if any(tensor.data_ptr() % 32 for tensor in (latent, weight, shared_shard)):
+        if any(
+            tensor.data_ptr() % 32
+            for tensor in (latent, weight, shared_source, shared_flags)
+        ):
             raise ValueError("skinny up-projection inputs must be 32-byte aligned")
         if mailbox.shape[1] < self.num_rows:
             raise ValueError("mailbox capacity is smaller than runtime M")
@@ -445,7 +548,12 @@ class FusedAddMulticastSkinnyGemmKernel:
             self._skinny(
                 _as_cute(latent),
                 _as_cute(weight),
-                _as_cute(shared_shard[: self.num_rows]),
+                _as_cute(
+                    shared_source
+                    if self.published_shared
+                    else shared_source[: self.num_rows]
+                ),
+                _as_cute(shared_flags),
                 Int64(mailbox_multicast_ptr + self.rank * self.shard_dim * 2),
                 cuda.CUstream(torch.cuda.current_stream(device).cuda_stream),
             )

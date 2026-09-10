@@ -135,10 +135,13 @@ class nccl_symm_mem_context:
         self,
         pynccl_comm: PyNcclCommunicator,
         disabled: bool = False,
+        force: bool = False,
     ):
+        # ``force`` bypasses only the process-wide opt-in. Hardware, allocator,
+        # world-size, and PyTorch-version guards still apply.
         self.disabled = (
             disabled
-            or not is_symmetric_memory_enabled()
+            or (not force and not is_symmetric_memory_enabled())
             or pynccl_comm.world_size == 1
             or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None

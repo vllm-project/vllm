@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
+from vllm.models.kimi_k3.nvidia.ops.sp_shared_reduce import (
+    KimiK3SPPublishedTailOp,
+)
 from vllm.platforms import current_platform
 
 HIDDEN_SIZE = 7168
@@ -298,6 +301,156 @@ def _test_latent_moe_tail_worker(
         )
     graph.replay()
     torch.testing.assert_close(graph_output, expected, atol=8e-2, rtol=3e-2)
+
+    # DeepGEMM MegaMoE has already combined and normalized the routed latent,
+    # so every TP rank owns the same routed tensor while the shared tensor is a
+    # rank-local partial.
+    torch.manual_seed(3000)
+    routed_normalized = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3100 + rank)
+    shared_partial = torch.randn(
+        16,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    shared_reference = shared_partial.clone()
+    dist.all_reduce(shared_reference, group=group)
+    expected_normalized = F.linear(routed_normalized, up_weight)
+    expected_normalized.add_(shared_reference)
+
+    actual_normalized = op.from_normalized_replicated_routed(
+        routed_normalized,
+        shared_partial,
+        up_weight,
+    )
+    torch.testing.assert_close(
+        actual_normalized,
+        expected_normalized,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    normalized_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(normalized_graph):
+        normalized_graph_output = op.from_normalized_replicated_routed(
+            routed_normalized,
+            shared_partial,
+            up_weight,
+        )
+    normalized_graph.replay()
+    torch.testing.assert_close(
+        normalized_graph_output,
+        expected_normalized,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    # DeepGEMM can scatter every rank's shared partial directly into the
+    # destination rank's symmetric Lamport workspace. The up-projection
+    # epilogue reduces the already-local fragments without an intermediate
+    # full shared output or standalone consumer kernel.
+    published_workspace, published_flags, _ = op.published_shared_workspace()
+    torch.manual_seed(3200)
+    routed_published = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3300 + rank)
+    shared_published = torch.randn(
+        16,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    published_sources = [torch.empty_like(shared_published) for _ in range(tp_size)]
+    dist.all_gather(published_sources, shared_published, group=group)
+    local_hidden_size = HIDDEN_SIZE // tp_size
+
+    def populate_published_generation(generation: int) -> None:
+        local_workspace = published_workspace[generation, :16]
+        for source_rank, source in enumerate(published_sources):
+            local_workspace[:, source_rank].copy_(
+                source[:, rank * local_hidden_size : (rank + 1) * local_hidden_size]
+            )
+
+    published_generation = int(published_flags[0].item())
+    populate_published_generation(published_generation)
+    shared_published_reference = shared_published.clone()
+    dist.all_reduce(shared_published_reference, group=group)
+    expected_published = F.linear(routed_published, up_weight)
+    expected_published.add_(shared_published_reference)
+
+    actual_published = op.from_normalized_replicated_routed_published(
+        routed_published,
+        up_weight,
+    )
+    torch.testing.assert_close(
+        actual_published,
+        expected_published,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    # Populate all generations with the same source so capture and replay can
+    # exercise device-side generation rotation without a host synchronization.
+    for generation in range(published_workspace.shape[0]):
+        populate_published_generation(generation)
+    published_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(published_graph):
+        published_graph_output = op.from_normalized_replicated_routed_published(
+            routed_published,
+            up_weight,
+        )
+    published_graph.replay()
+    torch.testing.assert_close(
+        published_graph_output,
+        expected_published,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    # Sequence-parallel ranks own different routed tokens. DeepGEMM publishes
+    # full-hidden shared partials by destination token, so the local tail must
+    # sum the source-rank dimension while running the replicated up-projection
+    # and must not multicast columns from unrelated tokens.
+    sp_op = KimiK3SPPublishedTailOp.initialize(
+        hidden_size=HIDDEN_SIZE,
+        latent_size=LATENT_SIZE,
+        max_num_tokens=128,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    sp_workspace, sp_flags, _ = sp_op.published_workspace()
+    torch.manual_seed(3400 + rank)
+    routed_sp = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3500 + rank)
+    shared_sp_partials = torch.randn(
+        16,
+        tp_size,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    sp_generation = int(sp_flags[0].item())
+    sp_workspace[sp_generation, :16].copy_(shared_sp_partials)
+    expected_sp = F.linear(routed_sp, up_weight)
+    expected_sp.add_(shared_sp_partials.float().sum(dim=1).to(torch.bfloat16))
+    actual_sp = sp_op(routed_sp, up_weight)
+    torch.testing.assert_close(actual_sp, expected_sp, atol=8e-2, rtol=3e-2)
+    assert actual_sp.is_contiguous()
 
 
 def _run_latent_moe_tail_test(

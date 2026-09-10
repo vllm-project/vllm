@@ -14,6 +14,7 @@ import torch
 from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
 
 from .primitives import (
+    NUM_LAMPORT_BUFFERS,
     VEC_BF16,
     fragment_is_dirty,
     load_global_u32x4,
@@ -27,16 +28,24 @@ from .primitives import (
 class LamportCopy:
     """Consume the local physical copy of an NVLS-multicast mailbox."""
 
-    def __init__(self, hidden_dim: int, ctas: int, threads: int):
+    def __init__(
+        self,
+        hidden_dim: int,
+        ctas: int,
+        threads: int,
+        rotate_shared_generation: bool,
+    ):
         self.hidden_dim = hidden_dim
         self.ctas = ctas
         self.threads = threads
+        self.rotate_shared_generation = rotate_shared_generation
 
     @cute.jit
     def __call__(
         self,
         symmetric_mailbox: cute.Tensor,
         local_output: cute.Tensor,
+        shared_flags: cute.Tensor,
         m: cutlass.Int32,
         stream: cuda.CUstream,
     ):
@@ -45,7 +54,7 @@ class LamportCopy:
             cutlass.Int32(self.ctas),
             cute.ceil_div(fragments, self.threads),
         )
-        self.kernel(symmetric_mailbox, local_output, m).launch(
+        self.kernel(symmetric_mailbox, local_output, shared_flags, m).launch(
             grid=(grid_ctas, 1, 1),
             block=(self.threads, 1, 1),
             stream=stream,
@@ -57,6 +66,7 @@ class LamportCopy:
         self,
         symmetric_mailbox: cute.Tensor,
         local_output: cute.Tensor,
+        shared_flags: cute.Tensor,
         m: cutlass.Int32,
     ):
         # The Lamport marker carries producer readiness, so polling can begin
@@ -65,6 +75,19 @@ class LamportCopy:
 
         tidx, _, _ = cute.arch.thread_idx()
         block, _, _ = cute.arch.block_idx()
+        if cutlass.const_expr(self.rotate_shared_generation):  # noqa: SIM102
+            if block == 0 and tidx == 0:
+                current_index = cute.arch.load(
+                    (shared_flags.iterator + 0).llvm_ptr,
+                    cutlass.Uint32,
+                )
+                next_index = (current_index + cutlass.Uint32(1)) % cutlass.Uint32(
+                    NUM_LAMPORT_BUFFERS
+                )
+                cute.arch.store(
+                    (shared_flags.iterator + 0).llvm_ptr,
+                    next_index,
+                )
         grid_x, _, _ = cute.arch.grid_dim()
         thread = cutlass.Int64(block * self.threads + tidx)
         stride = cutlass.Int64(grid_x * self.threads)
@@ -96,6 +119,7 @@ def compile_kernel(
     ctas: int,
     threads: int,
     device_index: int,
+    rotate_shared_generation: bool,
 ):
     if hidden_dim <= 0 or hidden_dim % VEC_BF16:
         raise ValueError("hidden_dim must be a positive multiple of 8")
@@ -114,10 +138,17 @@ def compile_kernel(
             (cute.sym_int32(divisibility=VEC_BF16),),
             assumed_align=16,
         )
+        shared_flags = make_fake_compact_tensor(cutlass.Int32, (12,), assumed_align=16)
         return cute.compile(
-            LamportCopy(hidden_dim, ctas, threads),
+            LamportCopy(
+                hidden_dim,
+                ctas,
+                threads,
+                rotate_shared_generation,
+            ),
             mailbox,
             output,
+            shared_flags,
             cutlass.Int32(max_m),
             make_fake_stream(),
         )
@@ -132,6 +163,8 @@ def launch(
     max_m: int,
     ctas: int,
     threads: int,
+    shared_flags: torch.Tensor,
+    rotate_shared_generation: bool,
 ) -> None:
     if not 1 <= m <= max_m:
         raise ValueError(f"runtime M={m} must be in [1, {max_m}]")
@@ -160,13 +193,21 @@ def launch(
     stream = cuda.CUstream(
         torch.cuda.current_stream(symmetric_mailbox.device).cuda_stream
     )
-    compile_kernel(hidden_dim, max_m, ctas, threads, device_index)(
+    compile_kernel(
+        hidden_dim,
+        max_m,
+        ctas,
+        threads,
+        device_index,
+        rotate_shared_generation,
+    )(
         to_cute(symmetric_mailbox.flatten(), 16),
         to_cute_dynamic_m(
             local_output.flatten(),
             mode=0,
             assumed_align=16,
         ),
+        to_cute(shared_flags, 16),
         cutlass.Int32(m),
         stream,
     )
@@ -187,15 +228,29 @@ class LamportCopyKernel:
         self.max_m = max_m
         self.ctas = ctas
         self.threads = threads
-        compile_kernel(
-            hidden_dim,
-            max_m,
-            ctas,
-            threads,
-            torch.accelerator.current_device_index(),
+        device_index = torch.accelerator.current_device_index()
+        self._dummy_shared_flags = torch.zeros(
+            12,
+            dtype=torch.int32,
+            device=torch.device("cuda", device_index),
         )
+        for rotate_shared_generation in (False, True):
+            compile_kernel(
+                hidden_dim,
+                max_m,
+                ctas,
+                threads,
+                device_index,
+                rotate_shared_generation,
+            )
 
-    def __call__(self, symmetric_mailbox: torch.Tensor, *, m: int) -> torch.Tensor:
+    def __call__(
+        self,
+        symmetric_mailbox: torch.Tensor,
+        *,
+        m: int,
+        shared_flags: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if not symmetric_mailbox.is_cuda:
             raise ValueError("symmetric_mailbox must be a CUDA tensor")
         device = symmetric_mailbox.device
@@ -205,6 +260,16 @@ class LamportCopyKernel:
                 dtype=torch.bfloat16,
                 device=device,
             )
+            rotate_shared_generation = shared_flags is not None
+            if shared_flags is None:
+                shared_flags = self._dummy_shared_flags
+            elif (
+                shared_flags.shape != (12,)
+                or shared_flags.dtype != torch.int32
+                or shared_flags.device != device
+                or not shared_flags.is_contiguous()
+            ):
+                raise ValueError("shared_flags must be contiguous CUDA int32 [12]")
             launch(
                 symmetric_mailbox,
                 output,
@@ -213,5 +278,7 @@ class LamportCopyKernel:
                 max_m=self.max_m,
                 ctas=self.ctas,
                 threads=self.threads,
+                shared_flags=shared_flags,
+                rotate_shared_generation=rotate_shared_generation,
             )
         return output

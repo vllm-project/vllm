@@ -85,6 +85,65 @@ def _mock_sequence_parallel_collectives(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("tp_size", "num_tokens", "batch_invariant", "expect_symm"),
+    [
+        (8, 256, False, True),
+        (8, 255, False, False),
+        (16, 256, False, False),
+        (8, 256, True, False),
+    ],
+)
+def test_sharded_shared_gather_backend_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    num_tokens: int,
+    batch_invariant: bool,
+    expect_symm: bool,
+) -> None:
+    hidden_states = torch.empty(num_tokens, 4)
+    symm_output = torch.empty(1)
+    fallback_output = torch.empty(2)
+    calls: list[tuple[torch.Tensor, int]] = []
+
+    class FakeCommunicator:
+        def all_gather_symm_mem(
+            self,
+            tensor: torch.Tensor,
+            *,
+            max_input_size_0: int,
+        ) -> torch.Tensor:
+            calls.append((tensor, max_input_size_0))
+            return symm_output
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_tp_group",
+        lambda: SimpleNamespace(device_communicator=FakeCommunicator()),
+    )
+    monkeypatch.setattr(
+        kimi_model,
+        "sp_all_gather",
+        lambda tensor: fallback_output,
+    )
+    monkeypatch.setattr(
+        kimi_model.envs,
+        "VLLM_BATCH_INVARIANT",
+        batch_invariant,
+    )
+    moe = SimpleNamespace(
+        tp_size=tp_size,
+        _mega_sp_published_tail=SimpleNamespace(
+            contract=SimpleNamespace(max_num_tokens=4096)
+        ),
+    )
+
+    output = kimi_model.KimiMoE._gather_fused_sharded_shared_states(moe, hidden_states)
+
+    assert output is (symm_output if expect_symm else fallback_output)
+    assert calls == ([(hidden_states, 4096)] if expect_symm else [])
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "is_padding", "tp_rank", "expected"),
     [
         (1, None, 0, [False]),
