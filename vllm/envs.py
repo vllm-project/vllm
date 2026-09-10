@@ -138,7 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1282,12 +1282,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Route K3 SiTU MXFP4 MoE through the FlyDSL SiTUv2 path (a4w4 fp4
     # activations, separated gate/up layout) instead of default a16w4. vLLM
-    # sets AITER_SITUV2_A4W4 at init when this flag is on. The env name
-    # retains the historical A8W4 suffix for recipe compatibility.
+    # sets AITER_SITUV2_A4W4 at init when this flag is on and clears any
+    # legacy AITER_SITUV2_A8W4 override (AITER checks A8W4 first).
+    # VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 is a deprecated alias for existing
+    # recipes; it does not select a8w4 kernels.
     # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
     # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
-    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0").lower() in ("true", "1")
+        or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
+        in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
