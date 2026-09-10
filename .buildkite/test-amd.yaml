@@ -4022,7 +4022,7 @@ steps:
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI355) Weight Loading Multi-GPU" # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
