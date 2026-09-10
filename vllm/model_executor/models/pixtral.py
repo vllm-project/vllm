@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -12,15 +13,12 @@ import torch.nn as nn
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from packaging.version import Version
 from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
-from transformers.models.pixtral.modeling_pixtral import (
-    PixtralRotaryEmbedding,
-    apply_rotary_pos_emb,
-    position_ids_in_meshgrid,
-)
+from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -90,6 +88,39 @@ from .vision import (
 )
 
 PATCH_MERGE = "patch_merge"
+
+# Transformers 5.17 renamed Pixtral's rotary embedding and switched it to axial
+# RoPE, which takes 2D (height, width) positions instead of flattened grid ids.
+TRANSFORMERS_VERSION = importlib.metadata.version("transformers")
+TRANSFORMERS_WITH_AXIAL_ROPE = Version(TRANSFORMERS_VERSION) >= Version("5.17.0.dev0")
+
+if TRANSFORMERS_WITH_AXIAL_ROPE:
+    from transformers.models.pixtral.modeling_pixtral import (
+        PixtralVisionRotaryEmbedding,
+    )
+else:
+    from transformers.models.pixtral.modeling_pixtral import (
+        PixtralRotaryEmbedding as PixtralVisionRotaryEmbedding,
+    )
+    from transformers.models.pixtral.modeling_pixtral import (
+        position_ids_in_meshgrid as flat_position_ids_in_meshgrid,
+    )
+
+
+def position_ids_in_meshgrid(
+    patch_embeds_list: list[torch.Tensor],
+    max_width: int,
+) -> torch.Tensor:
+    if not TRANSFORMERS_WITH_AXIAL_ROPE:
+        return flat_position_ids_in_meshgrid(patch_embeds_list, max_width)
+    positions = []
+    for patch in patch_embeds_list:
+        height, width = patch.shape[-2:]
+        h_ids, w_ids = torch.meshgrid(
+            torch.arange(height), torch.arange(width), indexing="ij"
+        )
+        positions.append(torch.stack([h_ids.flatten(), w_ids.flatten()], dim=-1))
+    return torch.cat(positions, dim=0)
 
 
 def _make_packed_sequence_metadata(
@@ -1465,7 +1496,9 @@ class PixtralHFVisionModel(nn.Module):
 
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
-        self.patch_positional_embedding = PixtralRotaryEmbedding(config, self.device)
+        self.patch_positional_embedding = PixtralVisionRotaryEmbedding(config).to(
+            self.device
+        )
 
     def forward(
         self,
