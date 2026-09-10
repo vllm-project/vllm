@@ -3,17 +3,46 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorMetadata,
+    HiSparseConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
+    """Composite binding must reach HiSparse and existing pool-only connectors."""
+    hisparse = object.__new__(HiSparseConnector)
+    hisparse._role = KVConnectorRole.SCHEDULER
+    hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    legacy = object.__new__(ExampleConnector)
+    legacy.bind_gpu_block_pool = MagicMock()
+    connector = object.__new__(MultiConnector)
+    connector._connectors = [hisparse, legacy]
+    if nested:
+        parent = object.__new__(MultiConnector)
+        parent._connectors = [connector]
+        connector = parent
+    manager = SimpleNamespace(block_pool=object(), hisparse_coordinator=object())
+
+    connector.bind_kv_cache_manager(manager)
+
+    assert hisparse.connector_scheduler.coordinator is manager.hisparse_coordinator
+    legacy.bind_gpu_block_pool.assert_called_once_with(manager.block_pool)
 
 
 def test_hisparse_requires_block_outermost_device_layout():
