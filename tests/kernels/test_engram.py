@@ -612,8 +612,7 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
 
     def gather(local, dim):
         torch.testing.assert_close(local, shards[0], rtol=0, atol=0)
-        assert dim == 1
-        return gathered
+        return torch.cat(shards, dim=dim)
 
     monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
     torch.testing.assert_close(layers[0](ids), expected, rtol=0, atol=0)
@@ -624,6 +623,17 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
     module.staged_rows = torch.empty_like(shards[0])
     module.prepare_embeddings(ids)
     torch.testing.assert_close(module.embed(ids), expected, rtol=0, atol=0)
+    # Slicing before head reordering must preserve padded heads and empty owners.
+    module.use_sequence_parallel = True
+    chunk = (len(ids) + tp_size - 1) // tp_size
+    padded = torch.nn.functional.pad(expected, (0, 0, 0, 0, 0, (-len(ids)) % tp_size))
+    for rank in range(tp_size):
+        monkeypatch.setattr(
+            engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+        )
+        torch.testing.assert_close(
+            module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

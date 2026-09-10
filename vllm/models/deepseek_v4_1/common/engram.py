@@ -50,7 +50,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.common.ops.sequence_parallel import sp_shard
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -855,6 +854,28 @@ def _fused_engram_post_wkv_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["num_tokens", "token_start", "num_elements"])
+def _engram_sp_rows_kernel(
+    gathered,
+    output,
+    num_tokens,
+    token_start,
+    num_elements,
+    LOCAL_WIDTH: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    tokens = token_start + offsets // WIDTH
+    cols = offsets % WIDTH
+    source = (cols // LOCAL_WIDTH * num_tokens + tokens) * LOCAL_WIDTH
+    source += cols % LOCAL_WIDTH
+    values = tl.load(
+        gathered + source, (offsets < num_elements) & (tokens < num_tokens), other=0
+    )
+    tl.store(output + offsets, values, offsets < num_elements)
+
+
 class Engram(nn.Module):
     """Writes an n-gram lookup into the residual stream, gated by how well it
     matches that stream.
@@ -928,9 +949,25 @@ class Engram(nn.Module):
         rows = self.staged_rows[: hash_ids.shape[0]]
         if self.embed_tokens.tp_size == 1:
             return rows
+        if self.use_sequence_parallel:
+            tp_size = self.embed_tokens.tp_size
+            num_tokens, local_heads, dim = rows.shape
+            gathered = tensor_model_parallel_all_gather(rows, dim=0)
+            chunk = (num_tokens + tp_size - 1) // tp_size
+            rows = rows.new_empty((chunk, self.embed_tokens.n_hash_cols, dim))
+            _engram_sp_rows_kernel[(triton.cdiv(rows.numel(), 1024),)](
+                gathered,
+                rows,
+                num_tokens,
+                get_tensor_model_parallel_rank() * chunk,
+                rows.numel(),
+                local_heads * dim,
+                self.embed_tokens.n_hash_cols * dim,
+                BLOCK_SIZE=1024,
+            )
+            return rows
         rows = tensor_model_parallel_all_gather(rows, dim=1)
-        rows = rows[:, : self.embed_tokens.n_hash_cols]
-        return sp_shard(rows) if self.use_sequence_parallel else rows
+        return rows[:, : self.embed_tokens.n_hash_cols]
 
     def forward(
         self,
