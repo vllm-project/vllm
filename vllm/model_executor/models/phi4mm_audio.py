@@ -374,7 +374,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 default_nemo_conv_settings.update(nemo_conv_settings)
                 for i in ["subsampling_factor", "feat_in", "feat_out"]:
                     assert i not in nemo_conv_settings, (
-                        "{i} should be specified outside of the NeMo dictionary"
+                        f"{i} should be specified outside of the NeMo dictionary"
                     )
 
             self.embed = NemoConvSubsampling(
@@ -1210,7 +1210,7 @@ class AudioEmbedding(nn.Module):
                 default_nemo_conv_settings.update(nemo_conv_settings)
                 for i in ["subsampling_factor", "feat_in", "feat_out"]:
                     assert i not in nemo_conv_settings, (
-                        "{i} should be specified outside of the NeMo dictionary"
+                        f"{i} should be specified outside of the NeMo dictionary"
                     )
 
             self.conv_ds: NemoConvSubsampling | None = NemoConvSubsampling(
