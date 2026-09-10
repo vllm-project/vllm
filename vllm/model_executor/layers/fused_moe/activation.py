@@ -289,8 +289,6 @@ def _apply_moe_activation_masked(
     return output
 
 
-# ``vllm._C`` is only built for CUDA/HIP; on XPU and CPU the fused activation
-# kernels are unavailable and we fall back to torch ops.
 _HAS_C_ACTIVATION_KERNELS = hasattr(torch.ops, "_C") and hasattr(
     torch.ops._C, "silu_and_mul_with_clamp"
 )
@@ -303,18 +301,14 @@ def _silu_and_mul_with_clamp_native(
     alpha: float,
     beta: float,
 ) -> None:
-    """Torch equivalent of ``torch.ops._C.silu_and_mul_with_clamp``.
-
-    Mirrors ``silu_and_mul_clamp`` in ``csrc/.../activation_kernels.cu``
-    (``act_first=true``, ``HAS_CLAMP=true``) and hence
-    ``SiluAndMulWithClamp.forward_native``::
+    """Torch equivalent of ``torch.ops._C.silu_and_mul_with_clamp``::
 
         gate = clamp(input[..., :d], max=limit)
         up = clamp(input[..., d:], min=-limit, max=limit)
         out = gate * sigmoid(alpha * gate) * (up + beta)
 
-    Unlike ``_swiglu_limit_torch``, this honours ``alpha``/``beta``; MiniMax-M3
-    uses alpha=1.702, beta=1.0, so they cannot be assumed to be 1.0/0.0.
+    Unlike ``_swiglu_limit_torch``, this honours ``alpha``/``beta``, which
+    MiniMax-M3 sets to 1.702/1.0.
     """
     d = input.shape[-1] // 2
     gate = torch.clamp(input[..., :d], max=limit)

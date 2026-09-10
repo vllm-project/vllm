@@ -159,11 +159,9 @@ class ApplyRotaryEmb(CustomOp):
             enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
                                  for higher accuracy.
 
-        ``rotary_dim = 2 * cos.shape[-1]`` may be smaller than ``head_size``
-        (partial rotary, e.g. MiniMax-M3's vision tower: head_size=80,
-        rotary_dim=78). Only the leading ``rotary_dim`` channels are rotated and
-        the trailing ones are passed through unchanged, matching the
-        ``apply_rotary_emb`` flash-attention kernel used by ``forward_cuda``.
+        As in ``forward_cuda``, ``rotary_dim = 2 * cos.shape[-1]`` may be smaller
+        than ``head_size`` (partial rotary), in which case only the leading
+        ``rotary_dim`` channels are rotated.
         """
         origin_dtype = x.dtype
         if enable_fp32_compute:
@@ -172,7 +170,7 @@ class ApplyRotaryEmb(CustomOp):
         cos = cos.unsqueeze(-2).to(x.dtype)
         sin = sin.unsqueeze(-2).to(x.dtype)
 
-        # Partial rotary: split off the pass-through tail before rotating.
+        # Split off the pass-through tail before rotating.
         head_size = x.shape[-1]
         rotary_dim = 2 * cos.shape[-1]
         assert rotary_dim <= head_size, (

@@ -2703,14 +2703,10 @@ def reshape_and_cache_flash(
     )
 
 
-# MiniMax-M3 fused attention pre-processing: head dim is hard-coded to 128 in
-# both the CUDA kernel and the reference implementation below.
+# Head dim is hard-coded to 128 in the CUDA kernel and the reference below.
 _MINIMAX_M3_HEAD_DIM = 128
 _FP8_E4M3_MAX = 448.0
 
-# Availability of the fused CUDA/HIP kernel. ``import_kernels()`` above has
-# already run, so this is settled by now. Platforms that do not build
-# ``vllm._C`` (e.g. XPU, CPU) fall back to the reference implementation.
 _HAS_FUSED_MINIMAX_M3_KERNEL = hasattr(torch.ops, "_C") and hasattr(
     torch.ops._C, "fused_minimax_m3_qknorm_rope_kv_insert"
 )
@@ -2725,23 +2721,13 @@ def _minimax_m3_gemma_norm_rope(
 ) -> torch.Tensor:
     """Gemma RMSNorm + partial NeoX RoPE on one branch, in FP32.
 
-    Mirrors ``normAndRope()`` in the fused CUDA kernel:
+    Mirrors ``normAndRope()`` in the fused CUDA kernel, over a
+    ``[num_tokens, heads, 128]`` view of the packed row.
 
-    - Gemma RMSNorm ``x * rsqrt(mean(x^2) + eps) * (1 + weight)``, accumulated
-      in FP32 over the full 128-wide head. Skipped when ``weight is None``
-      (the V branch).
-    - Partial NeoX RoPE over the leading ``rotary_dim = 2 * cos.shape[-1]``
-      channels, pairing ``(i, i + rotary_dim // 2)``; trailing channels pass
-      through untouched. Skipped when ``cos is None``.
-
-    Args:
-        x: ``[num_tokens, num_branch_heads, 128]``, model dtype.
-        weight: ``[128]`` norm weight, or None to skip the norm.
-        cos, sin: ``[num_tokens, rotary_dim // 2]`` FP32, or None to skip RoPE.
-
-    Returns:
-        FP32 tensor shaped like ``x``. The caller rounds to the destination
-        dtype, matching the kernel which keeps registers in FP32 until store.
+    The norm is skipped when ``weight is None`` (the V branch) and RoPE when
+    ``cos is None``. RoPE rotates the leading ``2 * cos.shape[-1]`` channels and
+    passes the tail through. Returns FP32; the caller rounds to the destination
+    dtype, as the kernel keeps registers in FP32 until store.
     """
     out = x.float()
     if weight is not None:
@@ -2753,7 +2739,6 @@ def _minimax_m3_gemma_norm_rope(
         rotary_dim = 2 * half
         x1 = out[..., :half]
         x2 = out[..., half:rotary_dim]
-        # [num_tokens, 1, half] broadcasts over the branch's heads.
         c = cos.unsqueeze(-2)
         s = sin.unsqueeze(-2)
         out = torch.cat(
@@ -2763,7 +2748,7 @@ def _minimax_m3_gemma_norm_rope(
 
 
 def _to_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
-    """FP32 -> E4M3, saturating at +-448 like the kernel's ``__NV_SATFINITE``."""
+    """FP32 -> E4M3, saturating at +-448 like the kernel."""
     return x.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
 
 
@@ -2772,9 +2757,8 @@ def _minimax_m3_cache_store_dtype(
 ) -> torch.dtype:
     """Storage dtype to cast K/V to before writing them into ``kv_cache``.
 
-    ``kv_cache_dtype == "auto"`` means unquantized: the cache already has the
-    model dtype. The FP8 modes keep uint8 storage and convert with an identity
-    scale (``storeCacheElems`` in the kernel).
+    ``"auto"`` means unquantized: the cache already has the model dtype. The FP8
+    modes keep uint8 storage and convert with an identity scale.
     """
     if kv_cache_dtype == "auto":
         return kv_cache.dtype
@@ -2815,11 +2799,9 @@ def _fused_minimax_m3_qknorm_rope_kv_insert_ref(
 ) -> None:
     """Unfused reference for ``fused_minimax_m3_qknorm_rope_kv_insert``.
 
-    Platform-agnostic PyTorch equivalent of the fused CUDA/HIP kernel, used
-    wherever ``vllm._C`` is unavailable (XPU, CPU). Semantics are taken from
-    ``csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu``:
-    same FP32 norm/RoPE math, same in-place/gathered store choices, same cache
-    scatter. See the public wrapper below for the argument contract.
+    Follows the semantics of
+    ``csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu``;
+    see the public wrapper below for the argument contract.
     """
     head_dim = _MINIMAX_M3_HEAD_DIM
     num_tokens = qkv.shape[0]
@@ -2851,7 +2833,6 @@ def _fused_minimax_m3_qknorm_rope_kv_insert_ref(
     heads = qkv.view(num_tokens, -1, head_dim)
     k_begin, v_begin, iq_begin = nq, nq + nkv, nq + 2 * nkv
 
-    # ── Q: norm + RoPE, then in place or gathered into q_out. ───────────────
     q = _minimax_m3_gemma_norm_rope(heads[:, :k_begin], q_norm_weight, eps, cos, sin)
     q_rounded = q.to(qkv.dtype)
     if q_out is not None:
@@ -2859,17 +2840,15 @@ def _fused_minimax_m3_qknorm_rope_kv_insert_ref(
     else:
         heads[:, :k_begin] = q_rounded
     if q_fp8_out is not None:
-        # storeScaledQElemsFp8: round to model dtype, then scale, then convert.
+        # Like the kernel, round to the model dtype before scaling.
         scaled = q_rounded.float() * (1.0 / float(q_fp8_scale))
         q_fp8_out.view(num_tokens, nq, head_dim).copy_(_to_fp8_e4m3(scaled))
 
-    # ── K: norm + RoPE, always written back in place. ───────────────────────
     k = _minimax_m3_gemma_norm_rope(
         heads[:, k_begin:v_begin], k_norm_weight, eps, cos, sin
     )
     heads[:, k_begin:v_begin] = k.to(qkv.dtype)
 
-    # ── index branch: norm + RoPE on index_q (niq heads) and index_k (1). ──
     index_k = None
     if process_index:
         assert index_q_norm_weight is not None and index_k_norm_weight is not None, (
@@ -2890,31 +2869,22 @@ def _fused_minimax_m3_qknorm_rope_kv_insert_ref(
                 dst.copy_(index_q.to(index_q_out.dtype))
         else:
             heads[:, iq_begin:ik_begin] = index_q.to(qkv.dtype)
-        # index_k is always rewritten in place in qkv, in the model dtype.
         heads[:, ik_begin : ik_begin + 1] = index_k.to(qkv.dtype)
 
     if not insert_kv:
         return
 
-    # ── Cache scatter (sparse serving only). Negative slots are padded or
-    # unscheduled tokens and must be skipped.
-    #
-    # Filtering them out with a boolean mask forces a device->host sync (the
-    # gathered row count is data-dependent), which the kernel avoids with a
-    # per-thread ``if (sm >= 0)`` guard. There is no sync-free equivalent here:
-    # clamping the padded slots to a real row instead would make them race with
-    # a genuine write to that same row under duplicate-index scatter. The
-    # unfused path is already far slower than the kernel, so correctness wins.
-    # ────────────────────────────────────────────────────────────────────────
+    # Negative slots are padded or unscheduled tokens and must be skipped.
+    # Masking them out costs a device->host sync, which the kernel avoids with a
+    # per-thread guard, but clamping them to a real row would instead race with
+    # a genuine write to that row under duplicate-index scatter.
     assert slot_mapping is not None, "insert mode requires slot_mapping"
     slots = slot_mapping.long().view(-1)
     row_sel = slots >= 0
     rows = slots[row_sel]
 
     if rows.numel():
-        # kv_cache logical shape [num_blocks, nkv, block_size, 2*head_dim];
-        # advanced indexing honours whatever physical layout it was allocated
-        # with (the kernel does the same via explicit strides).
+        # kv_cache logical shape [num_blocks, nkv, block_size, 2 * head_dim].
         block = rows // block_size
         offset = rows % block_size
         store_dtype = _minimax_m3_cache_store_dtype(kv_cache, kv_cache_dtype)
@@ -3004,9 +2974,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
 
-    On platforms that do not build ``vllm._C`` (XPU, CPU) this dispatches to
-    ``_fused_minimax_m3_qknorm_rope_kv_insert_ref``, an unfused PyTorch
-    implementation with the same semantics.
+    Platforms that do not build ``vllm._C`` (XPU, CPU) dispatch to an unfused
+    PyTorch implementation with the same semantics.
     """
     if not _HAS_FUSED_MINIMAX_M3_KERNEL:
         return _fused_minimax_m3_qknorm_rope_kv_insert_ref(

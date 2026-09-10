@@ -118,12 +118,11 @@ class MiniMAXGemmaRMSNorm(nn.Module):
     When ``residual`` is given, the fused add + norm runs in place and the
     updated ``(x, residual)`` pair is returned.
 
-    FlashInfer is CUDA-only, so on other platforms (XPU, CPU) this falls back to
-    the same ``ir.ops`` primitives that back
-    :class:`~vllm.model_executor.layers.layernorm.GemmaRMSNorm`, which implement
-    identical Gemma semantics (``x * (1 + w)``, weight applied in fp32 and cast
-    back afterwards). The fallback is out-of-place, which is safe because both
-    call sites consume the returned tensors.
+    FlashInfer is CUDA-only, so other platforms fall back to the same ``ir.ops``
+    primitives that back
+    :class:`~vllm.model_executor.layers.layernorm.GemmaRMSNorm`. That fallback is
+    out-of-place, which is safe because both call sites consume the returned
+    tensors.
     """
 
     def __init__(
