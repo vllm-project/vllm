@@ -55,7 +55,6 @@ Example out-of-tree tier configuration:
 
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -253,6 +252,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        if self.local_world_size != config.parallel.world_size:
+            raise ValueError(
+                "Native secondary tiers do not support multi-node replicas: "
+                "the scheduler cannot access remote CPU cache shards. "
+                "Use CPUOffloadingSpec for multi-node CPU-only offloading."
+            )
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
 
@@ -384,15 +389,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        local_world_size = (
-            self.config.parallel.local_world_size or self.config.parallel.world_size
-        )
         if self.replicated_layout:
             rank = 0
         else:
-            # Fold the global physical device index into the replica-local
-            # node-local slot range.
-            rank = torch.accelerator.current_device_index() % local_world_size
+            rank = self.config.parallel.rank % self.local_world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,

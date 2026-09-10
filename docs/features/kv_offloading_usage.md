@@ -66,12 +66,39 @@ vllm serve <model> \
   }'
 ```
 
+## Parallelism and host-memory budget
+
+For native `OffloadingConnector`, multi-worker CPU offloading uses the `mp`
+executor. Set `--nnodes` for multi-node TP so each node's shared-memory region
+contains only its local workers. Data-parallel replicas use separate regions;
+the budget applies independently to each replica on each node. For example,
+TP8 on two nodes with four workers per node and `cpu_bytes_to_use=10737418240`
+uses a 10 GiB budget on each node. Two such replicas use 20 GiB per node if
+both have workers on that node. Actual allocation is rounded down to whole
+aligned chunks. Device selection with `--device-ids` does not change worker
+slot ordering.
+
+Pipeline and prefill-context parallelism are rejected because worker byte
+geometry is not negotiated. Multi-worker Ray and external launchers are also
+rejected: Ray node membership is not available through this configuration
+boundary, and external launchers lack cross-worker offload completion
+aggregation. Decode-context parallelism does not add worker slots; it remains
+subject to the attention backend's own support requirements.
+
+`TieringOffloadingSpec` requires every worker of a replica to share one node's
+memory region. Secondary tiers are storage beyond CPU memory, such as a
+filesystem or object store. The scheduler cannot directly transfer remote
+nodes' CPU shards to those tiers. Multi-node replicas must use CPU-only
+`CPUOffloadingSpec`; multi-node secondary-tier transfers require a separate
+worker-executed transfer protocol. Multiple DP replicas on different nodes
+are allowed when each replica fits on one node.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `cpu_bytes_to_use` | yes | — | both | CPU-tier budget in bytes per node, per DP replica, shared by that replica's local workers. Not a per-worker or cluster-wide budget. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
@@ -300,7 +327,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 
 ## Tuning Tips
 
-- `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. The value is total across all workers, not per-worker. Leave headroom for the rest of the host workload.
+- `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. The value is per node, per DP replica; multiply by the number of local replicas when budgeting host RAM. Leave headroom for the rest of the host workload.
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.

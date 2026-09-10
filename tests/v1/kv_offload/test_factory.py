@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -53,6 +54,7 @@ def _make_offloading_config(
     data_parallel_rank_local: int | None = None,
     is_parallelism_agnostic: bool = False,
     local_world_size: int | None = None,
+    executor_backend: str | None = None,
     replicated_layout: bool = False,
     extra_config: dict[str, Any] | None = None,
 ) -> OffloadingConfig:
@@ -88,6 +90,7 @@ def _make_offloading_config(
             data_parallel_rank_local=data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
             local_world_size=local_world_size,
+            executor_backend=executor_backend,
         ),
         replicated_layout=replicated_layout,
     )
@@ -151,8 +154,7 @@ def test_cpu_spec_sizes_normalized_worker_layout():
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
-        tp_size=3,
-        pp_size=2,
+        tp_size=6,
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -188,8 +190,8 @@ def test_cpu_spec_uses_local_world_size_for_node_local_region():
 
     assert isinstance(global_sized, CPUOffloadingSpec)
     assert isinstance(local_sized, CPUOffloadingSpec)
-    assert global_sized.num_blocks == 4
-    assert local_sized.num_blocks == 8
+    assert global_sized.num_chunks == 4
+    assert local_sized.num_chunks == 8
     assert local_sized.kv_bytes_per_chunk == worker_kv_bytes_per_block * 4
     assert local_sized.cpu_page_size_per_worker == worker_kv_bytes_per_block
 
@@ -202,8 +204,7 @@ def test_tiering_spec_aligns_row_size():
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
-        tp_size=3,
-        pp_size=2,
+        tp_size=6,
     )
 
     assert isinstance(spec, TieringOffloadingSpec)
@@ -257,9 +258,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
-    monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator, "current_device_index", lambda: 5
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
@@ -270,13 +269,14 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert worker_calls[0]["mmap_region"] is region
 
 
-def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkeypatch):
+def test_tiering_spec_create_worker_uses_model_parallel_rank(monkeypatch):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         worker_kv_bytes_per_block=4096,
-        world_size=8,
+        rank=1,
+        world_size=4,
         local_world_size=4,
     )
     assert isinstance(spec, TieringOffloadingSpec)
@@ -290,7 +290,7 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator,
+        torch.accelerator,
         "current_device_index",
         lambda: 5,
     )
@@ -400,9 +400,7 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
-    monkeypatch.setattr(
-        cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
@@ -504,6 +502,7 @@ def test_cpu_spec_create_worker_rank_assignment(
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=device_index,
         world_size=world_size,
         local_world_size=local_world_size,
         replicated_layout=replicated_layout,
@@ -517,9 +516,7 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
-    monkeypatch.setattr(
-        cpu_spec_module.torch.accelerator, "current_device_index", lambda: device_index
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: device_index)
 
     spec.create_worker(MagicMock())
 
@@ -529,6 +526,74 @@ def test_cpu_spec_create_worker_rank_assignment(
 def test_offloading_spec_has_replicated_layout_default():
     spec = SingleArgExternalOffloadingSpec(_make_offloading_config())
     assert spec.replicated_layout is False
+
+
+@pytest.mark.parametrize(
+    "spec_name,world_size,rank_offset",
+    [
+        ("CPUOffloadingSpec", 2, 0),
+        ("CPUOffloadingSpec", 4, 0),
+        ("CPUOffloadingSpec", 4, 2),
+        ("TieringOffloadingSpec", 2, 0),
+    ],
+)
+@pytest.mark.parametrize("device_indices", [(0, 2), (2, 0), (0, 0)])
+def test_worker_slots_are_distinct_despite_device_remapping(
+    monkeypatch, spec_name, world_size, rank_offset, device_indices
+):
+    """Visible device ordinals need not be dense or shared across processes."""
+    import vllm.v1.kv_offload.cpu.spec as cpu_module
+    import vllm.v1.kv_offload.tiering.spec as tiering_module
+
+    module = cpu_module if spec_name == "CPUOffloadingSpec" else tiering_module
+    monkeypatch.setattr(cpu_module.current_platform, "is_cuda_alike", lambda: True)
+    regions = []
+
+    def region(**kwargs):
+        regions.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(module, "SharedOffloadRegion", region)
+    monkeypatch.setattr(module, "CPUOffloadingWorker", MagicMock())
+    for rank, device in enumerate(device_indices, start=rank_offset):
+        monkeypatch.setattr(
+            torch.accelerator, "current_device_index", lambda device=device: device
+        )
+        spec = _create_spec(
+            spec_name=spec_name,
+            rank=rank,
+            world_size=world_size,
+            local_world_size=2,
+            worker_kv_bytes_per_block=4096,
+        )
+        spec.create_worker(MagicMock())
+
+    assert [r["rank"] for r in regions] == [0, 1]
+
+
+@pytest.mark.parametrize("local_world_size", [-1, 0, 3, 8])
+def test_cpu_spec_rejects_invalid_node_geometry(local_world_size):
+    with pytest.raises(ValueError, match="local_world_size"):
+        _create_spec(world_size=4, local_world_size=local_world_size)
+
+
+def test_tiering_rejects_remote_cpu_shards_before_allocating():
+    with pytest.raises(ValueError, match="secondary.*multi-node|multi-node.*secondary"):
+        _create_spec(
+            spec_name="TieringOffloadingSpec", world_size=4, local_world_size=2
+        )
+
+
+@pytest.mark.parametrize("pp_size,pcp_size", [(2, 1), (1, 2)])
+def test_cpu_spec_rejects_unnegotiated_worker_geometry(pp_size, pcp_size):
+    with pytest.raises(ValueError, match="pipeline|prefill context"):
+        _create_spec(world_size=4, pp_size=pp_size, pcp_size=pcp_size)
+
+
+@pytest.mark.parametrize("backend", ["ray", "external_launcher", "custom"])
+def test_cpu_spec_requires_known_multiworker_topology(backend):
+    with pytest.raises(ValueError, match="topology"):
+        _create_spec(world_size=4, executor_backend=backend)
 
 
 def test_offloading_spec_uses_normalized_chunk_geometry():

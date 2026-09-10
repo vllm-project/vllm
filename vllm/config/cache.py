@@ -247,8 +247,10 @@ class CacheConfig:
     (when not-None) ignores gpu_memory_utilization"""
 
     kv_offloading_size: float | None = None
-    """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
-    the total buffer size summed across all TP ranks. By default, this is set
+    """Size of the KV cache offloading buffer in GiB. For the native
+    OffloadingConnector, this is a per-node budget for each DP replica,
+    shared by its local TP workers (not a per-worker or cluster-wide budget).
+    By default, this is set
     to None, which means no KV offloading is enabled. When set, vLLM will
     enable KV cache offloading to CPU using the kv_offloading_backend."""
 
