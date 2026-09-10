@@ -1234,6 +1234,84 @@ class TestMessageStartIncludesTypeAndRole:
         assert message["role"] == "assistant"
 
 
+class TestMessageDeltaIncludesStopSequence:
+    """Regression test for issue #55324: the streaming message_delta event is
+    serialized with exclude_unset=True, so a ``stop_sequence`` that was never
+    assigned is dropped from the JSON. Anthropic declares ``stop_sequence`` as
+    a required, nullable member of ``MessageDelta``, and validating proxies
+    reject the stream one event from the end when the key is absent.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "finish_reason,expected_stop_reason",
+        [
+            ("stop", "end_turn"),
+            ("length", "max_tokens"),
+            ("tool_calls", "tool_use"),
+        ],
+    )
+    async def test_message_delta_carries_null_stop_sequence(
+        self, finish_reason, expected_stop_reason
+    ):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(content="Hello"))
+            yield _make_stream_chunk(finish_reason=finish_reason)
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10,
+                    total_tokens=30,
+                    completion_tokens=20,
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+
+        assert msg_deltas
+        delta = msg_deltas[0]["delta"]
+        assert delta["stop_reason"] == expected_stop_reason
+        assert "stop_sequence" in delta
+        assert delta["stop_sequence"] is None
+
+    @pytest.mark.asyncio
+    async def test_matched_stop_string_still_reports_the_value(self):
+        """The matched-stop-string branch already set the field; keep it."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(content="Hello"))
+            yield _make_stream_chunk(finish_reason="stop", stop_reason="END")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10,
+                    total_tokens=30,
+                    completion_tokens=20,
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+
+        assert msg_deltas
+        delta = msg_deltas[0]["delta"]
+        assert delta["stop_reason"] == "stop_sequence"
+        assert delta["stop_sequence"] == "END"
+
+
 class TestStreamingCacheUsageSemantics:
     """Locks in the documented streaming behavior of cache usage fields.
 
