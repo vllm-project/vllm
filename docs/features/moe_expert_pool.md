@@ -57,9 +57,10 @@ Qwen3.8-Flash-Next NVFP4 with 258 rows per layer (about a 32 GiB bank),
 `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, 4096
 context, one request: decode about 63 tok/s (median of three fresh server
 launches). That number was measured on an RTX PRO 6000 Blackwell Max-Q
-limited to 48 GiB, on a combination of this feature with the deferred PLE
-rows change (01554/vllm#46 on top of #54129), which this model needs to
-load its PLE table within that budget; it is not a measurement of this
+limited to 48 GiB, on the integrated head 7dedc6d8 = this feature + PLE
+mmap support (#54129, which this model needs to load its PLE table within
+that budget) + deferred PLE rows (01554/vllm#46, part of the measured
+configuration, not required for loading); it is not a measurement of this
 branch alone. For reference, the existing `--offload-backend uva
 --cpu-offload-gb 40` path gave about 7 tok/s in a single run on a
 different base commit; see `benchmarks/expert_pool/README.md` for the exact
