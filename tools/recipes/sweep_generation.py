@@ -59,14 +59,10 @@ def validate_sweep_workload(workload: WorkloadHints) -> None:
 
 
 def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build a diverse, bounded sweep around the initial suggestion.
+    """Build a bounded batch-budget sweep at the sequence-count lower bound.
 
-    The initial five-point sweep changed only one parameter at a time and
-    skipped the useful middle sequence count. Eight directed tuned points cover
-    the batch-budget curve at full concurrency plus interactions at 3/4 and 1/2
-    of the initial scheduler concurrency. Three additional reference points
-    compare those tuned values with vLLM-resolved defaults without paying for a
-    full Cartesian grid.
+    Explicit candidates keep the initial per-replica sequence count. Three
+    reference points compare those tuned values with vLLM-resolved defaults.
     """
     initial_seqs = _positive_int(config, "max-num-seqs")
     initial_batch = _positive_int(config, "max-num-batched-tokens")
@@ -81,8 +77,6 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
         ):
             minimum_batch = max(minimum_batch, max_model_len)
 
-    lower_seqs = max(1, (initial_seqs + 1) // 2)
-    middle_seqs = max(lower_seqs, (3 * initial_seqs + 3) // 4)
     lower_batch = max(
         minimum_batch,
         _strict_lower_power_of_two(initial_batch),
@@ -124,11 +118,6 @@ def build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     add("smaller_batch_budget", initial_seqs, smaller_batch)
     add("lower_batch_budget", initial_seqs, lower_batch)
     add("higher_batch_budget", initial_seqs, higher_batch)
-    add("middle_seqs_lower_batch", middle_seqs, lower_batch)
-    add("middle_seqs_higher_batch", middle_seqs, higher_batch)
-    add("lower_seqs_lower_batch", lower_seqs, lower_batch)
-    add("lower_seqs_higher_batch", lower_seqs, higher_batch)
-
     # Default-reference candidates intentionally omit one or both scheduler
     # keys. The sweep server starts from sweep_config.yml, where both keys are
     # removed, so omission lets vLLM resolve its normal runtime default.
@@ -457,10 +446,15 @@ def _write_guide(path: Path, workload: WorkloadHints) -> None:
     content = f"""# Optional Runtime Tuning Sweep
 
 The generated `config.yml` is the **single initial suggestion** and can be
-deployed directly. The sweep benchmarks nearby values for:
+deployed directly. The scheduler sweep keeps explicit `max-num-seqs` at the
+per-replica concurrency lower bound while benchmarking nearby values for:
 
-- `max-num-seqs`
 - `max-num-batched-tokens`
+
+It does not test explicit `max-num-seqs` values below per-replica concurrency,
+because those values can introduce scheduler queueing and severe TTFT
+degradation. The vLLM-default references still test whether an explicit
+`max-num-seqs` override is needed.
 
 In addition to nearby tuned values, the sweep includes three vLLM-default
 references:
@@ -525,11 +519,15 @@ recommendation.json
 ```
 
 With TTFT/TPOT objectives it requires duration-weighted combined compliance of
-at least 99% plus median P99 TTFT/TPOT compliance, then selects highest mean
-output-token throughput. If no candidate qualifies, it records a best-effort
-candidate but does not write `recommended-config.yml`. Without latency
-objectives it selects highest mean output-token throughput. Configurations with
-failed requests are excluded.
+at least 99% plus median P99 TTFT/TPOT compliance. Scheduler candidates within
+1% of the highest eligible output-token throughput are treated as practically
+equivalent, and the recommender prefers fewer explicit scheduler overrides
+within that set. Use `--throughput-equivalence-percent 0` for exact
+highest-throughput selection. If no candidate qualifies, it records a
+best-effort candidate but does not write `recommended-config.yml`. Without
+latency objectives it applies the same scheduler equivalence policy.
+Configurations with failed requests are excluded. TP/DP comparisons continue
+to use exact highest-throughput selection.
 
 `recommended-config.yml` copies the initial configuration and changes only
 `max-num-seqs` and `max-num-batched-tokens`. If a vLLM-default reference wins,
@@ -1023,4 +1021,3 @@ def write_full_sweep_files(
         run_scheduler,
         run_full,
     ]
-

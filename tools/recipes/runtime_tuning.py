@@ -70,9 +70,9 @@ def _get_active_sequence_count(
     config: dict[str, Any],
     workload: WorkloadHints,
 ) -> int:
-    """Return the sequence count used to size one scheduler iteration."""
+    """Return the per-replica sequence count for one scheduler iteration."""
     if workload.concurrency is not None:
-        return workload.concurrency
+        return ceil(workload.concurrency / _get_data_parallel_size(config))
 
     configured = config.get("max-num-seqs")
     if (
@@ -85,9 +85,22 @@ def _get_active_sequence_count(
     return SchedulerConfig.DEFAULT_MAX_NUM_SEQS
 
 
+def _get_data_parallel_size(config: dict[str, Any]) -> int:
+    """Return a valid configured DP size, falling back to one replica."""
+    configured = config.get("data-parallel-size", 1)
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and configured > 0
+    ):
+        return configured
+    return 1
+
+
 def _estimate_prefills_per_step(
     workload: WorkloadHints,
     active_sequences: int,
+    data_parallel_size: int,
 ) -> float:
     """Estimate steady-state prompt arrivals per decode scheduler step."""
     # Reserve enough prefill budget for at least one representative prompt.
@@ -104,9 +117,10 @@ def _estimate_prefills_per_step(
     # With target QPS + TPOT, approximate how many prompts arrive during one
     # decode scheduler-step interval.
     if workload.target_qps is not None and workload.tpot_sla_ms is not None:
+        per_replica_qps = workload.target_qps / data_parallel_size
         prefills_per_step = max(
             prefills_per_step,
-            workload.target_qps * workload.tpot_sla_ms / 1000.0,
+            per_replica_qps * workload.tpot_sla_ms / 1000.0,
         )
 
     # A step cannot replace more requests than are active.
@@ -181,15 +195,21 @@ def _resolve_max_num_seqs(
     workload: WorkloadHints,
     result: TuningResult,
 ) -> None:
-    del config, hardware
+    del hardware
     if workload.concurrency is None:
         return
+
+    data_parallel_size = _get_data_parallel_size(config)
+    per_replica_concurrency = ceil(workload.concurrency / data_parallel_size)
 
     _record_override(
         result,
         "max-num-seqs",
-        workload.concurrency,
-        "derived from the optional target concurrency",
+        per_replica_concurrency,
+        (
+            "derived from the optional global target concurrency "
+            f"and data_parallel_size={data_parallel_size}"
+        ),
     )
 
 
@@ -203,12 +223,17 @@ def _resolve_max_num_batched_tokens(
     if workload.input_tokens is None:
         return
 
+    data_parallel_size = _get_data_parallel_size(config)
     active_sequences = _get_active_sequence_count(config, workload)
 
     # Decode requests consume roughly one token per active sequence in one
     # scheduler iteration. Prefills share the remaining scheduler token budget.
     decode_budget = active_sequences
-    prefills_per_step = _estimate_prefills_per_step(workload, active_sequences)
+    prefills_per_step = _estimate_prefills_per_step(
+        workload,
+        active_sequences,
+        data_parallel_size,
+    )
     prefill_budget = ceil(workload.input_tokens * prefills_per_step)
 
     # Use vLLM's scheduler defaults/constraints as floors rather than local
@@ -237,7 +262,8 @@ def _resolve_max_num_batched_tokens(
         candidate,
         (
             "workload-derived scheduler budget "
-            f"(active_sequences={active_sequences}, "
+            f"(per_replica_active_sequences={active_sequences}, "
+            f"data_parallel_size={data_parallel_size}, "
             f"prefills_per_step={prefills_per_step:.2f}, "
             f"decode_budget={decode_budget}, "
             f"prefill_budget={prefill_budget})"
