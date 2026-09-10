@@ -180,6 +180,13 @@ class Mixer2RMSNormGated(CustomOp):
             norm_before_gate=False,
         )
 
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(x, gate)
+
 
 def mamba_v2_sharded_weight_loader(
     shard_spec: list[tuple[int, int, float]],
