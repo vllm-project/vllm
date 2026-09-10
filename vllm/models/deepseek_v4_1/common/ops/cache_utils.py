@@ -298,49 +298,24 @@ def _dequantize_and_gather_k_kernel(
         # Output pointer for this token (flattened)
         output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
 
-        # ========== Dequantize FP8 portion using UE8M0 ==========
-        for qblock_idx in tl.static_range(n_quant_blocks):
-            qblock_start = qblock_idx * quant_block
+        qblocks = tl.arange(0, triton.next_power_of_2(n_quant_blocks))
+        offsets = qblocks[:, None] * quant_block + tl.arange(0, quant_block)[None, :]
+        mask = (qblocks[:, None] < n_quant_blocks) & (offsets < fp8_dim)
+        x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+        fp8_dtype = tl.float8e4b8 if use_fnuz else tl.float8e4nv
+        x = x_uint8.to(fp8_dtype, bitcast=True).to(tl.float32)
+        encoded_scales = tl.load(
+            token_scale_ptr + qblocks, mask=qblocks < n_quant_blocks, other=127
+        )
+        scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+        tl.store(
+            output_row_ptr + offsets, (x * scales[:, None]).to(tl.bfloat16), mask=mask
+        )
 
-            if qblock_start < fp8_dim:
-                offsets = qblock_start + tl.arange(0, quant_block)
-                mask = offsets < fp8_dim
-
-                # Load quantized fp8 values (stored as uint8)
-                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
-
-                # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
-                if use_fnuz:
-                    x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
-                else:
-                    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-
-                # Convert fp8 to float32 for computation
-                x_float = x_fp8.to(tl.float32)
-
-                # Load and decode UE8M0 scale
-                # UE8M0: scale = 2^(stored_value - 127)
-                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
-                exponent = encoded_scale.to(tl.float32) - 127.0
-                scale = tl.exp2(exponent)
-
-                # Dequantize: bf16_value = fp8_value * scale
-                x_dequant = x_float * scale
-
-                # Store as bf16
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
-
-        # ========== Copy BF16 portion directly ==========
-        bf16_output_offset = fp8_dim  # After 448 elements in output
-
-        # Read bf16 from cache
         bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-
-        # Process in chunks of 16
-        for j in tl.static_range(bf16_dim // 16):
-            chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+        rope_offsets = tl.arange(0, bf16_dim)
+        rope = tl.load(bf16_cache_ptr + rope_offsets)
+        tl.store(output_row_ptr + fp8_dim + rope_offsets, rope)
 
 
 def dequantize_and_gather_k_cache_triton(
