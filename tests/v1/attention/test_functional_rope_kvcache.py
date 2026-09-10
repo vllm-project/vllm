@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import torch
@@ -28,6 +30,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.fope import FourierRotaryEmbedding
@@ -39,6 +42,74 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheLayout
 
 _LAYER_NAME = "model.layers.0.self_attn.attn"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend constructors")
+@pytest.mark.parametrize(
+    "selection,enabled,is_cuda,supports_fusion,expected_warnings",
+    [
+        ("auto", True, True, False, 1),
+        ("override", True, True, False, 1),
+        ("auto", False, True, False, 0),
+        ("auto", True, False, False, 0),
+        ("auto", True, True, True, 0),
+        ("flash", True, True, True, 0),
+    ],
+)
+def test_cuda_fusion_warning_uses_selected_backend_capability(
+    selection: str,
+    enabled: bool,
+    is_cuda: bool,
+    supports_fusion: bool,
+    expected_warnings: int,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config: VllmConfig,
+    caplog_vllm: pytest.LogCaptureFixture,
+) -> None:
+    from vllm.model_executor.layers.attention import attention as attention_module
+
+    backend = (
+        AttentionBackendEnum.FLASH_ATTN
+        if selection == "flash"
+        else AttentionBackendEnum.TRITON_ATTN
+    ).get_class()
+    default_vllm_config.compilation_config.pass_config.fuse_rope_kvcache = enabled
+    default_vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(attention_module, "get_attn_backend", lambda *a, **kw: backend)
+    # A future supporting backend must not be rejected by its name.
+    if selection != "flash" and supports_fusion:
+        monkeypatch.setattr(
+            backend.get_impl_cls(), "fused_rope_kvcache_q_out_supported", lambda _: True
+        )
+    monkeypatch.setattr(
+        attention_module, "logger", init_logger(f"vllm.test.rope_kvcache.{uuid4()}")
+    )
+
+    with set_default_torch_dtype(torch.float16), caplog_vllm.at_level(logging.WARNING):
+        for index in range(2):
+            layer = Attention(
+                num_heads=4,
+                head_size=64,
+                scale=0.125,
+                num_kv_heads=2,
+                prefix=f"model.layers.{index}.self_attn.attn",
+                attn_backend=backend if selection == "override" else None,
+            )
+            assert layer.attn_backend is backend
+            assert layer.impl.fused_rope_kvcache_q_out_supported() is supports_fusion
+    warnings = [
+        record.getMessage()
+        for record in caplog_vllm.records
+        if "fuse_rope_kvcache=True" in record.getMessage()
+    ]
+    assert len(warnings) == expected_warnings
+    if warnings:
+        assert backend.get_name() in warnings[0]
+        assert "has no effect" in warnings[0]
+    assert (
+        default_vllm_config.compilation_config.pass_config.fuse_rope_kvcache is enabled
+    )
 
 
 class _IdentityProjection(torch.nn.Module):

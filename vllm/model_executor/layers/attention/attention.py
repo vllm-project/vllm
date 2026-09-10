@@ -439,6 +439,17 @@ class Attention(nn.Module, AttentionLayerBase):
         self._rope_kvcache_fusion_enabled = bool(
             compilation_config.pass_config.fuse_rope_kvcache
         )
+        if (
+            self._rope_kvcache_fusion_enabled
+            and current_platform.is_cuda()
+            and not self.impl.fused_rope_kvcache_q_out_supported()
+        ):
+            logger.warning_once(
+                "fuse_rope_kvcache=True has no effect for the selected %s "
+                "attention backend in this configuration. These layers will "
+                "use unfused RoPE and KV-cache updates.",
+                self.attn_backend.get_name(),
+            )
         self._fuse_attn_quant = bool(compilation_config.pass_config.fuse_attn_quant)
         self.rope_kvcache_fusion_max_token_num = (
             compilation_config.pass_config.rope_kvcache_fusion_max_token_num
