@@ -2725,6 +2725,49 @@ async fn non_stream_chat_returns_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(

@@ -92,6 +92,7 @@ pub fn lower_sampling_params(
 ) -> Result<EngineCoreSamplingParams> {
     let SamplingParams {
         temperature,
+        watermarking,
         top_p,
         top_k,
         seed,
@@ -164,6 +165,7 @@ pub fn lower_sampling_params(
 
     let params = EngineCoreSamplingParams {
         temperature,
+        watermarking,
         top_p,
         top_k,
         seed,
@@ -632,6 +634,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -686,6 +689,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -853,6 +857,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.6,
+                watermarking: true,
                 top_p: 0.95,
                 top_k: 20,
                 seed: None,
@@ -917,6 +922,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -989,6 +995,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.2,
+                watermarking: true,
                 top_p: 0.3,
                 top_k: 4,
                 seed: None,
@@ -1239,6 +1246,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.8,
+                watermarking: true,
                 top_p: 0.9,
                 top_k: 12,
                 seed: None,
