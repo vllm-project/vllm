@@ -15,12 +15,14 @@ import torch
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
     MEDIUM_GPU,
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
     HiSparseConnectorScheduler,
 )
 from vllm.lora.request import LoRARequest
@@ -45,6 +47,10 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.hisparse.prefix_cache import (
+    get_computed_blocks_for_group_completion,
+    truncate_group_completion_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -170,7 +176,6 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["indexer"],
             source_spec,
-            enable_prefix_caching=True,
             enable_kv_transfer=transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         ),
@@ -182,7 +187,6 @@ def make_hisparse_kv_cache_config(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
             ),
-            enable_prefix_caching=False,
             enable_kv_transfer=transfer_device_cache,
         )
     )
@@ -194,7 +198,6 @@ def make_hisparse_kv_cache_config(
                 page_size=HISPARSE_BLOCK_SIZE * 4,
                 blocks_per_request=2,
             ),
-            enable_prefix_caching=False,
             enable_kv_transfer=False,
         )
     )
@@ -262,6 +265,10 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
         draft_kv_lookahead=4,
     )
     scheduler.bind_coordinator(coordinator)
+    request = SimpleNamespace(request_id="request", num_output_placeholders=3)
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = scheduler
+    connector.update_state_after_alloc(request, None, 0)
     scheduler_output = SimpleNamespace(
         block_table_updates=None,
         kv_cache_block_copies=None,
@@ -272,12 +279,19 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
             num_computed_tokens=[103],
         ),
         num_scheduled_tokens={"request": 4},
-        num_output_placeholders={"request": 3},
     )
 
     scheduler.build_connector_meta(scheduler_output)
 
     coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 11),))
+
+    # Acceptance arrives between steps; the connector must read the live count.
+    request.num_output_placeholders = 1
+    scheduler.build_connector_meta(scheduler_output)
+    coordinator.build_row_mirrors.assert_called_with((("request", 102, 9),))
+
+    connector.request_finished_all_groups(request, ())
+    assert not scheduler.requests
 
 
 def test_hisparse_reports_when_context_is_fully_resident():
@@ -317,7 +331,7 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     blocks, num_local, _, diverged, max_completion = (
-        manager.get_computed_blocks_for_group_completion(resumed, frozenset({1}))
+        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
     )
 
     assert diverged
@@ -325,7 +339,8 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert max_completion == HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
 
-    completed = manager.truncate_group_completion_blocks(
+    completed = truncate_group_completion_blocks(
+        manager,
         blocks,
         num_local,
         num_local + max_completion,
@@ -369,7 +384,7 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, num_local, _, diverged, max_completion = (
-        manager.get_computed_blocks_for_group_completion(resumed, frozenset({1}))
+        get_computed_blocks_for_group_completion(manager, resumed, frozenset({1}))
     )
 
     assert not diverged
@@ -577,21 +592,84 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-def test_hisparse_full_sequence_admission_preserves_host_reservations():
-    """A first chunk must not admit a prompt using another prefill's host budget."""
-    manager = make_hisparse_kv_cache_manager(32, 5)
+@pytest.mark.parametrize(
+    "full_sequence_must_fit,host_num_blocks,admitted",
+    [(True, 6, False), (True, 8, True), (False, 4, False), (False, 5, True)],
+)
+def test_hisparse_async_admission_preserves_host_reservations(
+    full_sequence_must_fit, host_num_blocks, admitted, tmp_path
+):
+    """A new transfer must leave room for an in-flight prefill to finish."""
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+    )
+    manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = manager.kv_cache_config
+    scheduler.scheduler_reserve_full_isl = full_sequence_must_fit
+    inflight = make_request(
+        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    scheduler.add_request(inflight)
+    scheduler.schedule()
+    assert inflight in scheduler._inflight_prefills
+
+    request = make_request(
+        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    assert (request in scheduler._inflight_prefills) == admitted
+    assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
+
+
+@pytest.mark.parametrize(
+    "evictable,local_tokens,admitted",
+    [
+        (False, HISPARSE_BLOCK_SIZE, True),
+        (True, HISPARSE_BLOCK_SIZE, False),
+        (False, HISPARSE_BLOCK_SIZE - 1, False),
+    ],
+)
+def test_hisparse_async_admission_accounts_for_host_cache_hits(
+    evictable, local_tokens, admitted
+):
+    """Evictable hits and partial-hit copies consume the reserved host budget."""
+    manager = make_hisparse_kv_cache_manager(32, 7 if evictable else 8)
+    inflight = make_request(
+        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, inflight, HISPARSE_BLOCK_SIZE) is not None
+    coordinator = manager.hisparse_coordinator
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    hit = host_pool.get_new_blocks(1)[0]
+    if evictable:
+        host_pool.free_blocks([hit])
+    assert host_pool.get_num_free_blocks() == 5
     request = make_request(
         "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
 
     assert (
-        manager.allocate_slots(
+        coordinator.can_admit_async_load(
             request,
-            num_new_tokens=HISPARSE_BLOCK_SIZE,
+            2 * HISPARSE_BLOCK_SIZE,
+            local_tokens,
+            ([hit], [], [], []),
+            [inflight],
             full_sequence_must_fit=True,
-            reserved_host_blocks=2,
         )
-        is None
+        == admitted
     )
 
 
@@ -605,6 +683,19 @@ def test_hisparse_host_import_ignores_unsealed_tail():
     state = coordinator.request_states["partial"]
     assert state.valid_pages == {0}
     assert state.ready_prefix_pages == 1
+
+
+def test_hisparse_resident_request_can_grow_without_hot_capacity():
+    """Running resident history must not be mistaken for a new host-prefix hit."""
+    manager = make_hisparse_kv_cache_manager(8, 16)
+    request = make_request("resident", list(range(48)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=32) is not None
+    request.num_computed_tokens = 32
+
+    # Three free blocks fit the next indexer/resident pages, but not a hot region.
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+    assert manager.get_block_ids(request.request_id)[3] == []
 
 
 def test_hisparse_capacity_query_does_not_require_hot_blocks():
@@ -641,6 +732,72 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     command = manager.hisparse_coordinator.build_offload_command()
     counts = {spill.transfer_id: 1 for spill in command.page_transfers}
     manager.hisparse_coordinator.update_spills(counts, counts)
+
+
+def test_hisparse_events_report_host_and_device_placement():
+    """Host publication and eviction must not advertise GPU-resident KV."""
+    manager = make_kv_cache_manager(
+        make_hisparse_kv_cache_config(32, 16),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=HISPARSE_BLOCK_SIZE,
+        enable_kv_cache_events=True,
+    )
+    request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 64) is not None
+    _publish_hisparse_pages(manager)
+
+    stored = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    assert {(event.group_idx, event.medium) for event in stored} == {
+        (0, MEDIUM_CPU),
+        (1, MEDIUM_GPU),
+    }
+
+    host_block = manager.get_blocks(request.request_id).blocks[0][0]
+    manager.evict_blocks({host_block.block_id})
+    [removed] = manager.take_events()
+    assert isinstance(removed, BlockRemoved)
+    assert removed.medium == MEDIUM_CPU
+    assert removed.group_idx == 0
+
+
+def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
+    """Draining unused connector offers must not retain old recurrent states."""
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    request = make_request("request", list(range(64)), 16, sha256)
+    old_blocks = []
+    for end in (16, 32, 48):
+        assert manager.allocate_slots(request, 16) is not None
+        request.num_computed_tokens = end
+        offers = manager.take_boundary_state_offloads()
+        [(_, block_id, boundary)] = offers[request.request_id]
+        assert boundary == end
+        old_blocks.append(manager.block_pool.blocks[block_id])
+        manager.remove_skipped_blocks(request.request_id, end, 64)
+        manager.new_step_starts()
+
+    assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
 def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
@@ -4474,6 +4631,42 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     assert (
         manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is not None
     )
+
+
+@pytest.mark.parametrize(("reserved_blocks", "fits"), [(4, True), (10, False)])
+def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
+    reserved_blocks, fits
+):
+    """Reservations constrain the current allocation, not the entire prompt."""
+    block_size = 16
+    config = KVCacheConfig(
+        num_blocks=11,  # Ten usable blocks after the null block.
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config, max_model_len=128, enable_caching=True, hash_block_size=block_size
+    )
+    request = make_request("chunk", list(range(128)), block_size, sha256)
+
+    blocks = manager.allocate_slots(
+        request,
+        block_size,
+        full_sequence_must_fit=True,
+        reserved_blocks=reserved_blocks,
+    )
+
+    assert (blocks is not None) is fits
 
 
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():

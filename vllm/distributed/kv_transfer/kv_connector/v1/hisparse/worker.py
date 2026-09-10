@@ -99,10 +99,8 @@ def _select_written_row_mirrors(
 ) -> tuple[SparseKVRowMirror, ...]:
     """Select and coalesce GPU-written rows from a scheduler-owned envelope."""
     source_slots = source_slots[source_slots >= 0]
-    if source_slots.size == 0:
+    if source_slots.size == 0 or not candidates:
         return ()
-    if not candidates:
-        raise RuntimeError("HiSparse GPU slots have no scheduler mapping envelope.")
     starts = np.asarray([mirror.source_starts for mirror in candidates], dtype=np.int64)
     counts = np.fromiter((mirror.num_rows for mirror in candidates), dtype=np.int64)
     destinations = np.fromiter(
@@ -281,15 +279,18 @@ class HiSparseConnectorWorker:
         self._forward_ready_event = torch.Event()
         self._set_row_mirrors(())
         self.cache_layer_names = cache_layer_names
+        self._group_leaders = tuple(
+            (layer_name, cache)
+            for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
+            if cache.runtime.is_group_leader
+        )
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
         )
         self.host_write_event = self.host_write_events[1]
         self._next_host_write_event = 0
         self.cache_handles = cache_handles
-        self.leader_runtimes = [
-            cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
-        ]
+        self.leader_runtimes = [cache.runtime for _, cache in self._group_leaders]
         request_state_indices = {
             indices.data_ptr(): indices
             for cache in cache_handles
@@ -402,6 +403,14 @@ class HiSparseConnectorWorker:
             handle.num_actual_tokens = 0
             handle.num_decode_tokens = 0
             handle.req_id_per_token = None
+
+    def prepare_forward(self, attn_metadata: Mapping[str, Any] | None) -> None:
+        if attn_metadata is None:
+            return
+        for layer_name, handle in self._group_leaders:
+            metadata = attn_metadata.get(layer_name)
+            if metadata is not None:
+                handle.prepare_group_for_batch(metadata)
 
     def stage_row_mirror_mapping(
         self, slot_mappings: Mapping[str, torch.Tensor], num_tokens: int

@@ -29,8 +29,8 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -78,6 +78,7 @@ class HiSparseConnectorScheduler:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+        self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
@@ -127,17 +128,12 @@ class HiSparseConnectorScheduler:
             )
         )
         row_mirrors = {}
-        for (
-            request_id,
-            scheduled_count,
-        ) in scheduler_output.num_scheduled_tokens.items():
-            scheduled_start = num_computed_tokens[request_id]
+        for request_id, scheduled_start, scheduled_count in scheduled_requests:
             mirror_start = scheduled_start
             if self.async_speculative:
                 mirror_start = max(
                     0,
-                    scheduled_start
-                    - scheduler_output.num_output_placeholders.get(request_id, 0),
+                    scheduled_start - self.requests[request_id].num_output_placeholders,
                 )
             row_mirrors[request_id] = self.coordinator.build_row_mirrors(
                 (
@@ -173,6 +169,10 @@ class HiSparseConnectorScheduler:
 
 class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     """Join the scheduler coordinator to the worker's transfer engine."""
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str:
+        return "BLHNC"
 
     def __init__(
         self,
@@ -243,11 +243,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         )
         request_ids = kwargs.get("request_ids")
         assert request_ids is None or isinstance(request_ids, list)
+        attn_metadata = kwargs.get("attn_metadata")
+        assert attn_metadata is None or isinstance(attn_metadata, dict)
         self.connector_worker.start_step(
             metadata,
             request_state_indices,
             request_ids,
         )
+        self.connector_worker.prepare_forward(attn_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -289,7 +292,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         blocks: KVCacheBlocks,
         num_external_tokens: int,
     ) -> None:
-        return
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.requests[request.request_id] = request
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -306,6 +310,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.requests.pop(request.request_id, None)
         return False, None
 
 

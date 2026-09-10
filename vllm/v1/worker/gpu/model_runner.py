@@ -589,15 +589,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             # Preserve each cache type's alignment requirements after applying
             # its topology-aware block-table width.
-            token_alignment = (
-                None
-                if isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
-                else spec.block_table_token_alignment
-            )
             max_num_blocks = get_block_table_width(
                 max_num_blocks,
                 spec.block_size,
-                token_alignment=token_alignment,
+                token_alignment=spec.block_table_token_alignment,
             )
             max_num_blocks_per_group.append(max_num_blocks)
 
@@ -1132,9 +1127,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         table_updates = scheduler_output.block_table_updates or {}
-        self.block_tables.update_block_ids(
-            table_updates, self.req_states.req_id_to_index
-        )
+        for req_id, block_ids in table_updates.items():
+            req_index = self.req_states.req_id_to_index.get(req_id)
+            if req_index is not None:
+                self.block_tables.append_block_ids(req_index, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
@@ -1840,6 +1836,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output,
                 input_batch.idx_mapping,
                 input_batch.req_ids,
+                attn_metadata,
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:

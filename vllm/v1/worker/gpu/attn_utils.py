@@ -116,7 +116,7 @@ def init_attn_backend(
         group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
         group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
 
-        for layer_name in attn_layers:
+        for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec

@@ -327,7 +327,8 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     assert job.src_spec.block_indices == [0]
 
 
-def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
+@pytest.mark.parametrize("cow_reuse", [False, True])
+def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -344,7 +345,11 @@ def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
     [job_id] = meta.store_jobs
 
     output = SchedulerOutput.make_empty()
-    output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    if cow_reuse:
+        output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    else:
+        output.scheduled_cached_reqs.req_ids = ["req"]
+        output.scheduled_cached_reqs.new_block_ids = [([], [99])]
     meta = scheduler.build_connector_meta(output)
 
     assert meta.jobs_to_flush == {job_id}
