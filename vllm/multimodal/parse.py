@@ -678,7 +678,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
 
-        data_items: list[AudioItem]
+        data_items: list[AudioItem | None]
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
@@ -690,8 +690,13 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray]()
+        new_audios = list[np.ndarray | None]()
         for data_item in data_items:
+            # Requests can omit audio samples when reusing a cached UUID.
+            if data_item is None:
+                new_audios.append(None)
+                continue
+
             audio, orig_sr = self._get_audio_with_sr(data_item)
             if orig_sr is None:
                 new_audio = audio
