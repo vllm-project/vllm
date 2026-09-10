@@ -1,13 +1,18 @@
 # Synthetic post-flatten area YAML: one job per directory, whole-dir
 # pytest commands, no -k/-m partitions. The hybrid job keeps production
-# 2-way pytest-sharding (parallel instances of one job over the flat
-# directory, not a partition between sibling jobs).
+# pytest-sharding (parallel instances of one job over the flat directory,
+# not a partition between sibling jobs). The granite compatibility job is a
+# single-file job: its file is the whole target, nothing inside is split.
 steps:
 - label: "Language Models (Hybrid) Shard %N"
   key: language-models-tests-hybrid
-  parallelism: 2
+  parallelism: 6
   commands:
     - pytest -v -s models/language/generation/hybrid --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+- label: "Granite Language Model Compatibility"
+  key: language-models-tests-granite-l4-compatibility
+  commands:
+    - pytest -v -s models/language/generation/test_granite_4_hybrid.py
 - label: "Language Models (Core)"
   key: language-models-tests-core
   commands:
