@@ -828,6 +828,10 @@ def _expand_pools_and_append_tail_kernel(
     BLOCK_COLS: tl.constexpr,
     pid_s0,
     out_s0,
+    peer_ptrs,
+    peer_row_start,
+    PEER_COUNT: tl.constexpr,
+    PEER_RANK: tl.constexpr,
 ):
     # Fuses expand_pools_to_tokens + append_tail_to_topk (identity path) into a
     # single kernel. Each program writes one (row, column-tile) of the output.
@@ -857,12 +861,20 @@ def _expand_pools_and_append_tail_kernel(
 
     result = tl.where(is_history, hist_out, tail_out)
     tl.store(out_ptr + row * out_s0 + cols, result, mask=mask)
+    for peer in tl.static_range(PEER_COUNT):
+        if peer != PEER_RANK:
+            dst = tl.load(peer_ptrs + peer).to(tl.pointer_type(tl.int32))
+            tl.store(dst + (peer_row_start + row) * out_s0 + cols, result, mask=mask)
 
 
 def expand_pools_and_append_tail(
     pool_ids: torch.Tensor,
     seq_lens: torch.Tensor,
     pool_size: int,
+    out: torch.Tensor | None = None,
+    peer_ptrs: torch.Tensor | None = None,
+    peer_rank: int = 0,
+    peer_row_start: int = 0,
 ) -> torch.Tensor:
     """Fuse ``expand_pools_to_tokens`` + ``append_tail_to_topk`` (identity path).
 
@@ -876,7 +888,12 @@ def expand_pools_and_append_tail(
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size
     out_cols = topk + pool_size - 1
-    out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
+    if out is None:
+        out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
+    else:
+        assert out.shape == (rows, out_cols)
+        assert out.dtype == torch.int32 and out.device == pool_ids.device
+        assert out.stride(1) == 1
     BLOCK_COLS = 128
     n_tiles = triton.cdiv(out_cols, BLOCK_COLS)
     _expand_pools_and_append_tail_kernel[(rows, n_tiles)](
@@ -889,5 +906,9 @@ def expand_pools_and_append_tail(
         BLOCK_COLS=BLOCK_COLS,
         pid_s0=pool_ids.stride(0),
         out_s0=out.stride(0),
+        peer_ptrs=peer_ptrs,
+        peer_row_start=peer_row_start,
+        PEER_COUNT=peer_ptrs.numel() if peer_ptrs is not None else 0,
+        PEER_RANK=peer_rank,
     )
     return out

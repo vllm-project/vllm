@@ -426,6 +426,9 @@ def sparse_attn_indexer_kpool(
         # per rank and exchange only the final token indices. KV gathers remain
         # unconditional because continuation query chunks reuse their cache.
         shard_sizes = getattr(prefill_metadata, "row_shard_sizes", None)
+        from vllm.model_executor.layers.tp_topk_publication import get_topk_publication
+
+        publication = get_topk_publication(topk_indices_buffer)
         shard_start = shard_stop = 0
         if shard_sizes is not None:
             assert not current_platform.is_rocm()
@@ -436,6 +439,8 @@ def sparse_attn_indexer_kpool(
             tp_rank = get_tensor_model_parallel_rank()
             shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
             shard_stop = shard_start + shard_sizes[tp_rank]
+            if publication is not None:
+                publication.begin()
 
         # Short sequences select every pool, so skip sparse scoring and fill
         # the top-k buffer with all causal token indices. The index-K cache was
@@ -594,12 +599,35 @@ def sparse_attn_indexer_kpool(
                 )
 
             if index_kpool > 1:
-                pool_ids = pool_topk.to(torch.int64)
+                pool_ids = (
+                    pool_topk
+                    if current_platform.is_cuda() and positions is not None
+                    else pool_topk.to(torch.int64)
+                )
                 if positions is not None:
                     # Fused expand-pools + append-tail into one Triton kernel
                     # (replaces ~25 elementwise ops). seq_len is token-granular
                     # (pos+1); the kernel derives pool_len internally.
                     q_seq = positions[row_start:row_end].to(torch.int32) + 1
+                    if current_platform.is_cuda():
+                        kpool_ops.expand_pools_and_append_tail(
+                            pool_ids,
+                            q_seq,
+                            index_kpool,
+                            out=topk_indices_buffer[
+                                row_start:row_end, : topk_tokens + index_kpool - 1
+                            ],
+                            peer_ptrs=(
+                                publication.peers
+                                if publication is not None and shard_sizes is not None
+                                else None
+                            ),
+                            peer_rank=publication.rank
+                            if publication is not None
+                            else 0,
+                            peer_row_start=row_start,
+                        )
+                        continue
                     expanded = kpool_ops.expand_pools_and_append_tail(
                         pool_ids, q_seq, index_kpool
                     )
@@ -610,7 +638,17 @@ def sparse_attn_indexer_kpool(
                     )
                 topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
 
-        if shard_sizes is not None:
+        if shard_sizes is not None and publication is not None:
+            if index_kpool > 1 and positions is not None and not short_prefill:
+                publication.finish()
+            else:
+                publication.publish(
+                    topk_indices_buffer,
+                    shard_start,
+                    shard_stop - shard_start,
+                    topk_tokens + (index_kpool - 1 if index_kpool > 1 else 0),
+                )
+        elif shard_sizes is not None:
             # Metadata token counts can include graph padding, unlike the shard.
             prefill_end = num_decode_tokens + sum(shard_sizes)
             # K-pool expansion appends the request's incomplete tail after the

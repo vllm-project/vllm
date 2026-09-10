@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
 )
+from vllm.model_executor.layers.tp_topk_publication import allocate_topk_buffer
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -598,7 +599,7 @@ class Glm5NextModel(nn.Module):
             buffer_width = (
                 (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
             ) * sparse_topk_block_n
-            topk_indices_buffer = torch.empty(
+            topk_indices_buffer = allocate_topk_buffer(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 buffer_width,
                 dtype=torch.int32,

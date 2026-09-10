@@ -455,6 +455,9 @@ def sparse_attn_indexer(
         # row_shard_sizes from replicated scheduler metadata, so every TP rank
         # agrees on whether the exchange below runs.
         shard_sizes = prefill_metadata.row_shard_sizes
+        from vllm.model_executor.layers.tp_topk_publication import get_topk_publication
+
+        publication = get_topk_publication(topk_indices_buffer)
         shard_start = shard_stop = 0
         if shard_sizes is not None:
             # TP ranks in one PCP lane share the same local query rows.
@@ -463,6 +466,8 @@ def sparse_attn_indexer(
             tp_rank = get_tensor_model_parallel_rank()
             shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
             shard_stop = shard_start + shard_sizes[tp_rank]
+            if publication is not None:
+                publication.begin()
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -552,7 +557,11 @@ def sparse_attn_indexer(
                 row_starts=cu_seqlen_ks,
             )
 
-        if shard_sizes is not None:
+        if shard_sizes is not None and publication is not None:
+            publication.publish(
+                topk_indices_buffer, shard_start, shard_stop - shard_start, topk_tokens
+            )
+        elif shard_sizes is not None:
             # Every row was scored and ranked end to end by one rank, so this is
             # a layout-preserving concatenation, not a top-k merge. all_gatherv
             # allocates its output, so the source may alias the destination.

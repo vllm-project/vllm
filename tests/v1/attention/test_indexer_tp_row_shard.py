@@ -9,6 +9,7 @@ group exchanges ``index_topk`` int32s per row instead of the logits.
 """
 
 import importlib
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,93 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
+
+
+def _direct_topk_worker(rank, port):
+    import torch.distributed as dist
+
+    from vllm.model_executor.layers import tp_topk_publication as publication
+
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=4)
+    # Two disjoint TP groups model TP2 x PCP2. Group creation is collective.
+    groups = [
+        dist.new_group(ranks=list(range(start, start + 2)), backend="nccl")
+        for start in (0, 2)
+    ]
+    group = SimpleNamespace(
+        device_group=groups[rank // 2], rank_in_group=rank % 2, world_size=2
+    )
+    publication.get_tp_group = lambda: group
+    os.environ["VLLM_TP_TOPK_DIRECT"] = "1"
+    buffer = publication.allocate_topk_buffer(
+        43, 2176, dtype=torch.int32, device=torch.device("cuda", rank)
+    )
+    publisher = publication.get_topk_publication(buffer)
+    assert publisher is not None
+    sizes = [11, 19]
+    start = 5 + sum(sizes[: rank % 2])
+    stop = start + sizes[rank % 2]
+    for epoch in range(8):
+        buffer.fill_(-1)
+        publisher.begin()
+        values = torch.arange(30 * 2051, device=buffer.device, dtype=torch.int32)
+        values = values.reshape(30, 2051) + (rank // 2) * 1_000_000 + epoch * 100_000
+        buffer[start:stop, :2051].copy_(values[start - 5 : stop - 5])
+        publisher.publish(buffer, start, stop - start, 2051)
+        torch.testing.assert_close(buffer[5:35, :2051], values)
+        assert torch.all(buffer[:5] == -1)
+        assert torch.all(buffer[35:] == -1)
+        assert torch.all(buffer[:, 2051:] == -1)
+    from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+        expand_pools_and_append_tail,
+    )
+
+    for epoch in range(3):
+        buffer.fill_(-1)
+        publisher.begin()
+        pools = torch.arange(30 * 512, device=buffer.device, dtype=torch.int32)
+        pools = (pools.reshape(30, 512) + epoch + (rank // 2) * 100) % 1000
+        pools[:, -3:] = -1
+        seq_lens = torch.arange(30, device=buffer.device, dtype=torch.int32) + 4096
+        expanded = expand_pools_and_append_tail(
+            pools[start - 5 : stop - 5],
+            seq_lens[start - 5 : stop - 5],
+            4,
+            out=buffer[start:stop, :2051],
+            peer_ptrs=publisher.peers,
+            peer_rank=publisher.rank,
+            peer_row_start=start,
+        )
+        assert expanded.data_ptr() == buffer[start:stop].data_ptr()
+        publisher.finish()
+        offsets = torch.arange(4, device=buffer.device)
+        history = torch.where(pools[..., None] >= 0, pools[..., None] * 4 + offsets, -1)
+        tail_offsets = torch.arange(3, device=buffer.device)
+        tail = torch.where(
+            tail_offsets < (seq_lens % 4)[:, None],
+            (seq_lens // 4)[:, None] * 4 + tail_offsets,
+            -1,
+        )
+        expected = torch.cat((history.flatten(1), tail), dim=1).int()
+        torch.testing.assert_close(buffer[5:35, :2051], expected)
+        assert torch.all(buffer[:, 2051:] == -1)
+    torch.accelerator.synchronize()
+    dist.barrier()
+    del publisher, buffer
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(torch.accelerator.device_count() < 4, reason="requires four GPUs")
+def test_direct_topk_publication_isolates_pcp_lanes():
+    """Uneven TP rows preserve tails/padding and never mix two PCP lanes."""
+    import torch.multiprocessing as mp
+
+    from vllm.utils.network_utils import get_open_port
+
+    mp.spawn(_direct_topk_worker, args=(get_open_port(),), nprocs=4, join=True)
+
 
 _TOPK = 8
 _NUM_KV = 64
@@ -205,14 +293,18 @@ def _run_rank(
         set_(deep_gemm, "fp8_fp4_mqa_logits", fake_mqa_logits)
         set_(torch.ops._C, "top_k_per_row_prefill", _ref_top_k_per_row_prefill)
 
-        def expand(pool_ids, seq_lens, pool_size):
+        def expand(pool_ids, seq_lens, pool_size, out=None, **kwargs):
             offsets = torch.arange(pool_size)
             tokens = pool_ids[..., None] * pool_size + offsets
             tokens = torch.where(pool_ids[..., None] >= 0, tokens, -1)
             tail_offsets = torch.arange(pool_size - 1)
             tail = (seq_lens // pool_size)[:, None] * pool_size + tail_offsets
             tail = torch.where(tail_offsets < (seq_lens % pool_size)[:, None], tail, -1)
-            return torch.cat((tokens.flatten(1), tail), dim=1).int()
+            result = torch.cat((tokens.flatten(1), tail), dim=1).int()
+            if out is not None:
+                out.copy_(result)
+                return out
+            return result
 
         set_(kpool_compress, "expand_pools_and_append_tail", expand)
         positions = torch.zeros(num_tokens + padded_rows, dtype=torch.int64)
