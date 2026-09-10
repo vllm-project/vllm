@@ -157,16 +157,13 @@ def test_triton_kernel_decorator_returns_launcher(
     keys = launch.get_warmup_keys()
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
     launch.compile(keys[0])
+    warmup_first = dict(keys[0].inputs)["first"]
     assert kernel.warmup_calls == [
         {
             "grid": (1,),
-            "FIRST_PTR": TritonWarmupTensor(
-                torch.float32, shape=(2, 3), strides=(5, 1)
-            ),
+            "FIRST_PTR": warmup_first,
             "FIRST_STRIDE0": 5,
-            "aliased_ptr": TritonWarmupTensor(
-                torch.float32, shape=(2, 3), strides=(5, 1)
-            ),
+            "aliased_ptr": warmup_first,
             "aliased_stride_0": 5,
             "SECOND": 1,
             "CONST": 7,
@@ -200,7 +197,8 @@ def test_triton_kernel_decorator_compacts_large_ranges(
     dispatched: list[int] = []
 
     def warmup_inputs() -> dict[str, Any]:
-        tokens: Any = WarmupIntRange(1, 8193)
+        max_tokens = 8192
+        tokens: Any = WarmupIntRange(1, max_tokens + 1)
         return dict(first="warmup", second=tokens)
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
@@ -219,14 +217,14 @@ def test_triton_kernel_decorator_compacts_large_ranges(
     assert {7 if dict(key.inputs)["second"] <= 17 else 8 for key in keys} == {7, 8}
 
 
-def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
+def test_triton_kernel_dispatch_uses_cuda_metadata_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = _FakeTritonKernel()
 
     def warmup_inputs() -> dict[str, Any]:
         return dict(
-            first=TritonWarmupTensor(torch.float32, shape=(2, 3)),
+            first=TritonWarmupTensor(torch.float32, aligned=False, shape=(2, 3)),
             second=1,
         )
 
@@ -234,6 +232,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
     def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
         assert isinstance(first, torch.Tensor)
         assert first.is_cuda
+        assert first.data_ptr() == 1
         assert first[0].is_contiguous()
         return (first.shape[0],), dict(CONST=first[0].numel())
 

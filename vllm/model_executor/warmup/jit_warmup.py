@@ -713,7 +713,8 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         globals_ = getattr(cases_fn, "__func__", cases_fn).__globals__
 
         domains: list[tuple[str, tuple[Any, ...]]] = []
-        local_exprs: list[tuple[str, ast.AST]] = []
+        dynamic_names: set[str] = set()
+        dynamic_local_exprs: list[tuple[str, ast.AST]] = []
         predicates: list[ast.AST] = []
         return_expr: ast.AST | None = None
         for statement in function_def.body:
@@ -734,8 +735,20 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 if call_name in {"WarmupIntRange", "WarmupChoices"}:
                     value = _eval_dispatch_expr(value_expr, static_values, globals_)
                     domains.append((name, _value_expander(value)))
+                    dynamic_names.add(name)
                 else:
-                    local_exprs.append((name, value_expr))
+                    referenced_names = {
+                        node.id
+                        for node in ast.walk(value_expr)
+                        if isinstance(node, ast.Name)
+                    }
+                    if referenced_names & dynamic_names:
+                        dynamic_local_exprs.append((name, value_expr))
+                        dynamic_names.add(name)
+                    else:
+                        static_values[name] = _eval_dispatch_expr(
+                            value_expr, static_values, globals_
+                        )
                 continue
             if (
                 isinstance(statement, ast.Expr)
@@ -778,20 +791,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 return ast.copy_location(ast.Name(id=name), node)
 
         return_expr = cast(ast.Call, _InlineDomainRewriter().visit(return_expr))
-
         domain_names = tuple(name for name, _ in domains)
-        dynamic_names = set(domain_names)
-        dynamic_local_exprs: list[tuple[str, ast.AST]] = []
-        for name, expr in local_exprs:
-            referenced_names = {
-                node.id for node in ast.walk(expr) if isinstance(node, ast.Name)
-            }
-            if referenced_names & dynamic_names:
-                dynamic_local_exprs.append((name, expr))
-                dynamic_names.add(name)
-            else:
-                static_values[name] = _eval_dispatch_expr(expr, static_values, globals_)
-
         domain_values = tuple(values for _, values in domains)
         for values in itertools.product(*domain_values):
             evaluated = {**static_values, **dict(zip(domain_names, values))}

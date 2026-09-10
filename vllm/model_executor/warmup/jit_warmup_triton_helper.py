@@ -4,10 +4,11 @@ import ast
 import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache, cached_property, update_wrapper, wraps
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
+
+import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
@@ -195,6 +196,45 @@ class TritonWarmupTensor:
         return result if dim is None else result[dim]
 
 
+class _TritonWarmupDispatchTensor(torch.Tensor):
+    @staticmethod
+    def __new__(cls, descriptor: TritonWarmupTensor) -> "_TritonWarmupDispatchTensor":
+        return torch.Tensor._make_wrapper_subclass(
+            cls,
+            descriptor.shape,
+            strides=cast(tuple[int, ...], descriptor.stride()),
+            dtype=descriptor.dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+
+    def __init__(self, descriptor: TritonWarmupTensor) -> None:
+        self.descriptor = descriptor
+
+    @classmethod
+    def __torch_dispatch__(
+        cls, func: Any, types: Any, args: Any = (), kwargs: Any = None
+    ) -> Any:
+        raise TypeError(f"Warmup dispatch may not execute tensor operation {func}")
+
+    def __getitem__(self, index: Any) -> "_TritonWarmupDispatchTensor":
+        if not isinstance(index, int):
+            raise TypeError("Warmup dispatch supports integer tensor indexing only")
+        return type(self)(
+            replace(
+                self.descriptor,
+                shape=tuple(self.shape[1:]),
+                strides=tuple(self.stride()[1:]),
+            )
+        )
+
+    def data_ptr(self) -> int:
+        return self.descriptor.data_ptr()
+
+    def ptr_range(self) -> int:
+        return 0
+
+
 class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     """Triton owner whose runtime launch specification is reused for warmup."""
 
@@ -259,9 +299,6 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         if self._warming:
             if self._run_autotune:
                 return self.kernel[grid](**kwargs)
-            kwargs = {
-                name: _triton_metadata_arg(value) for name, value in kwargs.items()
-            }
             if (
                 self._warming_compile_key is not None
                 and "launch_pdl" in kwargs
@@ -502,47 +539,27 @@ def _is_autotuned(kernel: Any) -> bool:
     return False
 
 
-def _triton_metadata_arg(value: Any) -> Any:
-    from torch._subclasses.fake_tensor import FakeTensor
-
-    if not isinstance(value, FakeTensor):
-        return value
-    return TritonWarmupTensor(
-        value.dtype,
-        aligned=getattr(value, "_vllm_warmup_aligned", True),
-        shape=tuple(value.shape),
-        strides=tuple(value.stride()),
-    )
-
-
 def _materialize_warmup_case(
     case: Mapping[str, Any],
     *,
     real: bool,
 ) -> dict[str, Any]:
-    import torch
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    mode = nullcontext() if real else FakeTensorMode()
-
     def materialize(value: Any) -> Any:
         if not isinstance(value, TritonWarmupTensor):
             return value
+        if not real:
+            return _TritonWarmupDispatchTensor(value)
         strides = cast(tuple[int, ...], value.stride())
-        with mode:
-            tensor = torch.empty_strided(
-                value.shape,
-                strides,
-                dtype=value.dtype,
-                device="cuda",
-            )
-        if real:
-            if callable(value.init):
-                value.init(tensor)
-            else:
-                tensor.fill_(value.init)
+        tensor = torch.empty_strided(
+            value.shape,
+            strides,
+            dtype=value.dtype,
+            device="cuda",
+        )
+        if callable(value.init):
+            value.init(tensor)
         else:
-            tensor._vllm_warmup_aligned = value.aligned
+            tensor.fill_(value.init)
         return tensor
 
     return {name: materialize(value) for name, value in case.items()}
@@ -631,9 +648,6 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                     tuple(inputs.values()),
                     dict(launch_kwargs),
                 )
-            prepared = {
-                name: _triton_metadata_arg(value) for name, value in prepared.items()
-            }
             jit_keys = frozenset(_triton_compile_keys(self.kernel, prepared))
             if jit_keys:
                 keys[TritonCompileKey(jit_keys, tuple(inputs.items()))] = None
