@@ -612,7 +612,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 o_padded,
             )
         else:
-            # Fall back to sequential execution.
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
 
         o = o_padded[:, : self.n_local_heads, :]
