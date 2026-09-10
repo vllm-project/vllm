@@ -227,7 +227,8 @@ class TieringOffloadingManager(OffloadingManager):
         self._req_state: dict[str, RequestState] = {}
 
         # Preserve the original tier for this request's cache-hit metrics,
-        # even after its KV blocks are promoted into host memory.
+        # even after its KV blocks are promoted into host memory
+        # (otherwise a disk or P2P hit would be mislabeled as a host hit).
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
