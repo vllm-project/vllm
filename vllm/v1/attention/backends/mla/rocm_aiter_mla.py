@@ -535,6 +535,22 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # whitelist sizes unlisted drafters for qlen=1, which closes the
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
+        self._persistent_metadata_max_qo_len = self._mtp_decode_qlen
+        speculative_config = vllm_config.speculative_config
+        if (
+            self._supports_native_dcp_verify
+            and speculative_config is not None
+            and speculative_config.method == "dspark"
+            and speculative_config.num_speculative_tokens is not None
+        ):
+            # Parallel drafting needs a wider scheduler reorder threshold, but
+            # the draft pass has K queries and target verification has at most
+            # the current target token plus K draft tokens.
+            # Sizing AITER metadata from 1 + 2 * num_speculative_tokens makes its
+            # fp32 partial-output workspace quadratic in that inflated qlen.
+            self._persistent_metadata_max_qo_len = (
+                1 + speculative_config.num_speculative_tokens
+            )
 
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
@@ -607,7 +623,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             (reduce_partial_map_size, reduce_partial_map_type),
         ) = get_mla_metadata_info_v1(
             max_num_reqs,
-            self._mtp_decode_qlen,
+            self._persistent_metadata_max_qo_len,
             self._num_attention_heads,
             q_dtype,
             kv_dtype,
@@ -1095,7 +1111,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             causal,
         )
         use_native_dcp_verify = (
-            self._supports_native_dcp_verify and max_qo_len > 1 and causal
+            self._supports_native_dcp_verify
+            and max_qo_len > 1
+            and causal
+            and max_qo_len <= self._persistent_metadata_max_qo_len
         )
         use_segmented_dcp_verify = (
             self._supports_segmented_dcp_verify
@@ -1214,7 +1233,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
             )
             and max_qo_len >= 1
-            and max_qo_len <= self._mtp_decode_qlen
+            and max_qo_len <= self._persistent_metadata_max_qo_len
         )
         if (
             not causal

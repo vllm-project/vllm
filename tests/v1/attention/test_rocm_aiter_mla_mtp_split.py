@@ -119,6 +119,7 @@ def _builder(
             )
         ),
         _mtp_decode_qlen=mtp_decode_qlen,
+        _persistent_metadata_max_qo_len=mtp_decode_qlen,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
@@ -286,8 +287,8 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
     assert metadata.dcp_verify is not None
 
 
-def test_native_dcp_verify_uses_global_indptr_and_regular_page_table(monkeypatch):
-    qlen = 4
+@pytest.mark.parametrize("qlen", [4, 5])
+def test_native_dcp_verify_uses_global_indptr_and_regular_page_table(monkeypatch, qlen):
     builder = _builder(
         mtp_decode_qlen=qlen,
         dcp_world_size=2,
@@ -692,6 +693,7 @@ def test_native_dcp_verify_matches_causal_attention():
     "spec_method, parallel_drafting",
     [
         ("deepseek_mtp", False),
+        ("dspark", True),
         # A drafter that is not one of the historically recognized MTP methods,
         # and a parallel one, so the threshold is 1 + 2 * num_spec rather than
         # 1 + num_spec. Sizing the metadata off a method name instead leaves
@@ -759,6 +761,9 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         "__init__",
         init_common_builder,
     )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_native_dcp_verify_supported", lambda *args: True
+    )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
 
     config = SimpleNamespace(
@@ -769,7 +774,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=8,
             cp_kv_cache_interleave_size=1,
         ),
         model_config=SimpleNamespace(
@@ -796,7 +801,11 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     assert info_calls == [
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
-            "max_qo_len": builder.reorder_batch_threshold,
+            "max_qo_len": (
+                1 + config.speculative_config.num_speculative_tokens
+                if spec_method == "dspark"
+                else builder.reorder_batch_threshold
+            ),
             "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
