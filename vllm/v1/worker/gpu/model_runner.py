@@ -1390,6 +1390,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if adaptive_verification is not None
                 else None
             ),
+            mamba_prefix_producer_ids=scheduler_output.mamba_prefix_producer_ids,
         )
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,

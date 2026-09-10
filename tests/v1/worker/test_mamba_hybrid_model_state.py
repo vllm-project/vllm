@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
+@pytest.mark.skip_global_cleanup
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
@@ -56,6 +57,62 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+
+
+@pytest.mark.skip_global_cleanup
+def test_prepare_attn_forwards_mamba_checkpoint_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_MRV2_GROUPED_GDN", "1")
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state.max_model_len = 8192
+    state._align_mode = False
+    state.recoverssm = None
+    state.device = torch.device("cpu")
+    state._mamba_checkpoint_positions = {"req_0": 48}
+    state._mamba_checkpoint_source_block_ids = {"req_1": 10}
+
+    input_batch = SimpleNamespace(
+        req_ids=["req_0", "req_1"],
+        num_reqs=2,
+        num_tokens=2,
+        num_reqs_after_padding=2,
+        num_tokens_after_padding=2,
+        idx_mapping_np=torch.tensor([0, 1], dtype=torch.int32).numpy(),
+        query_start_loc_np=torch.tensor([0, 1, 2], dtype=torch.int32).numpy(),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_scheduled_tokens=torch.tensor([1, 1], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([48, 16], dtype=torch.int32),
+        seq_lens=torch.tensor([48, 16], dtype=torch.int32),
+        is_prefilling_np=torch.tensor([True, True]).numpy(),
+        dcp_local_seq_lens=None,
+        positions=torch.tensor([0, 1], dtype=torch.int64),
+        prompt_lens=torch.tensor([48, 16], dtype=torch.int32),
+        mamba_prefix_producer_ids={"req_1": "req_0"},
+    )
+    captured = {}
+
+    def fake_build_attn_metadata(**kwargs):
+        captured.update(kwargs)
+        return {"layer": object()}
+
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", fake_build_attn_metadata)
+
+    state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+
+    model_specific = captured["model_specific_attn_metadata"]
+    extra_kwargs = model_specific.get_extra_common_attn_kwargs(0, 2)
+    assert extra_kwargs["mamba_prefix_producer_indices"].tolist() == [-1, 0]
+    assert extra_kwargs["mamba_checkpoint_positions"].tolist() == [48, -1]
+    assert extra_kwargs["mamba_checkpoint_source_block_ids"].tolist() == [-1, 10]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

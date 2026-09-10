@@ -452,6 +452,15 @@ class CommonAttentionMetadata:
     at the current decode run's last full-state write. write_pos counts from
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
+    mamba_prefix_producer_indices: torch.Tensor | None = None
+    """(batch_size,) request indices for same-step Mamba producers."""
+
+    mamba_checkpoint_positions: torch.Tensor | None = None
+    """(batch_size,) processed prompt checkpoint positions."""
+
+    mamba_checkpoint_source_block_ids: torch.Tensor | None = None
+    """(batch_size,) physical Mamba state rows for checkpoint consumers."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None

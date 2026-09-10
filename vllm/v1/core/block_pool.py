@@ -183,6 +183,7 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        self.unready_block_hashes: set[BlockHashWithGroupId] = set()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -214,6 +215,8 @@ class BlockPool:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, group_id
             )
+            if block_hash_with_group_id in self.unready_block_hashes:
+                return None
             block = self.cached_block_hash_to_block.get_one_block(
                 block_hash_with_group_id
             )
@@ -221,6 +224,15 @@ class BlockPool:
                 return None
             cached_blocks.append(block)
         return cached_blocks
+
+    def mark_block_hash_unready(self, block_hash: BlockHashWithGroupId) -> None:
+        self.unready_block_hashes.add(block_hash)
+
+    def is_block_hash_unready(self, block_hash: BlockHashWithGroupId) -> bool:
+        return block_hash in self.unready_block_hashes
+
+    def mark_block_hash_ready(self, block_hash: BlockHashWithGroupId) -> None:
+        self.unready_block_hashes.discard(block_hash)
 
     def cache_full_blocks(
         self,
@@ -452,12 +464,13 @@ class BlockPool:
         block_size: int,
         replace_existing_hashes: bool = False,
     ) -> BlockHashWithGroupId | None:
-        """Register a partial prefix-cache entry for an existing block.
+        """Register a prefix-cache entry for a boundary in an existing block.
 
-        Prefix-cache keys normally identify full cache blocks. A partial entry
-        makes an existing cache block reachable from a fine-grained prefix
-        boundary inside that block without allocating or copying a new
-        ``KVCacheBlock``.
+        Prefix-cache keys normally identify full cache blocks. An entry can also
+        make an existing cache block reachable from a fine-grained prefix
+        boundary inside that block, without allocating or copying a new
+        ``KVCacheBlock``. Mamba checkpoints may use the same operation at a
+        physical block boundary.
 
         The partial entry is lookup metadata owned by ``block``. If ``block``
         has no primary hash, the key becomes its primary hash. If the block
@@ -490,6 +503,7 @@ class BlockPool:
             return None
 
         assert block_size % self.hash_block_size == 0
+        assert num_tokens % self.hash_block_size == 0
         assert replace_existing_hashes or (
             block_size > self.hash_block_size and num_tokens % block_size != 0
         )
@@ -592,6 +606,7 @@ class BlockPool:
 
         removed_hashes: list[BlockHashWithGroupId] = []
         for block_hash in block_hashes:
+            self.unready_block_hashes.discard(block_hash)
             if (
                 self.cached_block_hash_to_block.pop(block_hash, block.block_id)
                 is not None
@@ -727,10 +742,6 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def is_block_writable(self, block: KVCacheBlock) -> bool:
-        """Return whether a block can be mutated by its sole owner."""
-        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
-
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
@@ -797,6 +808,7 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self.unready_block_hashes.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

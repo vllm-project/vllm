@@ -710,6 +710,19 @@ class KVCacheManager:
         """Get the blocks of a request."""
         return self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
 
+    def get_prefix_blocks(self, request_id: str, prefix_tokens: int) -> KVCacheBlocks:
+        """Get blocks covering a request prefix."""
+        blocks = self.coordinator.get_blocks(request_id)
+        prefix_blocks = tuple(
+            list(group_blocks[: cdiv(prefix_tokens, manager.block_size)])
+            for group_blocks, manager in zip(
+                blocks,
+                self.coordinator.single_type_managers,
+                strict=True,
+            )
+        )
+        return self.create_kv_cache_blocks(prefix_blocks)
+
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
@@ -890,6 +903,13 @@ class KVCacheManager:
                     (group_id, block.block_id, boundary_tokens)
                 )
         return offloads
+
+    def mark_checkpoint_ready(self, request_id: str) -> None:
+        """Make a checkpoint cache entry visible after its forward completes."""
+        self.coordinator.mark_checkpoint_ready(request_id)
+
+    def has_unready_checkpoint(self, request: Request) -> bool:
+        return self.coordinator.has_unready_checkpoint(request)
 
     def finalize_partial_tail_offloads(
         self, request: Request

@@ -66,7 +66,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -119,7 +118,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -746,9 +744,6 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
-        self.cp_kv_cache_interleave_size = (
-            self.parallel_config.cp_kv_cache_interleave_size
-        )
         # Capture warmup providers registered by the initial placeholder InputBatch
         with self.jit_warmup_registry.activate():
             self.input_batch = InputBatch(
@@ -985,7 +980,6 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
-        self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -1038,25 +1032,19 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
-    def _get_mamba_state_copy_funcs(self) -> MambaStateCopyFuncsByType:
-        if self._mamba_state_copy_funcs is None:
-            mamba_groups = mamba_utils.get_mamba_groups(self.kv_cache_config)
-            mamba_types = {spec.mamba_type for spec in mamba_groups}
-            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
-            mamba_utils.validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
-            self._mamba_state_copy_funcs = copy_funcs
-        return self._mamba_state_copy_funcs
-
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # Only reachable on the ``mamba_cache_mode == "align"`` path.
         # The postprocess sub-object is additionally gated on spec
         # decode + hybrid model.
         assert self.cache_config.mamba_cache_mode == "align"
         if self._mamba_bufs is None:
+            mamba_groups = mamba_utils.get_mamba_groups(self.kv_cache_config)
+            mamba_types = {spec.mamba_type for spec in mamba_groups}
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=self.kv_cache_config,
-                copy_funcs=self._get_mamba_state_copy_funcs(),
+                copy_funcs=copy_funcs,
                 make_buffer=self._make_buffer,
                 device=self.device,
                 with_postprocess_align=(
@@ -1299,6 +1287,11 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                mamba_checkpoint_position=new_req_data.mamba_checkpoint_position,
+                mamba_checkpoint_source_block_ids=(
+                    new_req_data.mamba_checkpoint_source_block_ids
+                ),
+                mamba_prefix_producer_id=new_req_data.mamba_prefix_producer_id,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
@@ -1590,7 +1583,7 @@ class GPUModelRunner(
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self._get_mamba_state_copy_funcs(),
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
             )
 
             assert self.num_accepted_tokens_event is not None
@@ -1635,6 +1628,11 @@ class GPUModelRunner(
         self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
+        req_state.mamba_checkpoint_position = new_req_data.mamba_checkpoint_position
+        req_state.mamba_checkpoint_source_block_ids = (
+            new_req_data.mamba_checkpoint_source_block_ids
+        )
+        req_state.mamba_prefix_producer_id = new_req_data.mamba_prefix_producer_id
         req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -2280,6 +2278,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
+        mamba_prefix_producer_ids: dict[str, str] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         Returns:
@@ -2426,6 +2425,38 @@ class GPUModelRunner(
         if self.model_config.rswa_window is not None:
             rswa_prefix_lens = num_prompt_tokens_cpu
 
+        mamba_prefix_producer_indices = None
+        mamba_checkpoint_positions = None
+        mamba_checkpoint_source_block_ids = None
+        if mamba_prefix_producer_ids or any(
+            self.requests[req_id].mamba_checkpoint_position is not None
+            for req_id in self.input_batch.req_ids[:num_reqs]
+        ):
+            producer_indices = np.full(num_reqs_padded, -1, dtype=np.int32)
+            checkpoint_positions = np.full(num_reqs_padded, -1, dtype=np.int32)
+            source_block_ids = np.full(num_reqs_padded, -1, dtype=np.int32)
+            req_indices_by_id = self.input_batch.req_id_to_index
+            for batch_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                request = self.requests[req_id]
+                if request.mamba_checkpoint_position is not None:
+                    checkpoint_positions[batch_idx] = request.mamba_checkpoint_position
+                producer_id = (mamba_prefix_producer_ids or {}).get(req_id)
+                if producer_id is not None:
+                    producer_indices[batch_idx] = req_indices_by_id[producer_id]
+                if request.mamba_checkpoint_source_block_ids:
+                    source_block_ids[batch_idx] = (
+                        request.mamba_checkpoint_source_block_ids[0]
+                    )
+            mamba_prefix_producer_indices = torch.from_numpy(producer_indices).to(
+                self.device
+            )
+            mamba_checkpoint_positions = torch.from_numpy(checkpoint_positions).to(
+                self.device
+            )
+            mamba_checkpoint_source_block_ids = torch.from_numpy(source_block_ids).to(
+                self.device
+            )
+
         replayssm_decode_base_cpu = None
         if self.cache_config.use_replayssm:
             replayssm_decode_base_cpu = (
@@ -2451,6 +2482,9 @@ class GPUModelRunner(
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
+            mamba_prefix_producer_indices=mamba_prefix_producer_indices,
+            mamba_checkpoint_positions=mamba_checkpoint_positions,
+            mamba_checkpoint_source_block_ids=mamba_checkpoint_source_block_ids,
         )
 
         if self.dcp_world_size > 1:
@@ -4332,7 +4366,7 @@ class GPUModelRunner(
                     self.input_batch,
                     self.requests,
                     self.compilation_config.static_forward_context,
-                    self._get_mamba_state_copy_funcs(),
+                    self.model.get_mamba_state_copy_func(),
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
                 )
@@ -4388,6 +4422,9 @@ class GPUModelRunner(
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
+                    mamba_prefix_producer_ids=(
+                        scheduler_output.mamba_prefix_producer_ids
+                    ),
                 )
             )
 
@@ -5309,11 +5346,9 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
-                # Capture warmup providers selected while constructing the model.
-                with self.jit_warmup_registry.activate():
-                    self.model = model_loader.load_model(
-                        vllm_config=self.vllm_config, model_config=self.model_config
-                    )
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config, model_config=self.model_config
+                )
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
@@ -6529,7 +6564,29 @@ class GPUModelRunner(
 
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
 
-    _freeze_gc = staticmethod(freeze_gc_for_cudagraph_capture)
+    @staticmethod
+    @contextmanager
+    def _freeze_gc():
+        gc_was_enabled = gc.isenabled()
+        gc.collect()
+        should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+        if should_freeze:
+            gc.freeze()
+            # A Triton kernel finalized during stream capture unloads its
+            # module and invalidates the captured graph.
+            gc.disable()
+        try:
+            yield
+        finally:
+            if should_freeze:
+                try:
+                    gc.unfreeze()
+                    gc.collect()
+                finally:
+                    if gc_was_enabled:
+                        gc.enable()
+                    else:
+                        gc.disable()
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
@@ -7257,16 +7314,11 @@ class GPUModelRunner(
             or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
-            or self.cp_kv_cache_interleave_size
-            != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
-            self.cp_kv_cache_interleave_size = (
-                self.parallel_config.cp_kv_cache_interleave_size
-            )
             # Capture warmup providers registered after final KV-cache geometry is known
             with self.jit_warmup_registry.activate():
                 self.input_batch = InputBatch(
@@ -7393,7 +7445,6 @@ class GPUModelRunner(
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
-        self._mamba_state_copy_funcs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
@@ -7417,13 +7468,11 @@ class GPUModelRunner(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-        # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
-            kv_caches = self.initialize_kv_cache_tensors(
-                kv_cache_config,
-                kernel_block_sizes,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-            )
+        kv_caches = self.initialize_kv_cache_tensors(
+            kv_cache_config,
+            kernel_block_sizes,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
 
         if (
             self.speculative_config

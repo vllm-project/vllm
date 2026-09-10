@@ -798,14 +798,15 @@ class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfi
     pass
 
 
-class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+class Qwen3_5ForConditionalGenerationConfig(MambaModelConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Update mamba_ssm_cache_dtype for Qwen3.5 models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config's
         mamba_ssm_dtype field. Warn if the user explicitly overrides it to a
         different value.
         """
+        super().verify_and_update_config(vllm_config)
         cache_config = vllm_config.cache_config
         hf_text_config = vllm_config.model_config.hf_text_config
         mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
@@ -826,9 +827,9 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
 
 
 class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        super().verify_and_update_config(vllm_config)
 
         # Text-only Qwen3.5 models use one-dimensional positions. Remove the
         # M-RoPE fields inherited from the multimodal configuration.

@@ -35,8 +35,10 @@ def test_request_copies_session_id_from_engine_core_request():
         cache_salt=None,
         data_parallel_rank=None,
         session_id="session-1",
+        mamba_checkpoint_position=2,
     )
 
     request = Request.from_engine_core_request(engine_request, block_hasher=None)
 
     assert request.session_id == "session-1"
+    assert request.mamba_checkpoint_position == 2
