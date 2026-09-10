@@ -67,6 +67,7 @@ def main():
     parser.add_argument("--tp", type=int, default=2)
     parser.add_argument("--pcp", type=int, default=2)
     parser.add_argument("--input", type=int, default=65536)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.92)
     args = parser.parse_args()
     llm = LLM(
         model=args.model,
@@ -77,6 +78,7 @@ def main():
         decode_context_parallel_size=1,
         enable_expert_parallel=True,
         kv_cache_dtype="fp8",
+        gpu_memory_utilization=args.gpu_memory_utilization,
         enable_prefix_caching=False,
         enable_chunked_prefill=True,
         max_model_len=args.input + 32,

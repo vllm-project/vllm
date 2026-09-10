@@ -22,8 +22,8 @@ def worker(rank, port, output):
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.model_executor.layers import tp_topk_publication as pub
     from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
         balanced_prefill_row_shard,
-        split_indexer_prefill_chunks,
     )
 
     cpu_groups, gpu_groups = [], []
@@ -59,7 +59,10 @@ def worker(rank, port, output):
         ).reshape(-1, width)
         # Use actual production query chunk planner; bound synthetic logits
         # at 512 MiB and regenerate outside timed intervals.
-        specs = split_indexer_prefill_chunks(seq, qlens, 2_000_000, 512 * 1024**2)
+        builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+        specs = builder._split_indexer_prefill_chunks(
+            seq, qlens, 2_000_000, 512 * 1024**2
+        )
         native_chunks = []
         for req, query in specs:
             assert req.stop - req.start == 1

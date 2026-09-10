@@ -5,6 +5,13 @@ Implementation measured: `a2a11409a` (PCP enablement) and `4f5a0a183` (direct
 publication), based on #54951 head `b466281a9`. The packaging commit changes
 only scripts/documentation/evidence, not the implementation.
 
+The subsequent main sync retains upstream's overridable metadata-builder
+chunk planner; component_profile.py now calls that method. Timings below
+were collected before that sync and are not post-merge performance results.
+Post-sync checks: 96 row-sharding tests, six upstream chunk-planner tests,
+and the four-GPU direct-publication/graph-replay test pass. Scoped lint and
+mypy checks pass. The engine benchmark suite was not rerun for conflict resolution.
+
 ## Engine comparison
 
 GLM-5.2 NVFP4, four GB200 GPUs, TP2PCP2 DCP1 EP4, FP8 KV, V2 eager runner,
@@ -16,13 +23,17 @@ Torch 2.13.0+cu130. Synthetic repeated-text prompts, not a quality evaluation.
 | --- | ---: | ---: | ---: |
 | 65536 | 1.900839 s | 1.835469 s | 1.833061 s |
 | 131072 | 4.094189 s | 3.814938 s | 3.813031 s |
+| 524288 | 26.609500 s | 20.703629 s | 20.675670 s |
 
 Each arm has one excluded warmup and one measured request in the same engine,
 with identical symmetric-buffer allocation. Baseline disables row sharding;
 the other two arms differ in publication. Exact generated tokens match.
 Every worker confirms activation. The 128K request has two prefill steps.
-Sharding's directional TTFT improvement is 3.44%/6.82%. Direct's additional
-0.13%/0.05% does not establish an engine speedup.
+Sharding's directional TTFT improvement is 3.44%/6.82%/22.19%. Direct's additional
+0.13%/0.05%/0.135% does not establish an engine speedup. The 512K run uses
+memory utilization 0.96 equally in all arms (versus 0.92 at 64K/128K), giving
+595547-token KV capacity. It exercises eight scheduled prefill steps; outputs
+match and no preemption or measured-phase JIT warning was observed.
 
 The callback consistently selects the existing AllReduce+RMSNorm fallback
 because this host rejects FlashInfer multicast workspace initialization.
@@ -39,6 +50,7 @@ benchmarks/pcp_tp_topk/engine_bench.py --model /path/to/GLM-5.2-NVFP4 \
 ```
 
 Repeat with `--input 131072`. Raw results are in `results/`.
+For 512K use `--input 524288 --gpu-memory-utilization 0.96`.
 
 ## Component comparison
 

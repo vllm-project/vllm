@@ -60,6 +60,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     FP8_SCALE_SENTINEL,
@@ -106,6 +107,11 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+# ``FP8_PB_WO`` is ModelOpt's canonical 2D block-FP8 name. Early composed
+# Qwen3.8-Flash-Next checkpoints used ``FP8_BLOCK_SCALES`` for the same tensor
+# layout, so retain it as a checkpoint-compatibility alias.
+_BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
 
 # Single source of truth for the ModelOpt linear algos.
 #
@@ -1491,11 +1497,28 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
 
+        block_sizes = {
+            int(layer_info.get("group_size", 128))
+            for layer_info in quantized_layers.values()
+            if layer_info.get("quant_algo", "").upper() in _BLOCK_FP8_MOE_ALGOS
+        }
+        if len(block_sizes) > 1:
+            raise ValueError(
+                "MIXED_PRECISION currently requires all block-FP8 MoE layers "
+                f"to use one group_size, got {sorted(block_sizes)}."
+            )
+        block_size = next(iter(block_sizes), 128)
+        self.fp8_block_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[block_size, block_size],
+        )
+
     def has_blocked_weights(self) -> bool:
         # Same gate as ModelOptFp8Config.has_blocked_weights, resolved per
         # layer: "+quant_fp8" must be on as soon as any layer is block-scaled.
         return any(
-            info.get("quant_algo", "").upper() == "FP8_PB_WO"
+            info.get("quant_algo", "").upper() in _BLOCK_FP8_MOE_ALGOS
             for info in self.quantized_layers.values()
         )
 
@@ -1730,6 +1753,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return build_linear_method(getattr(self, subcfg_attr), quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
+            if quant_algo in _BLOCK_FP8_MOE_ALGOS:
+                return Fp8MoEMethod(self.fp8_block_config, layer)
             if quant_algo == "FP8":
                 return ModelOptFp8MoEMethod(
                     quant_config=self.fp8_config,
@@ -2433,6 +2458,30 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.process(layer, ACT)
         maybe_fuse_global_scales(layer)
         self.fmt.post_process(layer)
+        layer.is_w4a16_nvfp4 = (
+            self.spec.weight == kNvfp4Static and self.spec.activation is None
+        )
+        if getattr(layer, "_retain_weight_for_gather", False):
+            if not layer.is_w4a16_nvfp4:
+                raise NotImplementedError(
+                    "Gathered projection is only supported for ModelOpt W4A16 "
+                    "NVFP4 weights."
+                )
+            assert self.ctx.group_size is not None
+            layer.register_buffer(
+                "_nvfp4_weight_for_gather", layer.weight.detach(), persistent=False
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_scale_for_gather",
+                layer.weight_scale.detach(),
+                persistent=False,
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_global_scale_for_gather",
+                layer.weight_global_scale.detach(),
+                persistent=False,
+            )
+            layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):
