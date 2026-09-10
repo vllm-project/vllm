@@ -161,8 +161,28 @@ class CustomAllreduce {
       if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
-      CUDACHECK(cudaIpcGetMemHandle(
-          (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
+      // Not CUDACHECK: that macro calls exit(EXIT_FAILURE), which kills the
+      // worker with only "Failed: Cuda error custom_all_reduce.cuh:<line>
+      // 'invalid argument'" and no Python traceback. cudaIpcGetMemHandle
+      // rejects any pointer not backed by a single cudaMalloc allocation --
+      // most often because PyTorch's expandable_segments allocator placed this
+      // graph buffer in a CUDA VMM range. Throw so the failure surfaces with
+      // an actionable message (see #42609, #49101, #56180).
+      cudaError_t ipc_err = cudaIpcGetMemHandle(
+          (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr);
+      if (ipc_err != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "custom allreduce failed to get an IPC handle for a CUDA "
+                "graph buffer: ") +
+            cudaGetErrorString(ipc_err) +
+            ". This usually means the buffer is not backed by a single "
+            "cudaMalloc allocation, e.g. because PyTorch's "
+            "expandable_segments allocator placed it in a CUDA VMM range. "
+            "Unset expandable_segments:True in PYTORCH_ALLOC_CONF / "
+            "PYTORCH_CUDA_ALLOC_CONF, or run with "
+            "--disable-custom-all-reduce.");
+      }
       offsets[i] = ((char*)ptr) - ((char*)base_ptr);
     }
     return std::make_pair(handles, offsets);
