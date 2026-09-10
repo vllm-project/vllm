@@ -84,3 +84,9 @@ tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platform
 
 # tests/tools/
 tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
+
+# tests/watermarking/ - added by #54053 (2026-09-09), no Buildkite job collects the dir yet
+tests/watermarking/test_detection.py  # watermarking feature (#54053); no job collects tests/watermarking/
+tests/watermarking/test_gumbel.py  # watermarking feature (#54053); no job collects tests/watermarking/
+tests/watermarking/test_prf.py  # watermarking feature (#54053); no job collects tests/watermarking/
+tests/watermarking/test_watermarking.py  # watermarking feature (#54053); no job collects tests/watermarking/
