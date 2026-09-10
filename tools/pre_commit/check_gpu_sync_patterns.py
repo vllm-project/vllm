@@ -133,6 +133,20 @@ class SyncPatternChecker(ast.NodeVisitor):
         self.path = path
         self.source_lines = source_lines
         self.violations: list[tuple[int, str]] = []
+        # Per-function tainted-name tracking. Each entry maps a bare local
+        # name (`t`) to the line where it was last bound to an unpinned CPU
+        # tensor construction; used to catch the two-line shape:
+        #     t = torch.from_numpy(x)
+        #     ...
+        #     t.to(device, non_blocking=True)
+        # A reassignment to any non-unpinned expression clears the name;
+        # augmented assignment leaves it alone. Inline calls (single-line
+        # shape) still route through `_check_h2d` / `_check_copy` directly.
+        self._scopes: list[dict[str, int]] = [{}]
+
+    @property
+    def _tainted(self) -> dict[str, int]:
+        return self._scopes[-1]
 
     def _call_muted(self, call: ast.Call) -> bool:
         """Check the whole call span for a `gpu-sync-ok` comment.
@@ -155,6 +169,65 @@ class SyncPatternChecker(ast.NodeVisitor):
                 return True
         return False
 
+    def _enter_scope(self) -> None:
+        self._scopes.append({})
+
+    def _exit_scope(self) -> None:
+        self._scopes.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._enter_scope()
+        self.generic_visit(node)
+        self._exit_scope()
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self, node: ast.AsyncFunctionDef
+    ) -> None:
+        self._enter_scope()
+        self.generic_visit(node)
+        self._exit_scope()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        self._enter_scope()
+        self.generic_visit(node)
+        self._exit_scope()
+
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        self.generic_visit(node)
+        tainted = _produces_unpinned_cpu_tensor(node.value)
+        for target in node.targets:
+            self._update_binding(target, tainted, node.lineno)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        self.generic_visit(node)
+        if node.value is None:
+            # Bare annotation without a value doesn't establish a binding.
+            return
+        tainted = _produces_unpinned_cpu_tensor(node.value)
+        self._update_binding(node.target, tainted, node.lineno)
+
+    def visit_AugAssign(  # noqa: N802
+        self, node: ast.AugAssign
+    ) -> None:
+        # `t += ...` doesn't rebind `t` to a fresh construction, so leave
+        # any existing taint state alone.
+        self.generic_visit(node)
+
+    def _update_binding(self, target: ast.AST, tainted: bool, lineno: int) -> None:
+        if isinstance(target, ast.Name):
+            if tainted:
+                self._tainted[target.id] = lineno
+            else:
+                self._tainted.pop(target.id, None)
+        elif isinstance(target, ast.Tuple | ast.List):
+            # Tuple unpacking of a mixed-value construction: we can't tell
+            # which element is unpinned from the AST alone, so treat each
+            # target as safe. This trades a rare false negative for zero
+            # false positives on the common `a, b = ...` pattern.
+            for elt in target.elts:
+                if isinstance(elt, ast.Name):
+                    self._tainted.pop(elt.id, None)
+
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         func = node.func
         if isinstance(func, ast.Attribute):
@@ -163,6 +236,12 @@ class SyncPatternChecker(ast.NodeVisitor):
             elif func.attr == "copy_":
                 self._check_copy(node)
         self.generic_visit(node)
+
+    def _source_is_unpinned(self, expr: ast.AST) -> bool:
+        """Inline construction OR a locally-tainted name."""
+        if _produces_unpinned_cpu_tensor(expr):
+            return True
+        return isinstance(expr, ast.Name) and expr.id in self._tainted
 
     def _check_h2d(self, call: ast.Call) -> None:
         if not _kwarg_equals(call, "non_blocking", True):
@@ -173,21 +252,23 @@ class SyncPatternChecker(ast.NodeVisitor):
         # conservatively treat as CUDA). Explicit `.to("cpu")` is safe.
         if not _targets_cuda(call):
             return
-        if not _produces_unpinned_cpu_tensor(func.value):
+        if not self._source_is_unpinned(func.value):
             return
         if self._call_muted(call):
             return
+        origin = self._origin_hint(func.value)
         self.violations.append(
             (
                 call.lineno,
                 (
-                    "unpinned CPU tensor pushed via `non_blocking=True`; the "
-                    "CUDA driver stages such copies through pageable memory "
-                    "and blocks the host (see #53491). Use "
-                    "`async_tensor_h2d(...)` from `vllm.utils.torch_utils` or "
-                    "pass `pin_memory=PIN_MEMORY` on the CPU-side "
-                    "construction. Suppress with a `# gpu-sync-ok: <reason>` "
-                    "comment on this line."
+                    f"unpinned CPU tensor{origin} pushed via "
+                    "`non_blocking=True`; the CUDA driver stages such copies "
+                    "through pageable memory and blocks the host (see "
+                    "#53491). Use `async_tensor_h2d(...)` from "
+                    "`vllm.utils.torch_utils` or pass "
+                    "`pin_memory=PIN_MEMORY` on the CPU-side construction. "
+                    "Suppress with a `# gpu-sync-ok: <reason>` comment on "
+                    "this line."
                 ),
             )
         )
@@ -198,23 +279,32 @@ class SyncPatternChecker(ast.NodeVisitor):
         if not call.args:
             return
         source = call.args[0]
-        if not _produces_unpinned_cpu_tensor(source):
+        if not self._source_is_unpinned(source):
             return
         if self._call_muted(call):
             return
+        origin = self._origin_hint(source)
         self.violations.append(
             (
                 call.lineno,
                 (
-                    "unpinned CPU source in `.copy_(..., non_blocking=True)`; "
-                    "same silent host stall as above (see #53491). Materialize "
-                    "the source via `np_to_pinned_tensor(...)` from "
-                    "`vllm.utils.torch_utils` or set `pin_memory=PIN_MEMORY` "
-                    "on the construction. Suppress with a "
-                    "`# gpu-sync-ok: <reason>` comment on this line."
+                    f"unpinned CPU source{origin} in "
+                    "`.copy_(..., non_blocking=True)`; same silent host "
+                    "stall as above (see #53491). Materialize the source "
+                    "via `np_to_pinned_tensor(...)` from "
+                    "`vllm.utils.torch_utils` or set "
+                    "`pin_memory=PIN_MEMORY` on the construction. Suppress "
+                    "with a `# gpu-sync-ok: <reason>` comment on this line."
                 ),
             )
         )
+
+    def _origin_hint(self, expr: ast.AST) -> str:
+        """Human-readable pointer to where the taint started, if any."""
+        if isinstance(expr, ast.Name) and expr.id in self._tainted:
+            src_line = self._tainted[expr.id]
+            return f" (bound at line {src_line})"
+        return ""
 
 
 def scan_file(path: str) -> int:

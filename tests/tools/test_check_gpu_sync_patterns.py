@@ -91,3 +91,64 @@ def test_pragma_only_mutes_its_own_line(tmp_path: Path) -> None:
 def test_syntax_error_returns_zero(tmp_path: Path) -> None:
     # Malformed source shouldn't crash the linter or fail the file.
     assert _check(tmp_path, "def broken(:\n") == 0
+
+
+# --- cross-variable flow: two-line shape ---------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        # Assign then push in the same function
+        """
+        def f(x):
+            t = torch.from_numpy(x)
+            return t.to(device, non_blocking=True)
+        """,
+        # Assign then use as .copy_ source
+        """
+        def f(buf, x):
+            src = torch.from_numpy(x)
+            buf.copy_(src, non_blocking=True)
+        """,
+        # Augmented assign preserves taint
+        """
+        def f(x):
+            t = torch.from_numpy(x)
+            t += 1
+            return t.to(device, non_blocking=True)
+        """,
+    ],
+)
+def test_two_line_bad_flagged(tmp_path: Path, snippet: str) -> None:
+    assert _check(tmp_path, snippet) == 1
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        # Reassignment to a safe value clears the taint
+        """
+        def f(x):
+            t = torch.from_numpy(x)
+            t = safe_helper(t)
+            return t.to(device, non_blocking=True)
+        """,
+        # Taint doesn't cross function boundaries
+        """
+        def f(x):
+            t = torch.from_numpy(x)
+            def inner():
+                return t.to(device, non_blocking=True)
+            return inner
+        """,
+        # Tuple unpack from an unknown call — don't taint anything
+        """
+        def f(x):
+            a, b = something(x)
+            return a.to(device, non_blocking=True)
+        """,
+    ],
+)
+def test_two_line_good_silent(tmp_path: Path, snippet: str) -> None:
+    assert _check(tmp_path, snippet) == 0
