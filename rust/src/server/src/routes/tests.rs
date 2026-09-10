@@ -2736,7 +2736,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].modality.as_str(), "image");
             assert_eq!(features[0].identifier, "image-1");
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -2799,7 +2799,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
             qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmModality::Image,
                 vllm_chat::multimodal::MmLimitSpec::Count(1),
             )])),
         )),
@@ -3112,6 +3112,64 @@ async fn http_metrics_group_error_statuses() {
             Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
         ),
         1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_collapse_unknown_methods() {
+    let mut app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    for (method, path) in [
+        ("XVULNCARD000001", "/tokenize"),
+        ("XVULNCARD000002", "/tokenize"),
+        ("XVULNCARD000003", "/detokenize"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let after = METRICS.render().unwrap();
+    assert!(
+        !after.contains("XVULNCARD"),
+        "raw method tokens must not appear in metrics: {after}"
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/tokenize\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/detokenize\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"other\",handler=\"/tokenize\""),
+        ),
+        2.0
     );
 }
 

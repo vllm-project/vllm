@@ -123,6 +123,9 @@ def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
     )
 
     assert rewritten["messages"][0]["content"][0]["uuid"] == "proxy-uuid"
+    assert rewritten["messages"][0]["content"][0]["image_embeds"] == {
+        "image_grid_thw": [1, 2, 3]
+    }
     assert rewritten["ec_transfer_params"]["ec_items"] == [
         {"mm_hash": "engine-derived-hash", "transfer_id": "transfer"}
     ]
