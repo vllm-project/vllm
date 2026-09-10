@@ -6,7 +6,7 @@
 | Target | `vllm/models/deepseek_v4_1/attention.py` + `nvidia/flashmla.py` (CUDA / SM100 only) |
 | Hardware here | GB200 (SM100), torch 2.13, vLLM builds `_flashmla_C` against the torch 2.11 stable ABI |
 | Checkpoint | `ckpt20260903`: 64 heads, `head_dim=512`, `o_groups=8` (8 heads per group), `q_lora_rank=1280`, `o_lora_rank=1024`, `sliding_window=128`, `index_topk=512`, MXFP8 weights (`[32,32]` ue8m0 blocks) |
-| Status | Plan. Nothing implemented. Phase 0 is a measurement spike that decides the decode dispatch policy. |
+| Status | In progress on branch `v41-megakernel` (worktree). Done: FlashMLA pinned to upstream `07a1089` and built (Task 2), op wrappers + equivalence tests (Tasks 3-4), Phase 0 spike (Task 5, section 4b), layout helpers, Q padding kernel, permuted O quant, config flags, int32 positions, weight-permutation hook, base-class forward hooks and the fused attention layer (Tasks 1, 6-12). Pending: TP4 end-to-end parity/latency (Task 13), `nvfp4_ds_mla` (Part 3). |
 
 ---
 
@@ -299,6 +299,17 @@ halves the decode attention segment once the two surrounding kernels are counted
 CUDA-graph capture and replay of the fused decode works. `dsv4_fused_decode_min_tokens`
 therefore defaults to 0 (fused everywhere); the split-KV fallback path stays as an
 escape hatch.
+
+## 4c. Implementation status (2026-09-10, branch `v41-megakernel`)
+
+| Area | State |
+| :-- | :-- |
+| FlashMLA build | `flashmla.cmake` pins upstream `deepseek-ai/FlashMLA@07a1089…` (pybind11 module, `torch_python` linked); 51 sm_100 cubins; existing V3.2 fp8 smoke tests pass through the regenerated interface. `_flashmla_extension_C` and V3.2 `nvfp4_ds_mla` are unavailable with this pin. |
+| Op wrappers | `flash_mla_fused_sparse_prefill/decode`, `is_flashmla_fused_sparse_supported`, `out=` emulation for the fork-only parameter. |
+| Kernel-level tests | 59 passing: layout permutations, Q padding kernel, permuted O quant, fused decode/prefill vs the split-KV pipeline (lse tight, `z` within 2 %), sliced-group einsum, V4.1 fp8/fp4 insert + gather vs torch ports of FlashMLA's reference quantizer, fused decode over V4.1 fp8 + fp4 caches. |
+| Layer | `DeepseekV4FlashMLAFusedAttention` selected by `attention_config.dsv4_fused_attention`; weight permutation at load keyed on `loaded_params`; split-KV fallback below `dsv4_fused_decode_min_tokens` (default 0 after Phase 0). |
+| `nvfp4_ds_mla` | Layout table, spec plumbing, insert/gather kernels, SM100 gating, DSpark context insert. Needs the fused layer. |
+| Pending | TP4 end-to-end parity (fused vs unfused, `fp8_ds_mla` and `nvfp4_ds_mla`), gsm8k/gpqa and bs1 latency via the `recipe/dsv41/*_fused.yaml` recipes (which use the config-shim checkpoint `/mnt/data/yongye/cache/ckpt20260903-v41cfg` because origin/sra-tracking #64 renamed the hf_config fields). |
 
 ## 5. Risks and open questions
 

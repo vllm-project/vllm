@@ -36,7 +36,7 @@
 
 - Produces: `q_fused_permutation(num_heads, head_dim=512) -> LongTensor[num_heads*head_dim]` with `fused = standard[perm]`; `o_fused_permutation(heads_per_group=8, head_dim=512) -> LongTensor[G*D]`; `o_fused_chunk_permutation(heads_per_group=8, head_dim=512) -> LongTensor[G*D//32]`; `inverse_permutation(perm)`; `permute_q_to_fused(q[N,H,D]) -> [N,H,D]`; `permute_q_from_fused(q)`; `permute_wq_b_(weight, weight_scale, num_local_heads)`; `permute_wo_a_(weight, weight_scale, heads_per_group=8)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/kernels/test_dsv41_fused_layout.py
@@ -126,12 +126,12 @@ def test_permute_helpers_accept_fp8_storage():
     permute_wo_a_(w2, s2)
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_fused_layout.py -v`
 Expected: FAIL with `ModuleNotFoundError: ... fused_layout`
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```python
 # vllm/models/deepseek_v4_1/common/ops/fused_layout.py
@@ -233,12 +233,12 @@ def permute_wo_a_(
     s.copy_(s[:, chunk_perm.to(weight.device)])
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_fused_layout.py -v`
 Expected: 6 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/common/ops/fused_layout.py tests/kernels/test_dsv41_fused_layout.py
@@ -268,7 +268,7 @@ git commit -m "[DSv4.1] Add fused-kernel layout permutation helpers"
 
 - Produces: `vllm/_flashmla_C.abi3.so` exposing `torch.ops._flashmla_C.{sparse_decode_fwd, sparse_prefill_fwd, dense_decode_fwd, dense_prefill_fwd, fused_norm_rope_attn_rope_cast_fwd, fused_norm_rope_attn_rope_cast_decode, permute_q_b_proj, permute_wv_proj}`.
 
-- [ ] **Step 1: Add the preset cache variables**
+- [x] **Step 1: Add the preset cache variables**
 
 Edit `CMakeUserPresets.json` `cacheVariables` (untracked file, worktree copy) and add:
 
@@ -277,7 +277,7 @@ Edit `CMakeUserPresets.json` `cacheVariables` (untracked file, worktree copy) an
 "CMAKE_CUDA_ARCHITECTURES": "100a"
 ```
 
-- [ ] **Step 2: Replace the FlashMLA source and include lists**
+- [x] **Step 2: Replace the FlashMLA source and include lists**
 
 In `cmake/external_projects/flashmla.cmake` replace the `set(FlashMLA_SOURCES ...)` block with the PR-221 tree (mirrors the FlashMLA `setup.py` list without the dense backward, which vLLM does not register). Every path is `${flashmla_SOURCE_DIR}/csrc/...`:
 
@@ -376,7 +376,7 @@ and replace `set(FlashMLA_INCLUDES ...)` with
     endif()
 ```
 
-- [ ] **Step 3: Configure and build**
+- [x] **Step 3: Configure and build**
 
 ```bash
 cmake --preset release 2>&1 | tail -5
@@ -389,7 +389,7 @@ Expected: build succeeds; the last grep must print the `out:` parameters of `fla
 
 If nvcc rejects a fused-kernel source for an `sm_100a`-only feature under the `10.0f` gencode, change the `SUPPORT_ARCHS` entry `"10.0f"` to `"10.0a"` for `CMAKE_CUDA_COMPILER_VERSION >= 12.9` in the same file and rebuild.
 
-- [ ] **Step 4: Verify the ops and the existing paths**
+- [x] **Step 4: Verify the ops and the existing paths**
 
 ```bash
 /home/yongye/sra/.venv/bin/python - <<'PY'
@@ -405,7 +405,7 @@ PY
 
 Expected: four `True`; the smoke tests pass (they exercise V3.2 fp8 decode/prefill through the regenerated interface).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add cmake/external_projects/flashmla.cmake
@@ -426,7 +426,7 @@ git commit -m "[Build] Point the FlashMLA extension at the PR-221 source tree"
     - `flash_mla_fused_sparse_prefill(q, kv, indices, sm_scale, token_positions, cos_sin_cache, n_wv_group, attn_sink=None, topk_length=None) -> (out_fp8 [s_q, n_wv_group, 4096] e4m3, out_sf [s_q, n_wv_group, 32] int32, max_logits [s_q, h_q] f32, lse [s_q, h_q] f32)`
     - `flash_mla_fused_sparse_decode(q, k_cache, indices, sm_scale, token_positions, cos_sin_cache, n_wv_group, attn_sink=None, topk_length=None, extra_k_cache=None, extra_indices=None, extra_topk_length=None) -> (out_fp8, out_sf, lse)`
 
-- [ ] **Step 1: Write the failing smoke test**
+- [x] **Step 1: Write the failing smoke test**
 
 ```python
 # tests/kernels/attention/test_flashmla_fused_sparse.py
@@ -467,12 +467,12 @@ def test_fused_decode_smoke_shapes():
     assert lse.shape == (s_q, h_q)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_fused_sparse.py -v`
 Expected: FAIL with `AttributeError: ... has no attribute 'is_flashmla_fused_sparse_supported'`
 
-- [ ] **Step 3: Add the wrappers**
+- [x] **Step 3: Add the wrappers**
 
 Append to `vllm/v1/attention/ops/flashmla.py`:
 
@@ -601,12 +601,12 @@ def flash_mla_fused_sparse_decode(
     return out_fp8, out_sf, lse
 ```
 
-- [ ] **Step 4: Run the smoke test**
+- [x] **Step 4: Run the smoke test**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_fused_sparse.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/v1/attention/ops/flashmla.py tests/kernels/attention/test_flashmla_fused_sparse.py
@@ -624,7 +624,7 @@ git commit -m "[Attention] Add wrappers for the FlashMLA fused sparse attention 
 - Consumes: Task 1 helpers, Task 3 wrappers, `vllm.models.deepseek_v4_1.common.ops.quantize_and_insert_k_cache`, `vllm.models.deepseek_v4_1.common.ops.fused_inv_rope_fp8_quant`, `vllm.utils.deep_gemm.fp8_einsum`, `vllm.model_executor.layers.quantization.utils.fp8_utils.deepgemm_post_process_fp8_weight_block`.
 - Produces (test helpers reused by later tasks): `make_cos_sin_cache(max_pos, device)`, `rope_gptj(x, positions, cos_sin)`, `build_v4_cache(k [T,512] bf16, block_size) -> [num_blocks, block_size, 1, 584] uint8`, `dequant_fused_output(out_fp8, out_sf) -> fp32 [s_q, G, 4096]`, `make_wo_a(n_groups, device) -> (w_perm3d, sf_perm, w_std3d, sf_std)`, `_random_indices(s_q, topk, num_slots, device, min_len=1)`.
 
-- [ ] **Step 1: Add the helpers and the decode equivalence test**
+- [x] **Step 1: Add the helpers and the decode equivalence test**
 
 ```python
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -804,12 +804,12 @@ def test_fused_output_sliced_groups_feed_einsum():
     torch.testing.assert_close(z_slice, z_full[:, :keep], rtol=0, atol=0)
 ```
 
-- [ ] **Step 2: Run and fix until green**
+- [x] **Step 2: Run and fix until green**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_fused_sparse.py -v -x`
 Expected: PASS. If `lse` mismatches only on rows whose every index is invalid, those rows are `+inf` in the fused kernel; all rows here have `min_len=1` so that should not happen. If the sliced-groups test fails inside DeepGEMM's scale-layout check, spec assumption 1.4 is wrong: make the fused class copy `out_fp8[:, :G].contiguous()` and rebuild the SF slice with `get_mn_major_tma_aligned_packed_ue8m0_tensor`, and record that in the spec.
 
-- [ ] **Step 3: Add the prefill equivalence test**
+- [x] **Step 3: Add the prefill equivalence test**
 
 ```python
 @pytest.mark.parametrize("s_q", [1, 184, 2123])
@@ -849,12 +849,12 @@ def test_fused_prefill_matches_sparse_fwd_pipeline(s_q: int):
                                atol=2e-2 * z_ref.abs().max().item())
 ```
 
-- [ ] **Step 4: Run the whole file**
+- [x] **Step 4: Run the whole file**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_fused_sparse.py -v`
 Expected: all pass (`flash_mla_sparse_fwd` returns `(out, max_logits, lse)`; the vendored signature is `flash_mla_sparse_fwd(q, kv, indices, sm_scale, d_v=512, attn_sink=None, topk_length=None, out=None)`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/kernels/attention/test_flashmla_fused_sparse.py
@@ -872,7 +872,7 @@ git commit -m "[Test] Check the FlashMLA fused sparse kernel against the split-K
 - Consumes: Task 3 wrappers. Benchmarks must not import tests, so the small cache/RoPE helpers are repeated here.
 - Produces: a table `s_q, fused_us, splitkv_attn_us, splitkv_total_us` for decode and `s_q, fused_us, sparse_fwd_total_us` for prefill, eagerly and under CUDA-graph capture. The smallest `s_q` where `fused_us <= splitkv_total_us` becomes the default of `AttentionConfig.dsv4_fused_decode_min_tokens` (Task 7).
 
-- [ ] **Step 1: Write the benchmark**
+- [x] **Step 1: Write the benchmark**
 
 ```python
 # benchmarks/kernels/benchmark_dsv41_fused_attention.py
@@ -1067,7 +1067,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run eagerly and under CUDA graphs**
+- [x] **Step 2: Run eagerly and under CUDA graphs**
 
 ```bash
 /home/yongye/sra/.venv/bin/python benchmarks/kernels/benchmark_dsv41_fused_attention.py
@@ -1076,7 +1076,7 @@ if __name__ == "__main__":
 
 Expected: two tables. Record them in the spec (`20260910-v41-megakernel-vllm-integration-plan.md`, new section "Phase 0 results"). Decision rule: `dsv4_fused_decode_min_tokens` default = smallest `s_q` in the table with `fused_us <= splitkv_total_us`; if the fused kernel wins at every `s_q` the default is `0` and Task 12's fallback branch stays but is off by default. If graph capture of the fused decode fails, note it and make Task 12 raise when `cudagraph_mode` is not `NONE` with the fused class.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add benchmarks/kernels/benchmark_dsv41_fused_attention.py 20260910-v41-megakernel-vllm-integration-plan.md
@@ -1097,7 +1097,7 @@ git commit -m "[Bench] Compare the FlashMLA fused sparse kernel with the split-K
 
 - Produces: `DeepseekSparseSWAMetadata.positions_int32: torch.Tensor | None` (`[num_tokens]` int32, graph-stable buffer slice), filled once per step for all layers.
 
-- [ ] **Step 1: Add the field**
+- [x] **Step 1: Add the field**
 
 In the `DeepseekSparseSWAMetadata` dataclass, after `token_to_req_indices`:
 
@@ -1106,7 +1106,7 @@ In the `DeepseekSparseSWAMetadata` dataclass, after `token_to_req_indices`:
     positions_int32: torch.Tensor | None = None  # [num_tokens]
 ```
 
-- [ ] **Step 2: Add the buffer and fill it**
+- [x] **Step 2: Add the buffer and fill it**
 
 In `DeepseekSparseSWAMetadataBuilder.__init__`, next to `self.decode_swa_lens = torch.zeros(...)`:
 
@@ -1129,12 +1129,12 @@ In `build()`, before `return DeepseekSparseSWAMetadata(`:
 
 and pass `positions_int32=positions_int32,` in the constructor call (after `token_to_req_indices=token_to_req_indices,`).
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 Run: `pre-commit run --files vllm/v1/attention/backends/mla/sparse_swa.py` and `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_sparse.py -v -k "chunk_planning or adaptive_width"`
 Expected: clean; existing tests pass. End-to-end coverage arrives with Task 13.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add vllm/v1/attention/backends/mla/sparse_swa.py
@@ -1152,7 +1152,7 @@ git commit -m "[Attention] Expose int32 positions in the DeepSeek sparse SWA met
 
 - Produces: `AttentionConfig.dsv4_fused_attention: bool | None = None`, `AttentionConfig.dsv4_fused_decode_min_tokens: int = <Phase 0 result, 0 if unknown>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/config/test_dsv4_fused_attention_config.py
@@ -1174,12 +1174,12 @@ def test_dsv4_fused_decode_min_tokens_rejects_negative():
         AttentionConfig(dsv4_fused_decode_min_tokens=-1)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/config/test_dsv4_fused_attention_config.py -v`
 Expected: FAIL (`unexpected keyword argument` / attribute missing)
 
-- [ ] **Step 3: Add the fields and validation**
+- [x] **Step 3: Add the fields and validation**
 
 After `sparse_mla_force_mqa` in `AttentionConfig`:
 
@@ -1207,12 +1207,12 @@ Set the default to the Task 5 result once known. In `__post_init__` (next to the
             )
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/config/test_dsv4_fused_attention_config.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/config/attention.py tests/config/test_dsv4_fused_attention_config.py
@@ -1230,7 +1230,7 @@ git commit -m "[Config] Add DeepSeek V4.1 fused attention flags"
 
 - Produces: `dsv41_q_layout(q_fused_local: Tensor[N, H_local, 512] bf16, padded_heads: int, mode: Literal["fused", "standard_rope"], positions: Tensor | None = None, cos_sin_cache: Tensor | None = None) -> Tensor[N, padded_heads, 512]`. `"fused"` scatters the local fused layout into the 64-head fused layout with zero padding heads (no RoPE); `"standard_rope"` un-permutes to `[N, padded_heads, 512]`, applies GPT-J RoPE to dims 448..511 at `positions` (int64 or int32), zero padding heads. When `padded_heads == H_local` and mode is `"fused"` the input is returned unchanged.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/kernels/test_dsv41_q_layout.py
@@ -1299,12 +1299,12 @@ def test_standard_rope_mode_matches_cuda_q_path():
     torch.testing.assert_close(out.float(), q_ref.float(), rtol=1e-2, atol=1e-2)
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_q_layout.py -v`
 Expected: FAIL with `ModuleNotFoundError: ... q_layout`
 
-- [ ] **Step 3: Write the kernel**
+- [x] **Step 3: Write the kernel**
 
 ```python
 # vllm/models/deepseek_v4_1/common/ops/q_layout.py
@@ -1413,12 +1413,12 @@ def dsv41_q_layout(
     return out
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_q_layout.py -v`
 Expected: PASS. If `test_standard_rope_mode_matches_cuda_q_path` fails on the CUDA op call signature, check `csrc/libtorch_stable/ops.h:265` (argument order `q_in, kv, k_cache, slot_mapping, position_ids, cos_sin_cache, q_head_padded, eps, cache_block_size, apply_q_norm`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/common/ops/q_layout.py tests/kernels/test_dsv41_q_layout.py
@@ -1436,7 +1436,7 @@ git commit -m "[DSv4.1] Add the fused-layout Q padding kernel"
 
 - Produces: `fused_inv_rope_fp8_quant(..., permuted_output: bool = False)`; with `True` (requires `quant_group_size == 32` and `tma_aligned_scales`) the values of group `g` are stored with chunk `(h, c)` at chunk position `c * heads_per_group + h` and the scale byte at the same chunk position, i.e. exactly the megakernel's `out_fp8` / `out_sf` layout. Output shapes unchanged.
 
-- [ ] **Step 1: Write the failing test** (append to `tests/kernels/test_dsv41_fused_layout.py`)
+- [x] **Step 1: Write the failing test** (append to `tests/kernels/test_dsv41_fused_layout.py`)
 
 ```python
 @pytest.mark.parametrize("num_tokens", [1, 5, 129])
@@ -1471,12 +1471,12 @@ def test_inv_rope_quant_permuted_output_matches_standard(num_tokens):
 
 Add `import pytest` at the top of that test file.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_fused_layout.py -v -k permuted_output`
 Expected: FAIL with `TypeError: ... unexpected keyword argument 'permuted_output'`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `_fused_inv_rope_fp8_quant_per_head` add the constexpr `PERMUTED_OUTPUT: tl.constexpr` (after `TMA_ALIGNED_SCALES`) and change the two store sites:
 
@@ -1510,12 +1510,12 @@ Use `out_offsets` instead of `qb_start * QUANT_GROUP_SIZE + offsets` for both th
 
 (and the padding-row branch stores `tl.zeros((CHUNKS_PER_HEAD,), tl.uint8)` at the same addresses). In Python, `fused_inv_rope_fp8_quant` gains `permuted_output: bool = False`; when set, assert `quant_group_size == 32 and tma_aligned_scales and quantize`, and pass through the custom op as a new trailing `bool` argument (`_fused_inv_rope_fp8_quant_kernel_impl(..., permuted_output: bool)` and the fake impl). In the impl, when `permuted_output`, launch with `scale_buf.view(torch.uint8)` as `scale_ptr`, `scale_stride_group=scale_buf.stride(0) * 4`, `scale_stride_k=scale_buf.stride(2) * 4`, and `PERMUTED_OUTPUT=True`. `pid_token * 4` in the kernel is the byte stride of the token dimension (`scale_buf.stride(1) == 1` int32).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_fused_layout.py tests/kernels/attention/test_flashmla_fused_sparse.py -v`
 Expected: PASS (the existing standard-mode callers are untouched).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4/common/ops/fused_inv_rope_fp8_quant.py tests/kernels/test_dsv41_fused_layout.py
@@ -1536,7 +1536,7 @@ git commit -m "[DSv4] Let fused_inv_rope_fp8_quant emit the fused-kernel chunk l
 
 - Produces: `DeepseekV4Attention.finalize_loaded_weights(loaded_params: set[str]) -> None` (no-op in the base; the fused subclass from Task 12 permutes `wq_b`/`wo_a` when `f"{self.prefix}.wq_b.weight"` / `f"{self.prefix}.wo_a.weight"` are in `loaded_params`); inner model `finalize_attention_weights(loaded_params)`; the outer models' `process_weights_after_loading(loaded_params)`.
 
-- [ ] **Step 1: Write the failing test** (append to `tests/kernels/test_dsv41_fused_layout.py`)
+- [x] **Step 1: Write the failing test** (append to `tests/kernels/test_dsv41_fused_layout.py`)
 
 ```python
 def test_fused_attention_finalize_permutes_only_loaded_layers():
@@ -1573,7 +1573,7 @@ def test_fused_attention_finalize_permutes_only_loaded_layers():
 
 This test also needs Task 12's module to import; until then it fails with `ModuleNotFoundError`, which is the expected red state.
 
-- [ ] **Step 2: Base-class hook** (`attention.py`, in `DeepseekV4Attention` after `PREFILL_CHUNK_SIZE`)
+- [x] **Step 2: Base-class hook** (`attention.py`, in `DeepseekV4Attention` after `PREFILL_CHUNK_SIZE`)
 
 ```python
     # True when wq_b rows / wo_a columns are permuted for the FlashMLA fused
@@ -1589,7 +1589,7 @@ and after `_uses_fp8_ds_mla_layout`:
         return None
 ```
 
-- [ ] **Step 3: Model wiring** (`nvidia/model.py`)
+- [x] **Step 3: Model wiring** (`nvidia/model.py`)
 
 In the inner model class next to `finalize_mega_moe_weights`:
 
@@ -1627,12 +1627,12 @@ In the outer class:
 
 Grep for every other caller of these two `process_weights_after_loading` methods (`grep -rn "process_weights_after_loading()" vllm/models/deepseek_v4_1/`) and pass the set.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `pre-commit run --files vllm/models/deepseek_v4_1/attention.py vllm/models/deepseek_v4_1/nvidia/model.py vllm/models/deepseek_v4_1/nvidia/dspark.py vllm/models/deepseek_v4_1/nvidia/vl_model.py`
 Expected: clean. The new test goes green after Task 12.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/attention.py vllm/models/deepseek_v4_1/nvidia/model.py vllm/models/deepseek_v4_1/nvidia/dspark.py vllm/models/deepseek_v4_1/nvidia/vl_model.py tests/kernels/test_dsv41_fused_layout.py
@@ -1649,7 +1649,7 @@ git commit -m "[DSv4.1] Add a per-layer post-load weight hook for fused-kernel l
 
 - Produces: `_alloc_attn_out(num_tokens, hidden_states) -> Tensor` (base: `[N, padded_heads, 512]` in `hidden_states.dtype`), `_finish_o_proj(attn_out, positions) -> Tensor` (base: `self._o_proj(attn_out[:, :n_local_heads], positions)`), `_prepare_q_and_insert_kv(q, kv, positions, attn_metadata) -> Tensor` (base: `self._fused_qnorm_rope_kv_insert(...)`). `forward_mqa(q, kv, positions, out)` keeps its signature; `out` is whatever `_alloc_attn_out` returned.
 
-- [ ] **Step 1: Refactor `forward`**
+- [x] **Step 1: Refactor `forward`**
 
 ```python
     def forward(
@@ -1710,12 +1710,12 @@ git commit -m "[DSv4.1] Add a per-layer post-load weight hook for fused-kernel l
 
 and in `_prepare_and_attn` replace the body of `project_query_and_cache_kv` with `return self._prepare_q_and_insert_kv(q, kv, positions, attn_metadata)` (keeping the `self._wq_b_proj(...).view(-1, self.n_local_heads, self.head_dim)` line before it). Rename the `o_padded` parameters of `_prepare_and_attn_eager` / `_prepare_and_attn` / `_sparse_indexer_and_attn` to `attn_out` (the eager-break decorator does not care about names).
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 Run: `pre-commit run --files vllm/models/deepseek_v4_1/attention.py` and `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_sparse.py -v -k "chunk_planning or flashinfer"`.
 Expected: clean, tests pass (FlashInfer and ROCm subclasses inherit the defaults unchanged).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/attention.py
@@ -1735,7 +1735,7 @@ git commit -m "[DSv4.1] Factor the attention output buffer and o_proj tail into 
 - Consumes: Task 3 wrappers, Task 6 `positions_int32`, Task 7 flags, Task 8 `dsv41_q_layout`, Task 9 `permuted_output`, Task 1 `permute_wq_b_` / `permute_wo_a_`, `rope_quant_insert` from `common/ops/fused_compress_quant_cache.py` (KV-only V4 insert with `compress_ratio=1`), `fp8_einsum`.
 - Produces: the class below; `_select_dsv4_attn_cls` returns it when `_dsv4_fused_attention_enabled(vllm_config)`.
 
-- [ ] **Step 1: Write the class**
+- [x] **Step 1: Write the class**
 
 ```python
 # vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py
@@ -2146,7 +2146,7 @@ class DeepseekV4FlashMLAFusedAttention(DeepseekV4FlashMLAAttention):
 
 Note `self._einsum_recipe` comes from `DeepseekV4FlashMLAAttention.__init__` (`(1, 1, 32)` on SM100). `combined_indices.unsqueeze(1)` has `stride(0) == combined_topk`, a multiple of 128, so the kernel's 32 B index-row alignment holds.
 
-- [ ] **Step 2: Wire selection** (`nvidia/model.py::_select_dsv4_attn_cls`)
+- [x] **Step 2: Wire selection** (`nvidia/model.py::_select_dsv4_attn_cls`)
 
 Import `DeepseekV4FlashMLAFusedAttention, dsv4_fused_attention_enabled` from `vllm.models.deepseek_v4_1.nvidia.flashmla_fused`. Replace each `return DeepseekV4FlashMLAAttention` with `return _flashmla_attn_cls(vllm_config)` where
 
@@ -2158,12 +2158,12 @@ def _flashmla_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     return DeepseekV4FlashMLAAttention
 ```
 
-- [ ] **Step 3: Run the unit tests**
+- [x] **Step 3: Run the unit tests**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_fused_layout.py tests/kernels/test_dsv41_q_layout.py -v && pre-commit run --files vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py vllm/models/deepseek_v4_1/nvidia/model.py`
 Expected: PASS (including Task 10's finalize test), lint clean, `pre-commit run mypy-3.12 --files vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py --hook-stage manual` clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py vllm/models/deepseek_v4_1/nvidia/model.py
@@ -2231,7 +2231,7 @@ Requires `dsv4_fused_attention` (the base class's Q+KV CUDA insert op only knows
 
 - Produces: `DSv4KVLayout(cache_dtype, torch_dtype, swa_bytes, swa_alignment, compressed_bytes, compressed_alignment)` frozen dataclass and `DSV4_KV_LAYOUTS = {"fp8_ds_mla": DSv4KVLayout("fp8_ds_mla", torch.uint8, 584, 576, 584, 576), "nvfp4_ds_mla": DSv4KVLayout("nvfp4_ds_mla", torch.uint8, 528, 512, 288, 256)}`; `_resolve_dsv4_kv_cache_dtype(...) -> DSv4KVLayout` (plain-row FlashInfer layouts get `swa_bytes=None`, `compressed_bytes=None`, alignment 512); `DeepseekV4Attention.kv_layout`; `DeepseekV4SWACache(..., state_content_bytes: int | None, alignment: int)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/kernels/test_dsv41_kv_layout.py
@@ -2279,12 +2279,12 @@ def test_resolve_plain_rows():
 
 (Use the attribute name `swa_alignment`; drop `alignment_for_swa` in the last line, it should read `fp8.swa_alignment == 512`.)
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_layout.py -v`
 Expected: FAIL with `ImportError: cannot import name 'DSV4_KV_LAYOUTS'`
 
-- [ ] **Step 3: Implement the table and resolver** (`attention.py`)
+- [x] **Step 3: Implement the table and resolver** (`attention.py`)
 
 ```python
 @dataclass(frozen=True)
@@ -2354,12 +2354,12 @@ In `__init__`: `self.kv_layout = _resolve_dsv4_kv_cache_dtype(...)`, `self.kv_ca
 
 In `flashmla_fused.py`, `dsv4_fused_attention_enabled` accepts `"nvfp4_ds_mla"` too, and `__init__` accepts `self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")`. In `attention.py.__init__`, when `self.kv_cache_dtype == "nvfp4_ds_mla" and not self.uses_fused_kernel_layouts` raise `ValueError("nvfp4_ds_mla requires dsv4_fused_attention")`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_layout.py -v && pre-commit run --files vllm/models/deepseek_v4_1/attention.py vllm/v1/attention/backends/mla/sparse_swa.py vllm/models/deepseek_v4_1/sparse_mla.py vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py`
 Expected: PASS, clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/kernels/test_dsv41_kv_layout.py vllm/models/deepseek_v4_1/attention.py vllm/v1/attention/backends/mla/sparse_swa.py vllm/models/deepseek_v4_1/sparse_mla.py vllm/models/deepseek_v4_1/nvidia/flashmla_fused.py
@@ -2378,7 +2378,7 @@ git commit -m "[DSv4.1] Describe the FlashMLA KV cache formats in one layout tab
 
 - Produces: `rope_quant_insert(...)` accepts `kv_cache.shape[-1] == 528` (row `page + slot*512`, scale row `page + block*512 + slot*16`); reference `quantize_v41_fp8(k_roped [T,512] bf16) -> (values uint8 [T,512], scales uint8 [T,16])` with `scale = 2**ceil(log2(clamp_min(amax/448, 1e-4)))` per 32 and `values = (k / scale).to(e4m3)`; `dequantize_v41_fp8(values, scales) -> bf16 [T,512]`.
 
-- [ ] **Step 1: Write the reference and the failing test**
+- [x] **Step 1: Write the reference and the failing test**
 
 ```python
 # tests/kernels/dsv41_kv_reference.py
@@ -2498,12 +2498,12 @@ def test_v41_fp8_insert_matches_reference(num_tokens, compress_ratio):
     assert ((deq.float() - ref).abs() <= ref.abs() * 0.07 + 1e-3).all()
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v`
 Expected: FAIL on the `assert kv_cache.shape[-1] == 584` inside `rope_quant_insert`.
 
-- [ ] **Step 3: Add the 528 B branch**
+- [x] **Step 3: Add the 528 B branch**
 
 In `rope_quant_insert`, replace `if kv_cache.dtype == torch.uint8:` body's `assert kv_cache.shape[-1] == 584` with a dispatch on `kv_cache.shape[-1]` (`584` -> existing `_rope_quant_insert_kernel`, `528` -> `_rope_quant_insert_v41_kernel`, else `ValueError`). New kernel:
 
@@ -2551,12 +2551,12 @@ def _rope_quant_insert_v41_kernel(
 
 Launch it with the same arguments as `_rope_quant_insert_kernel` minus `SANITIZE_CACHE_NANS`. Update the `rope_quant_insert` docstring to name the 528 B format. If the exact-match assertion fails only on tiles whose amax lands on an fp8 rounding boundary, compare the reference with `row` rounded through bf16 the same way (the reference already receives bf16 `rope_gptj` output, so both sides round identically).
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/common/ops/fused_compress_quant_cache.py tests/kernels/dsv41_kv_reference.py tests/kernels/test_dsv41_kv_formats.py
@@ -2574,7 +2574,7 @@ git commit -m "[DSv4.1] Insert RoPE'd KV rows into the V4.1 fp8 (528 B) paged la
 
 - Produces: `rope_quant_insert(...)` accepts `kv_cache.shape[-1] == 288` (data `page + slot*256`, scales `page + block*256 + slot*32`); reuses `_fp32x2_to_fp4x2` from `vllm.models.deepseek_v4_1.common.ops` (MXFP4 indexer path; even element in the low nibble, round-to-nearest-even via `cvt.rn.satfinite.e2m1x2.f32`).
 
-- [ ] **Step 1: Write the failing test** (append)
+- [x] **Step 1: Write the failing test** (append)
 
 ```python
 def _split_v41_fp4(cache, block_size):
@@ -2608,12 +2608,12 @@ def test_v41_fp4_insert_matches_reference(num_tokens, compress_ratio):
     assert ((deq.float() - ref).abs() <= tile_amax.reshape(-1, 512) / 6 + 1e-3).all()
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v -k fp4`
 Expected: FAIL with the `ValueError` from the dispatch added in Task 15.
 
-- [ ] **Step 3: Add the 288 B branch**
+- [x] **Step 3: Add the 288 B branch**
 
 ```python
 @triton.jit
@@ -2659,12 +2659,12 @@ def _rope_fp4_insert_kernel(
 
 Import `_fp32x2_to_fp4x2` from `vllm.models.deepseek_v4_1.common.ops` (it is re-exported there for `indexer_k_store`; check its argument order — the first argument must land in the low nibble; if the indexer helper packs the opposite way, swap `lo, hi`). Dispatch `288 -> _rope_fp4_insert_kernel`.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v`
 Expected: PASS. If codes differ only on exact ties, the PTX conversion rounds to nearest-even like the reference; a systematic off-by-one means the nibble order is swapped.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/common/ops/fused_compress_quant_cache.py tests/kernels/test_dsv41_kv_formats.py
@@ -2682,7 +2682,7 @@ git commit -m "[DSv4.1] Insert compressed KV rows into the V4.1 fp4 (288 B) page
 
 - Produces: `dequantize_and_gather_k_cache(out, k_cache, seq_lens, gather_lens, block_table, block_size, offset)` dispatches on `k_cache.shape[-1]`: 584 (existing, including the CuteDSL path), 528 (`_dequantize_and_gather_v41_kernel`), 288 (`_dequantize_and_gather_fp4_kernel`). Same grid `(num_reqs, NUM_WORKERS=128)`, same `seq_lens` / `gather_lens` / `offset` semantics as the existing Triton kernel (each worker walks tokens `worker, worker + 128, ...` of its request; with `gather_lens` the last `gather_lens[r]` tokens of the sequence are gathered, otherwise the first `seq_lens[r]`).
 
-- [ ] **Step 1: Write the failing test** (append)
+- [x] **Step 1: Write the failing test** (append)
 
 ```python
 from vllm.models.deepseek_v4_1.common.ops import dequantize_and_gather_k_cache
@@ -2725,12 +2725,12 @@ def test_gather_dequant_new_formats(bytes_per_token):
 
 `starts` must be block aligned for this table construction: change `seq_lens` to `[192, 64, 1]` and `starts` to `[0, 192, 256]` if the assertion trips on block boundaries.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v -k gather`
 Expected: FAIL (existing kernel decodes the bytes as 584 B rows).
 
-- [ ] **Step 3: Implement the two kernels**
+- [x] **Step 3: Implement the two kernels**
 
 Copy `_dequantize_and_gather_k_kernel`'s program structure (request id from `program_id(0)`, worker from `program_id(1)`, token loop, `physical_block_idx = block_table[req, tok // block_size]`, output at `out + req*out_stride0 + (offset + tok)*out_stride1`). Per token, the V4.1 fp8 body:
 
@@ -2768,12 +2768,12 @@ and the fp4 body:
 
 `dequantize_and_gather_k_cache` picks the kernel by `k_cache.shape[-1]` and only uses the CuteDSL path for 584.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/test_dsv41_kv_formats.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vllm/models/deepseek_v4_1/common/ops/cache_utils.py tests/kernels/test_dsv41_kv_formats.py
@@ -2792,7 +2792,7 @@ git commit -m "[DSv4.1] Gather and dequantize V4.1 fp8 and fp4 pages for prefill
 - Consumes: Tasks 15-16 insert kernels, Task 3 wrappers.
 - Produces: `_insert_context_kv` uses `rope_quant_insert(kv, positions, cos_sin, swa_cache, slot_mapping, 1)` for every `uint8` SWA cache (584 or 528) instead of the CUDA op with a dummy Q.
 
-- [ ] **Step 1: Write the failing test** (append to the fused-sparse test file)
+- [x] **Step 1: Write the failing test** (append to the fused-sparse test file)
 
 ```python
 def test_fused_decode_v41_fp8_swa_with_fp4_extra_matches_split_kv():
@@ -2860,12 +2860,12 @@ def test_fused_decode_v41_fp8_swa_with_fp4_extra_matches_split_kv():
         torch.testing.assert_close(lse[t], ref_lse, rtol=2e-2, atol=2e-2)
 ```
 
-- [ ] **Step 2: Run** (should already pass once Tasks 15-16 are in; it fails before them on the 528 B assert)
+- [x] **Step 2: Run** (should already pass once Tasks 15-16 are in; it fails before them on the 528 B assert)
 
 Run: `/home/yongye/sra/.venv/bin/python -m pytest tests/kernels/attention/test_flashmla_fused_sparse.py -v -k v41`
 Expected: PASS
 
-- [ ] **Step 3: DSpark context insert**
+- [x] **Step 3: DSpark context insert**
 
 Replace the `uint8` branch of `_insert_context_kv` with
 
@@ -2877,7 +2877,7 @@ Replace the `uint8` branch of `_insert_context_kv` with
 
 (import `rope_quant_insert` from `vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache`; `dummy_q` is then only needed for the plain-row branches, so build it after the early return). Run `pre-commit run --files vllm/models/deepseek_v4_1/nvidia/dspark.py`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/kernels/attention/test_flashmla_fused_sparse.py vllm/models/deepseek_v4_1/nvidia/dspark.py
