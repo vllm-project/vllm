@@ -40,7 +40,11 @@ from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
-from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
+from vllm.v1.kv_offload.tiering.obj.manager import (
+    _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES,
+    _build_primary_dram_descriptors,
+    ObjectStoreSecondaryTierManager,
+)
 
 # ---------------------------------------------------------------------------
 # Shared stubs
@@ -146,6 +150,7 @@ class MockNixlAgent:
         self._pending: dict[int, tuple[str, list[str]]] = {}
         self._handle_counter = 0
         self._last_obj_keys: list[str] = []
+        self.created_backends: list[tuple[str, dict[str, str]]] = []
         # Bind default implementations as instance attributes.
         self.register_memory = self._register_memory
         self.make_prepped_xfer = self._make_prepped_xfer
@@ -153,7 +158,7 @@ class MockNixlAgent:
         self.query_memory = self._query_memory
 
     def create_backend(self, backend_type, params):
-        pass
+        self.created_backends.append((backend_type, params))
 
     def _register_memory(self, descs, mem_type=None, backends=None):
         mock = MagicMock()
@@ -230,6 +235,7 @@ def _make_tier(
     num_blocks: int = 4,
     offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
     primary_kv_view: memoryview | None = None,
+    store_config: dict | None = None,
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
@@ -248,7 +254,7 @@ def _make_tier(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type="obj",
-            store_config=_STORE_CONFIG,
+            store_config=store_config or _STORE_CONFIG,
             prefix=_RUN_PREFIX,
             **tier_kwargs,
         )
@@ -764,6 +770,127 @@ class TestObjStoreConfig:
         params = cfg.to_nixl_params()
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
+
+    def test_accelerated_obj_params_included(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            use_virtual_addressing=False,
+            req_checksum="required",
+            resp_checksum="supported",
+            accelerated=True,
+            type="custom",
+        )
+        params = cfg.to_nixl_params()
+        assert params["use_virtual_addressing"] == "false"
+        assert params["req_checksum"] == "required"
+        assert params["resp_checksum"] == "supported"
+        assert params["accelerated"] == "true"
+        assert params["type"] == "custom"
+
+    def test_backend_params_pass_through(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            backend_params={
+                "custom_string": "value",
+                "custom_bool": True,
+                "custom_int": 7,
+            },
+        )
+        params = cfg.to_nixl_params()
+        assert params["custom_string"] == "value"
+        assert params["custom_bool"] == "true"
+        assert params["custom_int"] == "7"
+
+    def test_backend_params_cannot_override_reserved_keys(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            backend_params={"bucket": "other"},
+        )
+        with pytest.raises(ValueError, match="reserved object store parameters"):
+            cfg.to_nixl_params()
+
+
+def test_obj_tier_passes_accelerated_params_to_nixl_backend():
+    store_config = {
+        **_STORE_CONFIG,
+        "accelerated": True,
+        "type": "custom",
+        "use_virtual_addressing": False,
+        "backend_params": {"custom_param": "custom-value"},
+    }
+    tier, agent = _make_tier(store_config=store_config, io_threads=3)
+
+    assert agent.created_backends == [
+        (
+            "OBJ",
+            {
+                "bucket": "mock-bucket",
+                "endpoint_override": "mock:9000",
+                "scheme": "http",
+                "access_key": "mock-access",
+                "secret_key": "mock-secret",
+                "custom_param": "custom-value",
+                "use_virtual_addressing": "false",
+                "accelerated": "true",
+                "type": "custom",
+                "num_threads": "3",
+            },
+        )
+    ]
+    tier.shutdown()
+
+
+def test_primary_dram_registration_uses_single_range_below_cuobj_limit():
+    stride = 1024
+    base_addr = 0x100000
+    num_blocks = _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES // stride
+
+    descriptors = _build_primary_dram_descriptors(base_addr, num_blocks, stride)
+
+    assert descriptors == [
+        (
+            base_addr,
+            num_blocks * stride,
+            0,
+            "",
+        )
+    ]
+
+
+def test_primary_dram_registration_splits_ranges_above_cuobj_limit():
+    stride = 1024
+    base_addr = 0x100000
+    blocks_per_registration = _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES // stride
+    num_blocks = blocks_per_registration + 7
+
+    descriptors = _build_primary_dram_descriptors(base_addr, num_blocks, stride)
+
+    assert descriptors == [
+        (
+            base_addr,
+            blocks_per_registration * stride,
+            0,
+            "",
+        ),
+        (
+            base_addr + blocks_per_registration * stride,
+            7 * stride,
+            0,
+            "",
+        ),
+    ]
+
+
+def test_primary_dram_registration_rejects_oversized_block():
+    with pytest.raises(ValueError, match="block larger"):
+        _build_primary_dram_descriptors(
+            base_addr=0x100000,
+            num_blocks=1,
+            stride=_CUOBJ_MAX_MEMORY_REG_SIZE_BYTES + 1,
+        )
 
 
 def test_obj_tier_replicated_layout_collapses_mapper_identity():

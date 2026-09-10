@@ -54,12 +54,39 @@ NIXL_DEV_ID: int = 0
 _PROBE_ADDR: int = 0
 _PROBE_LEN: int = 1
 _PROBE_DEV_ID: int = 0
+_CUOBJ_MAX_MEMORY_REG_SIZE_BYTES = 4 * 1024 * 1024 * 1024 - 64 * 1024
 
 
 class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
+
+
+def _build_primary_dram_descriptors(
+    base_addr: int,
+    num_blocks: int,
+    stride: int,
+    max_registration_bytes: int = _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES,
+) -> list[tuple[int, int, int, str]]:
+    if stride > max_registration_bytes:
+        raise ValueError(
+            "Object store RDMA cannot register a primary-tier block larger "
+            f"than {max_registration_bytes} bytes: block size is {stride} bytes"
+        )
+    blocks_per_registration = max_registration_bytes // stride
+    descriptors = []
+    for start_block in range(0, num_blocks, blocks_per_registration):
+        block_count = min(blocks_per_registration, num_blocks - start_block)
+        descriptors.append(
+            (
+                base_addr + start_block * stride,
+                block_count * stride,
+                NIXL_DEV_ID,
+                "",
+            )
+        )
+    return descriptors
 
 
 class ObjAsyncLookupManager(AsyncLookupManager):
@@ -171,9 +198,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
         assert primary_kv_view.strides is not None
         stride = primary_kv_view.strides[0]
-        self._primary_reg = self._agent.register_memory(
-            [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
+        dram_descriptors = _build_primary_dram_descriptors(
+            base_addr, len(primary_kv_view), stride
         )
+        self._primary_reg = self._agent.register_memory(dram_descriptors, "DRAM")
         self._block_size_bytes = stride
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
@@ -326,8 +354,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
             transfer_time = None
             if success:
-                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
-                transfer_time = telemetry.xferDuration / 1e6
+                try:
+                    telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                    transfer_time = telemetry.xferDuration / 1e6
+                except Exception as exc:
+                    logger.warning(
+                        "get_xfer_telemetry failed for job %d: %s", job_id, exc
+                    )
 
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
