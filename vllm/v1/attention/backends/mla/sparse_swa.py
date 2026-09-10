@@ -168,6 +168,8 @@ class DeepseekSparseSWAMetadata:
 
     is_valid_token: torch.Tensor | None = None  # [num_tokens]
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
+    # int32 copy of the batch positions for the FlashMLA fused kernels.
+    positions_int32: torch.Tensor | None = None  # [num_tokens]
     decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, width]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
     # window_size (causal) or noncausal_index_width (DSpark non-causal).
@@ -474,6 +476,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self.positions_int32 = torch.zeros(
+            max_tokens, dtype=torch.int32, device=self.device
+        )
         # Allocated unconditionally — consumer picks paged-direct vs dequant
         # at call time.
         self.prefill_swa_indices = torch.zeros(
@@ -685,6 +690,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # resulting plan for the rest of the step.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
 
+        positions = common_attn_metadata.positions
+        positions_int32 = None
+        if positions is not None:
+            num_position_tokens = positions.shape[0]
+            self.positions_int32[:num_position_tokens].copy_(positions)
+            positions_int32 = self.positions_int32[:num_position_tokens]
+
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
@@ -693,6 +705,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             slot_mapping=slot_mapping,
             is_valid_token=is_valid_token,
             token_to_req_indices=token_to_req_indices,
+            positions_int32=positions_int32,
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
             decode_swa_width=decode_swa_width,
