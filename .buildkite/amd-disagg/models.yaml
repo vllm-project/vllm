@@ -82,7 +82,6 @@ models:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
-      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8 --block-size 1"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
