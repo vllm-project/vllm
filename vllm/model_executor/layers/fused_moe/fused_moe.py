@@ -5,7 +5,6 @@
 import functools
 import json
 import os
-from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -31,6 +30,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
+)
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+    _when,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
@@ -646,7 +650,7 @@ def _wna16_warmup_inputs(
     *,
     layer: Any,
     experts: Any,
-) -> Iterator[dict[str, Any]]:
+) -> dict[str, Any]:
     dtype = layer.moe_config.in_dtype
     top_k = layer.top_k
     pack_factor = 2 if experts.quant_config.use_int4_w4a16 else 1
@@ -658,84 +662,77 @@ def _wna16_warmup_inputs(
         if dtype == torch.float32
         else tl.bfloat16
     )
-    for num_tokens in range(1, layer.moe_config.max_num_tokens + 1):
-        base_config = try_get_optimal_moe_config(
-            layer.w13_weight.size(),
-            layer.w2_weight.size(),
-            top_k,
-            experts.quant_config.config_name(dtype),
-            num_tokens,
-            block_shape=experts.block_shape,
-        )
-        for second_gemm in (False, True):
-            weight = layer.w2_weight if second_gemm else layer.w13_weight
-            scale = experts.w2_scale if second_gemm else experts.w1_scale
-            zero_point = (
-                experts.quant_config.w2_zp
-                if second_gemm
-                else experts.quant_config.w1_zp
+    num_tokens: Any = WarmupIntRange(1, layer.moe_config.max_num_tokens + 1)
+    second_gemm: Any = WarmupChoices(False, True)
+    em: Any = WarmupChoices(1, 2, 16)
+    has_topk_weights: Any = WarmupChoices(False, True)
+    _when(not second_gemm or has_topk_weights)
+    base_config = try_get_optimal_moe_config(
+        layer.w13_weight.size(),
+        layer.w2_weight.size(),
+        top_k,
+        experts.quant_config.config_name(dtype),
+        num_tokens,
+        block_shape=experts.block_shape,
+    )
+    weight = layer.w2_weight if second_gemm else layer.w13_weight
+    scale = experts.w2_scale if second_gemm else experts.w1_scale
+    zero_point = (
+        experts.quant_config.w2_zp if second_gemm else experts.quant_config.w1_zp
+    )
+    input_size = weight.size(2) * pack_factor
+    config = _resolve_wna16_config(
+        base_config,
+        num_valid_tokens=num_tokens * top_k,
+        size_k=input_size,
+        size_n=weight.size(1),
+        group_size=group_size,
+        real_top_k=1 if second_gemm else top_k,
+    )
+    return dict(
+        a=TritonWarmupTensor(
+            dtype,
+            shape=(1, input_size),
+            strides=(input_size, 1),
+        ),
+        b=TritonWarmupTensor(
+            weight.dtype,
+            shape=(1, weight.size(1), 1),
+            strides=weight.stride(),
+        ),
+        c=TritonWarmupTensor(
+            dtype,
+            shape=(1, 1, weight.size(1)),
+            strides=(1, weight.size(1), 1),
+        ),
+        b_scale=TritonWarmupTensor(
+            scale.dtype,
+            shape=(1, 1, 1),
+            strides=scale.stride(),
+        ),
+        b_zp=(
+            None
+            if zero_point is None
+            else TritonWarmupTensor(
+                zero_point.dtype,
+                shape=(1, 1, 1),
+                strides=zero_point.stride(),
             )
-            input_size = weight.size(2) * pack_factor
-            config = _resolve_wna16_config(
-                base_config,
-                num_valid_tokens=num_tokens * top_k,
-                size_k=input_size,
-                size_n=weight.size(1),
-                group_size=group_size,
-                real_top_k=1 if second_gemm else top_k,
-            )
-            topk_weights = TritonWarmupTensor(torch.float32)
-            topk_weights_variants = (
-                (topk_weights,) if second_gemm else (None, topk_weights)
-            )
-            for em in (1, 2, 16):
-                for warmup_topk_weights in topk_weights_variants:
-                    yield dict(
-                        a=TritonWarmupTensor(
-                            dtype,
-                            shape=(1, input_size),
-                            strides=(input_size, 1),
-                        ),
-                        b=TritonWarmupTensor(
-                            weight.dtype,
-                            shape=(1, weight.size(1), 1),
-                            strides=weight.stride(),
-                        ),
-                        c=TritonWarmupTensor(
-                            dtype,
-                            shape=(1, 1, weight.size(1)),
-                            strides=(1, weight.size(1), 1),
-                        ),
-                        b_scale=TritonWarmupTensor(
-                            scale.dtype,
-                            shape=(1, 1, 1),
-                            strides=scale.stride(),
-                        ),
-                        b_zp=(
-                            None
-                            if zero_point is None
-                            else TritonWarmupTensor(
-                                zero_point.dtype,
-                                shape=(1, 1, 1),
-                                strides=zero_point.stride(),
-                            )
-                        ),
-                        topk_weights=warmup_topk_weights,
-                        sorted_token_ids=TritonWarmupTensor(torch.int32),
-                        expert_ids=TritonWarmupTensor(torch.int32),
-                        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
-                        EM=em,
-                        num_valid_tokens=num_tokens * top_k,
-                        config=config,
-                        group_size=group_size,
-                        mul_routed_weight=(
-                            second_gemm and not layer.apply_router_weight_on_input
-                        ),
-                        top_k=1 if second_gemm else top_k,
-                        compute_type=compute_type,
-                        use_int4_w4a16=experts.quant_config.use_int4_w4a16,
-                        use_int8_w8a16=experts.quant_config.use_int8_w8a16,
-                    )
+        ),
+        topk_weights=(TritonWarmupTensor(torch.float32) if has_topk_weights else None),
+        sorted_token_ids=TritonWarmupTensor(torch.int32),
+        expert_ids=TritonWarmupTensor(torch.int32),
+        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
+        EM=em,
+        num_valid_tokens=num_tokens * top_k,
+        config=config,
+        group_size=group_size,
+        mul_routed_weight=(second_gemm and not layer.apply_router_weight_on_input),
+        top_k=1 if second_gemm else top_k,
+        compute_type=compute_type,
+        use_int4_w4a16=experts.quant_config.use_int4_w4a16,
+        use_int8_w8a16=experts.quant_config.use_int8_w8a16,
+    )
 
 
 @triton_kernel_dispatcher_with_warmup(

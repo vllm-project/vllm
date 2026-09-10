@@ -4,15 +4,13 @@ import ast
 import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from functools import cache, cached_property, update_wrapper, wraps
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
-    WarmupChoices,
-    WarmupIntRange,
     get_ast_full_name,
     get_function_source_node,
 )
@@ -182,6 +180,12 @@ class TritonWarmupTensor:
     def ptr_range(self) -> int:
         return 0
 
+    @property
+    def device(self) -> Any:
+        import torch
+
+        return torch.device("cuda")
+
     def stride(self, dim: int | None = None) -> int | tuple[int, ...]:
         if self.strides is None:
             strides: list[int] = []
@@ -332,71 +336,91 @@ class TritonCompileKey:
     inputs: tuple[tuple[str, Any], ...] = field(compare=False, hash=False, repr=False)
 
 
-def _triton_compile_keys(kernel: Any, kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
-    """Derive the keys Triton warmup would compile without compiling them."""
+def _triton_key_deriver(
+    kernel: Any,
+) -> Callable[[Mapping[str, Any]], set[TritonJitKey]]:
+    """Prepare Triton's key derivation once for one kernel and device."""
     from triton import knobs
     from triton.runtime.autotuner import Autotuner, Heuristics
     from triton.runtime.driver import driver
     from triton.runtime.jit import JITFunction, compute_cache_key
 
     if isinstance(kernel, Heuristics):
-        heuristic_kwargs = dict(kwargs)
-        for name, heuristic in kernel.values.items():
-            heuristic_kwargs[name] = heuristic(heuristic_kwargs)
-        return _triton_compile_keys(kernel.fn, heuristic_kwargs)
+        derive_inner = _triton_key_deriver(kernel.fn)
+
+        def derive_heuristic(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+            heuristic_kwargs = dict(kwargs)
+            for name, heuristic in kernel.values.items():
+                heuristic_kwargs[name] = heuristic(heuristic_kwargs)
+            return derive_inner(heuristic_kwargs)
+
+        return derive_heuristic
 
     if isinstance(kernel, Autotuner):
-        previous_nargs = getattr(kernel, "nargs", None)
-        kernel.nargs = {}
-        try:
-            configs = kernel.prune_configs(dict(kwargs))
-        finally:
-            kernel.nargs = previous_nargs
-        keys: set[TritonJitKey] = set()
-        for config in configs:
-            conflicts = kwargs.keys() & config.kwargs.keys()
-            if conflicts:
-                names = ", ".join(sorted(conflicts))
-                raise ValueError(f"Conflicting autotune parameters: {names}")
-            keys.update(
-                _triton_compile_keys(kernel.fn, dict(kwargs) | config.all_kwargs())
-            )
-        return keys
+        derive_inner = _triton_key_deriver(kernel.fn)
+
+        def derive_autotuned(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+            previous_nargs = getattr(kernel, "nargs", None)
+            kernel.nargs = {}
+            try:
+                configs = kernel.prune_configs(dict(kwargs))
+            finally:
+                kernel.nargs = previous_nargs
+            keys: set[TritonJitKey] = set()
+            for config in configs:
+                conflicts = kwargs.keys() & config.kwargs.keys()
+                if conflicts:
+                    names = ", ".join(sorted(conflicts))
+                    raise ValueError(f"Conflicting autotune parameters: {names}")
+                keys.update(derive_inner(dict(kwargs) | config.all_kwargs()))
+            return keys
+
+        return derive_autotuned
 
     if not isinstance(kernel, JITFunction):
         raise TypeError(f"Unsupported Triton kernel wrapper: {type(kernel).__name__}")
 
     device = cast(Hashable, driver.active.get_current_device())
     _, kernel_key_cache, _, _, binder = kernel.device_caches[device]
-    binder_kwargs = dict(kwargs)
-    binder_kwargs["debug"] = (
-        binder_kwargs.get("debug", kernel.debug) or knobs.runtime.debug
+    jit_function_id = id(kernel)
+    jit_function_key = cast(Hashable, kernel.cache_key)
+    debug = kernel.debug or knobs.runtime.debug
+    instrumentation_mode = knobs.compilation.instrumentation_mode
+    fpsan_homomorphic_casts = getattr(
+        knobs.compilation, "fpsan_homomorphic_casts", None
     )
-    binder_kwargs["instrumentation_mode"] = knobs.compilation.instrumentation_mode
-    _, specialization, options = binder(**binder_kwargs)
-    if knobs.runtime.add_stages_inspection_hook is not None:
-        _, inspection_hash = knobs.runtime.add_stages_inspection_hook()
-        specialization.append(f'("custom_pipeline", {inspection_hash})')
-    cache_key = cast(
-        Hashable,
-        compute_cache_key(kernel_key_cache, specialization, options),
-    )
-    return {
-        TritonJitKey(
-            id(kernel),
-            cast(Hashable, kernel.cache_key),
-            device,
-            cache_key,
+    inspection_hook = knobs.runtime.add_stages_inspection_hook
+
+    def derive_jit(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+        binder_kwargs = dict(kwargs)
+        binder_kwargs["debug"] = binder_kwargs.get("debug", debug) or debug
+        binder_kwargs["instrumentation_mode"] = instrumentation_mode
+        if fpsan_homomorphic_casts is not None:
+            binder_kwargs["fpsan_homomorphic_casts"] = fpsan_homomorphic_casts
+        _, specialization, options = binder(**binder_kwargs)
+        if inspection_hook is not None:
+            _, inspection_hash = inspection_hook()
+            specialization.append(f'("custom_pipeline", {inspection_hash})')
+        cache_key = cast(
+            Hashable,
+            compute_cache_key(kernel_key_cache, specialization, options),
         )
-    }
+        return {
+            TritonJitKey(
+                jit_function_id,
+                jit_function_key,
+                device,
+                cache_key,
+            )
+        }
+
+    return derive_jit
 
 
 WarmupCases = Mapping[str, Any] | Iterable[Mapping[str, Any]]
 
 
 class _AutomaticTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
-    _range_boundaries: frozenset[int]
-
     def warmup_inputs(self, compile_key: TritonCompileKey) -> dict[str, Any]:
         return dict(compile_key.inputs)
 
@@ -413,83 +437,9 @@ class _AutomaticTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
             in {"WarmupIntRange", "WarmupChoices", "_when"}
             for node in ast.walk(cases_node)
         ):
-            return self._expand_warmup_cases(
-                provider,
-                *args,
-                _value_expander=self._expand_triton_value,
-                **kwargs,
-            )
+            return self._expand_warmup_cases(provider, *args, **kwargs)
         cases = provider(*args, **kwargs)
         return (cases,) if isinstance(cases, Mapping) else cases
-
-    def _expand_triton_value(self, value: Any) -> tuple[Any, ...]:
-        if isinstance(value, WarmupIntRange):
-            return _triton_range_values(value, self._range_boundaries)
-        if isinstance(value, WarmupChoices):
-            return value.values
-        if isinstance(value, (list, tuple)):
-            return tuple(value)
-        return (value,)
-
-
-def _dispatch_integer_constants(*functions: Callable[..., Any]) -> frozenset[int]:
-    return frozenset(
-        node.value
-        for function in functions
-        for node in ast.walk(get_function_source_node(function))
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, int)
-        and not isinstance(node.value, bool)
-    )
-
-
-def _triton_range_values(
-    domain: WarmupIntRange,
-    boundaries: frozenset[int],
-) -> tuple[int, ...]:
-    if domain.advance is not None:
-        values: list[int] = []
-        value = domain.start
-        while value < domain.stop:
-            values.append(value)
-            if len(values) > 256:
-                raise ValueError(
-                    "Triton warmup range produced more than 256 explicit values"
-                )
-            value = domain.advance(value)
-            if value <= values[-1]:
-                raise ValueError("WarmupIntRange.advance must increase its value")
-        return tuple(values)
-
-    range_values = range(domain.start, domain.stop, domain.step)
-    if len(range_values) <= 64:
-        return tuple(range_values)
-    if domain.step <= 0:
-        raise ValueError("Triton warmup ranges require a positive step")
-
-    indices = {0, len(range_values) - 1}
-
-    def include_near(candidate: int) -> None:
-        index = (candidate - domain.start) // domain.step
-        for nearby in (index - 1, index, index + 1):
-            if 0 <= nearby < len(range_values):
-                indices.add(nearby)
-
-    for boundary in boundaries | frozenset({-16, -1, 0, 1, 2, 16}):
-        include_near(boundary)
-
-    limit = max(abs(domain.start), abs(domain.stop - 1))
-    power = 1
-    while power <= limit:
-        include_near(power)
-        include_near(power + 1)
-        include_near(-power)
-        include_near(-power + 1)
-        power *= 2
-
-    first_multiple_of_16 = ((domain.start + 15) // 16) * 16
-    include_near(first_multiple_of_16)
-    return tuple(range_values[index] for index in sorted(indices))
 
 
 def _is_autotuned(kernel: Any) -> bool:
@@ -519,15 +469,23 @@ def _materialize_warmup_case(
     case: Mapping[str, Any],
     *,
     real: bool,
+    mode: Any,
+    cache: dict[TritonWarmupTensor, Any],
 ) -> dict[str, Any]:
     import torch
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    mode = nullcontext() if real else FakeTensorMode()
 
     def materialize(value: Any) -> Any:
         if not isinstance(value, TritonWarmupTensor):
             return value
+        if not real:
+            try:
+                return cache[value]
+            except KeyError:
+                pass
+            except TypeError:
+                # Unhashable initializers are uncommon and safe to materialize directly.
+                pass
+
         strides = cast(tuple[int, ...], value.stride())
         with mode:
             tensor = torch.empty_strided(
@@ -543,6 +501,8 @@ def _materialize_warmup_case(
                 tensor.fill_(value.init)
         else:
             tensor._vllm_warmup_aligned = value.aligned
+            with suppress(TypeError):
+                cache[value] = tensor
         return tensor
 
     return {name: materialize(value) for name, value in case.items()}
@@ -575,8 +535,6 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                 for parameter in parameters
                 if parameter.default is not inspect.Parameter.empty
             }
-        functions = (warmup_inputs,) if dispatch is None else (warmup_inputs, dispatch)
-        self._range_boundaries = _dispatch_integer_constants(*functions)
         super().__init__()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -608,36 +566,69 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
         return getattr(self.kernel, name)
 
     def get_warmup_keys(self, *args: Any, **kwargs: Any) -> list[TritonCompileKey]:
-        keys: dict[TritonCompileKey, None] = {}
+        keys: list[TritonCompileKey] = []
+        seen_jit_keys: set[frozenset[TritonJitKey]] = set()
         cases = self._provider_cases(self._warmup_inputs_fn, *args, **kwargs)
+        derive_keys = _triton_key_deriver(self.kernel)
+        materialize = self._run_autotune
+        mode: Any = nullcontext() if self._run_autotune else None
+        materialized: dict[TritonWarmupTensor, Any] = {}
         for case in cases:
-            inputs = _materialize_warmup_case(case, real=self._run_autotune)
+            inputs = (
+                _materialize_warmup_case(
+                    case,
+                    real=self._run_autotune,
+                    mode=mode,
+                    cache=materialized,
+                )
+                if materialize
+                else case
+            )
             if self._dispatch_fn is None:
-                prepared = inputs.copy()
+                prepared = dict(inputs)
                 prepared.pop("grid")
             else:
+                dispatch_inputs = {
+                    name: inputs[name]
+                    for name in self._dispatch_arg_names
+                    if name in inputs
+                }
                 try:
-                    _, launch_kwargs = self._dispatch_fn(
-                        **{
-                            name: inputs[name]
-                            for name in self._dispatch_arg_names
-                            if name in inputs
-                        }
-                    )[:2]
-                except AssertionError:
-                    continue
+                    _, launch_kwargs = self._dispatch_fn(**dispatch_inputs)[:2]
+                except (AssertionError, AttributeError, TypeError):
+                    if materialize:
+                        raise
+                    from torch._subclasses.fake_tensor import FakeTensorMode
+
+                    materialize = True
+                    mode = FakeTensorMode()
+                    inputs = _materialize_warmup_case(
+                        case,
+                        real=False,
+                        mode=mode,
+                        cache=materialized,
+                    )
+                    dispatch_inputs = {
+                        name: inputs[name]
+                        for name in self._dispatch_arg_names
+                        if name in inputs
+                    }
+                    _, launch_kwargs = self._dispatch_fn(**dispatch_inputs)[:2]
                 prepared = self._prepare_launch_kwargs(
                     tuple(inputs),
                     tuple(inputs.values()),
                     dict(launch_kwargs),
                 )
-            prepared = {
-                name: _triton_metadata_arg(value) for name, value in prepared.items()
-            }
-            jit_keys = frozenset(_triton_compile_keys(self.kernel, prepared))
-            if jit_keys:
-                keys[TritonCompileKey(jit_keys, tuple(inputs.items()))] = None
-        return list(keys)
+            if materialize:
+                prepared = {
+                    name: _triton_metadata_arg(value)
+                    for name, value in prepared.items()
+                }
+            jit_keys = frozenset(derive_keys(prepared))
+            if jit_keys and jit_keys not in seen_jit_keys:
+                seen_jit_keys.add(jit_keys)
+                keys.append(TritonCompileKey(jit_keys, tuple(inputs.items())))
+        return keys
 
 
 class TritonKernelDispatcher(Protocol[P]):

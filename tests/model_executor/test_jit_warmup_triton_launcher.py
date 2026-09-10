@@ -56,6 +56,17 @@ class _FakeTritonKernel:
         return launch
 
 
+def _patch_key_deriver(
+    monkeypatch: pytest.MonkeyPatch,
+    derive: Any,
+) -> None:
+    monkeypatch.setattr(
+        jit_warmup_triton_helper,
+        "_triton_key_deriver",
+        lambda kernel: lambda kwargs: derive(kernel, kwargs),
+    )
+
+
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     kernel = _FakeTritonKernel()
 
@@ -152,7 +163,7 @@ def test_triton_kernel_decorator_returns_launcher(
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
         return {TritonJitKey(id(kernel), "fake", 0, kwargs["SECOND"])}
 
-    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+    _patch_key_deriver(monkeypatch, fake_keys)
 
     keys = launch.get_warmup_keys()
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
@@ -193,7 +204,7 @@ def test_triton_kernel_decorator_returns_launcher(
         launch(first, 1, 7, stale_constexpr=True)
 
 
-def test_triton_kernel_decorator_compacts_large_ranges(
+def test_triton_kernel_decorator_exhausts_large_ranges_before_deduplication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = _FakeTritonKernel()
@@ -203,20 +214,47 @@ def test_triton_kernel_decorator_compacts_large_ranges(
         tokens: Any = WarmupIntRange(1, 8193)
         return dict(first="warmup", second=tokens)
 
+    def specialization(second: int) -> int:
+        return 7 if second <= 97 else 8
+
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
     def dispatch(first: str, second: int) -> LaunchSpec:
         dispatched.append(second)
-        return (second,), dict(CONST=7 if second <= 17 else 8)
+        return (second,), dict(CONST=specialization(second))
 
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
         return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
 
-    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
+    _patch_key_deriver(monkeypatch, fake_keys)
 
     keys = dispatch.get_warmup_keys()
-    assert len(dispatched) < 64
+    assert dispatched == list(range(1, 8193))
     assert len(keys) == 2
-    assert {7 if dict(key.inputs)["second"] <= 17 else 8 for key in keys} == {7, 8}
+    assert {specialization(dict(key.inputs)["second"]) for key in keys} == {7, 8}
+
+
+def test_triton_kernel_decorator_propagates_dispatch_assertions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = _FakeTritonKernel()
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(first="warmup", second=WarmupChoices(1, 2))
+
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: str, second: int) -> LaunchSpec:
+        assert second != 2, "broken dispatch"
+        return (1,), dict(CONST=second)
+
+    _patch_key_deriver(
+        monkeypatch,
+        lambda kernel, kwargs: {
+            TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])
+        },
+    )
+
+    with pytest.raises(AssertionError, match="broken dispatch"):
+        dispatch.get_warmup_keys()
 
 
 def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
@@ -237,10 +275,11 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
         assert first[0].is_contiguous()
         return (first.shape[0],), dict(CONST=first[0].numel())
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_compile_keys",
-        lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
+    _patch_key_deriver(
+        monkeypatch,
+        lambda kernel, kwargs: {
+            TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])
+        },
     )
 
     keys = dispatch.get_warmup_keys()
@@ -267,9 +306,8 @@ def test_triton_kernel_decorates_native_launchers(
 
     assert kernel.runtime_calls == [((3,), ("runtime", 4), {"CONST": 8})]
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_compile_keys",
+    _patch_key_deriver(
+        monkeypatch,
         lambda kernel, kwargs: {
             TritonJitKey(id(kernel), "fake", 0, (kwargs["second"], kwargs["CONST"]))
         },
@@ -334,19 +372,20 @@ def test_triton_key_derivation_applies_wrappers_and_runtime_options(
         {"BLOCK": lambda args: 16 if args["value"] <= 16 else 32}
     )(_binder_test_kernel)
 
-    keys = jit_warmup_triton_helper._triton_compile_keys(
-        heuristic_kernel,
-        {"x": TritonWarmupTensor(tl.float32), "value": 2},
+    keys = jit_warmup_triton_helper._triton_key_deriver(heuristic_kernel)(
+        {"x": TritonWarmupTensor(tl.float32), "value": 2}
     )
 
     assert len(keys) == 1
-    assert calls == [
-        {
-            "BLOCK": 16,
-            "debug": knobs.runtime.debug,
-            "instrumentation_mode": knobs.compilation.instrumentation_mode,
-        }
-    ]
+    expected_options = {
+        "debug": knobs.runtime.debug,
+        "instrumentation_mode": knobs.compilation.instrumentation_mode,
+    }
+    if hasattr(knobs.compilation, "fpsan_homomorphic_casts"):
+        expected_options["fpsan_homomorphic_casts"] = (
+            knobs.compilation.fpsan_homomorphic_casts
+        )
+    assert calls == [{"BLOCK": 16, **expected_options}]
 
 
 def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
@@ -372,10 +411,10 @@ def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
     )(_binder_test_kernel)
     inputs = {"x": TritonWarmupTensor(tl.float32), "value": 2}
 
-    autotune_keys = jit_warmup_triton_helper._triton_compile_keys(autotuned, inputs)
-    other_kernel_keys = jit_warmup_triton_helper._triton_compile_keys(
-        _second_binder_test_kernel, inputs | {"BLOCK": 16}
-    )
+    autotune_keys = jit_warmup_triton_helper._triton_key_deriver(autotuned)(inputs)
+    other_kernel_keys = jit_warmup_triton_helper._triton_key_deriver(
+        _second_binder_test_kernel
+    )(inputs | {"BLOCK": 16})
 
     assert len(autotune_keys) == 2
     assert {key.jit_function_key for key in autotune_keys} == {

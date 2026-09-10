@@ -389,6 +389,42 @@ def _eval_dispatch_expr(
     return _DispatchExprEvaluator(kwargs, globals_).eval(node)
 
 
+def _validate_dispatch_expr(node: ast.AST) -> None:
+    """Enforce the dispatch AST subset before compiling traced code."""
+    allowed_nodes = (
+        ast.Name,
+        ast.Constant,
+        ast.IfExp,
+        ast.Tuple,
+        ast.List,
+        ast.BoolOp,
+        ast.And,
+        ast.Or,
+        ast.Compare,
+        *tuple(_CMP_OPS),
+        ast.UnaryOp,
+        ast.Not,
+        ast.USub,
+        ast.BinOp,
+        *tuple(_BIN_OPS),
+        ast.Call,
+        ast.keyword,
+        ast.Starred,
+        ast.Attribute,
+        ast.Subscript,
+        ast.Load,
+    )
+    for child in ast.walk(node):
+        if not isinstance(child, allowed_nodes):
+            raise _dispatch_expr_error(child, "Unsupported dispatch expression")
+        if isinstance(child, ast.Call) and any(
+            keyword.arg is None for keyword in child.keywords
+        ):
+            raise _dispatch_expr_error(
+                child, "Dispatch helper calls cannot use **kwargs"
+            )
+
+
 def _collect_input_names(
     node: ast.AST,
     candidate_names: set[str],
@@ -696,7 +732,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             _expand_warmup_values
         ),
         **kwargs: Any,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[Mapping[str, Any]]:
         """Expand symbolic domains declared inside a warmup-cases method."""
         function_def = get_function_source_node(cases_fn)
         if isinstance(function_def, ast.Lambda):
@@ -775,7 +811,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 name = f"__warmup_domain_{len(domains)}"
                 domain = _eval_dispatch_expr(node, static_values, globals_)
                 domains.append((name, _value_expander(domain)))
-                return ast.copy_location(ast.Name(id=name), node)
+                return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
 
         return_expr = cast(ast.Call, _InlineDomainRewriter().visit(return_expr))
 
@@ -792,18 +828,69 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             else:
                 static_values[name] = _eval_dispatch_expr(expr, static_values, globals_)
 
+        for _, expr in dynamic_local_exprs:
+            _validate_dispatch_expr(expr)
+        for predicate in predicates:
+            _validate_dispatch_expr(predicate)
+        _validate_dispatch_expr(return_expr)
+
+        case_body: list[ast.stmt] = [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=cast(ast.expr, expr),
+            )
+            for name, expr in dynamic_local_exprs
+        ]
+        if predicates:
+            predicate = (
+                predicates[0]
+                if len(predicates) == 1
+                else ast.BoolOp(
+                    op=ast.And(),
+                    values=[cast(ast.expr, value) for value in predicates],
+                )
+            )
+            case_body.append(
+                ast.If(
+                    test=ast.UnaryOp(
+                        op=ast.Not(), operand=cast(ast.expr, predicate)
+                    ),
+                    body=[ast.Return(value=ast.Constant(value=None))],
+                    orelse=[],
+                )
+            )
+        case_body.append(ast.Return(value=cast(ast.expr, return_expr)))
+        case_function = ast.FunctionDef(
+            name="__vllm_warmup_case",
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[ast.arg(arg=name) for name in domain_names],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=case_body,
+            decorator_list=[],
+        )
+        case_globals = dict(globals_)
+        case_globals.update(static_values)
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[case_function], type_ignores=[])
+                ),
+                "<jit-warmup>",
+                "exec",
+            ),
+            case_globals,
+        )
+        evaluate_case = cast(Callable[..., Any], case_globals[case_function.name])
+
         domain_values = tuple(values for _, values in domains)
         for values in itertools.product(*domain_values):
-            evaluated = {**static_values, **dict(zip(domain_names, values))}
-            evaluated = _eval_local_exprs(
-                tuple(dynamic_local_exprs), evaluated, globals_
-            )
-            if any(
-                not _eval_dispatch_expr(predicate, evaluated, globals_)
-                for predicate in predicates
-            ):
+            case = evaluate_case(*values)
+            if case is None:
                 continue
-            case = _eval_dispatch_expr(return_expr, evaluated, globals_)
             if not isinstance(case, Mapping):
                 raise TypeError("AST-traced warmup cases must return a mapping")
             if any(
@@ -811,7 +898,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 for value in case.values()
             ):
                 raise TypeError("Warmup domains must be direct expressions")
-            yield dict(case)
+            yield case
 
     def dispatch(self, **kwargs: Any) -> CompileKeyT:
         """Build one compile key from one concrete dispatch point."""

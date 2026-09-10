@@ -95,7 +95,7 @@ def eagle_step_slot_mapping_metadata_kernel(
 
 
 def _eagle_step_warmup_inputs(*, max_model_len: int, max_batch_size: int):
-    block_size = WarmupChoices(1, 2, 4, 8, 16, 32, 64, 128, 256)
+    block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
     n_blocks_per_req = triton.cdiv(max_model_len, block_size)
     return dict(
         positions=TritonWarmupTensor(torch.int64),
@@ -603,7 +603,7 @@ def _copy_and_expand_eagle_warmup_inputs(
         total_input_tokens=WarmupIntRange(1, max_num_tokens + 1),
         num_padding_slots_per_request=num_padding_slots_per_request,
         shift_input_ids=shift_input_ids,
-        BLOCK_SIZE_TOKENS=WarmupChoices(1, 2, 4, 8, 16, 32, 64, 128, 256),
+        BLOCK_SIZE_TOKENS=WarmupIntRange(1, 257, advance=lambda value: value * 2),
         batch_size=1,
         num_blocks=1,
     )
@@ -755,7 +755,7 @@ def _copy_and_expand_dflash_warmup_inputs(
 ):
     int32 = TritonWarmupTensor(torch.int32)
     int64 = TritonWarmupTensor(torch.int64)
-    triton_block_size = WarmupChoices(1, 2, 4, 8, 16, 32, 64, 128, 256)
+    triton_block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
     has_num_rejected = WarmupChoices(False, True)
     return dict(
         next_token_ids_ptr=int32,

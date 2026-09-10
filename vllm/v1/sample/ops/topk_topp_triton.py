@@ -877,12 +877,13 @@ def _topk_topp_kernel(
 
 
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
-    max_batch_size = vllm_config.scheduler_config.max_num_seqs
     vocab_size = vllm_config.model_config.get_vocab_size()
-    split_enabled = current_platform.is_cuda()
+    split_enabled = current_platform.is_cuda_alike()
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, max_batch_size + 1)
+    batch_size: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_seqs + 1
+    )
     topk_enabled = mode[0]
     topp_enabled = mode[1]
     _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))
@@ -904,7 +905,8 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topk_topp_kernel, warmup_inputs=_topk_topp_warmup_inputs
+    kernel=_topk_topp_kernel,
+    warmup_inputs=_topk_topp_warmup_inputs,
 )
 def _topk_topp(
     logits: torch.Tensor,
@@ -929,7 +931,9 @@ def _topk_topp(
     else:
         block_size, block_size_trunc, num_warps = 8192, 4096, 8
     split_covers_ponly = (
-        current_platform.is_cuda() and topp_enabled and batch_size <= _SPLIT_MAX_BATCH
+        current_platform.is_cuda_alike()
+        and topp_enabled
+        and batch_size <= _SPLIT_MAX_BATCH
     )
     return (num_programs,), dict(
         K=k_ptr,
@@ -1030,10 +1034,11 @@ def _topp_sb_stats_kernel(
 
 def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
-    max_batch_size = min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH)
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, max_batch_size + 1)
+    batch_size: Any = WarmupIntRange(
+        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+    )
     has_k: Any = WarmupChoices(False, True)
     logits = TritonWarmupTensor(
         torch.float32,
@@ -1318,10 +1323,11 @@ def _topp_sb_step_kernel(
 
 def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
-    max_batch_size = min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH)
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, max_batch_size + 1)
+    batch_size: Any = WarmupIntRange(
+        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+    )
     round: Any = WarmupIntRange(0, _SPLIT_ROUNDS)
     has_k: Any = WarmupChoices(False, True)
     logits = TritonWarmupTensor(
@@ -1499,10 +1505,11 @@ def _topp_sb_mask_kernel(
 
 def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
-    max_batch_size = min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH)
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, max_batch_size + 1)
+    batch_size: Any = WarmupIntRange(
+        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+    )
     has_k: Any = WarmupChoices(False, True)
     logits = TritonWarmupTensor(
         torch.float32,
