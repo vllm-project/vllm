@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch.nn.functional as F
+from vllm.models.glm5next.nvidia.kda import _Glm5NextMergedColumnParallelLinear
 
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
@@ -31,6 +32,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -1089,6 +1091,55 @@ def test_merged_column_parallel_variable_slice(
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("replicated", [False, True])
+@pytest.mark.parametrize("partial_adapter", [False, True])
+def test_merged_lora_b_replicated_shards(
+    default_vllm_config, dist_init, tp_size, replicated, partial_adapter
+):
+    """Replicated projections retain all B rows on every rank during loading."""
+    sizes = [32, 32, 32, 8, 8, 8]
+    names = ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"]
+    config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=torch.float32)
+    lora_a: list[torch.Tensor | None] = [torch.ones(8, 16) for _ in sizes]
+    lora_b: list[torch.Tensor | None] = [
+        torch.arange(size * 8).reshape(size, 8).float() + 1 for size in sizes
+    ]
+    if partial_adapter:
+        lora_a[4] = lora_b[4] = None
+
+    for tp_rank in range(tp_size):
+        with (
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+                return_value=tp_rank,
+            ),
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+                return_value=tp_size,
+            ),
+            torch.device("cpu"),
+        ):
+            if replicated:
+                base = _Glm5NextMergedColumnParallelLinear(
+                    16, sizes, (4, 5), tp_size=tp_size, bias=False
+                )
+            else:
+                base = MergedColumnParallelLinear(16, sizes, bias=False)
+            layer = from_layer(base, 1, config, names)
+            layer.set_lora(0, lora_a, lora_b)
+
+        for i, b in enumerate(lora_b):
+            stored = layer.lora_b_stacked[i][0, 0]
+            if b is None:
+                assert torch.count_nonzero(stored) == 0
+            else:
+                expected = (
+                    b if replicated and i in (4, 5) else b.chunk(tp_size)[tp_rank]
+                )
+                torch.testing.assert_close(stored, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
