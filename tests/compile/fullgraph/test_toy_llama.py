@@ -341,10 +341,6 @@ def test_toy_llama(
 ):
     from vllm.compilation.counter import compilation_counter
 
-    # We disable the vLLM compile cache into a new tmp dir for 1 reason:
-    # 1. To make sure we can properly track the number of Inductor compilations.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
@@ -370,6 +366,7 @@ def test_toy_llama(
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,
         cudagraph_capture_sizes=[1, 2],
+        enable_vllm_compile_cache=False,
     )
 
     compile_config_split = deepcopy(compile_config_no_split)

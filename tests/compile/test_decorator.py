@@ -69,10 +69,6 @@ def run_model(
 
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatch):
-    # disable compile cache so that we can count the number of compilations
-    # appropriately
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
@@ -83,6 +79,9 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
+            # disable compile cache so that we can count the number of compilations
+            # appropriately
+            enable_vllm_compile_cache=False,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -201,10 +200,6 @@ class A(nn.Module):
 
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch):
-    # disable compile cache so that we can count the number of compilations
-    # appropriately
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
@@ -217,6 +212,9 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
+            # disable compile cache so that we can count the number of compilations
+            # appropriately
+            enable_vllm_compile_cache=False,
         ),
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
