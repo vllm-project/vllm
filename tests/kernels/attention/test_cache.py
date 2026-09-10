@@ -356,22 +356,34 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale):
+        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale, swizzled_scales):
             # data_cache:  [B, N, H, data_dim]  logical view (layout in strides)
             # scale_cache: [B, N, H, scale_dim] logical view (layout in strides)
             # Permute to [B, H, N, dim] for the dequant utility.
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
-                data_hnd, scale_hnd, global_scale, head_size, block_size
+                data_hnd,
+                scale_hnd,
+                global_scale,
+                head_size,
+                block_size,
+                swizzled_scales=swizzled_scales,
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
+        # The kernel writes K scales linearly on every arch and V scales in
+        # the 4x4 swizzle of the SM100 trtllm-gen reader. The FlashInfer
+        # reader used on SM12x expects linear V scales as well.
+        v_scales_swizzled = not current_platform.is_device_capability_family(120)
         result_key_cache = dequant_nvfp4_cache(
-            nvfp4_key_data, key_scale_cache, k_scale.item()
+            nvfp4_key_data, key_scale_cache, k_scale.item(), swizzled_scales=False
         )
         result_value_cache = dequant_nvfp4_cache(
-            nvfp4_value_data, value_scale_cache, v_scale.item()
+            nvfp4_value_data,
+            value_scale_cache,
+            v_scale.item(),
+            swizzled_scales=v_scales_swizzled,
         )
 
         # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
@@ -484,6 +496,7 @@ def test_nvfp4_4over6_selects_lower_error_scale(
             scale.item(),
             head_size,
             block_size,
+            swizzled_scales=False,
         )[0, 0, 0]
 
     default = quantize_and_dequantize("nvfp4")
