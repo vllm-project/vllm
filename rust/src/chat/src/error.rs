@@ -17,6 +17,8 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("{0}")]
+    InvalidReasoningEffort(String),
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -34,6 +36,10 @@ pub enum Error {
     },
     #[error("{kind} parsing is disabled by frontend configuration")]
     ParserDisabled { kind: &'static str },
+    #[error(
+        "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool={tool}, reasoning={reasoning}"
+    )]
+    IncompatibleParserSelections { tool: String, reasoning: String },
     #[error(
         "{kind} parser `{name}` is not registered{}",
         available_parser_hint(.available_names)
@@ -92,6 +98,7 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::InvalidReasoningEffort(_)
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. } => true,

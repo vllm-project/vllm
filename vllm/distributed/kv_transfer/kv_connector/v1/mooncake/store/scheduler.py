@@ -434,7 +434,7 @@ class MooncakeStoreScheduler:
             "Current block tables are required for Mooncake store jobs"
         )
         for req_meta in save_metas:
-            block_ids = block_state.block_ids.get(req_meta.req_id)
+            block_ids = block_state.get_block_ids(req_meta.req_id)
             assert block_ids is not None, (
                 f"Missing current block table for store request {req_meta.req_id}"
             )
