@@ -10,20 +10,38 @@
 # .buildkite/scripts/hardware_ci/run-cpu-test.sh. It is not pushed to a registry.
 #
 # See docker/Dockerfile.zen for the build workflow this mirrors.
-set -e
+set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <registry> <repo> <commit>"
+usage() {
+  echo "Usage: $0 [<registry> <repo>] <commit>"
   exit 1
+}
+
+image_repo() {
+  if [[ -n "${REGISTRY}" ]]; then
+    printf '%s/%s' "${REGISTRY}" "${REPO}"
+  else
+    printf '%s' "${REPO}"
+  fi
+}
+
+if [[ $# -eq 1 ]]; then
+  REGISTRY=""
+  REPO="${ZEN_CPU_IMAGE_REPO:-vllm-zen-ci-local}"
+  BUILDKITE_COMMIT=$1
+elif [[ $# -eq 3 ]]; then
+  REGISTRY=$1
+  REPO=$2
+  BUILDKITE_COMMIT=$3
+else
+  usage
 fi
 
-REGISTRY=$1
-REPO=$2
-BUILDKITE_COMMIT=$3
+IMAGE_REPO="$(image_repo)"
 
 # Local image tags (not pushed).
-BASE_IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-cpu-base-for-zen"
-IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-zen-cpu"
+BASE_IMAGE="$IMAGE_REPO:$BUILDKITE_COMMIT-cpu-base-for-zen"
+IMAGE="$IMAGE_REPO:$BUILDKITE_COMMIT-zen-cpu"
 
 # ZENTORCH_VERSION is optional; when unset the Dockerfile falls back to
 # installing zentorch via `vllm[zen]`.
