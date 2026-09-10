@@ -232,8 +232,7 @@ def _philox_gumbel_kernel(
     logits_stride,
     contexts_ptr,
     context_stride,
-    repeated_mask_ptr,
-    watermarking_ptr,
+    skip_mask_ptr,
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
@@ -249,18 +248,13 @@ def _philox_gumbel_kernel(
     block_index = tl.program_id(1)
     groups = block_index * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
 
-    if watermarking_ptr is not None:
+    if skip_mask_ptr is not None:
         req_state_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
         valid_req = req_state_idx >= 0
-        temp = tl.load(temp_ptr + req_state_idx, mask=valid_req, other=0.0).to(
-            tl.float32
-        )
-        use_watermark = tl.load(
-            watermarking_ptr + req_state_idx, mask=valid_req, other=False
-        ) & (temp != 0.0)
-        if repeated_mask_ptr is not None:
-            use_watermark &= ~tl.load(repeated_mask_ptr + row)
-        if not use_watermark:
+        if tl.load(skip_mask_ptr + row):
+            temp = tl.load(temp_ptr + req_state_idx, mask=valid_req, other=0.0).to(
+                tl.float32
+            )
             seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
             pos = tl.load(pos_ptr + row)
             candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -365,63 +359,30 @@ def philox_gumbel_sample(
     logits: torch.Tensor,
     contexts: torch.Tensor,
     key: int,
-) -> torch.Tensor:
-    if logits.stride(-1) != 1:
-        logits = logits.contiguous()
-    if contexts.stride(-1) != 1:
-        contexts = contexts.contiguous()
-    num_tokens, vocab_size = logits.shape
-    block_size = 1024
-    num_blocks = triton.cdiv(vocab_size, block_size)
-    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
-    _philox_gumbel_kernel[(num_tokens, num_blocks)](
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        logits,
-        logits.stride(0),
-        contexts,
-        contexts.stride(0),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        key & _UINT32_MASK_VALUE,
-        key >> 32,
-        vocab_size,
-        CONTEXT_WIDTH=contexts.shape[-1],
-        BLOCK_SIZE=block_size,
-        USE_FP64=False,
-    )
-    max_block_index = local_max.argmax(dim=-1, keepdim=True)
-    return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
-
-
-def mixed_philox_gumbel_sample(
-    logits: torch.Tensor,
-    contexts: torch.Tensor,
-    key: int,
-    repeated_mask: torch.Tensor | None,
-    watermarking: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    temperatures: torch.Tensor,
-    seeds: torch.Tensor,
-    positions: torch.Tensor,
+    *,
+    skip_mask: torch.Tensor | None = None,
+    expanded_idx_mapping: torch.Tensor | None = None,
+    temperatures: torch.Tensor | None = None,
+    seeds: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> torch.Tensor:
+    sampling_state = (expanded_idx_mapping, temperatures, seeds, positions)
+    if skip_mask is None and any(value is not None for value in sampling_state):
+        raise ValueError("sampling state requires skip_mask")
+    if skip_mask is not None and any(value is None for value in sampling_state):
+        raise ValueError("skip_mask requires complete sampling state")
+
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
     if contexts.stride(-1) != 1:
         contexts = contexts.contiguous()
-    if repeated_mask is not None:
-        repeated_mask = repeated_mask.contiguous()
-    watermarking = watermarking.contiguous()
-    expanded_idx_mapping = expanded_idx_mapping.contiguous()
-    positions = positions.contiguous()
+    if skip_mask is not None:
+        skip_mask = skip_mask.contiguous()
+    if expanded_idx_mapping is not None:
+        expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    if positions is not None:
+        positions = positions.contiguous()
     num_tokens, vocab_size = logits.shape
     block_size = 1024
     num_blocks = triton.cdiv(vocab_size, block_size)
@@ -440,8 +401,7 @@ def mixed_philox_gumbel_sample(
         logits.stride(0),
         contexts,
         contexts.stride(0),
-        repeated_mask,
-        watermarking,
+        skip_mask,
         expanded_idx_mapping,
         seeds,
         positions,

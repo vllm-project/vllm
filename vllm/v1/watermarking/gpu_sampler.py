@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -9,16 +9,11 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.watermarking.gumbel import GumbelWatermarker
-from vllm.v1.watermarking.prfs import PhiloxPRF
-from vllm.v1.watermarking.watermarker import Watermarker
+from vllm.v1.watermarking.watermarker import RandomSamplingState, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.watermark import (
-    mixed_philox_gumbel_sample,
-    repeated_context_mask,
-)
+from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 logger = init_logger(__name__)
 
@@ -104,49 +99,31 @@ class GPUWatermarkSampler(Sampler):
 
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
-        can_fuse = (
-            type(self.watermarker) is GumbelWatermarker
-            and type(self.watermarker.prf) is PhiloxPRF
-            and processed_logits.device.type == "cuda"
-        )
-        if needs_mixed_sampling and can_fuse:
-            watermarker = cast(GumbelWatermarker, self.watermarker)
-            prf = cast(PhiloxPRF, watermarker.prf)
-            sampled = mixed_philox_gumbel_sample(
-                processed_logits,
-                contexts,
-                prf.key,
-                repeated_contexts,
-                self.watermarking.gpu,
-                expanded_idx_mapping,
-                self.sampling_states.temperature.gpu,
-                self.sampling_states.seeds.gpu,
-                pos,
-                use_fp64=self.use_fp64_gumbel,
-            )
-            output_logits = processed_logits
-        else:
+        skip_mask = None
+        sampling_state = None
+        if needs_mixed_sampling:
             watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
             )
             if repeated_contexts is not None:
                 watermarking &= ~repeated_contexts
-            output = self.watermarker.sample(
-                processed_logits,
-                contexts,
-                random_sample,
+            skip_mask = ~watermarking
+            sampling_state = RandomSamplingState(
+                expanded_idx_mapping=expanded_idx_mapping,
+                temperatures=self.sampling_states.temperature.gpu,
+                seeds=self.sampling_states.seeds.gpu,
+                positions=pos,
+                use_fp64=self.use_fp64_gumbel,
             )
-            if needs_mixed_sampling:
-                unwatermarked = random_sample(processed_logits)
-                sampled = torch.where(watermarking, output.token_ids, unwatermarked)
-                output_logits = output.logits
-                if output.logits is not processed_logits:
-                    output_logits = torch.where(
-                        watermarking.unsqueeze(-1), output.logits, processed_logits
-                    )
-            else:
-                sampled = output.token_ids
-                output_logits = output.logits
+        output = self.watermarker.sample(
+            processed_logits,
+            contexts,
+            random_sample,
+            skip_mask=skip_mask,
+            sampling_state=sampling_state,
+        )
+        sampled = output.token_ids
+        output_logits = output.logits
         sampled = torch.where(
             temperatures == 0,
             processed_logits.argmax(dim=-1),
