@@ -1249,7 +1249,7 @@ def test_quark_fp8_w8a8_per_block_moe(vllm_runner, tp):
             assert isinstance(method, QuarkW8A8Fp8MoEMethod), (
                 f"Expected QuarkW8A8Fp8MoEMethod, got {type(method)}"
             )
-            assert method.weight_qscheme == "per_block"
+            assert method.block_quant
             assert method.weight_block_size == [128, 128]
 
             # hidden_size=128, moe_intermediate_size=256 and 4 experts, so one
