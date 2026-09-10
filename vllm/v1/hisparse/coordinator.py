@@ -117,7 +117,6 @@ class HiSparseCoordinator:
         max_model_len: int,
     ) -> None:
         self.managers = managers
-        self.max_model_len = max_model_len
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -227,75 +226,53 @@ class HiSparseCoordinator:
             and pool.blocks[block.block_id] is block
         )
 
-    def has_host_capacity(self, num_blocks: int) -> bool:
-        pool = self.get_host_block_pool()
-        return (
-            num_blocks == 0
-            if pool is None
-            else num_blocks <= pool.get_num_free_blocks()
-        )
-
-    def get_num_host_blocks_to_allocate(
+    def can_allocate_host_blocks(
         self,
         request_id: str,
         num_tokens: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         total_computed_tokens: int,
         num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> int:
-        manager = self.host_manager
-        if manager is None:
-            return 0
-        return manager.get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks[manager.kv_cache_group_id],
-            total_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
-        )
-
-    def can_admit_async_load(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        num_local_computed_tokens: int,
-        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        inflight_prefills: Iterable[Request],
-        full_sequence_must_fit: bool,
     ) -> bool:
-        """Keep enough host capacity for in-flight prefills to finish."""
         manager = self.host_manager
         if manager is None:
             return True
-        num_tokens = min(
-            request.num_tokens if full_sequence_must_fit else num_computed_tokens,
-            self.max_model_len,
+        # Only imports and partial-prefix copies require host storage. Newly
+        # computed pages can stay pinned on the GPU if the host pool is full.
+        required_tokens = (
+            total_computed_tokens if self.resident_managers else num_tokens
         )
         required = manager.get_num_blocks_to_allocate(
-            request.request_id,
-            num_tokens,
+            request_id,
+            required_tokens,
             new_computed_blocks[manager.kv_cache_group_id],
-            num_computed_tokens,
+            total_computed_tokens,
             num_local_computed_tokens,
-            num_tokens,
-            apply_admission_cap=full_sequence_must_fit,
+            required_tokens,
         )
-        for inflight in inflight_prefills:
-            full_num_tokens = min(inflight.num_tokens, self.max_model_len)
-            required += manager.get_num_blocks_to_allocate(
-                inflight.request_id,
-                full_num_tokens,
-                (),
-                inflight.num_computed_tokens,
-                inflight.num_computed_tokens,
-                full_num_tokens,
-                apply_admission_cap=True,
+        return required <= manager.block_pool.get_num_free_blocks()
+
+    def allocate_host_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        manager = self.host_manager
+        assert manager is not None
+        if not self.resident_managers:
+            return manager.allocate_new_blocks(
+                request_id, num_tokens, num_tokens_main_model
             )
-        return self.has_host_capacity(required)
+        blocks = manager.req_to_blocks[request_id]
+        num_required = cdiv(num_tokens, manager.block_size)
+        # A shared partial tail needs a private host copy before it is written.
+        cow_blocks = int(request_id in manager._partial_hit_reqs)
+        num_free = manager.block_pool.get_num_free_blocks() - cow_blocks
+        assert num_free >= 0
+        fit_tokens = min(num_tokens, (len(blocks) + num_free) * manager.block_size)
+        new_blocks = manager.allocate_new_blocks(
+            request_id, fit_tokens, min(num_tokens_main_model, fit_tokens)
+        )
+        blocks.extend([manager._null_block] * max(0, num_required - len(blocks)))
+        return new_blocks
 
     def free_host_blocks(self, blocks: Iterable[KVCacheBlock]) -> list[KVCacheBlock]:
         """Free owned host blocks and return blocks from other pools."""

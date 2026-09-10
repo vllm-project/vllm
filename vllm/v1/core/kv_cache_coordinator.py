@@ -335,6 +335,10 @@ class KVCacheCoordinator(ABC):
                 else num_tokens,
                 num_tokens_main_model,
             )
+            if manager is not self.hisparse_coordinator.host_manager
+            else self.hisparse_coordinator.allocate_host_blocks(
+                request_id, num_tokens, num_tokens_main_model
+            )
             for manager in self.single_type_managers
         )
 

@@ -1185,18 +1185,6 @@ class Scheduler(SchedulerInterface):
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
-                    hisparse = self.kv_cache_manager.hisparse_coordinator
-                    if not hisparse.can_admit_async_load(
-                        request,
-                        num_computed_tokens,
-                        num_new_local_computed_tokens,
-                        new_computed_blocks.blocks,
-                        self._inflight_prefills,
-                        self.scheduler_reserve_full_isl,
-                    ):
-                        if request.has_encoder_inputs:
-                            self.encoder_cache_manager.free(request)
-                        break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,

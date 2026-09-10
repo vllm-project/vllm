@@ -603,12 +603,12 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
 
 @pytest.mark.parametrize(
     "full_sequence_must_fit,host_num_blocks,admitted",
-    [(True, 6, False), (True, 8, True), (False, 4, False), (False, 5, True)],
+    [(True, 2, False), (True, 3, True), (False, 2, False), (False, 3, True)],
 )
-def test_hisparse_async_admission_preserves_host_reservations(
+def test_hisparse_async_admission_requires_only_import_destinations(
     full_sequence_must_fit, host_num_blocks, admitted, tmp_path
 ):
-    """A new transfer must leave room for an in-flight prefill to finish."""
+    """Imports need host destinations, but do not reserve future prefill pages."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -642,44 +642,80 @@ def test_hisparse_async_admission_preserves_host_reservations(
 
 
 @pytest.mark.parametrize(
-    "evictable,local_tokens,admitted",
+    "evictable,local_tokens,free_blocks,admitted",
     [
-        (False, HISPARSE_BLOCK_SIZE, True),
-        (True, HISPARSE_BLOCK_SIZE, False),
-        (False, HISPARSE_BLOCK_SIZE - 1, False),
+        (False, HISPARSE_BLOCK_SIZE, 1, True),
+        (True, HISPARSE_BLOCK_SIZE, 1, False),
+        (False, HISPARSE_BLOCK_SIZE - 1, 1, False),
+        (False, HISPARSE_BLOCK_SIZE - 1, 2, True),
     ],
 )
-def test_hisparse_async_admission_accounts_for_host_cache_hits(
-    evictable, local_tokens, admitted
+def test_hisparse_import_capacity_includes_hits_and_cow(
+    evictable, local_tokens, free_blocks, admitted
 ):
-    """Evictable hits and partial-hit copies consume the reserved host budget."""
-    manager = make_hisparse_kv_cache_manager(32, 7 if evictable else 8)
-    inflight = make_request(
-        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    assert allocate_external_prefix(manager, inflight, HISPARSE_BLOCK_SIZE) is not None
+    """Touching an evictable hit and copying a partial hit consume capacity."""
+    manager = make_hisparse_kv_cache_manager(32, free_blocks + 2 - int(evictable))
     coordinator = manager.hisparse_coordinator
     host_pool = coordinator.get_host_block_pool()
     assert host_pool is not None
     hit = host_pool.get_new_blocks(1)[0]
     if evictable:
         host_pool.free_blocks([hit])
-    assert host_pool.get_num_free_blocks() == 5
-    request = make_request(
-        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-
+    assert host_pool.get_num_free_blocks() == free_blocks
     assert (
-        coordinator.can_admit_async_load(
-            request,
-            2 * HISPARSE_BLOCK_SIZE,
-            local_tokens,
-            ([hit], [], [], []),
-            [inflight],
-            full_sequence_must_fit=True,
+        coordinator.can_allocate_host_blocks(
+            "waiting", 64, ([hit], [], [], []), 32, local_tokens
         )
         == admitted
     )
+
+
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
+    """Pages without a host destination must survive GPU cache reclamation."""
+    manager = make_hisparse_kv_cache_manager(32, 2, enable_caching=enable_caching)
+    request = make_request("resident", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 64) is not None
+    coordinator = manager.hisparse_coordinator
+    host = coordinator.host_manager
+    assert host is not None
+    assert [b.is_null for b in host.req_to_blocks[request.request_id]] == [
+        False,
+        True,
+        True,
+        True,
+    ]
+    _publish_hisparse_pages(manager)
+    for hot in coordinator.hot_managers:
+        hot.require_hot(request.request_id)
+        hot.allocate_new_blocks(request.request_id, 64, 64)
+    coordinator.update_residency(request.request_id)
+    for resident in coordinator.resident_managers:
+        for block in resident.req_to_blocks[request.request_id][1:]:
+            assert not block.is_null and block.ref_cnt > 0
+    assert coordinator.request_states[request.request_id].valid_pages == {0}
+    pool = coordinator.get_host_block_pool()
+    assert pool is not None
+    manager.free(request)
+    assert pool.get_num_free_blocks() == 1
+
+
+def test_hisparse_host_cow_takes_priority_over_new_pages():
+    """The last host block must hold the private tail, not a fresh page."""
+    manager = make_hisparse_kv_cache_manager(32, 3)
+    coordinator = manager.hisparse_coordinator
+    host = coordinator.host_manager
+    assert host is not None
+    source = host.block_pool.get_new_blocks(1)[0]
+    host.req_to_blocks["cow"] = [source]
+    host._partial_hit_reqs["cow"] = (0, source)
+
+    coordinator.allocate_host_blocks("cow", 32, 32)
+
+    private, missing = host.req_to_blocks["cow"]
+    assert not private.is_null and private is not source
+    assert missing.is_null
+    assert host.take_pending_cow_copies() == [(source, private)]
 
 
 @pytest.mark.parametrize("failed", [False, True])

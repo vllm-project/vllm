@@ -372,20 +372,15 @@ class KVCacheManager:
         reserved_blocks: int,
         apply_admission_cap: bool = False,
     ) -> bool:
-        """Check that the request's device and host blocks fit."""
-        hisparse = self.hisparse_coordinator
-        if hisparse.has_host_cache:
-            host_blocks = hisparse.get_num_host_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks,
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
-            )
-            if not hisparse.has_host_capacity(host_blocks):
-                return False
+        """Check that mandatory allocations fit in their pools."""
+        if not self.hisparse_coordinator.can_allocate_host_blocks(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+        ):
+            return False
 
         required = self.coordinator.get_num_blocks_to_allocate(
             request_id,
