@@ -2687,24 +2687,6 @@ class Scheduler(SchedulerInterface):
             )
         )
 
-    def has_structured_output_in_flight(
-        self, scheduler_output: SchedulerOutput
-    ) -> bool:
-        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
-        for req_id in scheduler_output.num_scheduled_tokens:
-            req = self.requests.get(req_id)
-            if req is None or not req.use_structured_output:
-                continue
-            # Placeholders reserved by this step: the sampled token plus any
-            # draft tokens. Anything on top of that belongs to an earlier step
-            # whose output has not landed yet.
-            reserved_this_step = self.num_sampled_tokens_per_step + len(
-                spec_decode_tokens.get(req_id, ())
-            )
-            if req.num_output_placeholders > reserved_this_step:
-                return True
-        return False
-
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:

@@ -907,6 +907,26 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_pipeline_parallelism_requires_v2_model_runner():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_batch_sharded_sampling=False,
+        ),
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
+
+    config.parallel_config.pipeline_parallel_size = 2
+    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
+    assert "pipeline parallelism" in unsupported
+
+
 def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
