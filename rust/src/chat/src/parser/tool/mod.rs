@@ -24,17 +24,12 @@ pub mod names {
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
-    pub const GEMMA4: &str = "gemma4";
-    pub const INKLING: &str = "inkling";
     pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
-    pub const HY_V3: &str = "hy_v3";
-    pub const HY_V4: &str = "hy_v4";
     // Matches the Python CLI name `--tool-call-parser internlm`, which Python
     // also routes to `Internlm2ToolParser` despite the version-agnostic name.
     pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
-    pub const KIMI_K3: &str = "kimi_k3";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -73,15 +68,10 @@ impl ToolParserFactory {
             .register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
-            .register_unified_dummy(names::GEMMA4)
-            .register_unified_dummy(names::INKLING)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
-            .register_unified_dummy(names::HY_V3)
-            .register_unified_dummy(names::HY_V4)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
-            .register_unified_dummy(names::KIMI_K3)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
@@ -101,8 +91,6 @@ impl ToolParserFactory {
             .register_pattern("qwen2.5", names::HERMES)
             .register_pattern("qwen3", names::QWEN3_XML)
             .register_pattern("hermes", names::HERMES)
-            .register_pattern("hy3", names::HY_V3)
-            .register_pattern("hy4", names::HY_V4)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
             // routes to Llama), `internlm3-*` (also Llama-architecture per
@@ -122,8 +110,6 @@ impl ToolParserFactory {
             .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
-            .register_pattern("gemma4", names::GEMMA4)
-            .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("granite-4", names::GRANITE4)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
@@ -142,16 +128,6 @@ impl ToolParserFactory {
         T: ToolParser + 'static,
     {
         self.register_creator(name, Arc::new(T::create))
-    }
-
-    /// Register one unified-only parser name in the split tool registry.
-    pub fn register_unified_dummy(&mut self, name: &str) -> &mut Self {
-        let name = name.to_string();
-        let registered_name = name.clone();
-        self.register_creator(
-            &registered_name,
-            Arc::new(move |_| Err(ToolParserError::DummyUnifiedParser { name: name.clone() })),
-        )
     }
 
     /// Construct a parser from an exact name.
