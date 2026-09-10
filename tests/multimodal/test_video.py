@@ -1249,6 +1249,42 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
         )
 
 
+def _molmo2_source(total_frames: int, fps: float = 30.0) -> VideoSourceMetadata:
+    return VideoSourceMetadata(
+        total_frames_num=total_frames,
+        original_fps=fps,
+        duration=total_frames / fps if fps > 0 else 0.0,
+    )
+
+
+def test_molmo2_default_mode_honors_positive_num_frames():
+    """Unset frame_sample_mode must still respect target.num_frames."""
+    source = _molmo2_source(1800)
+    target = VideoTargetMetadata(num_frames=1, fps=-1, max_duration=-1)
+    idx = Molmo2VideoBackend.compute_frames_index_to_sample(source, target)
+
+    assert len(idx) == 1
+    assert 0 <= idx[0] < 1800
+
+
+def test_molmo2_default_mode_uniformly_caps_to_num_frames():
+    source = _molmo2_source(1800)
+    target = VideoTargetMetadata(num_frames=32, fps=-1, max_duration=-1)
+    idx = Molmo2VideoBackend.compute_frames_index_to_sample(source, target)
+
+    assert len(idx) == 32
+    assert idx[0] == 0
+    assert idx[-1] == 1799
+
+
+def test_molmo2_default_mode_keeps_all_frames_when_unlimited():
+    source = _molmo2_source(12)
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+    idx = Molmo2VideoBackend.compute_frames_index_to_sample(source, target)
+
+    assert idx == list(range(12))
+
+
 @pytest.mark.parametrize(
     "loader_key, kwargs, expected_num_frames",
     [
@@ -1281,6 +1317,12 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
         ),
         pytest.param(
             "openpangu", {"num_frames": 32, "fps": -1}, 32, id="openpangu-num_frames"
+        ),
+        pytest.param(
+            "molmo2",
+            {"num_frames": 1},
+            1,
+            id="molmo2-default-honors-num_frames",
         ),
         pytest.param(
             "molmo2",

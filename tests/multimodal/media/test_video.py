@@ -369,6 +369,24 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
         videoio.load_base64("video/jpeg", data)
 
 
+def test_molmo2_backend_honors_num_frames(tmp_path):
+    """Request-selected molmo2 loader must not ignore a positive frame cap."""
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
+    video_path = tmp_path / "molmo2_cap.mp4"
+    create_video_from_image(str(image_path), str(video_path), num_frames=8, fps=8)
+
+    videoio = VideoMediaIO(
+        ImageMediaIO(),
+        num_frames=1,
+        video_backend="molmo2",
+    )
+    frames, _metadata = videoio.load_file(video_path)
+
+    assert frames.shape[0] == 1
+
+
 def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ):
