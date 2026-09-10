@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import torch
 
@@ -56,6 +57,15 @@ class TrtLlmNvFp4ExpertsBase:
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
+        if per_token_activation and not moe_config.is_act_and_mul:
+            # FlashInfer's per-token NVFP4 requant of the FC1 output
+            # (nvfp4QuantAndPerTokenScaleKernel) takes rcp(0) = inf for an
+            # all-zero row in its fast-math path and emits NaN block scales.
+            # Non-gated RELU^2 experts routinely produce all-zero rows, which
+            # poisons the token's output (GSM8K 0.69 -> 0.84 on Nemotron 3.5
+            # Lightning). The exact-math path guards rowAmax == 0.
+            # TODO: remove once FlashInfer fixes the fast-math path.
+            os.environ.setdefault("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token

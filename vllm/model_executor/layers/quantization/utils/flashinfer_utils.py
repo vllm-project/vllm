@@ -264,6 +264,20 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
+def trtllm_nvfp4_hidden_alignment(
+    per_token_activation: bool, is_act_and_mul: bool
+) -> int:
+    """Hidden-dim alignment for the TRTLLM-Gen NVFP4 MoE cubins.
+
+    The per-token (dynamic activation scale) non-gated variant has far fewer
+    tile configs for 256-aligned K and its heuristic default tactic fails with
+    "No valid config found" (e.g. Nemotron's 2688 -> 2816), so pad to 512.
+    """
+    if per_token_activation and not is_act_and_mul:
+        return 512
+    return 256
+
+
 def align_trtllm_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,

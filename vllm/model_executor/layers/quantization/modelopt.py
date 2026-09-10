@@ -63,6 +63,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    trtllm_nvfp4_hidden_alignment,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     FP8_SCALE_SENTINEL,
     process_fp8_input_tensor_strategy_moe,
@@ -840,11 +843,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # activation scales in convert_to_nvfp4_moe_kernel_format, so no
         # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        vllm_config = get_current_vllm_config_or_none()
+        hf_config = (
+            vllm_config.model_config.hf_config if vllm_config is not None else None
+        )
+        self.per_token_activation = bool(
+            getattr(hf_config, "nvfp4_per_token_activation", False)
+        )
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
             activation_key=None if self.use_a16 else kNvfp4Dynamic,
         )
+        if self.per_token_activation:
+            if self.use_a16:
+                raise ValueError(
+                    "Per-token NVFP4 activation requires a W4A4 checkpoint."
+                )
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                raise ValueError(
+                    "Per-token NVFP4 activation for pre-quantized weights "
+                    "requires the FlashInfer TRTLLM MoE backend."
+                )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
@@ -982,6 +1002,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self._build_moe_kernel(layer)
             return
 
+        if self.per_token_activation:
+            layer.w13_input_scale.data.fill_(1.0)
+            layer.w2_input_scale.data.fill_(1.0)
+
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
@@ -1014,6 +1038,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
             use_a16=self.use_a16,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=self.per_token_activation,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            ),
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1037,6 +1065,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            per_token_activation=self.per_token_activation,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
