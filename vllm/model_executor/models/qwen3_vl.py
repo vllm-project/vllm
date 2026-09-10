@@ -894,6 +894,19 @@ class Qwen3_VisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class Qwen3VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Timestamps are part of the prompt replacement (each frame group's
+    # "<X.X seconds>" text), so they size the placeholder range and must
+    # travel with the grid when embeddings are delivered out of band.
+    embedding_fields = {
+        **Qwen2VLMultiModalDataParser.embedding_fields,
+        "video": {
+            **Qwen2VLMultiModalDataParser.embedding_fields["video"],
+            "timestamps": "metadata",
+        },
+    }
+
+
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
@@ -912,7 +925,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return self.get_hf_processor(**kwargs).video_processor
 
     def get_data_parser(self):
-        return Qwen2VLMultiModalDataParser(
+        return Qwen3VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
@@ -928,6 +941,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         do_resize: bool = True,
         image_processor: Qwen2VLImageProcessor | Qwen3VLVideoProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
@@ -937,7 +951,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        if modality is None:
+            modality = "video" if is_video else "image"
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -1001,7 +1017,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     ) -> int:
         video_processor = self.get_video_processor()
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="video")
         video_size = mm_kwargs.get("size", video_processor.size)
         temporal_patch_size = mm_kwargs.get(
             "temporal_patch_size", video_processor.temporal_patch_size
@@ -1137,7 +1153,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
         video_processor = self.info.get_video_processor()
 
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({}, modality="video")
         video_size = mm_kwargs.get("size", video_processor.size)
         temporal_patch_size = mm_kwargs.get(
             "temporal_patch_size", video_processor.temporal_patch_size
@@ -1352,7 +1368,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
                 video_mm_kwargs = dict(**hf_processor_mm_kwargs)
-                merged = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+                merged = self.info.ctx.get_merged_mm_kwargs(
+                    hf_processor_mm_kwargs, modality="video"
+                )
                 if merged.keys() & {"size", "min_pixels", "max_pixels"}:
                     video_size = dict(self.info.get_video_processor().size)
                     size_override = merged.get("size")
@@ -1609,7 +1627,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     def get_video_repl(
         *,
         tokens_per_frame: list[int],
-        timestamps: list[float | int],
+        timestamps: list[float | int] | torch.Tensor,
         tokenizer: TokenizerLike,
         vision_start_token_id: int,
         vision_end_token_id: int,
@@ -2349,8 +2367,8 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
-                positions = compute_mrope_for_media(size, merge_size).to(
-                    emb.device, non_blocking=True
+                positions = async_tensor_h2d(
+                    compute_mrope_for_media(size, merge_size), emb.device
                 )
                 positions = torch.cat(
                     [
@@ -2578,14 +2596,11 @@ class Qwen3VLForConditionalGeneration(
             identifier="DUMMY",
             mm_position=PlaceholderRange(offset=0, length=len(unpruned_token_ids)),
         )
-        original_mrope = (
-            self.get_mrope_input_positions(
-                input_tokens=unpruned_token_ids,
-                mm_features=[mm_feature],
-            )[0]
-            .to(device, non_blocking=True)
-            .permute(1, 0)
-        )
+        original_mrope_cpu = self.get_mrope_input_positions(
+            input_tokens=unpruned_token_ids,
+            mm_features=[mm_feature],
+        )[0]
+        original_mrope = async_tensor_h2d(original_mrope_cpu, device).permute(1, 0)
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
 
         with gpu_sync_allowed():

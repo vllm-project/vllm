@@ -48,7 +48,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     result = attn_utils.init_kv_cache(
         [],
         {},
-        object(),
+        SimpleNamespace(kv_cache_groups=[]),
         torch.device("cpu"),
         [],
         config,
@@ -83,7 +83,7 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
         runner,
-        object(),
+        SimpleNamespace(kv_cache_groups=[]),
         [],
         kv_cache_allocation_context=scope,
     )
@@ -113,11 +113,14 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker = cast(
         Worker,
         SimpleNamespace(
-            _get_sleep_mode_backend=lambda: SimpleNamespace(resume=lambda tags: None),
+            sleep_mode_backend=SimpleNamespace(resume=lambda tags: None),
             _sleep_saved_buffers={},
             _sleep_saved_draft_buffers={},
             model_runner=runner,
             synchronize_device=lambda: None,
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+            ),
         ),
     )
     layout_tensors = runner.layout_tensors
