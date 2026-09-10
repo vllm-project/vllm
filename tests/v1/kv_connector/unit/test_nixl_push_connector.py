@@ -356,6 +356,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]
@@ -410,6 +411,84 @@ def _registration_data(
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
     }
+
+
+class TestPushWriterRegSend:
+    """``_do_send_reg_notif``: the PUSH_REG goes to every handshaked agent of
+    the P engine, and the agent map is read under ``_handshake_lock`` so the
+    send can't race the handshake done-callback's insert or a concurrent
+    stale-engine eviction (X1)."""
+
+    def _reg_send_worker(self) -> tuple[_StubWriterWorker, list]:
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        failures: list = []
+        w._handle_failed_transfer = lambda *a: failures.append(a)
+        return w, failures
+
+    def test_sends_to_all_agents_with_prefix_and_payload(self):
+        w, failures = self._reg_send_worker()
+        w._remote_agents["prefill-engine"] = {(0, 0): "agent-0", (0, 1): "agent-1"}
+        rd = _registration_data("req-1")
+
+        w._do_send_reg_notif("req-1", rd)
+
+        assert failures == []
+        calls = w.nixl_wrapper.send_notif.call_args_list
+        assert len(calls) == 2
+        assert {c.args[0] for c in calls} == {"agent-0", "agent-1"}
+        for call in calls:
+            notif = call.kwargs["notif_msg"]
+            assert notif.startswith(PUSH_REG_NOTIF_PREFIX)
+            # (Tuples decode back as lists, so compare identity fields.)
+            decoded = msgspec.msgpack.decode(notif[len(PUSH_REG_NOTIF_PREFIX) :])
+            assert decoded["request_id"] == "req-1"
+            assert decoded["decode_engine_id"] == rd["decode_engine_id"]
+            assert decoded["remote_engine_id"] == rd["remote_engine_id"]
+            assert decoded["local_block_ids"] == [
+                list(group) for group in rd["local_block_ids"]
+            ]
+
+    def test_fails_request_when_engine_not_handshaked(self):
+        w, failures = self._reg_send_worker()
+
+        w._do_send_reg_notif("req-1", _registration_data("req-1"))
+
+        assert failures == [("req-1", None)]
+        w.nixl_wrapper.send_notif.assert_not_called()
+
+    def test_agent_read_is_serialized_with_handshake_lock(self):
+        """While another thread holds ``_handshake_lock`` (as the handshake
+        done-callback does while writing ``_remote_agents``), the writer's
+        check-then-send must not run ahead of the critical section."""
+        w, failures = self._reg_send_worker()
+        w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
+        rd = _registration_data("req-1")
+
+        w._handshake_lock.acquire()
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def _send():
+            try:
+                w._do_send_reg_notif("req-1", rd)
+            except BaseException as e:  # pragma: no cover
+                errors.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_send)
+        t.start()
+        assert not done.wait(timeout=0.2)
+        w.nixl_wrapper.send_notif.assert_not_called()
+        assert failures == []
+
+        w._handshake_lock.release()
+        assert done.wait(timeout=2.0)
+        t.join(timeout=2.0)
+        assert errors == []
+        assert failures == []
+        assert w.nixl_wrapper.send_notif.call_count == 1
 
 
 class TestPushWriterMatching:
@@ -716,6 +795,31 @@ def test_stale_engine_evicted_on_push():
 
     assert "D-old" not in w._remote_agents
     assert "D-old" not in w._engine_last_active
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+
+
+def test_cleanup_remote_engine_pops_under_handshake_lock():
+    """Regression (X1): eviction must not remove ``_remote_agents`` entries
+    while another thread is inside the lock's critical section (e.g. the
+    push writer reading the map to send a registration)."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
+
+    w._handshake_lock.acquire()
+    done = threading.Event()
+
+    def _cleanup():
+        w._cleanup_remote_engine("D-old")
+        done.set()
+
+    t = threading.Thread(target=_cleanup)
+    t.start()
+    assert "D-old" in w._remote_agents
+
+    w._handshake_lock.release()
+    assert done.wait(timeout=2.0)
+    t.join(timeout=2.0)
+    assert "D-old" not in w._remote_agents
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 
