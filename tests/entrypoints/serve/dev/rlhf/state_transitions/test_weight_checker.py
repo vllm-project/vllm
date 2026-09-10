@@ -19,9 +19,12 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     gen,
     health,
     ok,
-    server,
+    reusable_server,
     weight_checker,
 )
+
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def _mode(tp: int, dp: int = 1, ep: bool = False, real_weights: bool = False):
@@ -85,7 +88,7 @@ def wc_server(request, num_gpus_available):
         if mode["ep"]
         else os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
     )
-    with server(
+    with reusable_server(
         model=model,
         timeout=900,
         dummy_weights=not mode["real_weights"],
