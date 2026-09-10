@@ -321,6 +321,8 @@ def flash_attn_supports_sinks() -> bool:
 def flash_attn_supports_mla():
     from vllm.platforms import current_platform
 
+    if current_platform.is_xpu():
+        return True
     if current_platform.is_cuda():
         try:
             from vllm.vllm_flash_attn.flash_attn_interface import (
