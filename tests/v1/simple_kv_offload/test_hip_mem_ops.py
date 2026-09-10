@@ -145,7 +145,12 @@ def test_copy_blocks_chunks_at_descriptor_cap(
         ([1, 2, 3], [5, 6, 7], [2], [3, 3]),
         ([1, 2, 3], [2, 4, 6], [3, 3], [3, 3]),
         ([1, 3, 5], [2, 3, 4], [3, 3], [3, 3]),
-        ([3, 2, 1], [6, 5, 4], [3, 3], [3, 3]),
+        ([3, 2, 1], [6, 5, 4], [2], [3, 3]),
+        ([1, 2, 1], [5, 6, 5], [3, 1], [3, 3]),
+        ([3, 2, 3], [6, 5, 6], [3, 1], [3, 3]),
+        ([1, 2, 1, 0], [5, 6, 5, 4], [3, 1], [3, 3, 2]),
+        ([1, 3, 2], [2, 6, 5], [3, 1], [3, 3]),
+        ([1, 2, 3], [6, 5, 4], [3, 3], [3, 3]),
         ([1, 1, 2], [2, 4, 5], [3, 1], [3, 3]),
         ([1, 2, 5, 6, 7, 4], [2, 3, 7, 8, 6, 5], [3, 3, 2], [3, 3, 3, 3]),
     ],
@@ -188,6 +193,25 @@ def test_copy_blocks_coalesces_contiguous_pairs_only_on_rocm(
                 src_id * block_bytes : (src_id + 1) * block_bytes
             ]
         np.testing.assert_array_equal(destination, expected)
+
+
+@pytest.mark.parametrize(
+    ("ids", "expected_count"),
+    [
+        ([np.iinfo(np.uint64).max, 0], 2),
+        ([0, np.iinfo(np.uint64).max], 2),
+        ([np.iinfo(np.uint64).max - 1, np.iinfo(np.uint64).max], 1),
+        ([np.iinfo(np.uint64).max, np.iinfo(np.uint64).max - 1], 1),
+    ],
+)
+def test_copy_blocks_coalescing_does_not_wrap_uint64(monkeypatch, ids, expected_count):
+    counts = _record_counts(monkeypatch)
+    monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 0)
+    monkeypatch.setattr(cuda_mem_ops.current_platform, "is_rocm", lambda: True)
+
+    copy_blocks(ids, ids, _fake_params(num_layers=1, bytes_per_block=1))
+
+    assert counts == [expected_count]
 
 
 def test_copy_blocks_noop_on_empty(monkeypatch):
