@@ -312,8 +312,8 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        router_logits, _ = self.gate(hidden_states)
         if self.use_mega_moe:
+            router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -338,8 +338,10 @@ class Glm5NextMoE(nn.Module):
             if self.shared_experts is not None:
                 final_hidden_states += self.shared_experts(hidden_states)
         else:
+            # MoERunner holds the gate and computes the router logits itself;
+            # router_logits is only a placeholder for this path.
             final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
+                hidden_states=hidden_states, router_logits=hidden_states
             )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
