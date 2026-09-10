@@ -68,7 +68,7 @@ build_log="$(mktemp)"
 attempt=1
 while true; do
     if docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test \
-            --build-arg USE_SCCACHE=1 --build-arg SCCACHE_LOCAL_ONLY=1 \
+            --build-arg USE_SCCACHE=1 --build-arg SCCACHE_LOCAL_ONLY=1 --build-arg max_jobs=16 \
             -f docker/Dockerfile.cpu . 2>&1 | tee "$build_log"; then
         break
     fi
@@ -83,6 +83,24 @@ while true; do
 done
 rm -f "$build_log"
 
-# Run the image, setting --shm-size=4g for tensor parallel.
-docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 --shm-size=4g "$IMAGE_NAME" \
+# Run the image, setting --shm-size=4g for tensor parallel. Default to
+# HF_HUB_OFFLINE so a warm ~/.cache/huggingface doesn't hit the network;
+# retry once online if the cache is missing something.
+OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)'
+run_test() {
+    local hf_offline=$1
+    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
         timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
+}
+
+test_log="$(mktemp)"
+if run_test 1 2>&1 | tee "$test_log"; then
+    rm -f "$test_log"
+elif grep -qE "$OFFLINE_RETRY_PATTERN" "$test_log"; then
+    rm -f "$test_log"
+    echo "--- :warning: HF_HUB_OFFLINE caused a cache miss, retrying with online fallback"
+    run_test 0
+else
+    rm -f "$test_log"
+    exit 1
+fi
