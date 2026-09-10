@@ -156,6 +156,7 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
+offen = "offen"  # AMD buffer instruction offset-enable modifier
 Hel = "Hel"
 wether = "wether"
 iy = "iy"

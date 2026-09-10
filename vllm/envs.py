@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1285,6 +1286,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # gate_mode to AITER and sets the AITER-side workaround env at init.
     "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 MXFP8 decode on gfx950, bf16 activations, up to 256 tokens.
+    "VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE": lambda: (
+        os.getenv("VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE", "0").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
