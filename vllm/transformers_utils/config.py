@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
@@ -152,6 +152,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
@@ -541,7 +542,8 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):
         for rope_parameters_layer_type in rope_parameters.values():
-            _patch_legacy_rope_type(rope_parameters_layer_type)
+            if rope_parameters_layer_type is not None:
+                _patch_legacy_rope_type(rope_parameters_layer_type)
     else:
         _patch_legacy_rope_type(rope_parameters)
 
@@ -568,12 +570,47 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.validate_rope()
 
 
-def _uses_mrope(config: PretrainedConfig) -> bool:
+def _iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
+    """Yield a config's rope parameters, one dict per layer type if nested."""
     rope_parameters = getattr(config, "rope_parameters", None)
-    if rope_parameters is None:
-        return False
+    if not isinstance(rope_parameters, dict):
+        return
 
-    return "mrope_section" in rope_parameters
+    if is_rope_parameters_nested(rope_parameters):
+        yield from (p for p in rope_parameters.values() if isinstance(p, dict))
+    else:
+        yield rope_parameters
+
+
+def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
+    """Return the M-RoPE section this config declares, if any.
+
+    `xdrope_section` is the legacy name HunYuan-VL checkpoints use for the same
+    field; upstream Transformers normalises it to `mrope_section`.
+    """
+    from vllm.config.utils import getattr_iter
+
+    names = ("mrope_section", "xdrope_section")
+
+    for params in _iter_rope_parameters(config):
+        for i, name in enumerate(names):
+            section = params.get(name)
+            if isinstance(section, (list, tuple)):
+                if i > 0:
+                    logger.warning_once(
+                        "rope_parameters contains a deprecated key '%s'. "
+                        "Please use the preferred key '%s' instead.",
+                        name,
+                        names[0],
+                    )
+                return section
+
+    section = getattr_iter(config, names, None, warn=True)
+    return section if isinstance(section, (list, tuple)) else None
+
+
+def _uses_mrope(config: PretrainedConfig) -> bool:
+    return _mrope_section(config) is not None
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
@@ -598,21 +635,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
-def uses_xdrope_dim(config: PretrainedConfig) -> int:
-    """Detect if the model with this config uses XD-ROPE."""
-    xdrope_section = getattr(config, "xdrope_section", None)
-    if xdrope_section is not None and isinstance(xdrope_section, list):
-        return len(xdrope_section)
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+def mrope_num_dims(config: PretrainedConfig) -> int:
+    """Number of M-RoPE position channels the model consumes.
+
+    Each section entry sizes one channel, so the section length is the channel
+    count. Interleaved M-RoPE also accepts a 2 section variant whose positions
+    are still 3D, so never return fewer than 3.
+    """
+    if not uses_mrope(config):
         return 0
 
-    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
-        xdrope_section = rope_scaling["xdrope_section"]
-        if xdrope_section is not None and isinstance(xdrope_section, list):
-            return len(xdrope_section)
+    for candidate in (config.get_text_config(), config):
+        mrope_section = _mrope_section(candidate)
+        if mrope_section is not None:
+            return max(len(mrope_section), 3)
 
-    return 0
+    # Custom configs may declare M-RoPE without exposing the sections.
+    return 3
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
