@@ -135,7 +135,7 @@ def test_config_file(parser_with_config):
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
-            ["serve", "mymodel", "--config", "./data/test_config.json"]
+            ["serve", "mymodel", "--config", "./data/test_config.txt"]
         )
 
     with pytest.raises(ValueError):
@@ -524,3 +524,81 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
+
+
+def test_config_equals_syntax(parser_with_config, cli_config_file):
+    """Test --config=file.yaml syntax works identically to --config file.yaml."""
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", f"--config={cli_config_file}"]
+    )
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+
+    # Test CLI override with --config=file.yaml
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", f"--config={cli_config_file}", "--tensor-parallel-size=4"]
+    )
+    assert args.tensor_parallel_size == 4
+
+
+def test_load_json_config_file(tmp_path):
+    """Test that JSON config files are supported."""
+    config_data = {
+        "port": 8080,
+        "tensor-parallel-size": 4,
+        "trust-remote-code": True,
+    }
+    json_path = tmp_path / "config.json"
+    with open(json_path, "w") as f:
+        json.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--tensor-parallel-size", type=int)
+    parser.add_argument("--trust-remote-code", action="store_true")
+
+    processed_args = parser.load_config_file(str(json_path))
+    assert "--port" in processed_args
+    assert processed_args[processed_args.index("--port") + 1] == "8080"
+    assert "--tensor-parallel-size" in processed_args
+    assert processed_args[processed_args.index("--tensor-parallel-size") + 1] == "4"
+    assert "--trust-remote-code" in processed_args
+
+
+def test_load_config_file_snake_case_boolean_false(tmp_path):
+    """Test that snake_case boolean false flags map to --no-<dashed-flag> correctly."""
+    config_data = {
+        "enable_feature": False,
+        "trust_remote_code": False,
+    }
+    yaml_path = tmp_path / "config.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-feature", action=BooleanOptionalAction)
+    parser.add_argument("--trust-remote-code", action=BooleanOptionalAction)
+
+    processed_args = parser.load_config_file(str(yaml_path))
+    assert "--no-enable-feature" in processed_args
+    assert "--no-trust-remote-code" in processed_args
+
+
+def test_load_config_file_null_values(tmp_path):
+    """Test that null/None values in config are ignored rather than converted to string 'None'."""
+    config_data = {
+        "port": 9000,
+        "model": None,
+    }
+    yaml_path = tmp_path / "config.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--model", type=str, default=None)
+
+    processed_args = parser.load_config_file(str(yaml_path))
+    assert "--port" in processed_args
+    assert "--model" not in processed_args
+
