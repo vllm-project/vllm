@@ -27,13 +27,17 @@ class _FakeQuantConfig:
     by the dynamic-exclusion branch)."""
 
     def __init__(self, name: str = "gptq"):
+        """Store the quantization method name reported by ``get_name``."""
         self._name = name
 
     def get_name(self) -> str:
+        """Return the quantization method name given at construction."""
         return self._name
 
 
 def _text_config(**overrides) -> PretrainedConfig:
+    """Build a small Qwen3.5-MTP text ``PretrainedConfig``; keyword
+    arguments override the defaults."""
     cfg = dict(
         model_type="qwen3_5_moe_text",
         architectures=["Qwen3_5MoeMTP"],
@@ -61,6 +65,8 @@ def _build_draft(monkeypatch: pytest.MonkeyPatch, dynamic):
 
     class FakeDecoderLayer(torch.nn.Module):
         def __init__(self, vllm_config, **kwargs):
+            """Stand-in draft layer that records the ``quant_config`` it is
+            constructed with."""
             super().__init__()
             quant_seen.append(getattr(vllm_config, "quant_config"))
 
@@ -122,6 +128,9 @@ def test_dynamic_mtp_exclusion_builds_draft_unquantized(monkeypatch):
 
 
 def test_no_quantization_config_keeps_draft_quantized(monkeypatch):
+    """Without any checkpoint ``quantization_config`` the unquantized-draft
+    bypass must not trigger: every draft layer is built with the model's
+    quantization config, and ``vllm_config`` keeps it."""
     vllm_config, quant_cfg, quant_seen = _build_draft(monkeypatch, dynamic=None)
     assert all(q is quant_cfg for q in quant_seen)
     assert vllm_config.quant_config is quant_cfg
@@ -139,6 +148,9 @@ def test_no_quantization_config_keeps_draft_quantized(monkeypatch):
     ],
 )
 def test_non_mtp_negative_patterns_keep_draft_quantized(monkeypatch, dynamic):
+    """``dynamic`` entries that are not ``-:``-prefixed mtp exclusions (a
+    positive mtp pattern, a non-mtp negative pattern, an empty dict) must
+    not bypass quantization."""
     _, _, quant_seen = _build_draft(monkeypatch, dynamic=dynamic)
     assert all(isinstance(q, _FakeQuantConfig) for q in quant_seen), (
         "only `-:`-prefixed patterns mentioning mtp may bypass quantization"
