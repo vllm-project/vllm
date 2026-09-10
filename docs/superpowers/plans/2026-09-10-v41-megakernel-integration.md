@@ -2177,7 +2177,7 @@ git commit -m "[DSv4.1] Add the FlashMLA fused sparse attention layer"
 - Create: `recipe/dsv41/sra_vigil_tp4_gsm8k_fused.yaml` (copy of `recipe/dsv41/sra_vigil_tp4_gsm8k.yaml` with `--attention-config '{"dsv4_fused_attention": true}'` in the serve command and `PYTHONPATH` pointing at this worktree, as `sra_vigil_tp4_8k1k_32k1k_bs1_dspark_synth.yaml` does)
 - Create: `recipe/dsv41/sra_vigil_tp4_8k1k_32k1k_bs1_fused.yaml` (same treatment of `sra_vigil_tp4_8k1k_32k1k_bs1.yaml`)
 
-- [ ] **Step 1: Local single-GPU smoke** (worktree root; needs 1 GPU free)
+- [x] **Step 1: Local single-GPU smoke** (worktree root; needs 1 GPU free)
 
 ```bash
 /home/yongye/sra/.venv/bin/python -c "
@@ -2890,7 +2890,7 @@ git commit -m "[DSv4.1] Cover fused decode on V4.1 fp8/fp4 caches; layout-agnost
 
 - Create: `recipe/dsv41/sra_vigil_tp4_gsm8k_nvfp4.yaml`, `recipe/dsv41/sra_vigil_tp4_gpqad_nvfp4.yaml`, `recipe/dsv41/sra_vigil_tp4_8k1k_32k1k_bs1_nvfp4.yaml` (copies of the fused recipes from Task 13 with `--kv-cache-dtype nvfp4_ds_mla`)
 
-- [ ] **Step 1: Local smoke** as in Task 13 Step 1 with `kv_cache_dtype="nvfp4_ds_mla"` and `attention_config={"dsv4_fused_attention": True}`; the log must show the SWA spec at 528 B and the compressed spec at 288 B per token (add a `logger.info_once` of the layout in `DeepseekV4Attention.__init__`).
+- [x] **Step 1: Local smoke** as in Task 13 Step 1 with `kv_cache_dtype="nvfp4_ds_mla"` and `attention_config={"dsv4_fused_attention": True}`; the log must show the SWA spec at 528 B and the compressed spec at 288 B per token (add a `logger.info_once` of the layout in `DeepseekV4Attention.__init__`).
 
 - [ ] **Step 2: Evals and latency**
 
