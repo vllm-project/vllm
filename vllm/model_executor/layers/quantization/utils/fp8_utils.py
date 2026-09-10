@@ -8,8 +8,8 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from packaging.version import Version
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -985,9 +985,9 @@ def w8a8_triton_block_scaled_mm(
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx1151
 
-        force_fp8_dot_upcast = on_gfx1151() and Version(
-            triton.__version__
-        ) < Version("3.8.0")
+        force_fp8_dot_upcast = on_gfx1151() and Version(triton.__version__) < Version(
+            "3.8.0"
+        )
 
     def grid(META):
         return (

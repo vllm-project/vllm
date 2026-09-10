@@ -31,6 +31,7 @@ else:
     def on_gfx1151() -> bool:
         return False
 
+
 logger = init_logger(__name__)
 
 
