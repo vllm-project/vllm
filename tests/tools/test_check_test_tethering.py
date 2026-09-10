@@ -290,6 +290,13 @@ def test_option_and_token_handling(command, test_file, expected):
             "kernels/test_a.py",
             False,
         ),
+        # An `-exec pytest` with no `{}` runs only the named file for every
+        # match - the matched files never reach pytest.
+        (
+            "find kernels -name 'test_*.py' -exec pytest test_regression.py \\;",
+            "kernels/test_a.py",
+            False,
+        ),
         # xargs value-flags with a space don't swallow the command.
         (
             "find kernels -name 'test_*.py' | xargs -0 -I {} pytest {}",
@@ -385,6 +392,11 @@ def test_find_pipeline_parses_as_find_selection():
         ("python -m mypy kernels/test_a.py", "kernels/test_a.py", False),
         # `coverage run -m pytest` still resolves through to pytest.
         ("coverage run -m pytest kernels/test_a.py", "kernels/test_a.py", True),
+        # `python -c '<code>' file.py` runs the code string; `file.py` is argv.
+        ("python -c 'pass' kernels/test_a.py", "kernels/test_a.py", False),
+        ("python -c 'import sys' kernels/test_a.py", "kernels/test_a.py", False),
+        # ...but `-c` as the *script's* own arg still tethers the script.
+        ("python kernels/test_a.py -c config.py", "kernels/test_a.py", True),
     ],
 )
 def test_direct_runners(command, test_file, expected):
@@ -621,6 +633,9 @@ def test_bash_dash_c_does_not_follow_a_script_operand(tmp_path, monkeypatch):
     # ...and a `-c` that is the *script's* own flag (not bash's) is not `bash -c`.
     script_flag = _parse_command("bash tests/decoy.sh -c models.txt")
     assert any(s.runs("lora/test_decoy.py") for s in script_flag)
+    # A `bash -c` trailing arg that looks like a command string is `$0`, not run.
+    cmd_string_arg = _parse_command("bash -c 'echo ok' 'pytest kernels'")
+    assert not any(s.runs("kernels/test_a.py") for s in cmd_string_arg)
 
 
 def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):

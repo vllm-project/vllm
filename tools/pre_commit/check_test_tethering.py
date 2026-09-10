@@ -332,20 +332,29 @@ def _parse_find_command(tokens: list[str]) -> FindSelection | None:
     return FindSelection(root, name_globs, exclude_name_globs, max_depth)
 
 
+def _is_dash_c_invocation(tokens: list[str]) -> bool:
+    """True for ``bash -c '<code>' [$0] [args]`` / ``sh -c ...``: the shell runs
+    the ``-c`` code string, and every token after it is a positional parameter
+    (``$0``, ``$1``, ...), not a script or command that executes."""
+    if not tokens or tokens[0].rsplit("/", 1)[-1] not in ("bash", "sh"):
+        return False
+    for token in tokens[1:]:
+        if not token.startswith("-"):
+            return False  # reached the script operand; a later `-c` is *its* flag
+        if token == "-c":
+            return True
+    return False
+
+
 def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]:
     """Follow a ``bash tests/foo.sh`` command: read the script and parse the
     pytest / runner lines inside it. ``visited`` stops a script that (directly or
     otherwise) refers back to itself; nesting is one level deep in practice.
     """
-    interpreter = tokens[0].rsplit("/", 1)[-1] if tokens else ""
-    if interpreter in ("bash", "sh"):
-        for token in tokens[1:]:
-            if not token.startswith("-"):
-                break  # reached the script operand; a later `-c` is *its* flag
-            if token == "-c":
-                # `bash -c '<code>' [$0] [args]` - the code is the `-c` string
-                # (the caller scans that); a trailing `.sh` is `$0`, not run.
-                return []
+    if _is_dash_c_invocation(tokens):
+        # The code is the `-c` string (the caller scans that); a trailing `.sh`
+        # is `$0`, not run.
+        return []
     script_arg = next((t for t in tokens if t.endswith(".sh")), None)
     if script_arg is None:
         return []
@@ -504,10 +513,12 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
         run_tokens = tokens[cmd_index:]
         selections = _parse_shell_script(run_tokens, visited)
         # Runner scripts (run-multi-node-test.sh, ...) take the real test
-        # commands as quoted string arguments - parse those too.
-        for arg in run_tokens[1:]:
-            if _looks_like_command_string(arg):
-                selections.extend(_parse_command(arg, visited))
+        # commands as quoted string arguments - parse those too. `bash -c`'s
+        # trailing args are `$0`/positional params, so skip them there.
+        if not _is_dash_c_invocation(run_tokens):
+            for arg in run_tokens[1:]:
+                if _looks_like_command_string(arg):
+                    selections.extend(_parse_command(arg, visited))
         return selections
 
     # `python` / `torchrun` / `coverage <file>.py`.
@@ -520,6 +531,12 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
             after_m = rest[rest.index("-m") + 1 :]
             if after_m[:1] and after_m[0] in PYTEST_COMMANDS:
                 return [_parse_pytest_command(after_m)]
+            return []
+        # `python -c '<code>' [argv...]` runs the code string, not a file; a `.py`
+        # after it is that program's argv (`-c` before any `.py` = interpreter's).
+        if "-c" in rest and not any(
+            t.endswith(".py") for t in rest[: rest.index("-c")]
+        ):
             return []
         # `python foo.py a b/c --suffix v1` executes only `foo.py`; the tokens
         # after it are that script's argv - treating them as test paths tethers
@@ -582,7 +599,15 @@ def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> 
     for i, token in enumerate(find_tokens):
         if token in ("-exec", "-execdir"):
             action = find_tokens[i + 1 :]
-            if action[:1] and action[0] in PYTEST_COMMANDS and _terminated(action):
+            # `find` substitutes the matched path for `{}`; without a `{}` the
+            # matches never reach pytest (`-exec pytest test_regression.py \;`
+            # just runs that one named file for every match).
+            if (
+                action[:1]
+                and action[0] in PYTEST_COMMANDS
+                and "{}" in action
+                and _terminated(action)
+            ):
                 return True
     for sep, tokens in stages[find_index + 1 :]:
         if sep != "|":
