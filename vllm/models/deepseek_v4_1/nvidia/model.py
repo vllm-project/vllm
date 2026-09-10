@@ -60,7 +60,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
+    MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
+    prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4_1.nvidia.flashinfer_sparse import (
@@ -293,6 +295,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
+        mega_gate_metadata: MegaGateRoutingMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
@@ -381,7 +384,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=self.ffn_norm.weight,
             norm_eps=self.ffn_norm.variance_epsilon,
         )
-        x = self.ffn(x, input_ids)
+        x = self.ffn(x, input_ids, mega_gate_metadata)
         return x, residual, post_mix, res_mix, ffn_pre
 
 
@@ -612,6 +615,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        mega_gate_metadata = None
+        if self.use_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
+
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
         if not get_pp_group().is_first_rank:
@@ -633,6 +646,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
+                mega_gate_metadata=mega_gate_metadata,
             )
             if idx + 1 in self.aux_hidden_state_layers:
                 # Reconstruct the aux hidden state for draft models

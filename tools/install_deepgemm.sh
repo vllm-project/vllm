@@ -7,8 +7,8 @@ set -e
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-# NOTE: This is currently targeting the nv_dev branch tip due to sm120 support
-DEEPGEMM_GIT_REF="8b1392b978f5a03c828dd1711090d7fb50958b8a"
+# DeepGEMM 2.8.0 with the SM100 Mega Gate API (upstream PR 432).
+DEEPGEMM_GIT_REF="39d8c4cacc2c07c1fa9921c6c29c6a8a2da75359"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -72,8 +72,8 @@ CUDA_MINOR="${CUDA_MINOR%%.*}"
 echo "CUDA version: $CUDA_VERSION (major: $CUDA_MAJOR, minor: $CUDA_MINOR)"
 
 # Check CUDA version requirement
-if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 8 ]; }; then
-    echo "Skipping DeepGEMM build/installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
+if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 9 ]; }; then
+    echo "Skipping DeepGEMM build/installation (requires CUDA 12.9+ but got ${CUDA_VERSION})"
     exit 0
 fi
 
@@ -91,6 +91,7 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+git submodule update --init --recursive
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
