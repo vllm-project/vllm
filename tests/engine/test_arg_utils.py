@@ -47,6 +47,39 @@ def test_optional_type():
 
 
 @pytest.mark.parametrize(
+    "options",
+    [
+        ["--engram-config", '{"cpu_offload": false, "embedding_across_dp": true}'],
+        [
+            "--engram-config.cpu_offload",
+            "false",
+            "--engram-config.embedding_across_dp",
+            "true",
+        ],
+    ],
+)
+def test_engram_config_cli(options, monkeypatch):
+    """CLI settings take precedence over the legacy offload environment."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.engram_config is not None
+    assert args.engram_config.cpu_offload is False
+    assert args.engram_config.embedding_across_dp is True
+
+
+@pytest.mark.parametrize(
+    "options, provided",
+    [([], False), (["--engram-config", "{}"], True)],
+)
+def test_engram_config_cli_optional(options, provided):
+    """An explicit empty config must remain distinct from an omitted config."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert (args.engram_config is not None) == provided
+
+
+@pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [
         (int, int, True),
