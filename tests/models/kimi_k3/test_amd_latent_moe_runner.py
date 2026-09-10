@@ -339,6 +339,27 @@ def test_large_front_workspace_is_shared_within_one_worker() -> None:
         (15, True),
         (16, True),
         (17, False),
+        # Decode bucket. Under MTP a pure-decode step submits
+        # num_seqs * (num_speculative_tokens + 1) tokens, so a server running
+        # more than four concurrent sequences never asks for a count in the
+        # 1..16 range above. The odd neighbours pin the gate as exact-match
+        # rather than a range: 33 and 129 must stay unsupported even though
+        # they sit between supported values.
+        (31, False),
+        (32, True),
+        (33, False),
+        (48, True),
+        (64, True),
+        (80, True),
+        (96, True),
+        (112, True),
+        (128, True),
+        (129, False),
+        (192, True),
+        (193, False),
+        # 256 is a cudagraph capture size but not a tuned front shape; it must
+        # not be inferred as supported from the capture list.
+        (256, False),
         (511, False),
         (512, True),
         (513, False),
