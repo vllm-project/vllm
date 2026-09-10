@@ -22,6 +22,10 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Terminology: Chunks
+
+The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash

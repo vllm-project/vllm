@@ -14,7 +14,10 @@ import tempfile
 import threading
 import time
 
+import pytest
+
 from vllm import SamplingParams
+from vllm.platforms import current_platform
 
 MODEL = "Qwen/Qwen3.5-0.8B"
 PROMPTS = [
@@ -121,6 +124,8 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner):
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon.
     """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     llm_kwargs = dict(
         gpu_memory_utilization=0.3,
         enforce_eager=True,

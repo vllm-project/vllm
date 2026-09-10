@@ -228,7 +228,7 @@ mod tests {
 
     fn assert_bool_mask(range: &PlaceholderRange, expected: &[bool]) {
         let tensor = range.is_embed.as_ref().expect("is_embed mask");
-        assert_eq!(tensor.dtype, "bool");
+        assert_eq!(tensor.dtype.as_str(), "bool");
         assert_eq!(tensor.shape, vec![expected.len()]);
         assert_eq!(
             tensor.data,

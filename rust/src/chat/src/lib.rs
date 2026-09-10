@@ -26,11 +26,11 @@ pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
 };
-pub use parser::ParserSelection;
 pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::{ParserSelection, validate_parser_overrides};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
@@ -61,36 +61,6 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
-
-/// Validate explicit parser override names without starting request processing.
-pub fn validate_parser_overrides(
-    tool_call_parser: &ParserSelection,
-    reasoning_parser: &ParserSelection,
-) -> Result<()> {
-    let tool_parser_factory = ToolParserFactory::global();
-    if let ParserSelection::Explicit(name) = tool_call_parser
-        && !tool_parser_factory.contains(name)
-    {
-        return Err(Error::ParserUnavailableByName {
-            kind: "tool",
-            name: name.clone(),
-            available_names: tool_parser_factory.list(),
-        });
-    }
-
-    let reasoning_parser_factory = ReasoningParserFactory::global();
-    if let ParserSelection::Explicit(name) = reasoning_parser
-        && !reasoning_parser_factory.contains(name)
-    {
-        return Err(Error::ParserUnavailableByName {
-            kind: "reasoning",
-            name: name.clone(),
-            available_names: reasoning_parser_factory.list(),
-        });
-    }
-
-    Ok(())
-}
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -326,24 +296,12 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        match &self.processor.tool_call_parser {
-            ParserSelection::Auto => {
-                ToolParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.tool_call_parser.resolve_tool_name(self.model_id())
     }
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        match &self.processor.reasoning_parser {
-            ParserSelection::Auto => {
-                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.reasoning_parser.resolve_reasoning_name(self.model_id())
     }
 
     /// Render, tokenize, and submit one chat request.

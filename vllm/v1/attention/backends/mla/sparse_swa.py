@@ -148,6 +148,12 @@ class DeepseekSparseSWABackend(AttentionBackend):
             )
 
             return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
+        if current_platform.is_cpu():
+            from vllm.models.deepseek_v4.cpu.cpu_mla import (
+                DeepseekV4CPUSparseSWAMetadataBuilder,
+            )
+
+            return DeepseekV4CPUSparseSWAMetadataBuilder
         return DeepseekSparseSWAMetadataBuilder
 
 
