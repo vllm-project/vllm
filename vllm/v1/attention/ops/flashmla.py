@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
 
+import inspect
+from collections.abc import Callable
+from typing import Any
+
 import torch
 
 from vllm.logger import init_logger
@@ -38,14 +42,25 @@ def _is_flashmla_available() -> tuple[bool, str | None]:
             "compiled due to insufficient nvcc version or a supported arch "
             "was not in the list of target arches to compile for.",
         )
-    if not _flashmla_extension_C_AVAILABLE:
-        return (
-            False,
-            "vllm._flashmla_extension_C is not available, likely "
-            "was not compiled due to a build error.",
-        )
-
     return True, None
+
+
+def _flashmla_op(name: str) -> Callable[..., Any] | None:
+    """Compiled FlashMLA entry point ``name``.
+
+    Upstream FlashMLA is a pybind11 module whose functions are attributes of
+    ``vllm._flashmla_C``; the vllm-project fork registers them as
+    ``torch.ops._flashmla_C`` ops instead.
+    """
+    if not _flashmla_C_AVAILABLE:
+        return None
+    fn = getattr(vllm._flashmla_C, name, None)
+    if fn is not None:
+        return fn
+    try:
+        return getattr(torch.ops._flashmla_C, name)
+    except (AttributeError, RuntimeError):
+        return None
 
 
 def is_flashmla_dense_supported() -> tuple[bool, str | None]:
@@ -78,9 +93,48 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     return True, None
 
 
+def is_flashmla_fused_sparse_supported() -> tuple[bool, str | None]:
+    """FlashMLA's fused Q-RoPE + sparse attention + O-RoPE + FP8 cast kernel."""
+    is_available, maybe_reason = is_flashmla_sparse_supported()
+    if not is_available:
+        return False, maybe_reason
+    if not current_platform.is_device_capability_family(100):
+        return False, "FlashMLA fused sparse attention requires sm_10x GPUs."
+    if _flashmla_op("fused_norm_rope_attn_rope_cast_decode") is None:
+        return (
+            False,
+            "vllm._flashmla_C was built without the fused sparse attention ops.",
+        )
+    return True, None
+
+
 def _raise_flashmla_unavailable(*_args, **_kwargs):
     _, reason = _is_flashmla_available()
     raise RuntimeError(reason or "FlashMLA is not available")
+
+
+def _accepts_out(fn: Callable[..., Any]) -> bool:
+    try:
+        return "out" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _call_with_optional_out(
+    fn: Callable[..., Any],
+    accepts_out: bool,
+    out: torch.Tensor | None,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Call ``fn``; emulate the fork's ``out=`` on interfaces that lack it."""
+    if out is None:
+        return fn(*args, **kwargs)
+    if accepts_out:
+        return fn(*args, out=out, **kwargs)
+    result = fn(*args, **kwargs)
+    out.copy_(result[0])
+    return (out, *result[1:])
 
 
 if _is_flashmla_available()[0]:
@@ -89,10 +143,34 @@ if _is_flashmla_available()[0]:
         flash_attn_varlen_func,
         flash_attn_varlen_kvpacked_func,
         flash_attn_varlen_qkvpacked_func,
-        flash_mla_sparse_fwd,
-        flash_mla_with_kvcache,
         get_mla_metadata,
     )
+    from vllm.third_party.flashmla.flash_mla_interface import (
+        flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+    )
+    from vllm.third_party.flashmla.flash_mla_interface import (
+        flash_mla_with_kvcache as _flash_mla_with_kvcache,
+    )
+
+    _WITH_KVCACHE_ACCEPTS_OUT = _accepts_out(_flash_mla_with_kvcache)
+    _SPARSE_FWD_ACCEPTS_OUT = _accepts_out(_flash_mla_sparse_fwd)
+
+    def flash_mla_with_kvcache(
+        *args: Any, out: torch.Tensor | None = None, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``flash_mla_with_kvcache`` with the fork's optional ``out`` buffer."""
+        return _call_with_optional_out(
+            _flash_mla_with_kvcache, _WITH_KVCACHE_ACCEPTS_OUT, out, *args, **kwargs
+        )
+
+    def flash_mla_sparse_fwd(
+        *args: Any, out: torch.Tensor | None = None, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``flash_mla_sparse_fwd`` with the fork's optional ``out`` buffer."""
+        return _call_with_optional_out(
+            _flash_mla_sparse_fwd, _SPARSE_FWD_ACCEPTS_OUT, out, *args, **kwargs
+        )
+
 else:
 
     class FlashMLASchedMeta:  # type: ignore[no-redef]
@@ -106,6 +184,126 @@ else:
     get_mla_metadata = _raise_flashmla_unavailable  # type: ignore[assignment]
 
 
+_FUSED_ROPE_DIM = 64
+_FUSED_QUANT_GROUP = 32
+_FUSED_HEAD_DIM_V = 512
+
+
+def flash_mla_fused_sparse_prefill(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    sm_scale: float,
+    token_positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    n_wv_group: int,
+    attn_sink: torch.Tensor | None = None,
+    topk_length: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused sparse prefill over a non-paged bf16 ``kv`` (DeepSeek V4.1).
+
+    Args:
+        q: ``[s_q, h_q, 512]`` bf16 in the fused (chunk-interleaved) layout,
+            before RoPE.
+        kv: ``[s_kv, 1, 512]`` bf16, RoPE already applied.
+        indices: ``[s_q, 1, topk]`` int32; entries ``< 0`` or ``>= s_kv`` are
+            skipped.
+        token_positions: ``[s_q]`` int32 RoPE positions of the queries.
+        cos_sin_cache: ``[max_pos, 64]`` fp32, cos in ``[:, :32]``.
+        n_wv_group: ``h_q // 8``.
+
+    Returns:
+        ``(out_fp8 [s_q, n_wv_group, 4096], out_sf [s_q, n_wv_group, 32] int32,
+        max_logits [s_q, h_q], lse [s_q, h_q])``. ``out_fp8`` holds the
+        inverse-RoPE'd output in the fused chunk order; ``out_sf`` is
+        DeepGEMM's TMA-aligned packed-ue8m0 layout (``stride(0) == 1``).
+    """
+    fn = _flashmla_op("fused_norm_rope_attn_rope_cast_fwd")
+    if fn is None:
+        _raise_flashmla_unavailable()
+    out_fp8, out_sf, max_logits, lse = fn(  # type: ignore[misc]
+        q,
+        kv,
+        indices,
+        sm_scale,
+        _FUSED_HEAD_DIM_V,
+        attn_sink,
+        topk_length,
+        False,
+        0.0,
+        token_positions,
+        False,
+        _FUSED_ROPE_DIM,
+        cos_sin_cache,
+        n_wv_group,
+        _FUSED_QUANT_GROUP,
+        True,
+        True,
+        True,
+    )
+    return out_fp8, out_sf, max_logits, lse
+
+
+def flash_mla_fused_sparse_decode(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    indices: torch.Tensor,
+    sm_scale: float,
+    token_positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    n_wv_group: int,
+    attn_sink: torch.Tensor | None = None,
+    topk_length: torch.Tensor | None = None,
+    extra_k_cache: torch.Tensor | None = None,
+    extra_indices: torch.Tensor | None = None,
+    extra_topk_length: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused sparse decode over paged quantized caches (batch flattened).
+
+    ``k_cache`` / ``extra_k_cache`` are ``[num_blocks, page, 1, bytes]`` with
+    the format detected from ``bytes`` (584 V4, 528 V4.1 fp8, 288 V4.1 fp4;
+    fp4 only for ``extra_k_cache`` next to a V4.1 fp8 ``k_cache``).
+    ``indices`` / ``extra_indices`` are ``[s_q, topk]`` int32 slot ids
+    (``block * page + offset``, ``-1`` invalid). Returns
+    ``(out_fp8, out_sf, lse)`` as in :func:`flash_mla_fused_sparse_prefill`.
+    """
+    fn = _flashmla_op("fused_norm_rope_attn_rope_cast_decode")
+    if fn is None:
+        _raise_flashmla_unavailable()
+    out_fp8, out_sf, lse = fn(  # type: ignore[misc]
+        q,
+        k_cache,
+        indices,
+        sm_scale,
+        _FUSED_HEAD_DIM_V,
+        attn_sink,
+        topk_length,
+        extra_k_cache,
+        extra_indices,
+        extra_topk_length,
+        False,
+        0.0,
+        token_positions,
+        False,
+        _FUSED_ROPE_DIM,
+        cos_sin_cache,
+        n_wv_group,
+        _FUSED_QUANT_GROUP,
+        True,
+        True,
+        True,
+    )
+    return out_fp8, out_sf, lse
+
+
+def _require_flashmla_extension() -> None:
+    if not _flashmla_extension_C_AVAILABLE:
+        raise RuntimeError(
+            "vllm._flashmla_extension_C is not available; the SM90 dense FP8 "
+            "decode extension only exists in the vllm-project FlashMLA fork."
+        )
+
+
 def get_mla_metadata_dense_fp8(
     cache_seqlens: torch.Tensor,
     num_q_tokens_per_head_k: int,
@@ -113,6 +311,7 @@ def get_mla_metadata_dense_fp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not _is_flashmla_available()[0]:
         _raise_flashmla_unavailable()
+    _require_flashmla_extension()
     return torch.ops._flashmla_extension_C.get_mla_decoding_metadata_dense_fp8(
         cache_seqlens,
         num_q_tokens_per_head_k,
@@ -135,6 +334,7 @@ def flash_mla_with_kvcache_fp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not _is_flashmla_available()[0]:
         _raise_flashmla_unavailable()
+    _require_flashmla_extension()
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     out, softmax_lse = torch.ops._flashmla_extension_C.fwd_kvcache_mla_fp8(
