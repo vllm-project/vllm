@@ -47,23 +47,11 @@ def o_fused_chunk_permutation(
     return o_fused_permutation(heads_per_group, head_dim)[::O_CHUNK] // O_CHUNK
 
 
-def inverse_permutation(perm: torch.Tensor) -> torch.Tensor:
-    inv = torch.empty_like(perm)
-    inv[perm] = torch.arange(perm.numel(), device=perm.device)
-    return inv
-
-
 def permute_q_to_fused(q: torch.Tensor) -> torch.Tensor:
     """``[N, H, D]`` standard layout -> the same nominal shape, fused layout."""
     n, h, d = q.shape
     perm = q_fused_permutation(h, d).to(q.device)
     return q.reshape(n, h * d)[:, perm].view(n, h, d)
-
-
-def permute_q_from_fused(q: torch.Tensor) -> torch.Tensor:
-    n, h, d = q.shape
-    inv = inverse_permutation(q_fused_permutation(h, d)).to(q.device)
-    return q.reshape(n, h * d)[:, inv].view(n, h, d)
 
 
 def _bytes_view(t: torch.Tensor) -> torch.Tensor:
