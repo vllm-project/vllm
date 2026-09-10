@@ -16,6 +16,22 @@ from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 logger = init_logger(__name__)
 
+
+_ASM_FP4_SCALE_ROW_MULTIPLE = 32
+_ASM_FP4_SCALE_COL_MULTIPLE = 8
+
+
+def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
+    # The ASM swizzle reshapes weight_scale into a fixed tile layout, requiring
+    # scale rows divisible by 32 and scale columns divisible by 8
+    if weight_scale.ndim != 2:
+        return False
+    sm, sn = weight_scale.shape
+    return (
+        sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0 and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
+    )
+
+
 # NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
 # which can force the engine core to spawn instead of fork.
 # is_aiter_found_and_supported() checks platform + arch + library availability via
@@ -169,6 +185,19 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
+            layer.weight_scale.data
+        ):
+            logger.warning_once(
+                "AITER ASM FP4 GEMM requires weight_scale dims divisible by "
+                "(%d, %d), but this layer has weight_scale shape %s. Falling "
+                "back to the AITER Triton FP4 GEMM for this layer.",
+                _ASM_FP4_SCALE_ROW_MULTIPLE,
+                _ASM_FP4_SCALE_COL_MULTIPLE,
+                tuple(layer.weight_scale.data.shape),
+            )
+            self.use_asm_gemm = False
+
         if self.use_asm_gemm:
             from aiter.ops.shuffle import shuffle_weight
 
