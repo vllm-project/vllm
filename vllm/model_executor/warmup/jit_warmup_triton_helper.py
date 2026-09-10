@@ -26,50 +26,54 @@ LaunchSpec = (
     | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
 DispatchSpec = LaunchSpec
-_MISSING = object()
 
 
 @dataclass(frozen=True)
 class _LaunchBindingPlan:
     input_targets: tuple[tuple[str, str], ...]
-    stride_targets: tuple[tuple[str, str, str, int], ...]
+    stride_targets: tuple[tuple[str, str, int], ...]
 
 
 @cache
 def _launch_binding_plan(
-    arg_names: tuple[str, ...], input_names: tuple[str, ...]
+    arg_names: tuple[str, ...],
+    input_names: tuple[str, ...],
+    launch_names: tuple[str, ...],
 ) -> _LaunchBindingPlan:
     arg_name_set = set(arg_names)
+    launch_name_set = set(launch_names)
 
     def kernel_arg(input_name: str) -> str | None:
         pointer_name = f"{input_name}_ptr"
+        candidates = (
+            input_name,
+            pointer_name,
+            input_name.upper(),
+            pointer_name.upper(),
+        )
         return next(
-            (
-                candidate
-                for candidate in (
-                    input_name,
-                    pointer_name,
-                    input_name.upper(),
-                    pointer_name.upper(),
-                )
-                if candidate in arg_name_set
-            ),
+            (candidate for candidate in candidates if candidate in arg_name_set),
             None,
         )
 
     input_targets = tuple(
         (name, target)
         for name in input_names
-        if (target := kernel_arg(name)) is not None
+        if (target := kernel_arg(name)) is not None and target not in launch_name_set
     )
+    bound_names = launch_name_set | {target for _, target in input_targets}
     stride_targets = []
     for target in arg_names:
+        if target in bound_names:
+            continue
         name, separator, dim = target.rpartition("_stride")
         if not separator:
             name, separator, dim = target.rpartition("_STRIDE")
         dim = dim.removeprefix("_")
         if separator and (not dim or dim.isdigit()):
-            stride_targets.append((target, name, f"{name}_ptr", int(dim or 0)))
+            source = name if name in bound_names else f"{name}_ptr"
+            if source in bound_names:
+                stride_targets.append((target, source, int(dim or 0)))
     return _LaunchBindingPlan(input_targets, tuple(stride_targets))
 
 
@@ -226,22 +230,18 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     def _prepare_launch_kwargs(
         self,
         inputs: Mapping[str, Any],
-        launch_kwargs: Mapping[str, Any],
+        launch_kwargs: dict[str, Any],
     ) -> tuple[dict[str, Any], Any, int]:
-        plan = _launch_binding_plan(self._kernel_arg_names, tuple(inputs))
-        kwargs = {target: inputs[source] for source, target in plan.input_targets}
-        kwargs.update(launch_kwargs)
-        runtime_launcher = kwargs.pop("_runtime_launcher", None)
-        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
-        for target, name, pointer_name, dim in plan.stride_targets:
-            if target in kwargs:
-                continue
-            value = kwargs.get(name, _MISSING)
-            if value is _MISSING:
-                value = kwargs.get(pointer_name, _MISSING)
-            if value is not _MISSING:
-                kwargs[target] = value.stride(dim)
-        return kwargs, runtime_launcher, runtime_launcher_arg_count
+        plan = _launch_binding_plan(
+            self._kernel_arg_names, tuple(inputs), tuple(launch_kwargs)
+        )
+        for source, target in plan.input_targets:
+            launch_kwargs[target] = inputs[source]
+        for target, source, dim in plan.stride_targets:
+            launch_kwargs[target] = launch_kwargs[source].stride(dim)
+        runtime_launcher = launch_kwargs.pop("_runtime_launcher", None)
+        runtime_launcher_arg_count = launch_kwargs.pop("_runtime_launcher_arg_count", 0)
+        return launch_kwargs, runtime_launcher, runtime_launcher_arg_count
 
     def launch(
         self,
@@ -639,7 +639,7 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                     continue
                 grid, launch_kwargs = spec[:2]
                 prepared, _, _ = self._prepare_launch_kwargs(
-                    input_values, launch_kwargs
+                    input_values, dict(launch_kwargs)
                 )
             if grid is None:
                 continue
