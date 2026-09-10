@@ -600,12 +600,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 else kFp8DynamicTensorSym
             )
 
-        # Select Fp8 MoE backend
+        # Select Fp8 MoE backend.
+        # When quant_config.use_deep_gemm is explicitly False (set by the
+        # per-model-type Blackwell denylist in VllmConfig), propagate that
+        # decision into the backend selector so the MoE path also avoids
+        # DEEPGEMM/BATCHED_DEEPGEMM even on hardware that otherwise supports
+        # it.
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
             allow_vllm_cutlass=False,
+            force_disable_deep_gemm=(self.quant_config.use_deep_gemm is False),
         )
 
     def create_weights(

@@ -214,10 +214,17 @@ def select_fp8_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
+    force_disable_deep_gemm: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+
+    Args:
+        force_disable_deep_gemm: When True, unconditionally remove DEEPGEMM
+            and BATCHED_DEEPGEMM from the candidate backend list before any
+            env-var checks.  Used by :class:`Fp8MoEMethod` to honour the
+            per-model-type denylist set in ``quant_config.use_deep_gemm``.
     """
 
     if config.is_lora_enabled:
@@ -225,6 +232,14 @@ def select_fp8_moe_backend(
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
+
+    # Remove DeepGEMM backends when the model-type denylist has disabled them.
+    # This must run before env-var checks so that an explicit
+    # VLLM_USE_DEEP_GEMM=1 cannot re-enable a denylisted model.
+    if force_disable_deep_gemm:
+        for _dg_backend in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM):
+            if _dg_backend in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(_dg_backend)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
