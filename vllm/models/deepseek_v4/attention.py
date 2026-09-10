@@ -292,7 +292,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
-            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor.
+            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. None on
+            # ROCm, where aux_stream_list is None.
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
             )
@@ -1005,6 +1006,7 @@ class DeepseekV4Indexer(nn.Module):
             compress_ratio=self.compress_ratio,
         )
 
+        # None on ROCm — maybe_execute_in_parallel falls back to sequential.
         self.aux_stream = aux_stream
         self.ln_events: list[torch.cuda.Event] = [
             torch.cuda.Event(),

@@ -612,6 +612,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 o_padded,
             )
         else:
+            # Fall back to sequential execution.
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
 
         o = o_padded[:, : self.n_local_heads, :]
@@ -633,7 +634,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         """Run the ROCm CSA fork/join inside the graph capture boundary."""
         aux_streams = self.aux_stream_list
-        if aux_streams is None or qr is not None:
+        # The sequential pipeline disables aux_stream_list before calling
+        # back with real projection inputs; aux_streams is None ends that
+        # recursion here.
+        if aux_streams is None:
             saved_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
