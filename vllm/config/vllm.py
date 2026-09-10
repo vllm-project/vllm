@@ -2713,13 +2713,19 @@ class VllmConfig:
                 "not forward sampling masks"
             )
 
-        if self.lora_config is not None:
+        if self.lora_config is not None and (
+            # Default targets include lm_head; an explicit target list only
+            # wraps lm_head when it names it.
+            self.lora_config.target_modules is None
+            or "lm_head" in self.lora_config.target_modules
+        ):
             # compute_logits_local() skips the TP logits gather, and the lm_head
             # LoRA delta can only be applied after that gather
             # (LogitsProcessorWithLoRA raises on skip_gather).
             blockers.append(
-                "it does not yet work with LoRA, whose lm_head delta requires "
-                "the TP logits gather that batch-sharded sampling skips"
+                "it does not yet work with LoRA when the lm_head is targeted, "
+                "whose delta requires the TP logits gather that batch-sharded "
+                "sampling skips"
             )
 
         if (

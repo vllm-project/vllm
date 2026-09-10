@@ -787,11 +787,28 @@ def test_batch_sharded_sampling_rejects_lora():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
         speculative_config=None,
-        lora_config=SimpleNamespace(),
+        lora_config=SimpleNamespace(target_modules=None),
     )
 
     with pytest.raises(ValueError, match="LoRA"):
         VllmConfig._validate_batch_sharded_sampling(config)
+
+
+def test_batch_sharded_sampling_allows_lora_without_lm_head_target():
+    """LoRA restricted to modules other than lm_head never wraps the logits
+    processor, so batch-sharded sampling still works and must not be
+    rejected."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(target_modules=["o_proj"]),
+    )
+
+    VllmConfig._validate_batch_sharded_sampling(config)
 
 
 @pytest.mark.skip_global_cleanup
