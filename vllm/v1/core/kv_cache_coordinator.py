@@ -139,7 +139,7 @@ class KVCacheCoordinator(ABC):
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=self.block_pool,
-                host_resident=kv_cache_group.host_resident,
+                role=kv_cache_group.role,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size_for_kv_cache_spec(

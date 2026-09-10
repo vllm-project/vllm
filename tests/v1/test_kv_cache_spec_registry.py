@@ -22,11 +22,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
     register_all_kvcache_specs,
 )
+from vllm.v1.hisparse.cache_manager import HiSparseSourceManager
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    KVCacheGroupRole,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -175,6 +177,19 @@ class TestKVCacheSpecRegistry:
                 KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
                 is spec_uniform_base_map[spec_cls]
             )
+
+    @pytest.mark.parametrize("role", list(KVCacheGroupRole))
+    def test_mla_manager_selection_by_role(self, role):
+        """Only the source role overrides ordinary MLA manager selection."""
+        expected = (
+            HiSparseSourceManager
+            if role == KVCacheGroupRole.HISPARSE_SOURCE
+            else FullAttentionManager
+        )
+        assert (
+            KVCacheSpecRegistry.get_manager_class(make_spec(MLAAttentionSpec), role)
+            is expected
+        )
 
     @pytest.mark.parametrize("spec_cls", list(spec_manager_map))
     def test_custom_spec_register(self, spec_cls):

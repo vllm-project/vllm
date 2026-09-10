@@ -31,10 +31,10 @@ class KVCacheSpecMetadata:
     # KVCacheSpecs with the same uniform_type_base_spec will be
     # grouped into one kvcache group
     uniform_type_base_spec: type["KVCacheSpec"]
-    host_manager_class: type["SingleTypeKVCacheManager"] | None = None
 
 
 _REGISTRY_KVCACHESPEC_LIST: dict[type["KVCacheSpec"], KVCacheSpecMetadata] = {}
+_REGISTRY_ROLE_MANAGERS: dict[str, type["SingleTypeKVCacheManager"]] = {}
 
 
 class KVCacheSpecRegistry:
@@ -66,7 +66,6 @@ class KVCacheSpecRegistry:
         kvcache_spec_cls: type["KVCacheSpec"],
         manager_class: type["SingleTypeKVCacheManager"] | None = None,
         uniform_type_base_spec: type["KVCacheSpec"] | None = None,
-        host_manager_class: type["SingleTypeKVCacheManager"] | None = None,
     ) -> None:
         """
         Register a KVCacheSpec class with its manager and base spec.
@@ -92,7 +91,6 @@ class KVCacheSpecRegistry:
             is_same_registration = (
                 manager_class == registered_spec.manager_class
                 and uniform_type_base_spec == registered_spec.uniform_type_base_spec
-                and host_manager_class == registered_spec.host_manager_class
             )
             assert is_same_registration, (
                 f"Conflicting registration for KVCacheSpec "
@@ -103,34 +101,42 @@ class KVCacheSpecRegistry:
             kvcache_spec_cls=kvcache_spec_cls,
             manager_class=manager_class,
             uniform_type_base_spec=uniform_type_base_spec,
-            host_manager_class=host_manager_class,
         )
 
     @classmethod
+    def register_role_manager(
+        cls, role: str, manager_class: type["SingleTypeKVCacheManager"]
+    ) -> None:
+        """Select ``manager_class`` for every group with the given role."""
+        registered = _REGISTRY_ROLE_MANAGERS.get(role)
+        assert registered is None or registered is manager_class, (
+            f"Conflicting manager registration for group role {role}"
+        )
+        _REGISTRY_ROLE_MANAGERS[role] = manager_class
+
+    @classmethod
     def get_manager_class(
-        cls, kvcache_spec: "KVCacheSpec", host_resident: bool = False
+        cls, kvcache_spec: "KVCacheSpec", role: str | None = None
     ) -> type["SingleTypeKVCacheManager"] | None:
         """
         Get the single type kvcache manager class for a given kvcache spec instance.
 
         Args:
             kvcache_spec: A KVCacheSpec instance
-            host_resident: Select the host manager rather than the device manager.
+            role: The group's role; a role-registered manager takes precedence.
 
         Returns:
             The SingleTypeKVCacheManager class to use for this kvcache_spec
         """
         cls._ensure_registered()
+        if role is not None and (manager_class := _REGISTRY_ROLE_MANAGERS.get(role)):
+            return manager_class
         kvcache_spec_cls = type(kvcache_spec)
 
         # Walk up the MRO to find a registered base class
         for base in kvcache_spec_cls.__mro__:
             if base in _REGISTRY_KVCACHESPEC_LIST:
-                metadata = _REGISTRY_KVCACHESPEC_LIST[base]
-                if not host_resident:
-                    return metadata.manager_class
-                if metadata.host_manager_class is not None:
-                    return metadata.host_manager_class
+                return _REGISTRY_KVCACHESPEC_LIST[base].manager_class
 
         return None
 

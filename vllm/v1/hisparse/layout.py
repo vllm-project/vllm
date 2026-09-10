@@ -239,6 +239,7 @@ def create_hisparse_layout(
     source_group = KVCacheGroupSpec(
         list(source_specs),
         source_group_spec,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
         host_resident=True,
         enable_kv_transfer=True,
     )

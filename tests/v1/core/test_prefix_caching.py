@@ -179,6 +179,7 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
+            role=KVCacheGroupRole.HISPARSE_SOURCE,
             host_resident=True,
         ),
         KVCacheGroupSpec(

@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -2161,7 +2162,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
-    host_resident: bool = False,
+    role: str | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -2179,7 +2180,7 @@ def get_manager_for_kv_cache_spec(
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
     """
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, host_resident)
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, role)
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
@@ -2211,11 +2212,13 @@ def register_all_kvcache_specs(vllm_config):
         HiSparseSourceManager,
     )
 
+    KVCacheSpecRegistry.register_role_manager(
+        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
+    )
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
         FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
-        host_manager_class=HiSparseSourceManager,
     )
     KVCacheSpecRegistry.register(
         HiSparseHotSpec,
