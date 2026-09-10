@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -409,6 +410,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
         return to_return
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> list[tuple[CacheHitSource, int]]:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is None:
+            return super().get_external_cache_hit_sources(request, num_external_tokens)
+        return self._connectors[chosen_connector].get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

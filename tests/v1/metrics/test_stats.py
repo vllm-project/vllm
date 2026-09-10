@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -43,6 +46,34 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_prefill_cache_sources_serialization():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=8,
+        external_cached_token_sources=[("p2p", 4), ("host", 4)],
+    )
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                request_id="request",
+                new_token_ids=[1],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.outputs[0].prefill_stats is not None
+    assert decoded.outputs[0].prefill_stats.external_cached_token_sources == [
+        ("p2p", 4),
+        ("host", 4),
+    ]
 
 
 def test_compute_iteration_details_includes_encoder_stats():
@@ -183,6 +214,7 @@ def test_prompt_token_stats_all_computed():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 0
+    assert stats.cached_tokens_by_source == {}
     assert stats.total == 1000
 
 
@@ -203,6 +235,7 @@ def test_prompt_token_stats_partial_local_cache():
     assert stats.local_cache_hit == 300
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 300
+    assert stats.cached_tokens_by_source == {"device": 300}
     assert stats.total == 1000
 
 
@@ -223,6 +256,7 @@ def test_prompt_token_stats_partial_external_transfer():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
     assert stats.cached_tokens == 500
+    assert stats.cached_tokens_by_source == {"external": 500}
     assert stats.total == 1000
 
 
@@ -236,6 +270,7 @@ def test_prompt_token_stats_mixed_sources():
         num_prompt_tokens=1000,
         num_local_cached_tokens=400,
         num_external_cached_tokens=200,
+        external_cached_token_sources=[("host", 100), ("disk", 100)],
     )
     stats.update_from_output(prefill_stats)
 
@@ -243,6 +278,11 @@ def test_prompt_token_stats_mixed_sources():
     assert stats.local_cache_hit == 400
     assert stats.external_kv_transfer == 200
     assert stats.cached_tokens == 600
+    assert stats.cached_tokens_by_source == {
+        "device": 400,
+        "host": 100,
+        "disk": 100,
+    }
     assert stats.total == 1000
 
 
@@ -267,6 +307,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
     assert stats.local_cache_hit == 999
     assert stats.external_kv_transfer == 0
     assert stats.cached_tokens == 999
+    assert stats.cached_tokens_by_source == {"device": 999}
     assert stats.total == 1000
 
 
@@ -287,4 +328,139 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
+    assert stats.cached_tokens_by_source == {"external": 999}
     assert stats.total == 1000
+
+
+def test_prefill_stats_truncates_failed_external_source_segments():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=100,
+        num_external_cached_tokens=400,
+        external_cached_token_sources=[("p2p", 200), ("host", 200)],
+    )
+
+    prefill_stats.truncate_external_cached_tokens(250)
+
+    assert prefill_stats.num_computed_tokens == 650
+    assert prefill_stats.num_cached_tokens == 350
+    assert prefill_stats.num_local_cached_tokens == 100
+    assert prefill_stats.num_external_cached_tokens == 250
+    assert prefill_stats.external_cached_token_sources == [
+        ("p2p", 200),
+        ("host", 50),
+    ]
+
+    stats = PromptTokenStats()
+    stats.update_from_output(prefill_stats)
+    assert stats.cached_tokens_by_source == {
+        "device": 100,
+        "p2p": 200,
+        "host": 50,
+    }
+
+
+def test_prefill_stats_coalesces_external_source_segments():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=8,
+        external_cached_token_sources=[
+            ("p2p", 0),
+            ("host", 3),
+            ("host", 5),
+            ("disk", 0),
+        ],
+    )
+
+    assert prefill_stats.external_cached_token_sources == [("host", 8)]
+
+    prefill_stats.truncate_external_cached_tokens(0)
+
+    assert prefill_stats.external_cached_token_sources == []
+    assert prefill_stats.num_external_cached_tokens == 0
+    assert prefill_stats.num_cached_tokens == 4
+    assert prefill_stats.num_computed_tokens == 12
+
+
+@pytest.mark.parametrize("source", list(CacheHitSource))
+@pytest.mark.parametrize("as_string", [False, True])
+def test_prefill_stats_accepts_canonical_sources(source, as_string):
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=16,
+        external_cached_token_sources=[(source.value if as_string else source, 16)],
+    )
+
+    assert prefill_stats.external_cached_token_sources == [(source.value, 16)]
+
+
+@pytest.mark.parametrize(
+    "source", ["gpu", "cpu", "dram", "file", "fs", "nvme", "HOST", "obj", "custom"]
+)
+@pytest.mark.parametrize("num_tokens", [0, 8])
+def test_prefill_stats_rejects_noncanonical_sources(source, num_tokens):
+    prefill_stats = PrefillStats()
+
+    with pytest.raises(ValueError):
+        prefill_stats.set(
+            num_prompt_tokens=16,
+            num_local_cached_tokens=0,
+            num_external_cached_tokens=num_tokens,
+            external_cached_token_sources=[(source, num_tokens)],
+        )
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        [("", 8)],
+        [("host", -1), ("disk", 9)],
+        [("host", 7)],
+        [("host", 9)],
+    ],
+)
+def test_prefill_stats_rejects_malformed_external_source_segments(
+    sources: list[tuple[str, int]],
+):
+    prefill_stats = PrefillStats()
+
+    with pytest.raises(AssertionError):
+        prefill_stats.set(
+            num_prompt_tokens=16,
+            num_local_cached_tokens=4,
+            num_external_cached_tokens=8,
+            external_cached_token_sources=sources,
+        )
+
+
+def test_prompt_token_stats_accumulates_sources_across_outputs():
+    stats = PromptTokenStats()
+    first = PrefillStats()
+    first.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=4,
+        num_external_cached_tokens=4,
+        external_cached_token_sources=[("host", 4)],
+    )
+    second = PrefillStats()
+    second.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=2,
+        num_external_cached_tokens=6,
+        external_cached_token_sources=[("host", 2), ("disk", 4)],
+    )
+
+    stats.update_from_output(first)
+    stats.update_from_output(second)
+
+    assert stats.cached_tokens_by_source == {
+        "device": 6,
+        "host": 6,
+        "disk": 4,
+    }
+    assert sum(stats.cached_tokens_by_source.values()) == stats.cached_tokens == 16

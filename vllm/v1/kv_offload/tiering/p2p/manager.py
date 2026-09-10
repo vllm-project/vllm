@@ -12,12 +12,13 @@ import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
@@ -198,6 +199,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
+
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
 
     def __init__(
         self,

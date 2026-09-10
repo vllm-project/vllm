@@ -72,6 +72,7 @@ from vllm.utils.network_utils import (
     make_zmq_socket,
 )
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -190,6 +191,8 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1):
+    _cache_hit_source = CacheHitSource.P2P
+
     def __init__(
         self,
         vllm_config: VllmConfig,

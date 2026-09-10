@@ -159,6 +159,29 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
+def test_scheduler_reports_mooncake_cache_source():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    # Mooncake Store is an external cache service. Its internal memory and
+    # local-storage policy is intentionally hidden behind that stable label.
+    assert connector.get_external_cache_hit_sources(None, 32) == [  # type: ignore[arg-type]
+        ("external", 32)
+    ]
+    assert connector.get_external_cache_hit_sources(None, 0) == []  # type: ignore[arg-type]
+
+
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()

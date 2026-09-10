@@ -49,6 +49,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -172,6 +173,8 @@ class KVConnectorBase_V1(ABC):
     """
     Base class for KV connectors.
     """
+
+    _cache_hit_source = CacheHitSource.EXTERNAL
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -480,6 +483,26 @@ class KVConnectorBase_V1(ABC):
             into account.
         """
         pass
+
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> list[tuple[CacheHitSource, int]]:
+        """Describe the source of externally cached prompt tokens.
+
+        The returned segments must be in prompt-token order, contain canonical
+        ``CacheHitSource`` values, and sum to ``num_external_tokens``. The
+        scheduler calls this after :meth:`update_state_after_alloc`, so
+        connectors can attribute the accepted hit using the actual load plan
+        rather than a speculative lookup result.
+
+        Connectors that cannot provide finer attribution use the conservative
+        ``external`` source supplied by this default implementation.
+        """
+        if num_external_tokens == 0:
+            return []
+        return [(self._cache_hit_source, num_external_tokens)]
 
     @abstractmethod
     def update_state_after_alloc(

@@ -90,6 +90,7 @@ pub struct RequestMetrics {
     pub prompt_tokens: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_cached_by_source: PromptTokenSourceCounterFamily,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
 
     // We intentionally don't support iteration-level histograms for now, since it seems to make
@@ -145,6 +146,13 @@ impl RequestMetrics {
             "vllm:prompt_tokens_cached",
             "Number of prompt tokens with prefix cache hits.",
             prompt_tokens_cached.clone(),
+        );
+
+        let prompt_tokens_cached_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached_by_source",
+            "Number of cached prompt tokens by the cache tier that supplied their KV. Sources are device, host, disk, p2p, and external.",
+            prompt_tokens_cached_by_source.clone(),
         );
 
         let generation_tokens = Family::default();
@@ -280,6 +288,7 @@ impl RequestMetrics {
             prompt_tokens,
             prompt_tokens_by_source,
             prompt_tokens_cached,
+            prompt_tokens_cached_by_source,
             generation_tokens,
             request_success,
             request_prompt_tokens,

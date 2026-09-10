@@ -104,6 +104,18 @@ def test_async_load_failure(
             assert request.num_computed_tokens == (
                 min_invalid_block_idx * scheduler.block_size
             )
+            assert request.prefill_stats is not None
+            assert request.prefill_stats.num_external_cached_tokens == (
+                min_invalid_block_idx * scheduler.block_size
+            )
+            expected_sources = (
+                [("external", min_invalid_block_idx * scheduler.block_size)]
+                if min_invalid_block_idx
+                else []
+            )
+            assert (
+                request.prefill_stats.external_cached_token_sources == expected_sources
+            )
         else:
             assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -181,6 +193,10 @@ def test_sync_load_failure(
     assert len(scheduler.running) == 1
     assert scheduler.running[0].request_id == request2.request_id
     assert scheduler.running[0].num_computed_tokens == (
+        min(invalid_block_idxs) * scheduler.block_size
+    )
+    assert scheduler.running[0].prefill_stats is not None
+    assert scheduler.running[0].prefill_stats.num_external_cached_tokens == (
         min(invalid_block_idxs) * scheduler.block_size
     )
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3

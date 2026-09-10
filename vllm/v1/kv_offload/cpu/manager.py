@@ -8,6 +8,7 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -138,6 +139,12 @@ class CPUOffloadingManager(OffloadingManager):
         if not chunk.is_ready:
             return LookupResult.HIT_PENDING
         return LookupResult.HIT
+
+    @override
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        return CacheHitSource.HOST
 
     @override
     def prepare_load(

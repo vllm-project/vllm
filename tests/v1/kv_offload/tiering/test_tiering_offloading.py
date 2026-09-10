@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     _parse_tier_filter,
 )
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -500,8 +501,12 @@ class TestTieringOffloadingManager:
         # Lookup should find all chunks in primary
         assert count_hits(self.manager, chunks) == 3
 
-    def test_promotion_from_secondary(self, manager_setup):
+    @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
+    def test_promotion_from_secondary(self, manager_setup, monkeypatch, source):
         """Test promotion of chunks from secondary to primary tier."""
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
 
         # Manually add chunks to secondary tier (simulate previous cascade)
@@ -525,6 +530,26 @@ class TestTieringOffloadingManager:
         # Next lookup should succeed
         assert count_hits(self.manager, chunks) == 3
 
+        # The request that caused the promotion retains the secondary origin.
+        assert all(
+            self.manager.get_load_source(chunk, _CTX) == source for chunk in chunks
+        )
+
+        # A later request sees the chunks as ordinary host-memory primary hits.
+        later_context = ReqContext(req_id="later")
+        self.manager.on_new_request(later_context)
+        assert all(
+            self.manager.lookup(chunk, later_context) is LookupResult.HIT
+            for chunk in chunks
+        )
+        assert all(
+            self.manager.get_load_source(chunk, later_context) == "host"
+            for chunk in chunks
+        )
+
+    @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
         [
@@ -540,8 +565,9 @@ class TestTieringOffloadingManager:
         ids=["partial", "legacy-full-failure"],
     )
     def test_failed_promotion_keeps_only_successful_chunks(
-        self, manager_setup, successful_indices, expected_results
+        self, manager_setup, monkeypatch, source, successful_indices, expected_results
     ):
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
@@ -571,6 +597,14 @@ class TestTieringOffloadingManager:
         assert [
             self.primary_tier.lookup(chunk, _CTX) for chunk in chunks
         ] == expected_results
+        expected_source_keys = (
+            set()
+            if successful_indices is None
+            else {chunks[i] for i in successful_indices}
+        )
+        assert set(self.manager._request_load_sources[_CTX.req_id]) == (
+            expected_source_keys
+        )
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample per tier and chunk."""
@@ -1265,6 +1299,7 @@ class TestTieringOffloadingManager:
         # Orchestrator state cleared.
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
+        assert self.manager._request_load_sources == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
 
