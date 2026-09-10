@@ -75,7 +75,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     # --8<-- [start:completion-sampling-params]
     use_beam_search: bool = False
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     min_p: float | None = None
     repetition_penalty: float | None = None
     watermarking: bool | None = None
@@ -284,7 +284,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+    stream_interval: Annotated[int, Field(ge=1, le=_INT64_MAX)] | None = Field(
         default=None,
         description=(
             "Number of tokens to batch into each streamed chunk. Raises the "

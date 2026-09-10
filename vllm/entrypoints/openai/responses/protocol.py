@@ -298,7 +298,7 @@ class ResponsesRequest(OpenAIBaseModel):
     tools: list[Tool] = Field(default_factory=list)
     top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
