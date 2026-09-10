@@ -653,9 +653,17 @@ def test_bash_dash_c_does_not_follow_a_script_operand(tmp_path, monkeypatch):
     # ...but the `-c` code string *itself* is parsed - it is what runs.
     code_runs = _parse_command("bash -c 'pytest lora/test_x.py'")
     assert any(s.runs("lora/test_x.py") for s in code_runs)
-    # a combined short-option group (`-ec`) still resolves the `-c` operand.
-    combined = _parse_command("bash -ec 'pytest lora/test_x.py'")
-    assert any(s.runs("lora/test_x.py") for s in combined)
+    # a combined short-option group resolves the `-c` operand with `c` in any
+    # position (`-ec`, `-ce`), and its trailing args are still `$0`, not run.
+    for grp in ("-ec", "-ce", "-euxc"):
+        assert any(
+            s.runs("lora/test_x.py")
+            for s in _parse_command(f"bash {grp} 'pytest lora/test_x.py'")
+        )
+    assert not any(
+        s.runs("lora/test_x.py")
+        for s in _parse_command("bash -ce 'echo ok' 'pytest lora/test_x.py'")
+    )
 
 
 def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):
