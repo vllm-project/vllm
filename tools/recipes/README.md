@@ -120,6 +120,11 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 See [SWEEP_TUNING.md](SWEEP_TUNING.md) for the benchmark, recommendation, and
 vLLM CPU Docker-shell workflow.
 
+Each generated sweep package also contains a standalone `visualize.py` helper,
+`requirements.txt`, and `VISUALIZATION.md`. Run the helper only after the
+benchmark stages finish; it reads existing `summary.json` files and never runs
+or resumes a sweep.
+
 For end-to-end tuning, `--generate-full-sweep` runs
 `TP/DP -> max_concurrency -> scheduler`. `--generate-concurrency-sweep` can be
 used independently, and `--generate-scheduler-sweep` is the explicit
