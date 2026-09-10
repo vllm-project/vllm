@@ -13,6 +13,10 @@ REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv
 
 uv pip install --system -r "${REQUIREMENTS_FILE}"
 
+# TODO: Move nvidia-kvcr to kv_connectors.txt once its wheel is released.
+uv pip install --system \
+    "nvidia-kvcr @ git+https://github.com/ai-dynamo/kvcr.git@main"
+
 KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
 
@@ -58,7 +62,3 @@ if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then
     uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true
     uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
 fi
-
-# TODO: Move nvidia-kvcr to kv_connectors.txt once its wheel is released.
-uv pip install --system \
-    "nvidia-kvcr @ git+https://github.com/ai-dynamo/kvcr.git@main"

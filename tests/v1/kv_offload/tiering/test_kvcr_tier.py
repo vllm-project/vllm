@@ -267,15 +267,11 @@ def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
     )
 
 
-def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
-    """Exercise the complete vLLM router-hint-to-KVCR load translation."""
+def test_kvcr_tier_adapts_request_and_load(monkeypatch):
+    """Check hint forwarding, key conversion, load descriptors, and cleanup."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
-    router_hint = {
-        "source_control_endpoint": "tcp://source:1234",
-        "block_hashes": [123],
-        "framework_hint": {"opaque": True},
-    }
+    router_hint = {"opaque": True}
     ctx = ReqContext(
         req_id="req",
         kv_transfer_params={ROUTER_HINT_KEY: router_hint, "unrelated": object()},
@@ -300,9 +296,7 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
 
     tier.submit_load(_job(7, ctx, key=key, chunk_id=2))
 
-    # Here we verify that submitting a load for a hinted key asks KVCR to
-    # deliver that key into the expected primary memory slot and completes the
-    # vLLM transfer job successfully.
+    # Check load destinations and job completion independently of hint parsing.
     assert len(kvcr.submit_hint_calls) == 1
     _, blocks, request_id = kvcr.deliver_calls[0]
     assert request_id == "req"
