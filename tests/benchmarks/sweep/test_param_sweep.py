@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from vllm.benchmarks.sweep import serve as sweep_serve
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
 
 
@@ -247,3 +248,47 @@ class TestParameterSweepItemKeyNormalization:
         # The prefix (compilation_config) gets converted to hyphens,
         # but the suffix (some_nested_param) is preserved
         assert any("compilation-config.some_nested_param" in arg for arg in cmd)
+
+
+def test_run_comb_excludes_warmup_from_measured_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    calls: list[tuple[int, int, str]] = []
+
+    def fake_run_benchmark(
+        server,
+        bench_cmd,
+        *,
+        serve_overrides,
+        bench_overrides,
+        run_number,
+        output_path,
+        dry_run,
+    ):
+        calls.append(
+            (run_number, int(bench_overrides["num_prompts"]), output_path.name)
+        )
+        return {"run_number": run_number}
+
+    monkeypatch.setattr(sweep_serve, "run_benchmark", fake_run_benchmark)
+    base_path = tmp_path / "combination"
+    base_path.mkdir()
+
+    measured = sweep_serve.run_comb(
+        None,
+        [],
+        serve_comb=ParameterSweepItem(),
+        bench_comb=ParameterSweepItem({"num_prompts": 320}),
+        link_vars=[],
+        base_path=base_path,
+        num_runs=2,
+        warmup_num_prompts=32,
+        dry_run=False,
+    )
+
+    assert calls == [
+        (-1, 32, "warmup.json"),
+        (0, 320, "run=0.json"),
+        (1, 320, "run=1.json"),
+    ]
+    assert measured == [{"run_number": 0}, {"run_number": 1}]

@@ -203,6 +203,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     sweep.add_argument(
+        "--generate-parallel-layout-sweep",
+        action="store_true",
+        help=(
+            "Generate a staged NUMA-aware TP/DP sweep followed by the existing "
+            "max-num-seqs/max-num-batched-tokens sweep. Requires "
+            "--detect-hardware."
+        ),
+    )
+    sweep.add_argument(
         "--sweep-out-dir",
         default="sweep",
         help="Output directory for optional sweep files (default: sweep).",
@@ -794,6 +803,11 @@ def main() -> int:
     args = parse_args()
 
     try:
+        if args.generate_sweep and args.generate_parallel_layout_sweep:
+            raise ValueError(
+                "Choose either --generate-sweep or "
+                "--generate-parallel-layout-sweep, not both."
+            )
         source = args.source
         if source is None:
             source = discover_recipe_source(
@@ -815,6 +829,7 @@ def main() -> int:
         tuning_requested = (
             args.detect_hardware
             or args.generate_sweep
+            or args.generate_parallel_layout_sweep
             or any(
                 value is not None
                 for value in (
@@ -831,6 +846,7 @@ def main() -> int:
         tuning = None
         workload = None
         sweep_writer = None
+        hardware = None
         if tuning_requested:
             # Keep plain Recipes conversion lightweight. vLLM-specific modules
             # are imported only for optional runtime tuning or sweep generation.
@@ -849,7 +865,7 @@ def main() -> int:
                 target_qps=args.target_qps,
             )
 
-            if args.generate_sweep:
+            if args.generate_sweep or args.generate_parallel_layout_sweep:
                 from sweep_generation import (
                     validate_sweep_workload,
                     write_sweep_files,
@@ -861,7 +877,6 @@ def main() -> int:
             recipe_hardware = recipe.get("hardware")
             policies = get_runtime_tuning_policies(recipe_hardware)
 
-            hardware = None
             if args.detect_hardware:
                 from hardware_detection import detect_hardware
 
@@ -879,7 +894,23 @@ def main() -> int:
         write_env(args.env_out, source, recipe)
 
         sweep_files: list[Path] = []
-        if args.generate_sweep:
+        if args.generate_parallel_layout_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError(
+                    "--generate-parallel-layout-sweep requires --detect-hardware."
+                )
+            assert workload is not None
+            from sweep_generation import write_parallel_layout_sweep_files
+
+            sweep_files = write_parallel_layout_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+            )
+        elif args.generate_sweep:
             assert workload is not None
             assert sweep_writer is not None
             sweep_files = sweep_writer(
@@ -911,10 +942,16 @@ def main() -> int:
     print(f"  vllm serve --config {shlex.quote(args.config_out)}")
     if sweep_files:
         sweep_dir = Path(args.sweep_out_dir)
+        run_parallel = sweep_dir / "run_parallel_layout_sweep.sh"
+        recommend_parallel = sweep_dir / "recommend_parallel_layout.py"
         run_sweep = sweep_dir / "run_sweep.sh"
         recommend = sweep_dir / "recommend.py"
         print()
         print("Optional performance sweep:")
+        if args.generate_parallel_layout_sweep:
+            print(f"  {shlex.quote(str(run_parallel))} --dry-run")
+            print(f"  {shlex.quote(str(run_parallel))}")
+            print(f"  {shlex.quote(str(recommend_parallel))}")
         print(f"  {shlex.quote(str(run_sweep))} --dry-run")
         print(f"  {shlex.quote(str(run_sweep))}")
         print()
