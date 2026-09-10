@@ -86,8 +86,6 @@ class KVCacheCoordinator(ABC):
         num_prefill_lookahead: int = 0,
     ):
         self.kv_cache_config = kv_cache_config
-        self.max_model_len = max_model_len
-        self.enable_caching = enable_caching
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
         assert scheduler_block_size % hash_block_size == 0 and all(
@@ -309,6 +307,27 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
+    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
+        """Positions a later request replaying this prompt can resume at.
+
+        A hit is the shortest across all groups, so every group retains state
+        at each position; EAGLE groups also keep the block above, which they
+        match and drop back from (see ``reachable_block_mask``).
+
+        Two positions are reachable: a resend of the identical prompt is capped
+        at ``num_tokens - 1`` (its last token is recomputed for logits), a
+        longer sibling matches the final aligned block. They differ only on a
+        block-aligned prompt, where retaining just the higher one collapses the
+        resend's hit to 0. The alignment is the scheduler block size, not the
+        finer hash granularity, which would over-estimate the reach.
+        """
+        if not self.eagle_group_ids:
+            return (request.num_prompt_tokens - 1,)
+        block = self.scheduler_block_size
+        resend = (request.num_prompt_tokens - 1) // block * block
+        extension = request.num_prompt_tokens // block * block
+        return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -319,6 +338,7 @@ class KVCacheCoordinator(ABC):
                 that need to be cached
                 (including tokens that are already cached).
         """
+        boundaries = self.get_replay_boundaries(request)
         for manager in self.single_type_managers:
             # Only cache tokens with finalized KV. The last num_reprefillable_tokens
             # tokens can be re-prefilled during multi-module MTP.
@@ -329,6 +349,7 @@ class KVCacheCoordinator(ABC):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                replay_boundaries=boundaries,
             )
 
     def free(self, request_id: str) -> None:
@@ -753,6 +774,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
+        boundaries = self.get_replay_boundaries(request)
         for manager in self.single_type_managers:
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -779,6 +801,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                replay_boundaries=boundaries,
             )
 
     def find_longest_cache_hit(

@@ -796,6 +796,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
+    "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash-VL",
+        trust_remote_code=True,
+        is_available_online=True,
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 6,
+                "layer_types": ["linear_attention"] * 5 + ["full_attention"],
+            }
+        },
+    ),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
@@ -808,6 +820,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/command-a-vision-07-2025",
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
         min_transformers_version="5.9.0",
+    ),
+    "CohereCompassForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
