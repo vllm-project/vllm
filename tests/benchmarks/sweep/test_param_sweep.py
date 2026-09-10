@@ -292,3 +292,47 @@ def test_run_comb_excludes_warmup_from_measured_results(
         (1, 320, "run=1.json"),
     ]
     assert measured == [{"run_number": 0}, {"run_number": 1}]
+
+
+def test_run_comb_continue_on_error_keeps_later_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    calls: list[int] = []
+
+    def fake_run_benchmark(
+        server,
+        bench_cmd,
+        *,
+        serve_overrides,
+        bench_overrides,
+        run_number,
+        output_path,
+        dry_run,
+    ):
+        calls.append(run_number)
+        if run_number == 0:
+            raise RuntimeError("synthetic run failure")
+        return {"run_number": run_number}
+
+    monkeypatch.setattr(sweep_serve, "run_benchmark", fake_run_benchmark)
+    base_path = tmp_path / "combination"
+    base_path.mkdir()
+
+    measured = sweep_serve.run_comb(
+        None,
+        [],
+        serve_comb=ParameterSweepItem(),
+        bench_comb=ParameterSweepItem({"num_prompts": 100}),
+        link_vars=[],
+        base_path=base_path,
+        num_runs=2,
+        warmup_num_prompts=0,
+        dry_run=False,
+        continue_on_error=True,
+    )
+
+    assert calls == [0, 1]
+    assert measured == [{"run_number": 1}]
+    assert (base_path / "run=0.failure.json").exists()
+    assert (base_path / "summary.json").exists()
+

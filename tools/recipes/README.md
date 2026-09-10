@@ -120,13 +120,19 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 See [SWEEP_TUNING.md](SWEEP_TUNING.md) for the benchmark, recommendation, and
 vLLM CPU Docker-shell workflow.
 
-To compare parallel layouts before scheduler tuning, use
-`--generate-parallel-layout-sweep` instead. Hardware detection supplies the
-effective NUMA-node count. The first stage generates every supported factor pair
-that uses all NUMA nodes. It also includes the largest supported TP size that
-does not exceed the NUMA-node count, even if that candidate leaves some NUMA
-nodes idle. The second stage tunes the scheduler around the selected layout.
-Generated TP values are limited to the supported set `1, 2, 4, 8`.
+For end-to-end tuning, `--generate-full-sweep` runs
+`TP/DP -> max_concurrency -> scheduler`. `--generate-concurrency-sweep` can be
+used independently, and `--generate-scheduler-sweep` is the explicit
+scheduler-only name (`--generate-sweep` remains an alias).
+
+To tune only the parallel layout, use
+`--generate-parallel-layout-sweep`. Hardware detection supplies the effective
+NUMA-node count. The sweep generates every supported factor pair that uses all
+NUMA nodes and also includes the largest supported TP size that does not exceed
+the NUMA-node count, even if that candidate leaves some NUMA nodes idle. This
+mode stops after TP/DP selection; use `--generate-full-sweep` to continue with
+concurrency and scheduler tuning. Generated TP values are limited to the
+supported set `1, 2, 4, 8`.
 
 ## Start vLLM
 
