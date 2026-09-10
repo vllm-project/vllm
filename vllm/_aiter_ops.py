@@ -981,33 +981,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
-
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.numel() // hidden_dim
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.custom_fused_ar_rms(
         input_,
@@ -1015,6 +994,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         weight,
         epsilon,
         use_1stage=use_1stage,
+        gemma_norm=gemma_norm,
     )
     assert result is not None
     return result[0], result[1]
@@ -1025,6 +1005,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
 
@@ -1036,38 +1017,12 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + RMSNorm + per-group FP8 quant.
-
-    Mirrors the eligibility logic of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``
-    for the 1-stage vs 2-stage AITER kernel dispatch (both variants run inside
-    AITER, the only choice we make here is the launcher to call into).
-    """
+    """Fused AllReduce + RMSNorm + per-group FP8 quant."""
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
 
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.numel() // hidden_dim
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.fused_ar_rms_per_group_quant(
         input_,
@@ -1119,28 +1074,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
 
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.fused_ar_rms_per_group_quant(
         input_,
