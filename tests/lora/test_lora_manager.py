@@ -1139,10 +1139,15 @@ def test_lru_cache_worker_adapter_manager_loaded_state(
         return manager.get_loaded_names(manager.get_loaded_state())
 
     assert names() == ([], [], [])
+    assert manager.get_loaded_ranks(manager.get_loaded_state()) == {}
 
     manager.add_adapter(request(1))
     manager.add_adapter(request(2))
     assert names() == (["adapter-1", "adapter-2"], ["adapter-1", "adapter-2"], [])
+    assert manager.get_loaded_ranks(manager.get_loaded_state()) == {
+        "adapter-1": 8,
+        "adapter-2": 8,
+    }
 
     # Third add: GPU slots are full, so 1 drops to the CPU tier.
     manager.add_adapter(request(3))
@@ -1213,7 +1218,11 @@ def test_model_runner_mixin_publishes_lora_load_events(
 
     assert runner.add_lora(LoRARequest("adapter-1", 1, dummy_lora_files))
     assert published() == [
-        LoRALoadEvent(gpu_adapters=["adapter-1"], cpu_adapters=["adapter-1"])
+        LoRALoadEvent(
+            gpu_adapters=["adapter-1"],
+            cpu_adapters=["adapter-1"],
+            ranks={"adapter-1": 8},
+        )
     ]
 
     # Re-adding a loaded adapter only touches it in the LRU cache, so the
@@ -1227,6 +1236,7 @@ def test_model_runner_mixin_publishes_lora_load_events(
             gpu_adapters=["adapter-1"],
             cpu_adapters=["adapter-1"],
             pinned_adapters=["adapter-1"],
+            ranks={"adapter-1": 8},
         )
     ]
 
@@ -1239,7 +1249,11 @@ def test_model_runner_mixin_publishes_lora_load_events(
         (2,), (2,), {LoRARequest("adapter-2", 2, dummy_lora_files)}
     )
     assert published() == [
-        LoRALoadEvent(gpu_adapters=["adapter-2"], cpu_adapters=["adapter-2"])
+        LoRALoadEvent(
+            gpu_adapters=["adapter-2"],
+            cpu_adapters=["adapter-2"],
+            ranks={"adapter-2": 8},
+        )
     ]
 
     runner.maybe_remove_all_loras(lora_config)
