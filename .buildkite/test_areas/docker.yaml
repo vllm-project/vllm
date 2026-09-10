@@ -15,10 +15,13 @@ steps:
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
     - tests/tools/test_area_test_coverage.py
+    - tests/tools/test_language_layout.py
+    - tests/models/language/generation/
     - tools/check_area_test_coverage.py
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py
     - pytest -v -s tools/test_area_test_coverage.py
+    - pytest -v -s tools/test_language_layout.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
