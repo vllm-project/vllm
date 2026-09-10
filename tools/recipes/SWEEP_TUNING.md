@@ -86,42 +86,6 @@ For **Tune All**, the supplied `--concurrency` is the representative load used
 for the initial TP/DP comparison and to size the benchmark request set. The
 concurrency stage then measures the final SLA-feasible `max_concurrency`.
 
-### Temporary TP/DP NUMA-binding workaround
-
-Xeon TP/DP and Tune All sweeps currently enable a temporary explicit CPU-binding
-workaround by default:
-
-```text
---tp-dp-numa-bind-workaround
-```
-
-Hardware detection builds one `VLLM_CPU_OMP_THREADS_BIND` CPU list per effective
-NUMA node. On x86 it selects one logical CPU per physical core, matching vLLM's
-auto-binding SMT policy, and excludes one physical core from each NUMA node for
-non-OMP work. The resulting value is written to `env.sh`, for example:
-
-```bash
-export VLLM_CPU_OMP_THREADS_BIND='48-62|64-78|80-94|96-110'
-```
-
-The exact CPU IDs depend on the effective container/cgroup cpuset and NUMA
-topology. Discontinuous CPU IDs are preserved as comma-separated ranges.
-
-`VLLM_CPU_NUM_OF_RESERVED_CPU` is not used by this workaround because vLLM only
-applies its reserved-CPU logic in automatic binding mode. With an explicit
-`VLLM_CPU_OMP_THREADS_BIND`, reserved cores must already be omitted from the
-generated lists.
-
-After the vLLM CPU DP NUMA-binding issue is fixed, disable the workaround
-without removing the implementation:
-
-```bash
---no-tp-dp-numa-bind-workaround
-```
-
-An explicit non-`auto` `VLLM_CPU_OMP_THREADS_BIND` supplied by the recipe is
-preserved.
-
 ### Generate the Tune All package
 
 Inside the container:
@@ -213,6 +177,42 @@ sweep/parallel-layout-recommendation.json
 
 The selected TP/DP layout becomes the fixed server layout for Stage 2.
 
+### Temporary TP/DP NUMA-binding workaround
+
+Xeon TP/DP and Tune All sweeps currently enable a temporary explicit CPU-binding
+workaround by default:
+
+```text
+--tp-dp-numa-bind-workaround
+```
+
+Hardware detection builds one `VLLM_CPU_OMP_THREADS_BIND` CPU list per effective
+NUMA node. On x86 it selects one logical CPU per physical core, matching vLLM's
+auto-binding SMT policy, and excludes one physical core from each NUMA node for
+non-OMP work. The resulting value is written to `env.sh`, for example:
+
+```bash
+export VLLM_CPU_OMP_THREADS_BIND='48-62|64-78|80-94|96-110'
+```
+
+The exact CPU IDs depend on the effective container/cgroup cpuset and NUMA
+topology. Discontinuous CPU IDs are preserved as comma-separated ranges.
+
+`VLLM_CPU_NUM_OF_RESERVED_CPU` is not used by this workaround because vLLM only
+applies its reserved-CPU logic in automatic binding mode. With an explicit
+`VLLM_CPU_OMP_THREADS_BIND`, reserved cores must already be omitted from the
+generated lists.
+
+After the vLLM CPU DP NUMA-binding issue is fixed, disable the workaround
+without removing the implementation:
+
+```bash
+--no-tp-dp-numa-bind-workaround
+```
+
+An explicit non-`auto` `VLLM_CPU_OMP_THREADS_BIND` supplied by the recipe is
+preserved.
+
 ### Stage 2: Tune Concurrency
 
 The concurrency stage keeps the selected TP/DP layout fixed and uses vLLM
@@ -249,10 +249,9 @@ selected max_concurrency
 fixed input/output token shape
 ```
 
-The scheduler stage then tunes:
-
-- `max-num-seqs`
-- `max-num-batched-tokens`
+The scheduler stage keeps an explicit `max-num-seqs` at the per-replica
+concurrency lower bound while tuning `max-num-batched-tokens`. It also compares
+the explicit sequence limit with the vLLM default.
 
 The per-replica sequence baseline is recalculated as:
 
@@ -260,7 +259,9 @@ The per-replica sequence baseline is recalculated as:
 max-num-seqs = ceil(selected max_concurrency / selected data-parallel-size)
 ```
 
-The directed scheduler sweep keeps the existing batch-budget curve around that
+The directed scheduler sweep does not test `max-num-seqs` below this value;
+doing so limits immediately active requests and can turn scheduler queueing into
+severe TTFT degradation. It keeps the existing batch-budget curve around the
 baseline and also measures three vLLM-default reference candidates:
 
 | Reference candidate | `max-num-seqs` | `max-num-batched-tokens` |
@@ -412,8 +413,23 @@ For TP/DP and scheduler selection, the recommender:
 2. Calculates duration-weighted combined compliance across successful runs.
 3. Requires median P99 TTFT/TPOT objectives and the minimum combined compliance
    ratio, which defaults to `0.99`.
-4. Among eligible configurations, selects the highest mean output-token
-   throughput.
+4. Establishes the highest mean output-token throughput among eligible
+   configurations, then applies the selection policy below.
+
+For a scheduler-only comparison with one fixed TP/DP layout, candidates within
+1% of the highest eligible output-token throughput are treated as practically
+equivalent. Within that set, the recommender prefers the candidate with fewer
+explicit scheduler overrides, followed by compliance, goodput, and throughput.
+This avoids hard-coding a scheduler value for a difference that is likely within
+normal run-to-run variation. Change or disable the equivalence range with:
+
+```bash
+/output/sweep/recommend.py --throughput-equivalence-percent VALUE
+```
+
+Use `0` to restore exact highest-throughput selection. TP/DP comparisons still
+use exact highest-throughput selection because changing a parallel layout is a
+material deployment decision.
 
 For concurrency selection, the policy instead selects the **highest
 SLA-feasible `max_concurrency`**, with throughput/compliance metrics used to
