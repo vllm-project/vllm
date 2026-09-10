@@ -746,8 +746,8 @@ def reduce_segments(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    # Fully masked tiles have M=0,L=0; unvisited tiles have M=-inf,L=1.
-    # Neither may set the maximum, even when all real scores are negative.
+    # Empty segments must not set the maximum. Unvisited segments retain
+    # the M=-inf,L=1 initial state.
     valid_segment = segm_mask & (segm_expsum > 0) & (segm_max != float("-inf"))
     segm_max = tl.where(valid_segment, segm_max, float("-inf"))
     overall_max = tl.max(segm_max)

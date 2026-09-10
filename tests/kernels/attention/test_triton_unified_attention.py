@@ -14,6 +14,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops import triton_unified_attention as attention
 from vllm.v1.attention.ops.triton_attention_helpers import (
     compute_tile_loop_bounds,
+    softmax_step,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     reduce_segments,
@@ -188,6 +189,24 @@ def test_reduce_segments_ignores_empty_softmax_states(empty_state: str) -> None:
     torch.testing.assert_close(
         output, torch.full_like(output, 0.0 if empty_state == "all_empty" else 3.0)
     )
+
+
+@triton.jit
+def _softmax_after_empty_tile(output_ptr):
+    maximum = tl.full((1,), float("-inf"), tl.float32)
+    mass = tl.full((1,), 1.0, tl.float32)
+    empty_scores = tl.full((1, 16), float("-inf"), tl.float32)
+    maximum, mass, _, _ = softmax_step(empty_scores, maximum, mass)
+    scores = tl.full((1, 16), -1000.0, tl.float32)
+    _, mass, probabilities, _ = softmax_step(scores, maximum, mass)
+    tl.store(output_ptr + tl.arange(0, 16), tl.sum(probabilities, axis=0) / mass)
+
+
+def test_splitk_softmax_recovers_after_fully_masked_tile() -> None:
+    """A masked first tile must not suppress later, strongly negative logits."""
+    probabilities = torch.empty(16, device=DEVICE_TYPE)
+    _softmax_after_empty_tile[(1,)](probabilities)
+    torch.testing.assert_close(probabilities, torch.full_like(probabilities, 1 / 16))
 
 
 @pytest.mark.parametrize(
