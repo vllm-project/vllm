@@ -748,12 +748,10 @@ class Scheduler(SchedulerInterface):
                         # The request can be scheduled.
                         break
 
-                    # HiSparse reclamation is stream ordered and becomes
-                    # allocatable after the worker acknowledges the spill.
-                    # Yield this scheduling iteration instead of preempting a
-                    # request whose resident pages are already being reclaimed.
-                    hisparse_coordinator = self.kv_cache_manager.hisparse_coordinator
-                    if hisparse_coordinator.has_pending_reclamation():
+                    if (
+                        self.connector is not None
+                        and self.connector.has_pending_block_frees()
+                    ):
                         break
 
                     # The request cannot be scheduled.
@@ -1181,39 +1179,38 @@ class Scheduler(SchedulerInterface):
                     )
 
                 reserved_blocks = 0
-                host_capacity_available = True
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
-                    host_capacity_available = (
-                        self.kv_cache_manager.hisparse_coordinator.can_admit_async_load(
-                            request,
-                            num_computed_tokens,
-                            num_new_local_computed_tokens,
-                            new_computed_blocks.blocks,
-                            self._inflight_prefills,
-                            self.scheduler_reserve_full_isl,
-                        )
-                    )
-
-                new_blocks = None
-                if host_capacity_available:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
+                    hisparse = self.kv_cache_manager.hisparse_coordinator
+                    if not hisparse.can_admit_async_load(
                         request,
-                        num_new_tokens,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_lookahead_tokens=effective_lookahead_tokens,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        delay_cache_blocks=load_kv_async,
-                        num_encoder_tokens=num_encoder_tokens,
-                        full_sequence_must_fit=self.scheduler_reserve_full_isl,
-                        reserved_blocks=reserved_blocks,
-                        has_scheduled_reqs=bool(self.running),
-                    )
+                        num_computed_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks.blocks,
+                        self._inflight_prefills,
+                        self.scheduler_reserve_full_isl,
+                    ):
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        break
+
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request,
+                    num_new_tokens,
+                    num_new_computed_tokens=num_new_local_computed_tokens,
+                    new_computed_blocks=new_computed_blocks,
+                    num_lookahead_tokens=effective_lookahead_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
+                    delay_cache_blocks=load_kv_async,
+                    num_encoder_tokens=num_encoder_tokens,
+                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    reserved_blocks=reserved_blocks,
+                    has_scheduled_reqs=bool(self.running),
+                )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -2738,7 +2735,6 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
-            or self.kv_cache_manager.hisparse_coordinator.has_pending_work()
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -3011,10 +3007,6 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
-                self.kv_cache_manager.hisparse_coordinator.complete_host_import(
-                    request.request_id, request.num_computed_tokens
-                )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
             # on a full prompt hit, we need to re-compute the last token

@@ -645,6 +645,10 @@ class KVConnectorBase_V1(ABC):
         """
         return ()
 
+    def has_pending_block_frees(self) -> bool:
+        """Whether pending transfers can release blocks instead of preemption."""
+        return False
+
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
         the engine main loop to keep stepping (e.g. a P-side request whose

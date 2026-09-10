@@ -19,7 +19,12 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
+    HiSparseConnectorScheduler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -148,12 +153,26 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def _bind_hisparse_connector(scheduler):
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    connector.connector_scheduler.bind_coordinator(
+        scheduler.kv_cache_manager.hisparse_coordinator
+    )
+    composite = object.__new__(MultiConnector)
+    composite._connectors = (connector,)
+    scheduler.connector = composite
+
+
 def test_pending_hisparse_spill_keeps_scheduler_alive():
     """A final host spill must complete after the last request finishes."""
     scheduler = create_scheduler()
-    scheduler.kv_cache_manager.hisparse_coordinator.pending_spills[0] = Mock()
-
+    _bind_hisparse_connector(scheduler)
+    pending = scheduler.kv_cache_manager.hisparse_coordinator.pending_spills
+    pending[0] = Mock()
     assert scheduler.has_requests()
+    pending.clear()
+    assert not scheduler.has_requests()
 
 
 @pytest.mark.parametrize(
@@ -1209,6 +1228,10 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
 
     monkeypatch.setattr(
         scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
+    )
+    _bind_hisparse_connector(scheduler)
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", Mock(return_value=None)
     )
     monkeypatch.setattr(
         scheduler.kv_cache_manager.hisparse_coordinator,

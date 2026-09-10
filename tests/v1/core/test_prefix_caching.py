@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -63,6 +64,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.cpu_test
 
@@ -677,6 +680,34 @@ def test_hisparse_async_admission_accounts_for_host_cache_hits(
         )
         == admitted
     )
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_host_receive_completion_without_spill_metadata(failed):
+    """Only successful external receives make host pages readable."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, 32) is not None
+    request.num_computed_tokens = 32
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(manager.hisparse_coordinator)
+    scheduler.requests[request.request_id] = request
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = scheduler
+    composite = object.__new__(MultiConnector)
+    composite._connectors = (connector,)
+    composite.update_connector_output(
+        KVConnectorOutput(
+            finished_recving={request.request_id},
+            failed_recving={request.request_id} if failed else set(),
+        )
+    )
+    state = manager.hisparse_coordinator.request_states.get(request.request_id)
+    if failed:
+        assert state is None
+    else:
+        assert state is not None and state.valid_pages == {0, 1}
 
 
 def test_hisparse_host_import_ignores_unsealed_tail():

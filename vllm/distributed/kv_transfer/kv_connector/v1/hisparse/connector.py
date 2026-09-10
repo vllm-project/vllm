@@ -25,6 +25,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -155,11 +156,21 @@ class HiSparseConnectorScheduler:
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        assert self.coordinator is not None
+        for request_id in connector_output.finished_recving or ():
+            request = self.requests.get(request_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and request_id not in connector_output.failed_recving
+            ):
+                self.coordinator.complete_host_import(
+                    request_id, request.num_computed_tokens
+                )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        assert self.coordinator is not None
         self.coordinator.update_spills(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
@@ -213,6 +224,16 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def requires_pre_forward_start(self) -> bool:
         return True
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        assert self.connector_scheduler.coordinator is not None
+        return self.connector_scheduler.coordinator.has_pending_work()
+
+    def has_pending_block_frees(self) -> bool:
+        assert self.connector_scheduler is not None
+        assert self.connector_scheduler.coordinator is not None
+        return self.connector_scheduler.coordinator.has_pending_reclamation()
 
     def finish_forward(self) -> None:
         assert self.connector_worker is not None

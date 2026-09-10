@@ -624,6 +624,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             yield from c.take_events()
 
+    def has_pending_block_frees(self) -> bool:
+        return any(c.has_pending_block_frees() for c in self._connectors)
+
     def has_pending_push_work(self) -> bool:
         return any(c.has_pending_push_work() for c in self._connectors)
 
