@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -21,9 +22,39 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
 )
+from vllm.v1.worker.utils import allocate_kv_cache
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
+
+
+def init_hisparse_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+    forward_context: dict[str, Any],
+    block_tables: "BlockTables",
+) -> dict[str, torch.Tensor]:
+    """Allocate and bind HiSparse caches within the caller's allocation context."""
+    host_allocator = HiSparseHostAllocator(kv_cache_config)
+    kv_caches = allocate_kv_cache(
+        kv_cache_config,
+        device,
+        vllm_config.cache_config.get_resolved_kv_cache_layout(),
+        kernel_block_sizes,
+        host_allocator=host_allocator,
+    )
+    bind_hisparse_kv_caches(
+        forward_context=forward_context,
+        kv_cache_config=kv_cache_config,
+        kv_caches=kv_caches,
+        block_tables=block_tables,
+        pinned_host_pools=host_allocator.registered_pools,
+        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+    )
+    return kv_caches
 
 
 class HiSparseHostAllocator:

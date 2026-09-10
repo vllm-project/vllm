@@ -26,7 +26,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
-from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.utils import (
+    bind_kv_cache,
+    bind_kv_cache_to_layers,
+    copy_kv_cache_blocks_inplace,
+)
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
@@ -910,7 +914,8 @@ def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
     return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
 
 
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
+@pytest.mark.parametrize("layers_only", [False, True])
+def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
@@ -925,7 +930,10 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         SimpleNamespace(layer_names=[layer_names[1]]),
     ]
 
-    bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
+    if layers_only:
+        bind_kv_cache_to_layers(kv_cache, ctx, kv_cache_groups=kv_cache_groups)
+    else:
+        bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 
     assert (
         mixers[0]._replayssm_ring_start.data_ptr()

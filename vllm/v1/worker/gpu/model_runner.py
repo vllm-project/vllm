@@ -710,11 +710,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
-        self.kv_caches: list[torch.Tensor] = []
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
-                self.kv_caches,
                 self.compilation_config.static_forward_context,
                 self.kv_cache_config,
                 self.device,
@@ -723,6 +721,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
             )
+        self.kv_caches = [
+            cache for cache in kv_caches_dict.values() if cache.device == self.device
+        ]
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:

@@ -18,7 +18,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
-from vllm.v1.hisparse.binding import HiSparseHostAllocator, bind_hisparse_kv_caches
+from vllm.v1.hisparse.binding import init_hisparse_kv_cache
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -31,7 +31,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
-    bind_kv_cache,
+    bind_kv_cache_to_layers,
     prepare_kernel_block_sizes,
 )
 
@@ -321,7 +321,6 @@ def get_query_lens_mismatch_unsupported_backend(
 
 
 def init_kv_cache(
-    runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -332,27 +331,23 @@ def init_kv_cache(
     block_tables: "BlockTables | None" = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
-    host_allocator = None
-    if vllm_config.attention_config.hisparse_config is not None:
-        host_allocator = HiSparseHostAllocator(kv_cache_config)
     with allocation_context:
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            device,
-            vllm_config.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-            host_allocator=host_allocator,
-        )
-        if host_allocator is not None:
+        if vllm_config.attention_config.hisparse_config is not None:
             assert block_tables is not None
-            bind_hisparse_kv_caches(
-                forward_context=forward_context,
-                kv_cache_config=kv_cache_config,
-                kv_caches=kv_caches,
-                block_tables=block_tables,
-                pinned_host_pools=host_allocator.registered_pools,
-                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            kv_caches = init_hisparse_kv_cache(
+                kv_cache_config,
+                device,
+                kernel_block_sizes,
+                vllm_config,
+                forward_context,
+                block_tables,
+            )
+        else:
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                device,
+                vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
             )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
@@ -367,19 +362,12 @@ def init_kv_cache(
     bindable_caches = {
         name: cache for name, cache in kv_caches.items() if name in forward_context
     }
-    bind_kv_cache(
+    bind_kv_cache_to_layers(
         bindable_caches,
         forward_context,
-        runner_kv_caches,
         num_attn_module,
         kv_cache_groups=kv_cache_config.kv_cache_groups,
     )
-    runner_kv_caches.extend(
-        cache for name, cache in kv_caches.items() if name not in forward_context
-    )
-    runner_kv_caches[:] = [
-        cache for cache in runner_kv_caches if cache.device == device
-    ]
     return kv_caches
 
 

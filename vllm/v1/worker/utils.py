@@ -605,7 +605,6 @@ def bind_kv_cache(
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
-    ordered_layer_names: list[str] = []
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
         if len(layer_names) > 1:
@@ -619,8 +618,19 @@ def bind_kv_cache(
             current_platform.check_runner_kv_caches_multi_layer()
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
-            ordered_layer_names.append(layer_name)
 
+    bind_kv_cache_to_layers(
+        kv_caches, forward_context, num_attn_module, kv_cache_groups
+    )
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Bind layer caches and share ReplaySSM trackers in model-layer order."""
     # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
     # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
@@ -628,6 +638,9 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
+    ordered_layer_names = sorted(
+        kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
+    )
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
