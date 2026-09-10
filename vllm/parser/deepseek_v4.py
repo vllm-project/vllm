@@ -50,6 +50,12 @@ DSML_INVOKE_END = f"</{_DSML}invoke>"
 DSML_PARAM_START = f"<{_DSML}parameter"
 DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 
+# Spellings variants of ``DSML_TOOL_START`` observed in production.
+DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
+    f"<{_DSML}toolcalls>",
+    f"<{_DSML}tool>",
+)
+
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
@@ -131,7 +137,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         terminals={
             "THINK_START": DSML_THINK_START,
             "THINK_END": DSML_THINK_END,
-            "TOOL_START": DSML_TOOL_START,
+            "TOOL_START": (DSML_TOOL_START, *DSML_TOOL_START_VARIANTS),
             "TOOL_END": DSML_TOOL_END,
             "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,

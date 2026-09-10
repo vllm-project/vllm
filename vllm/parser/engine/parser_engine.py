@@ -158,11 +158,11 @@ class ParserEngine(Parser):
 
     @property
     def reasoning_start_str(self) -> str | None:
-        return self.parser_engine_config.terminals.get("THINK_START")
+        return self.parser_engine_config.terminal_literal("THINK_START")
 
     @property
     def reasoning_end_str(self) -> str | None:
-        return self.parser_engine_config.terminals.get("THINK_END")
+        return self.parser_engine_config.terminal_literal("THINK_END")
 
     @cached_property
     def vocab(self) -> dict[str, int]:
