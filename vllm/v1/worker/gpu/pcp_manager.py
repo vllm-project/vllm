@@ -24,6 +24,40 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class PCPSchedule:
+    """PCP-invariant view of the current batch, for building DCP schedules.
+
+    Every field is computed identically on every PCP rank - they all run over
+    the same ``segments_by_rank`` - so any schedule derived from this is
+    guaranteed to agree across ranks without communicating.
+    """
+
+    # [num_global_reqs] full KV extent (num_computed + total query len).
+    seq_lens_np: np.ndarray
+    # [num_global_reqs] rank-invariant UPPER BOUND on the query length of one of
+    # this request's PCP chunks: ceil(query_len / 2*pcp) for a prefill, the full
+    # query length for a decode.
+    nominal_chunk_query_lens_np: np.ndarray
+    # [num_local_rows] global request index for each of THIS rank's local rows,
+    # in local row order.
+    local_to_global_req_idx_np: np.ndarray
+    # Whether NO request in the batch is PCP-split.
+    all_rows_replicated: bool
+
+
+_current_pcp_schedule: PCPSchedule | None = None
+
+
+def set_current_pcp_schedule(schedule: PCPSchedule | None) -> None:
+    global _current_pcp_schedule
+    _current_pcp_schedule = schedule
+
+
+def get_current_pcp_schedule() -> PCPSchedule | None:
+    return _current_pcp_schedule
+
+
+@dataclass(frozen=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -148,39 +182,45 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support speculative decoding yet."
             )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
-        if (
-            is_sparse_mla
-            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
-            )
-        if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if parallel_config.decode_context_parallel_size > 1:
+            if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL:
+                raise NotImplementedError(
+                    "MRV2 PCP cannot capture a FULL CUDA graph over mixed batches."
+                )
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
+                    f"'{parallel_config.dcp_comm_backend}'."
+                )
+        else:
+            is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+            if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
+                    "Set -cc.cudagraph_mode=NONE."
+                )
+            if cudagraph_mode.has_full_cudagraphs():
+                raise NotImplementedError(
+                    "MRV2 PCP supports PIECEWISE CUDA graphs only."
+                )
 
     @staticmethod
     def _reorder_segments(
         segments: list[RankSegment],
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-        query_start_loc_np: np.ndarray,
     ) -> list[RankSegment]:
-        """Move pure prefills last to match the batch ordering expected by
-        attention backends like MLA and sparse MLA.
-        """
+        """Order this rank's rows decodes-first, then prefills, canonically."""
 
-        def is_pure_prefill(segment: RankSegment) -> bool:
+        def sort_key(segment: RankSegment) -> tuple[bool, int, int]:
             req_idx = segment.global_batch_req_idx
-            start_pos = (
-                num_computed_tokens[req_idx]
-                + segment.global_batch_slice.start
-                - query_start_loc_np[req_idx]
+            return (
+                bool(is_prefilling[req_idx]),
+                req_idx,
+                segment.global_batch_slice.start,
             )
-            return is_prefilling[req_idx] and start_pos == 0
 
-        segments.sort(key=is_pure_prefill)
+        segments.sort(key=sort_key)
         rank_offset = 0
         for index, segment in enumerate(segments):
             segments[index] = replace(
@@ -191,6 +231,21 @@ class PCPManager:
             )
             rank_offset += segment.num_tokens
         return segments
+
+    def replicated_requests(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> np.ndarray:
+        """Per global request, whether every PCP rank gets the whole query."""
+        num_chunks = 2 * self.pcp_world_size
+        query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
+        replicated = ~np.asarray(is_prefilling, dtype=np.bool_)
+        if self.dcp_world_size > 1:
+            chunk_sizes = (query_lens + num_chunks - 1) // num_chunks
+            drops_a_chunk = (num_chunks - 1) * chunk_sizes >= query_lens
+            replicated |= drops_a_chunk
+        return replicated
 
     def _iter_rank_chunks(
         self,
@@ -207,17 +262,20 @@ class PCPManager:
             rank 1:      1                   6
             rank 2:          2           5
             rank 3:              3   4
+
+        Decodes, and prefills too short to fill all eight, are replicated instead.
         """
         num_chunks = 2 * self.pcp_world_size
+        replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
             chunk_indices: tuple[int, ...]
-            if bool(is_prefilling[global_batch_req_idx]):
+            if not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
-            else:  # decodes are replicated
+            else:  # decodes, and short prefills under DCP, are replicated
                 chunk_size = query_len
                 chunk_indices = (0,)
 
@@ -232,7 +290,6 @@ class PCPManager:
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> list[RankSegment]:
@@ -251,12 +308,30 @@ class PCPManager:
                 )
             )
             rank_offset += chunk_len
-        return self._reorder_segments(
-            rank_segments,
-            num_computed_tokens,
-            is_prefilling,
-            query_start_loc_np,
+        return self._reorder_segments(rank_segments, is_prefilling)
+
+    @staticmethod
+    def _compute_schedule_seq_lens(
+        num_computed_tokens: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> np.ndarray:
+        query_lens = np.diff(query_start_loc_np)
+        assert len(query_lens) == len(num_computed_tokens), (
+            f"query_start_loc_np implies {len(query_lens)} requests but "
+            f"num_computed_tokens has {len(num_computed_tokens)}"
         )
+        return (num_computed_tokens + query_lens).astype(np.int32)
+
+    def _nominal_chunk_query_lens(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        replicated: np.ndarray,
+    ) -> np.ndarray:
+        """Upper bound on one PCP chunk's query length."""
+        num_chunks = 2 * self.pcp_world_size
+        query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
+        chunked = (query_lens + num_chunks - 1) // num_chunks  # ceil
+        return np.where(replicated, query_lens, chunked).astype(np.int32)
 
     def _build_batch_layout(
         self,
@@ -266,19 +341,44 @@ class PCPManager:
         query_start_loc_np: np.ndarray,
         padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
+        num_reqs = len(num_computed_tokens)
+        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
+
+        replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         segments_by_rank = []
         per_rank_num_tokens = []
         for rank in range(self.pcp_world_size):
             segments = self._get_rank_segments(
                 rank,
                 num_scheduled_tokens,
-                num_computed_tokens,
                 is_prefilling,
                 query_start_loc_np,
             )
             num_rank_tokens = sum(segment.num_tokens for segment in segments)
             segments_by_rank.append(segments)
             per_rank_num_tokens.append(num_rank_tokens)
+
+        schedule_seq_lens_np = self._compute_schedule_seq_lens(
+            num_computed_tokens,
+            query_start_loc_np,
+        )
+
+        local_segments = segments_by_rank[self.pcp_rank]
+        # Publish for the attention metadata builders, which run after this and
+        # must size their DCP collectives PCP-invariantly.
+        set_current_pcp_schedule(
+            PCPSchedule(
+                seq_lens_np=schedule_seq_lens_np,
+                nominal_chunk_query_lens_np=self._nominal_chunk_query_lens(
+                    num_scheduled_tokens, replicated
+                ),
+                local_to_global_req_idx_np=np.fromiter(
+                    (segment.global_batch_req_idx for segment in local_segments),
+                    dtype=np.int32,
+                ),
+                all_rows_replicated=bool(replicated.all()),
+            )
+        )
 
         # PCP=2 example:
         #   global batch:       [A B C D E F G]
@@ -312,7 +412,7 @@ class PCPManager:
                     dtype=np.int64,
                 )
                 # Cache insertion pairs one slot entry with each rank's local decode.
-                if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
+                if replicated[segment.global_batch_req_idx] and rank != 0:
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
@@ -332,21 +432,24 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def get_num_tokens_for_dispatch(
+    def get_dispatch_batch_shape(
         self,
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-    ) -> int:
-        """Return the largest real rank-local batch before graph padding."""
-        return max(
-            sum(
+    ) -> tuple[int, int, int]:
+        """``(num_reqs, num_tokens, max_query_len)`` of the rank-local batch."""
+        num_reqs = num_tokens = max_query_len = 0
+        for rank in range(self.pcp_world_size):
+            chunk_lens = [
                 chunk_len
                 for _, _, chunk_len in self._iter_rank_chunks(
                     rank, num_scheduled_tokens, is_prefilling
                 )
-            )
-            for rank in range(self.pcp_world_size)
-        )
+            ]
+            num_reqs = max(num_reqs, len(chunk_lens))
+            num_tokens = max(num_tokens, sum(chunk_lens))
+            max_query_len = max(max_query_len, max(chunk_lens, default=0))
+        return num_reqs, num_tokens, max_query_len
 
     @property
     def input_buffers(self) -> InputBuffers:
@@ -360,6 +463,8 @@ class PCPManager:
     ) -> InputBatch:
         assert self._req_states is not None
         assert self._input_buffers is not None
+        # Drop the previous step's schedule up front.
+        set_current_pcp_schedule(None)
         req_states = self._req_states
         input_buffers = self._input_buffers
         if input_batch.num_draft_tokens > 0:
@@ -486,7 +591,7 @@ class PCPManager:
             local_query_start_loc,
             local_start_pos,
             input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
+            input_buffers.seq_lens,
         )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
@@ -605,6 +710,14 @@ class PCPManager:
         self._gathered_kv_slot_mappings.fill_(PAD_SLOT_ID)
         return self._gathered_kv_slot_mappings[:, : num_tokens * self.pcp_world_size]
 
+    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+        assert self._local_block_tables is not None
+        assert num_reqs <= self._local_block_tables[0].shape[0], (
+            f"dummy batch wants {num_reqs} rows but the PCP block tables hold "
+            f"{self._local_block_tables[0].shape[0]}"
+        )
+        return tuple(bt[:num_reqs].zero_() for bt in self._local_block_tables)
+
     def _convert_to_gathered_slot_mappings(
         self,
         global_batch_slot_mappings: torch.Tensor,
@@ -648,6 +761,30 @@ class PCPManager:
         return self.restore_hidden_states(hidden_states), self._global_batch
 
 
+def set_replicated_pcp_schedule(input_batch: InputBatch) -> None:
+    """Publish a PCP schedule for a batch that is identical on every PCP rank."""
+    num_reqs = len(input_batch.num_scheduled_tokens)
+    query_lens = np.asarray(input_batch.num_scheduled_tokens, dtype=np.int32)
+    set_current_pcp_schedule(
+        PCPSchedule(
+            seq_lens_np=query_lens,
+            nominal_chunk_query_lens_np=query_lens,
+            local_to_global_req_idx_np=np.arange(num_reqs, dtype=np.int32),
+            all_rows_replicated=True,
+        )
+    )
+
+
+def moe_should_all_reduce(cudagraph_mode: CUDAGraphMode) -> bool:
+    """Whether the MoE should all-reduce instead of gather/reduce-scatter."""
+    if cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        return False
+    schedule = get_current_pcp_schedule()
+    if schedule is None:
+        return False
+    return schedule.all_rows_replicated
+
+
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
@@ -669,6 +806,16 @@ def maybe_get_pcp_dummy_slot_mappings(
     if manager is None:
         return block_tables.get_dummy_slot_mappings(num_tokens)
     return manager.get_dummy_slot_mappings(num_tokens)
+
+
+def maybe_get_pcp_dummy_block_tables(
+    manager: PCPManager | None,
+    block_tables: BlockTables,
+    num_reqs: int,
+) -> tuple[torch.Tensor, ...]:
+    if manager is None:
+        return block_tables.get_dummy_block_tables(num_reqs)
+    return manager.get_dummy_block_tables(num_reqs)
 
 
 def maybe_restore_pcp_for_sampling(

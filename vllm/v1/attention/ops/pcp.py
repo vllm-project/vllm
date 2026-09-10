@@ -8,6 +8,18 @@ from vllm.distributed.parallel_state import (
 )
 
 
+def _pad_rows(tensor: torch.Tensor, num_rows: int) -> torch.Tensor:
+    """Pad along dim 0 so every PCP rank hands the collective the same shape."""
+    if tensor.shape[0] == num_rows:
+        return tensor.contiguous()
+    assert tensor.shape[0] < num_rows, (
+        f"cannot pad {tensor.shape[0]} rows down to {num_rows}"
+    )
+    padded = tensor.new_zeros((num_rows, *tensor.shape[1:]))
+    padded[: tensor.shape[0]] = tensor
+    return padded
+
+
 def _gather_prefill_cache_inputs(
     tensors: tuple[torch.Tensor, ...],
     slot_mapping: torch.Tensor,
@@ -22,12 +34,24 @@ def _gather_prefill_cache_inputs(
         return tensors, slot_mapping[:num_decode_tokens]
 
     pcp_group = get_pcp_group()
+    pcp_size = pcp_group.world_size
+    assert slot_mapping.shape[0] % pcp_size == 0, (
+        f"gathered slot mapping ({slot_mapping.shape[0]}) is not {pcp_size} "
+        "equal per-rank blocks"
+    )
+    stride = slot_mapping.shape[0] // pcp_size
+    assert local_num_tokens <= stride, (
+        f"{local_num_tokens} local tokens exceed the PCP capacity {stride}"
+    )
+    num_prefill_rows = stride - num_decode_tokens
+    # Pad so that all PCP ranks have exact same number of tokens.
     gathered_prefills = tuple(
-        pcp_group.all_gather(tensor[num_decode_tokens:].contiguous(), dim=0)
+        pcp_group.all_gather(
+            _pad_rows(tensor[num_decode_tokens:], num_prefill_rows), dim=0
+        )
         for tensor in tensors
     )
-    pcp_size = pcp_group.world_size
-    gathered_slot_mapping = slot_mapping[: pcp_size * local_num_tokens]
+    gathered_slot_mapping = slot_mapping[: pcp_size * stride]
     if num_decode_tokens == 0:
         return gathered_prefills, gathered_slot_mapping
 
@@ -35,7 +59,7 @@ def _gather_prefill_cache_inputs(
         torch.cat((tensor[:num_decode_tokens], gathered_prefill), dim=0)
         for tensor, gathered_prefill in zip(tensors, gathered_prefills)
     )
-    rank_slot_mappings = gathered_slot_mapping.view(pcp_size, local_num_tokens)
+    rank_slot_mappings = gathered_slot_mapping.view(pcp_size, stride)
     cache_slot_mapping = torch.cat(
         (
             rank_slot_mappings[0, :num_decode_tokens],

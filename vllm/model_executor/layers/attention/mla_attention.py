@@ -1058,6 +1058,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_start_loc = attn_metadata.query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ]
+                if self.use_pcp and lse.shape[0] != attn_out.shape[0]:
+                    raise NotImplementedError(
+                        "PCP+DCP is not supported through the base "
+                        "MLAAttention.forward."
+                    )
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,
