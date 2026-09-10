@@ -141,6 +141,11 @@ class Mamba2AttentionBackend(AttentionBackend):
             )
         if vllm_config.kv_transfer_config is not None:
             raise ValueError(f"{prefix} does not support KV connectors")
+        if "-mixer2_gated_rms_norm" in vllm_config.compilation_config.custom_ops:
+            raise ValueError(
+                f"{prefix} needs the mixer2_gated_rms_norm custom op; remove "
+                "-mixer2_gated_rms_norm from the compilation config"
+            )
 
 
 @dataclass

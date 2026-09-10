@@ -133,6 +133,11 @@ class Mixer2RMSNormGated(CustomOp):
         input_dtype = x.dtype
         if gate is not None:
             x = x * nn.functional.silu(gate.to(torch.float32))
+        else:
+            # The gate product used to upcast; keep the variance in fp32. This
+            # fallback still rounds before the weight multiply and is only used
+            # where the fp32 grouped kernel cannot run (see forward_cuda).
+            x = x.to(torch.float32)
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
@@ -185,6 +190,20 @@ class Mixer2RMSNormGated(CustomOp):
                 return x
             # Keep gate in float32 for numerical stability during silu
             return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
+
+        if envs.VLLM_BATCH_INVARIANT and self.n_groups % self.tp_size == 0:
+            # Each rank holds whole groups: run the fp32 grouped Triton norm,
+            # the arithmetic of the training-side RMSNormGated, for any group
+            # count (the torch path below rounds differently).
+            return rms_norm_gated(
+                x,
+                self.weight.data,
+                bias=None,
+                z=gate,
+                eps=self.variance_epsilon,
+                group_size=self.group_size,
+                norm_before_gate=False,
+            )
 
         if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
             return self.forward_native(x, gate)
@@ -547,6 +566,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Batch-invariant mode replays every SSD step from the last chunk
         # boundary and appends the partial-chunk input buffers (x, dt, B).
         self.exact_replay = envs.VLLM_BATCH_INVARIANT
+        # Batch-invariant mode applies the gate inside the scan kernel, the
+        # order of the Megatron memory-efficient training path; the norm
+        # then runs ungated.
+        self.gate_in_scan = self.exact_replay
         self.replay_chunk_size: int | None = None
         if self.exact_replay:
             Mamba2AttentionBackend.check_batch_invariant_config(vllm_config)
@@ -621,7 +644,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # In batch-invariant mode the scan kernel already multiplied its output
         # by silu(gate) in fp32, the order of the fused training path; the norm
         # then runs ungated.
-        hidden_states = self.norm(ssm_output, None if self.exact_replay else gate)
+        hidden_states = self.norm(ssm_output, None if self.gate_in_scan else gate)
 
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states)
@@ -674,6 +697,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
+        # Batch-invariant mode applies the gate inside the scan (HAS_Z), a
+        # separate specialization that must be compiled here as well.
+        z = (
+            torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
+            if self.gate_in_scan
+            else None
+        )
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
         # HAS_INITSTATES as a constexpr, producing separate compiled
@@ -706,7 +736,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     seq_idx=seq_idx,
                     out=out,
                     D=self.D,
-                    z=None,
+                    z=z,
                     dt_bias=self.dt_bias,
                     initial_states=initial_states,
                     dt_softplus=True,
@@ -738,7 +768,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         gate = (
             projected_states[..., : self.tped_intermediate_size]
-            if self.exact_replay
+            if self.gate_in_scan
             else None
         )
 

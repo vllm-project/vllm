@@ -1737,6 +1737,19 @@ class VllmConfig:
             logger.warning_once(
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
             )
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.model_config is not None
+            and (self.model_config.is_hybrid or self.model_config.is_attention_free)
+            and not (
+                {"+mixer2_gated_rms_norm", "-mixer2_gated_rms_norm"}
+                & set(self.compilation_config.custom_ops)
+            )
+        ):
+            # Models with Mamba layers: the Mamba2 mixer norm must run its fp32
+            # grouped kernel rather than the compiled torch fallback, whose
+            # rounding differs. Pure transformers keep their configuration.
+            self.compilation_config.custom_ops.append("+mixer2_gated_rms_norm")
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
