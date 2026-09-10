@@ -119,23 +119,32 @@ def parse_id_list(raw_str: str) -> list[int]:
     return sorted(list(set(result)))
 
 
+def _with_cgroup_clamp(total_memory: int, available_memory: int) -> MemoryNodeInfo:
+    """Honor cgroup memory limit (containers / k8s pods). Host-wide numbers
+    (NUMA meminfo or psutil) would otherwise apply gpu_memory_utilization to
+    host RAM instead of the pod's limit. cgroup does not expose per-NUMA-node
+    limits, so we just clamp the totals against the pod-wide limit here."""
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is not None and cgroup_limit < total_memory:
+        total_memory = cgroup_limit
+        cgroup_available = cgroup_limit - (cgroup_usage or 0)
+        available_memory = max(0, min(available_memory, cgroup_available))
+    return MemoryNodeInfo(total_memory=total_memory, available_memory=available_memory)
+
+
 def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
     if sys.platform == "darwin":
         # MacOS has no memory node
-        return MemoryNodeInfo(
-            total_memory=psutil.virtual_memory().total,
-            available_memory=psutil.virtual_memory().available,
-        )
+        vm = psutil.virtual_memory()
+        return _with_cgroup_clamp(vm.total, vm.available)
 
     meminfo_path = f"/sys/devices/system/node/node{node_id}/meminfo"
     if not os.path.exists(meminfo_path):
-        # Non-NUMA systems (e.g. many RISC-V boards) don't expose per-node
-        # meminfo. Fall back to system-wide numbers from psutil.
+        # Non-NUMA systems (e.g. many RISC-V boards, and some containers)
+        # don't expose per-node meminfo. Fall back to system-wide numbers
+        # from psutil.
         vm = psutil.virtual_memory()
-        return MemoryNodeInfo(
-            total_memory=vm.total,
-            available_memory=vm.available,
-        )
+        return _with_cgroup_clamp(vm.total, vm.available)
 
     meminfo = {}
     with open(meminfo_path) as f:
@@ -156,21 +165,7 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
         free_memory + active_file_memory + inactive_file_memory + reclaimable_memory
     )
 
-    # Honor cgroup memory limit (containers / k8s pods). NUMA meminfo
-    # reflects host-wide numbers; without this, gpu_memory_utilization
-    # would be applied to host RAM instead of the pod's limit. cgroup
-    # does not expose per-NUMA-node limits, so we just clamp the totals
-    # against the pod-wide limit here.
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
-    if cgroup_limit is not None and cgroup_limit < total_memory:
-        total_memory = cgroup_limit
-        cgroup_available = cgroup_limit - (cgroup_usage or 0)
-        available_memory = max(0, min(available_memory, cgroup_available))
-
-    return MemoryNodeInfo(
-        total_memory=total_memory,
-        available_memory=available_memory,
-    )
+    return _with_cgroup_clamp(total_memory, available_memory)
 
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
