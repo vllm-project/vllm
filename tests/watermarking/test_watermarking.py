@@ -53,6 +53,12 @@ def test_gumbel_config_warns_when_context_deduplication_is_disabled(monkeypatch)
     ]
 
 
+def test_context_deduplication_history_can_be_unbounded():
+    config = WatermarkConfig(key=42, deduplicate_contexts_max_history=None)
+
+    assert config.deduplicate_contexts_max_history is None
+
+
 def test_large_context_width_warns_but_is_allowed():
     config = WatermarkConfig(key=42, context_width=17)
 

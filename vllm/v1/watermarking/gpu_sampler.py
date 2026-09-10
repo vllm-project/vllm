@@ -29,7 +29,7 @@ class GPUWatermarkSampler(Sampler):
         watermarker: Watermarker,
         *args,
         deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn",
-        deduplicate_contexts_max_history: int = 8192,
+        deduplicate_contexts_max_history: int | None = 8192,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
