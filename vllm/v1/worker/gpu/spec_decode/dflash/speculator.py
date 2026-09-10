@@ -377,13 +377,18 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
+            num_tokens_across_dp = (
+                torch.full_like(dp_sync.num_tokens_across_dp, num_query_tokens)
+                if dp_sync is not None
+                else None
+            )
             self._prepare_eplb_forward(num_query_tokens)
             self._generate_draft(
                 num_reqs,
                 num_query_tokens,
                 attn_metadata=None,
                 slot_mappings=None,
-                num_tokens_across_dp=None,
+                num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             return self.draft_tokens[:num_reqs]

@@ -118,6 +118,58 @@ def test_selector_asks_for_fp32_proposal_logits():
     assert fill == float("-inf")
 
 
+def test_dflash_dummy_run_uses_draft_dp_token_count():
+    speculator = DFlashSpeculator.__new__(DFlashSpeculator)
+    speculator.num_query_per_req = 5
+    speculator.max_model_len = 1024
+    speculator.hidden_states = torch.zeros(2, 4)
+    speculator.context_positions = torch.zeros(2, dtype=torch.int64)
+    speculator.draft_tokens = torch.zeros(2, 4, dtype=torch.int64)
+    speculator.model = SimpleNamespace(
+        precompute_and_store_context_kv=lambda *_args: None
+    )
+    speculator._prepare_eplb_forward = lambda *_args: None
+
+    captured = {}
+
+    def capture_draft(_num_reqs, _num_tokens_padded, **kwargs):
+        captured.update(kwargs)
+
+    speculator._generate_draft = capture_draft
+
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=2,
+        seq_lens_cpu_upper_bound=torch.tensor([1, 1]),
+    )
+    dp_sync = SimpleNamespace(
+        num_tokens_across_dp=torch.tensor([4096, 4096], dtype=torch.int32)
+    )
+
+    result = speculator.propose(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings=None,
+        last_hidden_states=torch.zeros(2, 4),
+        aux_hidden_states=None,
+        num_sampled=None,
+        num_rejected=None,
+        last_sampled=None,
+        next_prefill_tokens=None,
+        temperature=None,
+        seeds=None,
+        dp_sync=dp_sync,
+        dummy_run=True,
+        skip_attn_for_dummy_run=True,
+    )
+
+    torch.testing.assert_close(
+        captured["num_tokens_across_dp"],
+        torch.full_like(dp_sync.num_tokens_across_dp, 10),
+    )
+    torch.testing.assert_close(result, speculator.draft_tokens)
+
+
 @pytest.mark.skip_global_cleanup
 def test_dflash2_model_decoder_layer_cls(monkeypatch):
     from types import SimpleNamespace
