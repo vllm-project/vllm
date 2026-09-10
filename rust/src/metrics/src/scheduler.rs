@@ -269,6 +269,8 @@ pub struct LoraLoadedLabels {
     pub level: LoraLoadedLevel,
     /// Whether the adapter is pinned in the caches.
     pub pinned: bool,
+    /// The adapter's LoRA rank (0 when the worker did not report one).
+    pub rank: u32,
 }
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.

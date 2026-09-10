@@ -34,6 +34,9 @@ pub struct LoraLoadEvent {
     /// Adapters pinned in the caches (sorted).
     #[serde(default)]
     pub pinned_adapters: Vec<String>,
+    /// LoRA rank of each resident adapter, keyed by name.
+    #[serde(default)]
+    pub ranks: BTreeMap<String, u32>,
     /// Adapter transitions completed since the previous event, in order.
     #[serde(default)]
     pub loads: Vec<LoraLoadTiming>,
@@ -95,6 +98,7 @@ mod tests {
                     pinned_adapters: [
                         "alpha",
                     ],
+                    ranks: {},
                     loads: [],
                 },
             )
@@ -116,6 +120,7 @@ mod tests {
                 gpu_adapters: vec!["alpha".to_string()],
                 cpu_adapters: vec!["alpha".to_string()],
                 pinned_adapters: vec![],
+                ranks: BTreeMap::new(),
                 loads: vec![
                     LoraLoadTiming {
                         adapter_name: "alpha".to_string(),
@@ -128,6 +133,24 @@ mod tests {
                         seconds: 0.5,
                     },
                 ],
+            })
+        );
+    }
+
+    /// Python: `encode(LoRALoadEvent(gpu_adapters=["alpha"], cpu_adapters=["alpha"], ranks={"alpha": 64}))`
+    const PYTHON_LORA_LOAD_EVENT_WITH_RANKS: &str = "84a474797065af6c6f72615f6c6f61645f6576656e74ac6770755f616461707465727391a5616c706861ac6370755f616461707465727391a5616c706861a572616e6b7381a5616c70686140";
+
+    #[test]
+    fn engine_event_decodes_python_lora_load_event_with_ranks() {
+        let event: EngineNotification =
+            decode_msgpack(&hex_bytes(PYTHON_LORA_LOAD_EVENT_WITH_RANKS)).unwrap();
+        assert_eq!(
+            event,
+            EngineNotification::LoraLoadEvent(LoraLoadEvent {
+                gpu_adapters: vec!["alpha".to_string()],
+                cpu_adapters: vec!["alpha".to_string()],
+                ranks: BTreeMap::from([("alpha".to_string(), 64)]),
+                ..Default::default()
             })
         );
     }
