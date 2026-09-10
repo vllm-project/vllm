@@ -53,7 +53,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \\
     --mount=type=bind,source=.git,target=.git \\
     SETUPTOOLS_SCM_PRETEND_METADATA=\"{dirty=false}\" bash build_rust.sh
 """
-# build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
+new = """# build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
 # child stage below finds it on disk instead of re-downloading it.
 ENV PATH=\"/root/.cargo/bin:${PATH}\"
 
