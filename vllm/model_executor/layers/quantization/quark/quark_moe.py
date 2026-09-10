@@ -1212,6 +1212,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
 
+        # TODO: this should eventually be removed, this is the
+        # oracle / backends job.
+        if self.activation_quant_key == kFp8DynamicTensorSym:
+            raise NotImplementedError(
+                "QuarkOCP_MX_MoEMethod with dynamic FP8 input scales is "
+                "currently not implemented. Please open an issue."
+            )
+
         self.mxfp4_backend: Mxfp4MoeBackend = Mxfp4MoeBackend.NONE
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None

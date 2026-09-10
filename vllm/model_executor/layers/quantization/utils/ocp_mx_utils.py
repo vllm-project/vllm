@@ -3,6 +3,7 @@
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
@@ -33,6 +34,14 @@ QUANT_DTYPE_TO_QUANT_KEY: dict[str, QuantKey] = {
 QUANT_KEY_TO_QUANT_DTYPE = {
     value: key for key, value in QUANT_DTYPE_TO_QUANT_KEY.items()
 }
+QUANT_KEY_TO_QUANT_DTYPE.update(
+    {
+        kFp8DynamicTensorSym: "fp8",
+        kMxfp4Static: "mxfp4",
+        kMxfp6E3M2Static: "mxfp6_e3m2",
+        kMxfp6E2M3Static: "mxfp6_e2m3",
+    }
+)
 
 OCP_MX_DTYPES = {
     "mxfp4",
