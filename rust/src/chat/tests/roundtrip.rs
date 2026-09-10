@@ -185,8 +185,8 @@ impl RoundtripCase {
         Self {
             model_id: "deepseek-ai/DeepSeek-V4.1-Flash",
             assistant_stop_suffix: "<｜end▁of▁sentence｜>",
-            tool_call_parser: ParserSelection::Explicit("deepseek_v41".to_string()),
-            reasoning_parser: ParserSelection::Explicit("deepseek_v41".to_string()),
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
