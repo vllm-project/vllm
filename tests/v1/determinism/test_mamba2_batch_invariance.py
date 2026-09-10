@@ -12,31 +12,57 @@ import pytest
 import torch
 from utils import skip_if_not_cuda
 
+from tests.utils import wait_for_memory_to_settle
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 
 MODEL = "AntonV/mamba2-130m-hf"
 PROMPT_LENS = (37, 300, 513, 700)
 NUM_NEW_TOKENS = 96
+GPU_MEMORY_UTILIZATION = 0.4
+
+
+@pytest.fixture
+def mamba2_llm():
+    """Build the engine and release its GPU memory before the next test.
+
+    Waiting for garbage collection is not enough: the next engine's memory
+    profiling fails when this one's memory is still being released, so the
+    engine core is shut down explicitly, as ``VllmRunner.__exit__`` does.
+    """
+    llms: list[LLM] = []
+
+    def build(max_num_seqs: int) -> LLM:
+        llm = LLM(
+            model=MODEL,
+            # this checkpoint's config has no `architectures` entry
+            hf_overrides={"architectures": ["Mamba2ForCausalLM"]},
+            runner="generate",
+            dtype="bfloat16",
+            max_model_len=2048,
+            max_num_seqs=max_num_seqs,
+            enable_prefix_caching=False,
+            logprobs_mode="raw_logprobs",
+            max_logprobs=1,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            seed=0,
+        )
+        llms.append(llm)
+        return llm
+
+    yield build
+    for llm in llms:
+        llm.llm_engine.engine_core.shutdown()
+    llms.clear()
+    cleanup_dist_env_and_memory()
+    wait_for_memory_to_settle(threshold_ratio=1.0 - GPU_MEMORY_UTILIZATION)
 
 
 @skip_if_not_cuda
 @pytest.mark.timeout(900)
-def test_mamba2_decode_logprobs_match_prefill_logprobs():
-    llm = LLM(
-        model=MODEL,
-        # this checkpoint's config has no `architectures` entry
-        hf_overrides={"architectures": ["Mamba2ForCausalLM"]},
-        runner="generate",
-        dtype="bfloat16",
-        max_model_len=2048,
-        max_num_seqs=len(PROMPT_LENS),
-        enable_prefix_caching=False,
-        logprobs_mode="raw_logprobs",
-        max_logprobs=1,
-        gpu_memory_utilization=0.4,
-        seed=0,
-    )
+def test_mamba2_decode_logprobs_match_prefill_logprobs(mamba2_llm):
+    llm = mamba2_llm(max_num_seqs=len(PROMPT_LENS))
     gen = torch.Generator().manual_seed(0)
     prompts = [
         torch.randint(100, 50000, (n,), generator=gen).tolist() for n in PROMPT_LENS
@@ -67,7 +93,9 @@ def test_mamba2_decode_logprobs_match_prefill_logprobs():
 
 @skip_if_not_cuda
 @pytest.mark.timeout(900)
-def test_one_token_prompt_joining_a_decode_batch_matches_prefill_logprobs():
+def test_one_token_prompt_joining_a_decode_batch_matches_prefill_logprobs(
+    mamba2_llm,
+):
     """A request whose whole prompt is one token arrives while others decode.
 
     The step is then a uniform one-token batch and runs in a full CUDA graph,
@@ -75,19 +103,7 @@ def test_one_token_prompt_joining_a_decode_batch_matches_prefill_logprobs():
     token it and the running requests generate must still match a single-shot
     prefill bit for bit.
     """
-    llm = LLM(
-        model=MODEL,
-        hf_overrides={"architectures": ["Mamba2ForCausalLM"]},
-        runner="generate",
-        dtype="bfloat16",
-        max_model_len=2048,
-        max_num_seqs=4,
-        enable_prefix_caching=False,
-        logprobs_mode="raw_logprobs",
-        max_logprobs=1,
-        gpu_memory_utilization=0.4,
-        seed=0,
-    )
+    llm = mamba2_llm(max_num_seqs=4)
     engine = llm.llm_engine
     gen = torch.Generator().manual_seed(1)
     prompts = {
