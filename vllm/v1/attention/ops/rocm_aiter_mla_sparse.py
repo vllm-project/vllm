@@ -29,6 +29,13 @@ else:
 
 logger = init_logger(__name__)
 
+_FP8_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2,
+    torch.float8_e5m2fnuz,
+)
+
 
 @functools.cache
 def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
@@ -1416,7 +1423,9 @@ def _sparse_attn_prefill_ragged_kernel(
     head_dim,
     num_kv,
     scale,
+    kv_scale,
     HAS_ATTN_SINK: tl.constexpr,
+    KV_IS_FP8: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -1464,6 +1473,12 @@ def _sparse_attn_prefill_ragged_kernel(
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
+        if KV_IS_FP8:
+            # Hop through bf16 rather than converting fp8 straight to f32: the
+            # fnuz encodings used on gfx942 are unreliable in that direct form,
+            # which is why the fp8_ds_mla loaders below take the same detour.
+            # bf16 holds every e4m3/e5m2 value exactly, so this is lossless.
+            kv = (kv.to(tl.bfloat16).to(tl.float32) * kv_scale).to(q.dtype)
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -2599,6 +2614,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
+    kv_scale: float = 1.0,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -2625,6 +2641,12 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         "_rocm_sparse_attn_prefill_ragged_triton",
     )
 
+    kv_is_fp8 = kv.dtype in _FP8_DTYPES
+    # The kernel dequantizes fp8 KV into the query dtype, so a quantized query
+    # would collapse the dequantized values back to fp8.
+    assert not (kv_is_fp8 and q.dtype in _FP8_DTYPES), (
+        f"fp8 KV requires an unquantized query, got q={q.dtype}"
+    )
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
@@ -2649,7 +2671,9 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         head_dim,
         kv.shape[0],
         float(scale),
+        float(kv_scale),
         HAS_ATTN_SINK=has_attn_sink,
+        KV_IS_FP8=kv_is_fp8,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -2667,6 +2691,7 @@ def _rocm_sparse_attn_prefill_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
+    kv_scale: float = 1.0,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -2684,6 +2709,7 @@ def _rocm_sparse_attn_prefill_triton(
         attn_sink=attn_sink,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        kv_scale=kv_scale,
     )
 
 
@@ -3240,6 +3266,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    kv_scale: float = 1.0,
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -3287,6 +3314,7 @@ def rocm_sparse_attn_prefill(
             attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
+            kv_scale=kv_scale,
         )
     else:
         assert indices is not None
@@ -3300,6 +3328,7 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
+            kv_scale=kv_scale,
         )
     output.copy_(output_chunk[..., : output.shape[-1]].to(output.dtype))
 

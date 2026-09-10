@@ -53,11 +53,25 @@ def _use_rocm_sparse_triton(
     num_decode_tokens: int,
     max_query_len: int,
 ) -> bool:
-    """Select the rope-free BF16 path not supported by AITER sparse MLA."""
+    """Select the rope-free path not supported by AITER sparse MLA.
+
+    AITER's precompiled ``mla_a8w8`` / ``mla_a16w16`` kernels bake in the
+    DeepSeek MLA row width of 576 bytes (512 latent + 64 RoPE). NoPE models
+    such as GLM-5.3-Flash store a 512-byte row (``head_size == kv_lora_rank``).
+    Routing those to the asm kernel overruns Q by 1024 B/token and reads 64 B
+    past each KV slot.
+
+    The Triton sparse kernel is parameterized on
+    ``(head_dim, nope_head_dim, rope_head_dim)`` and is the only in-tree path
+    that can serve this geometry. FP8 KV is included: Q stays in the model
+    dtype and the Triton kernel dequantizes FP8 KV in registers. Previously
+    FP8 was excluded, which forced NoPE + ``--kv-cache-dtype fp8_e4m3`` onto
+    the asm kernel and GPU-faulted on gfx950.
+    """
+    del kv_cache_dtype  # dtype no longer gates this path; see docstring.
     plain_decode = num_decode_tokens == num_decodes
     return (
-        not kv_cache_dtype.startswith("fp8")
-        and head_size == kv_lora_rank
+        head_size == kv_lora_rank
         and plain_decode
         and (num_prefills > 0 or (num_decodes > 0 and max_query_len == 1))
     )
@@ -867,9 +881,25 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 output=output,
                 ragged_indices=attn_metadata.paged_kv_indices,
                 ragged_indptr=attn_metadata.paged_kv_indptr,
+                kv_scale=float(getattr(layer, "_k_scale_float", 1.0)),
             )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
+
+        # Everything below dispatches to AITER's precompiled MLA kernels, which
+        # bake in the 576-byte DeepSeek row. A NoPE row is 512 bytes, so they
+        # would read past both Q and the KV cache and take a GPU memory fault
+        # instead of raising. Refuse the shape rather than corrupting memory.
+        if q.shape[-1] == self.kv_lora_rank:
+            raise NotImplementedError(
+                "ROCm sparse MLA cannot serve rope-free (NoPE) attention with "
+                f"query length {attn_metadata.max_query_len} over "
+                f"{attn_metadata.num_decode_tokens} decode tokens: AITER's "
+                "precompiled kernels assume a 576-byte KV row and only the "
+                "Triton path handles the 512-byte NoPE row. This combination "
+                "usually means speculative decoding or MTP is enabled; "
+                "disable it for this model on ROCm."
+            )
 
         # AITER's nonpersistent return-LSE dispatch has discrete head kernels.
         supported_head_buckets: tuple[int, ...] | None = None
@@ -1018,9 +1048,20 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         # MQA 576/512 approach for both prefill and decode
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        use_triton_sparse = _use_rocm_sparse_triton(
+            kv_cache_dtype=self.kv_cache_dtype,
+            head_size=self.head_size,
+            kv_lora_rank=self.kv_lora_rank,
+            num_prefills=attn_metadata.num_prefills,
+            num_decodes=attn_metadata.num_decodes,
+            num_decode_tokens=attn_metadata.num_decode_tokens,
+            max_query_len=attn_metadata.max_query_len,
+        )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            if fp8_attention:
+            # Triton NoPE path consumes bf16/fp16 Q. Quantizing Q to fp8 is
+            # only required for the AITER asm kernel.
+            if fp8_attention and not use_triton_sparse:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
@@ -1054,7 +1095,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         # write the latent and rope to kv cache
         if fp8_attention:
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            if q.dtype != current_platform.fp8_dtype():
+            if not use_triton_sparse and q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
