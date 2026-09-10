@@ -839,10 +839,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     stop_sequence=stop_sequence,
                                 )
                             else:
+                                # stop_sequence is a required, nullable member
+                                # of Anthropic's MessageDelta. Set it explicitly
+                                # so exclude_unset=True below keeps the key.
                                 stop_delta = AnthropicDelta(
                                     stop_reason=self.stop_reason_map.get(
                                         finish_reason or "stop"
-                                    )
+                                    ),
+                                    stop_sequence=None,
                                 )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
