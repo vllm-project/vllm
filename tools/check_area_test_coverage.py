@@ -31,9 +31,9 @@ in the command re-runs the same selection and is not a partition. Only
 commands with at least one target inside ``--tree`` are checked, so shared
 hardware YAMLs (cpu.yaml) can be passed without flagging other areas.
 
-Entry point (wired into CI by ticket 08, when the language YAML is rewritten
-to the one-job-per-directory shape; until then the real language YAML fails
-this guard by design):
+Entry point (wired into the docker-area CPU CI job; the language area YAML
+satisfies the guard, and an integration test in
+``tests/tools/test_area_test_coverage.py`` keeps it that way):
 
     python -m tools.check_area_test_coverage --tree tests/models/language \
         .buildkite/test_areas/models_language.yaml \
