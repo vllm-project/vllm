@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -170,24 +171,43 @@ def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
     torch.testing.assert_close(state._cache, history)
 
 
-def test_engram_staging_preserves_interleaved_microbatches(monkeypatch):
+@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("consume_order", [(0, 1), (1, 0)])
+def test_engram_staging_preserves_interleaved_microbatches(
+    monkeypatch, prefetch, consume_order
+):
     """A second microbatch must not overwrite rows awaiting a later layer."""
+    if prefetch and not current_platform.is_cuda():
+        pytest.skip("CUDA required for async prefetch")
+    device = "cuda" if prefetch else "cpu"
     module = Engram.__new__(Engram)
     torch.nn.Module.__init__(module)
     module.embed_tokens = torch.nn.Identity()
     module.embed_tokens.tp_size = module.embed_tokens.dp_size = 1
-    module.embed_tokens.lookup = lambda ids, out: out.copy_(ids.unsqueeze(-1))
+
+    def lookup(ids, out, background=False):
+        if background:
+            torch.cuda._sleep(2_000_000)
+        out.copy_(ids.unsqueeze(-1))
+
+    module.embed_tokens.lookup = lookup
     module.use_sequence_parallel = False
-    module.staged_rows = torch.empty(3, 2, 1)
+    module._prefetch_streams = (
+        tuple(torch.cuda.Stream() for _ in range(2)) if prefetch else ()
+    )
+    module.staged_rows = torch.empty(3, 2, 1, device=device)
     module._extra_staged_rows = [torch.empty_like(module.staged_rows)]
-    ids = [torch.full((3, 2), 11), torch.full((2, 2), 22)]
+    ids = [
+        torch.full((3, 2), 11, device=device),
+        torch.full((2, 2), 22, device=device),
+    ]
 
     for ubatch_id in range(2):
         monkeypatch.setattr(
             engram_ops, "dbo_current_ubatch_id", lambda ubatch_id=ubatch_id: ubatch_id
         )
         module.prepare_embeddings(ids[ubatch_id])
-    for ubatch_id in range(2):
+    for ubatch_id in consume_order:
         monkeypatch.setattr(
             engram_ops, "dbo_current_ubatch_id", lambda ubatch_id=ubatch_id: ubatch_id
         )
@@ -582,6 +602,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer.n_hash_cols = layer.part_n_hash_cols = 24
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
+    layer.shared_memory = False
     layer.part_num_embeddings = rows
     # A window strictly inside the table, so unowned rows are exercised too.
     layer.vocab_start_idx, layer.vocab_end_idx = rows // 4, rows // 4 + rows // 2
@@ -719,19 +740,130 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize("ubatch_size,enable_dbo", [(0, False), (2, False), (0, True)])
+def test_engram_constructor_prefetches_without_ubatching(
+    monkeypatch, ubatch_size, enable_dbo
+):
+    """Default num_ubatches=0 must still launch lookup on a side stream."""
+    from vllm.config import ParallelConfig
+
+    parallel = ParallelConfig(ubatch_size=ubatch_size, enable_dbo=enable_dbo)
+    config = SimpleNamespace(hidden_size=16, hc_mult=1, rms_norm_eps=1e-6)
+    layout = SimpleNamespace(
+        num_embeddings=(4096,),
+        head_dim=256,
+        max_ngram_size=2,
+        n_heads=24,
+        primes=(((3,) * 24,),),
+    )
+    vllm_config = SimpleNamespace(
+        engram_config=None,
+        parallel_config=parallel,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    layer = _make_embedding(True)
+    streams = []
+    lookup = layer.lookup
+
+    def track_lookup(ids, out, background=False):
+        streams.append(torch.cuda.current_stream())
+        lookup(ids, out, background=background)
+
+    layer.lookup = track_lookup
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(engram_ops, "ParallelEngramEmbedding", lambda *a, **k: layer)
+    monkeypatch.setattr(
+        engram_ops, "ReplicatedLinear", lambda *a, **k: torch.nn.Identity()
+    )
+    with torch.device("cuda"):
+        module = Engram(config, None, layout, 0, False, "engram")
+    main = torch.cuda.current_stream()
+    ids = torch.randint(
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+        (8, 24),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    for ubatch in range(max(1, parallel.num_ubatches)):
+        monkeypatch.setattr(engram_ops, "dbo_current_ubatch_id", lambda u=ubatch: u)
+        module.prepare_embeddings(ids)
+        expected = _reference_lookup(
+            layer.weight.cuda(),
+            layer.weight_scale_inv.cuda(),
+            ids,
+            layer.vocab_start_idx,
+            layer.vocab_end_idx,
+        )
+        torch.testing.assert_close(module.embed(ids), expected, atol=0, rtol=0)
+    assert all(stream != main for stream in streams)
+    assert len(set(streams)) == max(1, parallel.num_ubatches)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "cpu_offload,delay",
+    [(False, None), (True, None), (True, "producer"), (True, "lookup")],
+)
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture):
-    """Consume early lookup results after a break, with fresh IDs each replay."""
-    _run_engram_prepared_rows(cpu_offload, capture)
+def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
+    """Temporary lookup IDs survive allocator reuse and graph replay."""
+    _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "missing_dependency", ["record_stream", "producer_wait", "consumer_wait"]
+)
+def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_dependency):
+    """Negative controls must expose incorrect rows when a dependency is removed."""
+    if (
+        missing_dependency == "record_stream"
+        and torch.cuda.memory.get_allocator_backend() != "native"
+    ):
+        pytest.skip(
+            "The allocator reuse negative control requires the native allocator"
+        )
+
+    def start(self, hash_ids, rows, stream):
+        if missing_dependency != "producer_wait":
+            stream.wait_stream(torch.cuda.current_stream())
+        if missing_dependency != "record_stream":
+            hash_ids.record_stream(stream)
+        with torch.cuda.stream(stream):
+            self.embed_tokens.lookup(hash_ids, rows, background=True)
+
+    def finish(self, stream):
+        pass
+
+    monkeypatch.setattr(Engram, "_start_prefetch", start)
+    if missing_dependency == "consumer_wait":
+        monkeypatch.setattr(Engram, "_finish_prefetch", finish)
+    delay = "producer" if missing_dependency == "producer_wait" else "lookup"
+    try:
+        with pytest.raises(AssertionError, match="Tensor-likes are not equal"):
+            _run_engram_prepared_rows(True, "eager", delay=delay)
+    finally:
+        torch.accelerator.synchronize()
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False
+    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
 ):
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
 
     layer = _make_embedding(cpu_offload)
+    if delay == "lookup":
+        lookup = layer.lookup
+
+        def delayed_lookup(indices, out, background=False):
+            torch.cuda._sleep(2_000_000)
+            lookup(indices, out, background=background)
+
+        layer.lookup = delayed_lookup
     cols, num_tokens = (23, 65) if use_sequence_parallel else (24, 64)
     layer.n_hash_cols = cols
     layer.tp_size = tp_size
@@ -740,6 +872,17 @@ def _run_engram_prepared_rows(
     engram = Engram.__new__(Engram)
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
+    engram._prefetch_streams = (torch.cuda.Stream(),) if cpu_offload else ()
+    # Exercise the production eager boundaries even when the test process
+    # imported Engram before breakable graphs were enabled.
+    if capture == "breakable":
+        import vllm.envs as envs
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+            for name in ("_start_prefetch", "_finish_prefetch"):
+                fn = eager_break_during_capture(inspect.unwrap(getattr(Engram, name)))
+                setattr(engram, name, fn.__get__(engram, Engram))
     engram.use_sequence_parallel = use_sequence_parallel
     engram.staged_rows = torch.empty(
         num_tokens,
@@ -768,7 +911,12 @@ def _run_engram_prepared_rows(
         embed = torch.compile(embed, backend="eager", fullgraph=True, dynamic=True)
 
     def step(cap=None):
-        engram.prepare_embeddings(src)
+        if delay == "producer":
+            torch.cuda._sleep(2_000_000)
+        # Drop the last reference to a non-contiguous input after launching lookup.
+        engram.prepare_embeddings(hashes.clone()[:, 1])
+        # Exercise same-size allocator reuse before consuming the prefetched rows.
+        torch.empty_like(hashes).fill_(layer.part_num_embeddings - 1)
         if cap is not None:
             cap.add_eager(lambda: None)
         out.copy_(embed(src))
@@ -789,9 +937,12 @@ def _run_engram_prepared_rows(
         with torch.cuda.stream(warmup), graph:
             step(graph)
         torch.cuda.current_stream().wait_stream(warmup)
-        assert graph.num_graphs == 2
+        assert graph.num_eager_breaks == (3 if cpu_offload else 1)
 
     for _ in range(3):
+        # Eager prefill can overwrite staging rows between decode replays.
+        hashes.random_(0, layer.part_num_embeddings)
+        step()
         hashes.random_(0, layer.part_num_embeddings)
         if graph is None:
             step()

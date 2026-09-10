@@ -472,6 +472,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer's sliding-window KV cache. Only PP ranks owning an engram
         # layer need it.
         self.engram_hash: NgramHashState | None = None
+        self.engram_shared_memory = bool(
+            vllm_config.engram_config
+            and vllm_config.engram_config.enable_engram_shared_memory
+        )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
             local_engram = any(
@@ -607,7 +611,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
-                gathered_hashes = gather_engram_hashes(engram_hashes)
+                gathered_hashes = gather_engram_hashes(
+                    engram_hashes, shared_memory=self.engram_shared_memory
+                )
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     engram = getattr(layer, "engram", None)
                     if engram is not None:

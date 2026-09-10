@@ -3,7 +3,8 @@
 
 from typing import TYPE_CHECKING
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.utils import config, get_hash_factors, hash_factors
@@ -56,6 +57,20 @@ class EngramConfig:
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
+
+    enable_engram_shared_memory: bool = False
+    """Share host weights across co-located DP replicas, retaining TP sharding.
+    One DP rank loads each TP slice; every reader registers its shared mmap
+    with CUDA. Bypasses Engram DP gathers and supports asynchronous prefetch.
+    Requires CPU offload, a node-local Engram DP group, sufficient /dev/shm
+    capacity, and a shared IPC namespace on each node. Supported load formats
+    are auto, safetensors and pt, without multithreaded loading."""
+
+    @model_validator(mode="after")
+    def _validate_shared_memory(self) -> Self:
+        if self.enable_engram_shared_memory and not self.cpu_offload:
+            raise ValueError("enable_engram_shared_memory requires cpu_offload=True")
+        return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
