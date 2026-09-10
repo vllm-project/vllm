@@ -3,7 +3,7 @@
 
 import inspect
 from collections.abc import Callable
-from typing import ParamSpec
+from typing import Any, ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -643,6 +643,8 @@ class QkNormRopeKvCacheGatedPattern:
                 qkv, positions, q_weight, k_weight, cos_sin_cache, layer_name
             )
 
+        pattern_fn: Callable[..., Any]
+        replacement_fn: Callable[..., Any]
         if _USE_LAYERNAME:
             pattern_fn = pattern
             replacement_fn = replacement

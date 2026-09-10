@@ -15,7 +15,28 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     is_quantized_kv_cache,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+
+# AITER's fused QKV/RoPE/cache kernel still speaks FlashInfer's HND/NHD names.
+_AITER_KV_LAYOUT_NAMES = {
+    "HND": "HND",
+    "NHD": "NHD",
+    "LBHNC": "HND",
+    "LBNHC": "NHD",
+    "BLHNC": "HND",
+    "BLNHC": "NHD",
+    "BHLNC": "HND",
+}
+
+
+def get_kv_cache_layout() -> str | None:
+    """Configured KV layout as AITER's HND/NHD names, or None if unresolved."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    layout = vllm_config.cache_config.kv_cache_layout
+    if layout is None:
+        return None
+    return _AITER_KV_LAYOUT_NAMES.get(layout)
 
 
 def attn_layer_supports_gated_qk_norm_rope_kvcache(
@@ -147,9 +168,7 @@ def run_gated_qk_norm_rope_kvcache(
         q = _gemma_rmsnorm_rope_ref(
             q, q_weight, cos_sin_cache, pos, eps, is_neox
         ).reshape(num_tokens, q_size)
-        k = _gemma_rmsnorm_rope_ref(
-            k, k_weight, cos_sin_cache, pos, eps, is_neox
-        )
+        k = _gemma_rmsnorm_rope_ref(k, k_weight, cos_sin_cache, pos, eps, is_neox)
         gate = gate.contiguous()
         return (
             torch.empty(0, device=qkv.device, dtype=qkv.dtype),

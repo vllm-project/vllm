@@ -268,8 +268,9 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
 
 class GatedQKNormRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
-    def __init__(self, *args, rms_norm_eps: float, **kwargs):
-        super().__init__(*args, rms_norm_eps=rms_norm_eps, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        rms_norm_eps = kwargs["rms_norm_eps"]
         self.q_norm = GemmaRMSNorm(self.head_size, eps=rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_size, eps=rms_norm_eps)
         self.rotary_emb = MRotaryEmbedding(
@@ -606,7 +607,7 @@ def test_gated_qk_norm_rope_kvcache_fusion(monkeypatch: pytest.MonkeyPatch):
         block_size=64,
         is_neox=True,
         use_shuffle_kv_layout="0",
-        kv_stride_order=(0, 1, 2, 3),
+        kv_layout=KVCacheLayout.LBHNC,
         dtype=torch.bfloat16,
         kv_cache_dtype="fp8",
         rms_norm_eps=1e-6,
