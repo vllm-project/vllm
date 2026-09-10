@@ -36,9 +36,11 @@ BLOCK_SIZE = 16
 MAX_MODEL_LEN = 1024
 NUM_SPEC_STEPS = 3
 
-# `warmup_kernels` ends on `torch.accelerator.synchronize()`.
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="warmup synchronizes on the accelerator"
+# `warmup_kernels` ends with real accelerator synchronization. Tests that call
+# it need a CUDA-like platform; the remaining tests use fakes only.
+_requires_accelerator = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="warmup synchronizes on the accelerator",
 )
 
 
@@ -159,6 +161,7 @@ def _assert_covers_lookahead(
 
 
 # 0 covers eagle / MTP / draft models, 1 covers DFlash's extra in-fill query.
+@_requires_accelerator
 @pytest.mark.parametrize("extra_lookahead", [0, 1])
 @pytest.mark.parametrize("num_spec_steps", [2, 3, 5, 7])
 def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahead):
@@ -174,9 +177,16 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
 
 
-def test_mixed_warmup_reserves_lookahead_blocks():
+def test_mixed_warmup_reserves_lookahead_blocks_and_synchronizes(monkeypatch):
     num_lookahead_tokens = NUM_SPEC_STEPS + 1
     recorder = _StepRecorder()
+    synchronize_calls = 0
+
+    def synchronize():
+        nonlocal synchronize_calls
+        synchronize_calls += 1
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
 
     assert run_mixed_prefill_decode_warmup(
         _make_runner([_attention_group()], num_lookahead_tokens),
@@ -186,8 +196,10 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    assert synchronize_calls == 1
 
 
+@_requires_accelerator
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "all", "align"])
 def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
     """Mamba groups hold the running-state block plus the speculative tail.
