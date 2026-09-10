@@ -3566,13 +3566,13 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
 
 
 def _make_decode_checkpoint_manager(monkeypatch):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
     block_size = 4
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
         max_model_len=1024,
         enable_caching=True,
+        retention_interval=0,
         hash_block_size=block_size,
     )
     return manager, block_size
@@ -3597,15 +3597,17 @@ def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=
     return request
 
 
-def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
+@pytest.mark.parametrize("keep", [True, False])
+def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch, keep):
     """The latest materialized decode state becomes reusable after finish."""
     manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
     request = _materialize_checkpoint_test_request(manager, block_size)
 
-    manager.finalize_decode_checkpoints(request, keep=True)
+    assert manager.block_pool.get_cached_block(request.block_hashes[4], [1]) is None
+    manager.finalize_decode_checkpoints(request, keep=keep)
     manager.free(request)
 
-    # Exact replay reaches the latest checkpoint.
+    # Only a kept checkpoint extends reuse beyond the prompt replay boundary.
     full_replay = make_request(
         "full-replay",
         list(request.all_token_ids) + [100, 101, 102, 103],
@@ -3613,7 +3615,7 @@ def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
         sha256,
     )
     _, full_hit, _ = manager.get_computed_blocks(full_replay)
-    assert full_hit == 20
+    assert full_hit == (20 if keep else 4)
 
 
 def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
@@ -3673,6 +3675,30 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
     candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
     assert candidate.num_tokens == 16
     manager.free(request)
+
+
+@pytest.mark.parametrize(
+    ("retention_interval", "enable_caching", "use_eagle", "expected_match"),
+    [
+        (None, True, False, "prefix_cache_retention_interval=0"),
+        (64, True, False, "prefix_cache_retention_interval=0"),
+        (0, False, False, "prefix caching"),
+        (0, True, True, "hidden-state speculative decoding"),
+    ],
+)
+def test_decode_checkpoints_reject_unsupported_config(
+    monkeypatch, retention_interval, enable_caching, use_eagle, expected_match
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+    with pytest.raises(ValueError, match=expected_match):
+        make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(4, 100, ["full", "mamba_align"]),
+            max_model_len=1024,
+            enable_caching=enable_caching,
+            retention_interval=retention_interval,
+            use_eagle=use_eagle,
+            hash_block_size=4,
+        )
 
 
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():

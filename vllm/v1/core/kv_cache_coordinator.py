@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -47,7 +48,7 @@ def _validate_prefix_cache_retention_interval(
         if retention_interval != 0:
             raise ValueError(
                 "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
-                "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0."
+                "prefix_cache_retention_interval=0."
             )
         mamba_specs = [
             group.kv_cache_spec
@@ -205,7 +206,7 @@ class KVCacheCoordinator(ABC):
         _validate_prefix_cache_retention_interval(
             self.retention_interval,
             self.retain_decode_checkpoints,
-            self.enable_caching,
+            enable_caching,
             self.scheduler_block_size,
             kv_cache_config,
         )

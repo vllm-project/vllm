@@ -2018,11 +2018,9 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode != "align":
             return
 
-        # Spec-decode postprocessing explicitly copies the state at this
-        # floored boundary into its position-indexed Mamba block (see
-        # postprocess_mamba_align_gpu). Non-spec decode advances one token at a
-        # time, while aligned prefill is split by the scheduler. The floor is
-        # therefore a worker materialization contract, not an inferred state.
+        # Non-spec decode advances one token at a time, leaving the completed
+        # aligned state in its position-indexed block when the running state
+        # rotates. Hidden-state speculative decoding is guarded at setup.
         boundary = (
             materialized_tokens // self.scheduler_block_size * self.scheduler_block_size
         )
