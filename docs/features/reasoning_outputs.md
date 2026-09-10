@@ -20,6 +20,8 @@ vLLM currently supports the following reasoning models:
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
+| [GigaChat 3.5](https://huggingface.co/ai-sage/GigaChat3.5-432B-A28B) | `gigachat35` | `json`, `regex` | ✅ |
+| [GigaChat 3.5 Reasoning](https://huggingface.co/ai-sage/GigaChat3.5-432B-A28B-Reasoning) | `gigachat35_thinking` | `json`, `regex` | ✅ |
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
@@ -34,6 +36,7 @@ vLLM currently supports the following reasoning models:
     Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+    GigaChat 3.5 reasoning is disabled by default; to enable it, you must also pass `reasoning=True` in your `chat_template_kwargs`. GigaChat 3.5 Reasoning models always reason, so use the `gigachat35_thinking` parser for them.
 
 ## Quickstart
 
