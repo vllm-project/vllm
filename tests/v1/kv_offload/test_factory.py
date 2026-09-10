@@ -447,16 +447,28 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device_index", "world_size", "expected_rank"),
+    (
+        "replicated_layout",
+        "device_index",
+        "world_size",
+        "expected_rank",
+        "expected_owner",
+    ),
     [
-        (True, 5, 4, 0),  # replicated: always slot 0
-        (True, 0, 4, 0),  # replicated: slot 0 regardless of device
-        (False, 5, 4, 1),  # non-replicated: 5 % 4 == 1
-        (False, 7, 4, 3),  # non-replicated: 7 % 4 == 3
+        (True, 5, 4, 0, False),  # shared slot, worker rank 1
+        (True, 0, 4, 0, True),  # shared slot, worker rank 0
+        (False, 5, 4, 1, False),  # non-replicated: 5 % 4 == 1
+        (False, 7, 4, 3, False),  # non-replicated: 7 % 4 == 3
+        (False, 4, 4, 0, True),  # next DP engine's worker rank 0
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, device_index, world_size, expected_rank
+    monkeypatch,
+    replicated_layout,
+    device_index,
+    world_size,
+    expected_rank,
+    expected_owner,
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -484,6 +496,7 @@ def test_cpu_spec_create_worker_rank_assignment(
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == expected_rank
+    assert region_calls[0]["unlink_owner"] is expected_owner
 
 
 def test_offloading_spec_has_replicated_layout_default():
